@@ -59,7 +59,12 @@ pub struct MigrationReport {
 }
 
 /// 业务作用：将单源配置转换为明确的命名源建议，冻结原有默认并列出业务决策项。
-/// 参数说明：source_id 为目标规范名称，legacy 为单个 KafkaConfig 的结构化配置，routes 为已解析的既有路由。
+///
+/// 参数说明：
+/// - `source_id`：source_id 为目标规范名称。
+/// - `legacy`：legacy 为单个 KafkaConfig 的结构化配置。
+/// - `routes`：routes 为已解析的既有路由。
+///
 /// 返回：脱敏候选、默认差异与本地校验；未知字段及无效路由拒绝。函数不构造运行时、连接 broker 或更改 group 位点。
 pub fn inspect_legacy_config(
     source_id: &str,
@@ -99,12 +104,36 @@ pub fn inspect_legacy_config(
         return Err(NafkaError::Config("迁移输入的来源名称必须是字符串".into()));
     }
     let mut findings = vec![
-        finding("STRICT_HEADERS", false, "候选显式选择保留头取末值；仍拒绝非法 UTF-8、null 或空事件。全部生产者规范化后再开启 strict_headers。"),
-        finding("BOUNDED_EXECUTION", false, "输入、worker、DLT 和发布责任采用当前有界准入与安全水位；容量及失败时序需按业务负载确认。"),
-        finding("MANAGED_ADMIN_READ_ONLY", false, "KafkaHandle.admin 始终只读；管理写入须按 client 显式配置 container.admin_write 并调用 administration。"),
-        finding("MANAGED_LOOKUP", false, "kafkas 命名装配通过 app.kafka(name) 查找；不把单源默认入口或属性 consumer 的 client 声明静默重定向。"),
-        finding("ROUTE_MEMBERSHIP", false, "保留完整 group 身份；广播切换算法不自动继承位点。所有组成员先具备新增 event 路由，再允许发布该事件。"),
-        finding("TOMBSTONE_POLICY", false, "当前 typed tombstone 默认 Skip；需要转入死信或交给 nullable 业务时须明确选择策略，普通 JSON null 与 null payload 分别裁决。"),
+        finding(
+            "STRICT_HEADERS",
+            false,
+            "候选显式选择保留头取末值；仍拒绝非法 UTF-8、null 或空事件。全部生产者规范化后再开启 strict_headers。",
+        ),
+        finding(
+            "BOUNDED_EXECUTION",
+            false,
+            "输入、worker、DLT 和发布责任采用当前有界准入与安全水位；容量及失败时序需按业务负载确认。",
+        ),
+        finding(
+            "MANAGED_ADMIN_READ_ONLY",
+            false,
+            "KafkaHandle.admin 始终只读；管理写入须按 client 显式配置 container.admin_write 并调用 administration。",
+        ),
+        finding(
+            "MANAGED_LOOKUP",
+            false,
+            "kafkas 命名装配通过 app.kafka(name) 查找；不把单源默认入口或属性 consumer 的 client 声明静默重定向。",
+        ),
+        finding(
+            "ROUTE_MEMBERSHIP",
+            false,
+            "保留完整 group 身份；广播切换算法不自动继承位点。所有组成员先具备新增 event 路由，再允许发布该事件。",
+        ),
+        finding(
+            "TOMBSTONE_POLICY",
+            false,
+            "当前 typed tombstone 默认 Skip；需要转入死信或交给 nullable 业务时须明确选择策略，普通 JSON null 与 null payload 分别裁决。",
+        ),
     ];
     if source["client_name"].as_str() != Some(source_id) {
         findings.push(finding(
@@ -186,7 +215,11 @@ pub fn inspect_legacy_config(
 }
 
 /// 业务作用：合并单源声明并拒绝固定配置结构中的未知键，原生扩展和 lane 表由实际配置解析器校验。
-/// 参数说明：target 为独立默认树，supplied 为用户输入。
+///
+/// 参数说明：
+/// - `target`：target 为独立默认树。
+/// - `supplied`：supplied 为用户输入。
+///
 /// 返回：只更新候选；未知结构返回 Config，不改变输入或创建运行资源。
 fn merge(target: &mut Value, supplied: &Value) -> Result<()> {
     if target.is_object() && !supplied.is_object() {
@@ -210,7 +243,12 @@ fn merge(target: &mut Value, supplied: &Value) -> Result<()> {
 }
 
 /// 业务作用：构造只包含静态业务语义的决策项，避免嵌入底层错误或凭据。
-/// 参数说明：code 为稳定类别，blocking 标明部署前置项，detail 为固定说明。
+///
+/// 参数说明：
+/// - `code`：code 为稳定类别。
+/// - `blocking`：blocking 标明部署前置项。
+/// - `detail`：detail 为固定说明。
+///
 /// 返回：独立且可序列化的报告条目。
 fn finding(code: &str, blocking: bool, detail: &str) -> MigrationFinding {
     MigrationFinding {
@@ -221,7 +259,11 @@ fn finding(code: &str, blocking: bool, detail: &str) -> MigrationFinding {
 }
 
 /// 业务作用：在报告导出前遮蔽凭据与任意原生扩展值，阻止检查输出成为配置泄漏通道。
-/// 参数说明：value 为独立候选树，opaque 表示整个原生 properties 域均不可信。
+///
+/// 参数说明：
+/// - `value`：value 为独立候选树。
+/// - `opaque`：opaque 表示整个原生 properties 域均不可信。
+///
 /// 返回：是否实际遮蔽值；仅修改候选，不读取证书或连接外部服务。
 fn redact(value: &mut Value, opaque: bool) -> bool {
     let mut changed = false;

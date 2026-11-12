@@ -8,7 +8,10 @@ use std::{path::Path, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 /// 业务作用：启动只有控制面权限的独立平台进程。
-/// 参数说明：命令行提供应用 YAML 路径，可选 --once 执行一次收敛。
+///
+/// 参数说明: 无。
+/// 执行条件：命令行提供应用 YAML 路径，可选 --once 执行一次收敛。
+///
 /// 返回：配置或 required 观测阻断时以非零码退出，不触碰业务进程。
 #[tokio::main]
 async fn main() {
@@ -19,7 +22,10 @@ async fn main() {
 }
 
 /// 业务作用：解析同一 YAML、平台 binding 和唯一 Grafana secret 后接管调和生命周期。
-/// 参数说明：无；输入只来自进程命令行与平台标准环境。
+///
+/// 参数说明: 无。
+/// 执行条件：无；输入只来自进程命令行与平台标准环境。
+///
 /// 返回：停机或一次成功调和时成功；最终关闭时不创建平台资源，已启用的配置中心仍先完成读取。
 async fn run() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -144,7 +150,13 @@ async fn run() -> Result<(), String> {
         return controller.reconcile().await;
     }
     let stop = CancellationToken::new();
-    tokio::select! {result=controller.run(stop.clone())=>result,_=tokio::signal::ctrl_c()=>{stop.cancel();Ok(())}}
+    tokio::select! {
+        result = controller.run(stop.clone()) => result,
+        _ = tokio::signal::ctrl_c() => {
+            stop.cancel();
+            Ok(())
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -163,7 +175,11 @@ enum Fragment {
 }
 
 /// 业务作用：只解析 controller 实際使用的一份 secret，不读取 SQL 或通知材料。
-/// 参数说明：`root` 为按标准优先级合并后的配置，`id` 为已验证的 locator 标识。
+///
+/// 参数说明：
+/// - `root`：按应用优先级合并的配置树，提供所选 secret 声明及非 secret 的配置片段；不遍历其它凭据。
+/// - `id`：已通过 locator 校验的 secret 标识，仅选择 secrets 下同名声明，不包含凭据材料。
+///
 /// 返回：受硬上限约束的材料；错误不含凭据或 fragment 值。
 fn resolve_secret(root: &Value, id: &str) -> Result<nasecret::SecretBytes, String> {
     let declaration = root
@@ -209,7 +225,10 @@ fn resolve_secret(root: &Value, id: &str) -> Result<nasecret::SecretBytes, Strin
 }
 
 /// 业务作用：在消费控制面字段前拒绝尚未解析的引用，业务独有的未挂载材料不进入此门禁。
-/// 参数说明：`value` 是已经经标准加载器完成可用引用解析的控制面字段。
+///
+/// 参数说明：
+/// - `value`：即将交给控制面使用的配置子树；递归检查对象和数组，字符串残留占位符时拒绝。
+///
 /// 返回：没有残留占位符时成功；错误只含固定分类，不回显配置、变量或凭据。
 fn require_resolved(value: &Value) -> Result<(), String> {
     match value {
@@ -232,8 +251,12 @@ fn require_resolved(value: &Value) -> Result<(), String> {
 }
 
 /// 业务作用：按应用配置优先级取得 controller 启动快照，再允许后续判断平台启用状态。
-/// 参数说明：`path` 指定主配置，活动 profile 从同目录的主文件名加 -{APP_PROFILE} 读取。
+///
+/// 参数说明：
+/// - `path`：`path` 指定主配置。
+///
 /// 返回：主文件、profile、启用的 Nacos/file imports、APP__ 覆盖依次合并；失败不返回部分配置。
+///
 /// 未命中的业务独有引用暂留，控制面使用的字段随后严格检查，避免要求挂载数据库或通知凭据。
 async fn load_effective_config(path: &Path) -> Result<Value, String> {
     let stem = path

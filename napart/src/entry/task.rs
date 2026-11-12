@@ -763,7 +763,9 @@ impl<T> TaskEntry<T> {
             return Err(TaskAuthorityError::MoveAlreadyPrepared);
         }
         *current = Some(descriptor);
-        Ok(MoveTicket { epoch })
+        Ok(MoveTicket {
+            epoch,
+        })
     }
 
     /// 业务作用：在 moving 表和活动审计集合均已登记后发布 Queued 到 Moving；竞争失败时

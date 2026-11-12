@@ -21,20 +21,35 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod assignment;
+
+/// 将原生分配通知交给同一事务权威状态。
 struct Context {
+    /// 当前原生 consumer 所属的事务任务。
     task: Arc<Task>,
 }
 impl ClientContext for Context {}
 impl ConsumerContext for Context {
     /// 业务作用：在原生撤回执行前撤销整个旧事务批次，禁止普通 offset commit。
-    /// 参数说明：consumer 为真实 owner，rebalance 为协调器通知。返回：只修改当前事务权威，不等待业务线程。
+    ///
+    /// 参数说明：
+    /// - `_consumer`：触发通知的原生 consumer，本阶段只撤销任务权威，不调用其提交接口。
+    /// - `rebalance`：协调器通知。
+    ///
+    /// 返回：只修改当前事务权威，不等待业务线程。
     fn pre_rebalance(&self, _consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
         if let Rebalance::Revoke(partitions) = rebalance {
+            // 必须先撤销批次权威，防止原生撤回后旧业务线程仍把该组 metadata 用于提交。
             self.task.assignment_changed(tps(partitions), false);
         }
     }
     /// 业务作用：原生 assignment 完成后发布新代次，并在旧批次仍存活时暂停新分区。
-    /// 参数说明：consumer 为当前 owner，rebalance 为实际通知。返回：不复用旧组 metadata，不提交旧批次位点。
+    ///
+    /// 参数说明：
+    /// - `consumer`：当前 owner。
+    /// - `rebalance`：实际通知。
+    ///
+    /// 返回：不复用旧组 metadata，不提交旧批次位点。
     fn post_rebalance(&self, consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
         match rebalance {
             Rebalance::Assign(partitions) => {
@@ -52,13 +67,23 @@ impl ConsumerContext for Context {
 }
 
 /// 业务作用：建连前拒绝显式隔离级别冲突并验证基础原生配置。
-/// 参数说明：config 为命名源配置，plan 为事务合同。返回：事务可构造；非法组或配置映射为 InvalidConfiguration，隔离冲突为 IsolationMismatch，不创建 producer 或取得身份。
+///
+/// 参数说明：
+/// - `config`：命名源配置。
+/// - `plan`：事务合同。
+///
+/// 返回：事务可构造；非法组或配置映射为 InvalidConfiguration，隔离冲突为 IsolationMismatch，不创建 producer 或取得身份。
 pub(crate) fn validate(config: &KafkaConfig, plan: &TransactionPlan) -> Result<()> {
     configs(config, plan).map(|_| ())
 }
 
 /// 业务作用：为专属事务固定 read_committed、幂等 producer 与有限原生队列。
-/// 参数说明：config 为源的连接与安全配置，plan 为原子合同。返回：隔离的消费、发布配置；普通 lane 不受改写。
+///
+/// 参数说明：
+/// - `config`：源的连接与安全配置。
+/// - `plan`：原子合同。
+///
+/// 返回：隔离的消费、发布配置；普通 lane 不受改写。
 fn configs(config: &KafkaConfig, plan: &TransactionPlan) -> Result<(ClientConfig, ClientConfig)> {
     // 原生插件可在框架之外改写输入或发送，不能让冻结白名单和整批位点责任失去依据。
     if [
@@ -130,8 +155,15 @@ fn configs(config: &KafkaConfig, plan: &TransactionPlan) -> Result<(ClientConfig
 }
 
 /// 业务作用：维持组成员资格和失权观测，同时以唯一批次线程承担阻塞业务及事务 I/O。
-/// 参数说明：task 为已经登记身份的真实任务。返回：批次线程与原生资源全部退出后才返回，未知事务结果保留为失败。
+///
+/// 参数说明：
+/// - `task`：已经登记身份的真实任务。
+///
+/// 返回：批次线程与原生资源全部退出后才返回，未知事务结果保留为失败。
 pub(crate) fn run(task: &Arc<Task>) -> Result<()> {
+    if task.assignment_bound {
+        return assignment::run(task);
+    }
     let (consumer_config, producer_config) = configs(&task.config, &task.plan)?;
     let budget = operation(task);
     let mut producer = Some(match initialize_producer(task, &producer_config) {
@@ -352,8 +384,29 @@ enum Outcome {
 }
 
 /// 业务作用：为稳定身份取得新的专属原生 producer，并在 fencing 前核对实际集群。
-/// 参数说明：task 为仍持有身份的任务，config 为冻结的原生配置。返回：集群一致且初始化成功才交付资源，取消或失败时关闭本次实例。
+///
+/// 参数说明：
+/// - `task`：仍持有身份的任务。
+/// - `config`：冻结的原生配置。
+///
+/// 返回：集群一致且初始化成功才交付资源，取消或失败时关闭本次实例。
 fn initialize_producer(task: &Task, config: &ClientConfig) -> Result<Arc<FutureProducer>> {
+    initialize_producer_at(task, config, None)
+}
+
+/// 业务作用：在实际集群核验和可选分配门禁后取得稳定 producer 身份。
+///
+/// 参数说明：
+/// - `task`：仍承担稳定身份责任的任务。
+/// - `config`：冻结的原生 producer 配置。
+/// - `epoch`：单分区模式要求保持的分配代次，普通事务为空。
+///
+/// 返回：初始化成功且分配仍有效才交付资源；未知结果不作为可使用的 producer 返回。
+fn initialize_producer_at(
+    task: &Task,
+    config: &ClientConfig,
+    epoch: Option<u64>,
+) -> Result<Arc<FutureProducer>> {
     let producer: Arc<FutureProducer> = Arc::new(
         config
             .create()
@@ -377,14 +430,47 @@ fn initialize_producer(task: &Task, config: &ClientConfig) -> Result<Arc<FutureP
     if task.stopping() {
         return Err(Error::Cancelled);
     }
+    if let Some(epoch) = epoch {
+        let topic = task
+            .plan
+            .input_topics
+            .first()
+            .ok_or(Error::InvalidConfiguration)?;
+        let metadata = producer
+            .client()
+            .fetch_metadata(Some(topic), Timeout::After(budget))
+            .map_err(|error| classify(&error))?;
+        let observed = metadata
+            .topics()
+            .iter()
+            .find(|entry| entry.name() == topic)
+            .ok_or(Error::InvalidConfiguration)?;
+        if observed.error().is_some()
+            || observed.partitions().len() != 1
+            || observed.partitions()[0].id() != 0
+            || observed.partitions()[0].error().is_some()
+        {
+            return Err(Error::InvalidConfiguration);
+        }
+        // 组分配不替代 producer fencing；在调用前后都复验，晚到结果只能关闭，不能继续处理输入。
+        task.check_assignment(epoch)?;
+    }
     producer
         .init_transactions(budget)
         .map_err(|e| initialization_error("init_transactions", &e))?;
+    if let Some(epoch) = epoch {
+        task.check_assignment(epoch)?;
+    }
     Ok(producer)
 }
 
 /// 业务作用：保留事务启动失败的阶段与固定原生码，便于区分身份探测、认证和协调器故障。
-/// 参数说明：stage 为静态阶段名，error 为原生错误。返回：稳定公共错误类别，日志不记录配置或自由错误文本。
+///
+/// 参数说明：
+/// - `stage`：静态阶段名。
+/// - `error`：原生错误。
+///
+/// 返回：稳定公共错误类别，日志不记录配置或自由错误文本。
 fn initialization_error(stage: &'static str, error: &KafkaError) -> Error {
     tracing::warn!(stage, code = ?error.rdkafka_error_code(), "Kafka 事务初始化失败");
     classify(error)
@@ -397,7 +483,10 @@ struct Worker {
 }
 impl Drop for Worker {
     /// 业务作用：poll 线程提前失败时仍承担已经开始的回调和原生事务责任。
-    /// 参数说明：无。返回：撤销准入并真实 join 后才能允许外层释放 producer 和稳定身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：撤销准入并真实 join 后才能允许外层释放 producer 和稳定身份。
     fn drop(&mut self) {
         if let Some(thread) = self.thread.take() {
             self.task.cancel();
@@ -410,7 +499,18 @@ impl Drop for Worker {
 }
 
 /// 业务作用：组织唯一事务的全部输出与输入位点，提交等待失败后禁止切换为 abort。
-/// 参数说明：task/producer 为实际 owner，records/ends 为完整输入，metadata/epoch 为冻结权威，deadline 为整批期限，attempt 为确认中止后的序号。返回：只有原生 commit 或 abort 已确认才返回对应结局。
+///
+/// 参数说明：
+/// - `task`：持有批次控制权威、状态与业务处理器的事务任务。
+/// - `producer`：本批次专属的原生事务 producer。
+/// - `records`：交给业务处理器的完整输入记录。
+/// - `ends`：各输入分区待原子提交的下一消费位点。
+/// - `metadata`：冻结时取得的消费组 metadata，用于关联事务位点提交。
+/// - `epoch`：本批次 assignment 代次，每个关键阶段复验失权。
+/// - `deadline`：整批期限。
+/// - `attempt`：确认中止后的序号。
+///
+/// 返回：只有原生 commit 或 abort 已确认才返回对应结局；提交前取消可返回 Cancelled，失权、授权失败和提交或中止结果未知保留错误，不盲目重发。
 #[allow(clippy::too_many_arguments)]
 fn execute(
     task: &Arc<Task>,
@@ -435,6 +535,7 @@ fn execute(
             records,
             Box::new(move || authority.check(epoch, None)),
             attempt,
+            epoch,
         );
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             task.processor.process(&mut context)
@@ -515,6 +616,9 @@ fn execute(
         task.committed(input_count, output_count);
         Ok(Outcome::Committed)
     })();
+    if let Err(error) = &result {
+        tracing::warn!(phase = ?task.status().state, reason = ?error, "Kafka 事务未取得成功确认");
+    }
     match result {
         Ok(outcome) => Ok(outcome),
         Err(error) if committing => Err(if matches!(error, Error::Fenced | Error::Authorization) {
@@ -545,7 +649,12 @@ fn execute(
 }
 
 /// 业务作用：保留真实原文输入，防止原生 poll 缓冲回收改变本批确认依据。
-/// 参数说明：message 为本轮借用记录，cluster 为已核对物理集群。返回：独立记录，null、空值和重复头保持区别。
+///
+/// 参数说明：
+/// - `message`：本轮借用记录。
+/// - `cluster`：已核对物理集群。
+///
+/// 返回：独立记录，null、空值和重复头保持区别。
 fn owned(message: &rdkafka::message::BorrowedMessage<'_>, cluster: &str) -> ReplayRecord {
     let headers = message.headers().map_or_else(Vec::new, |headers| {
         (0..headers.count())
@@ -571,7 +680,11 @@ fn owned(message: &rdkafka::message::BorrowedMessage<'_>, cluster: &str) -> Repl
 }
 
 /// 业务作用：为独立输入按共同字节口径计费。
-/// 参数说明：record 为完整原文。返回：key、payload、头以及64字节固定责任开销之和。
+///
+/// 参数说明：
+/// - `record`：完整原文。
+///
+/// 返回：key、payload、头以及64字节固定责任开销之和。
 fn input_bytes(record: &ReplayRecord) -> u64 {
     64 + record.key.as_ref().map_or(0, |v| v.len() as u64)
         + record.payload.as_ref().map_or(0, |v| v.len() as u64)
@@ -579,7 +692,11 @@ fn input_bytes(record: &ReplayRecord) -> u64 {
 }
 
 /// 业务作用：将原生分配集合转换成产品自有定位类型。
-/// 参数说明：partitions 为协调器返回集合。返回：有序且不重复的 topic/partition。
+///
+/// 参数说明：
+/// - `partitions`：协调器返回集合。
+///
+/// 返回：有序且不重复的 topic/partition。
 fn tps(partitions: &TopicPartitionList) -> BTreeSet<Tp> {
     partitions
         .elements()
@@ -589,13 +706,22 @@ fn tps(partitions: &TopicPartitionList) -> BTreeSet<Tp> {
 }
 
 /// 业务作用：获取当前 owner 声明的原生操作预算。
-/// 参数说明：task 为冻结事务合同。返回：毫秒预算，不为每条记录延长整批截止时间。
+///
+/// 参数说明：
+/// - `task`：冻结事务合同。
+///
+/// 返回：毫秒预算，不为每条记录延长整批截止时间。
 fn operation(task: &Task) -> Duration {
     Duration::from_millis(task.plan.limits.operation_timeout_ms.into())
 }
 
 /// 业务作用：把原生操作限制在整批剩余准备时间内。
-/// 参数说明：task 为操作上限，deadline 为本批截止。返回：正的最小剩余预算，耗尽拒绝新副作用。
+///
+/// 参数说明：
+/// - `task`：操作上限。
+/// - `deadline`：本批截止。
+///
+/// 返回：正的最小剩余预算，耗尽拒绝新副作用。
 fn remaining(task: &Task, deadline: Instant) -> Result<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
@@ -605,7 +731,11 @@ fn remaining(task: &Task, deadline: Instant) -> Result<Duration> {
 }
 
 /// 业务作用：从事务清队列通知中取回原生已保存的权限或 fencing 原因，避免错误的中止掩盖拒绝证据。
-/// 参数说明：producer 为本批次独占且已 begin、尚未 commit/abort 的客户端；error 为输出回执或同步入队失败。
+///
+/// 参数说明：
+/// - `producer`：本批次独占且已 begin、尚未 commit/abort 的客户端。
+/// - `error`：输出回执或同步入队失败。
+///
 /// 返回：原生保存的授权或失权类别；没有此类证据时保留原始失败，不推断远端是否提交。
 fn classify_delivery(producer: &FutureProducer, error: &KafkaError) -> Error {
     if matches!(
@@ -625,7 +755,11 @@ fn classify_delivery(producer: &FutureProducer, error: &KafkaError) -> Error {
 }
 
 /// 业务作用：区分可由原生客户端重连的消费通知与必须终止 owner 的错误。
-/// 参数说明：error 为 poll 返回的原生事件。返回：仅非致命的连接或请求超时通知可继续 poll，授权和真实失权仍由各自路径处理。
+///
+/// 参数说明：
+/// - `error`：poll 返回的原生事件。
+///
+/// 返回：仅非致命的连接或请求超时通知可继续 poll，授权和真实失权仍由各自路径处理。
 fn transient_consumer_error(error: &KafkaError) -> bool {
     matches!(
         error,
@@ -641,8 +775,13 @@ fn transient_consumer_error(error: &KafkaError) -> bool {
 }
 
 /// 业务作用：从原生错误码选择固定恢复类别，不将底层凭据或任意文本带入产品状态。
-/// 参数说明：error 为当前阶段原生错误。返回：fencing、授权、重平衡、超时或通用 broker 类别。
+///
+/// 参数说明：
+/// - `error`：当前阶段原生错误。
+///
+/// 返回：fencing、授权、重平衡、超时或通用 broker 类别。
 fn classify(error: &KafkaError) -> Error {
+    tracing::debug!(code = ?error.rdkafka_error_code(), "Kafka 事务原生操作未确认");
     match error.rdkafka_error_code() {
         Some(
             Code::Fenced

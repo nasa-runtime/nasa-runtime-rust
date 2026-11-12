@@ -13,9 +13,13 @@ use crate::{
 
 /// Redis 健康 monitor 的固定 PING 间隔。
 const REDIS_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+/// 单次受管装配允许的来源数与 Snowflake 计划数上限。
 const MAX_MANAGED_REDIS_SOURCES: usize = 64;
+/// 受管来源名与生成器资源名的最大字节数。
 pub(crate) const MAX_MANAGED_REDIS_NAME_BYTES: usize = 256;
+/// 每个来源固定预留的幂等计数、模式与 marker 样本数量。
 const IDEMPOTENT_METRIC_SERIES_PER_SOURCE: usize = 11;
+/// Redis 幂等指标在进程中允许申请的样本容量上限。
 const IDEMPOTENT_METRIC_SERIES_BUDGET: usize = 10_000;
 
 macro_rules! idempotent_metric_descriptor {
@@ -95,16 +99,18 @@ pub(crate) const DEFAULT_REDIS: &str = "default";
 pub(crate) struct RedisComponent {
     /// Ready 后交由 Runner 按关键任务监督的 Redis 健康 monitor；未建连时为 None。
     critical_task: Option<ApplicationFuture<'static>>,
+    /// 指标回调共享的固定来源目录，仅在 Start 全部来源装配后发布。
     metric_clients: Arc<std::sync::Mutex<Vec<Arc<RedisClient>>>>,
+    /// 显式要求幂等账本能力的来源，Prepare 时必须完成共享布局确认。
     configured_idempotent_clients: Vec<Arc<RedisClient>>,
 }
 
 impl RedisComponent {
     /// 业务作用：创建尚未建连的 Redis 组件。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；客户端与健康 monitor 在 Start 阶段按最终配置建立。
+    /// 返回：空的客户端观测目录与监督任务槽位；此时不连接 Redis，Start 按最终配置建立来源。
     pub(crate) fn new() -> Self {
         Self {
             critical_task: None,
@@ -114,8 +120,12 @@ impl RedisComponent {
     }
 }
 
-/// 业务作用：Redis 就绪策略:默认**非关键**——Redis 故障使实例 Degraded(仍 200)而非摘流;
-/// 会话/锁强依赖 Redis 的部署可自行改为 critical。连续 3 次 PING 失败才降级,一次成功即恢复。
+/// 业务作用：将 Redis 来源健康作为非关键依赖汇入应用就绪状态，保留其它能力继续服务的空间。
+///
+/// 参数说明：无。
+///
+/// 返回：失败阈值为 3、恢复阈值为 1 且不设新鲜度窗口的策略；显式 Degraded 不经过失败阈值，
+/// 健康循环一次 PING 失败即可使聚合降级。需要强制摘流的派生能力须提供自己的关键贡献项。
 fn redis_readiness_policy() -> ReadinessPolicy {
     ReadinessPolicy {
         affects_ready: false,
@@ -125,17 +135,15 @@ fn redis_readiness_policy() -> ReadinessPolicy {
     }
 }
 
-/// 业务作用：运行期 Redis 健康 monitor:进入 Ready 后按固定间隔 PING 判活并发布就绪观测。
+/// 业务作用：应用就绪期间观察 Redis 派生能力，并发探测所有来源并分别发布健康状态。
 ///
-/// # 参数
+/// 参数说明：
+/// - `application`：提供生命周期订阅与分区、任务、派生能力的健康观察入口。
+/// - `clients`：固定的客户端和对应贡献句柄；各自 PING 受其命令超时约束。
 ///
-/// - `application`:读取全局生命周期状态;进入停机态时发布未就绪并优雅退出。
-/// - `client`:受监督的 Redis 客户端(只读 PING,不改数据/拓扑)。
-/// - `contributor`:Redis 就绪贡献句柄。
-///
-/// # 返回
-///
-/// Application 进入停机态时返回 `Ok(())`;PING 失败发布 Degraded 而非返回错误(非关键依赖)。
+/// 返回：停机或失败状态下记录各来源 NotReady 后正常退出；派生观察失败向监督器传播错误。
+/// 单项 PING 失败或幂等账本报告降级时立即记录 Degraded，其它来源不受影响；每轮探测后等待固定间隔。
+/// 状态通知可取消整轮探测等待，取消不证明已经发出的命令未被 Redis 执行。
 async fn run_redis_monitor(
     application: Application,
     clients: Vec<(Arc<RedisClient>, ReadinessContributor)>,
@@ -199,21 +207,24 @@ async fn run_redis_monitor(
 impl ApplicationComponent for RedisComponent {
     /// 业务作用：返回 Redis 组件稳定身份。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；Runner 用它归类 Redis 错误与资源所有者。
+    /// 返回：ComponentId::Redis，供生命周期归类与资源所有权登记使用，与来源数量无关。
     fn id(&self) -> ComponentId {
         ComponentId::Redis
     }
 
     /// 业务作用：读取最终配置的 `redis` 段并建立客户端。
     ///
-    /// 建连成功后先登记资源再压栈清理动作：这样任何后续启动失败都能沿同一条逆序链显式关闭客户端，
-    /// 而不是依赖最后一个 `Arc` 何时释放。
+    /// 每个来源建连后先登记逆序清理责任，再发布资源和就绪贡献，确保后续装配失败仍有清理入口。
+    /// nadis 的 shutdown 当前只记录通知，底层连接仍随最后一个共享引用释放；此处不承诺强制断开外部句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供最终配置、组件资源登记入口和 active stack 的 Start 上下文。
+    ///
+    /// 返回：启用来源及其 Snowflake、缓存派生装配成功后完成；非法配置、建连或登记失败终止启动。
+    /// 显式关闭不建立来源和健康循环，但仍验证派生能力的必需引用；已压栈的清理由 Runner 执行。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let application = context.application().clone();
@@ -256,7 +267,10 @@ impl ApplicationComponent for RedisComponent {
                 .metric_clients
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = metric_clients;
-            self.critical_task = Some(Box::pin(run_redis_monitor(application, monitored)));
+            // 关闭来源不创建健康循环；后续派生装配仍运行，必需引用缺失不能被跳过。
+            if !monitored.is_empty() {
+                self.critical_task = Some(Box::pin(run_redis_monitor(application, monitored)));
+            }
             install_snowflakes(context).await?;
             #[cfg(any(
                 feature = "mapper-cache",
@@ -270,7 +284,9 @@ impl ApplicationComponent for RedisComponent {
 
     /// 业务作用：为全部受管 Redis source 预留固定幂等指标，并只为显式配置的 source 完成账本布局门禁。
     ///
-    /// 参数说明：`context` 提供统一指标目录；客户端已由 Start 建立并登记。
+    /// 参数说明：
+    ///
+    /// - `context`：提供统一指标目录；客户端已由 Start 建立并登记。
     ///
     /// 返回：容量与 descriptor 无冲突且全部显式账本完成 marker/能力复验时成功；否则拒绝进入 Ready。
     fn prepare<'a>(&'a mut self, context: &'a mut PrepareContext<'_>) -> ApplicationFuture<'a> {
@@ -294,7 +310,9 @@ impl ApplicationComponent for RedisComponent {
                     "idempotent metric series budget is exceeded",
                 ));
             }
-            context
+            // 关闭来源不占用观测目录；后续派生计划仍要校验，不能把缺失来源当作可用。
+            if source_count > 0 {
+                context
                 .application()
                 .metrics_hub()
                 .register_legacy_source_reserved(
@@ -320,6 +338,7 @@ impl ApplicationComponent for RedisComponent {
                         )
                     }
                 })?;
+            }
 
             // 显式配置意味着部署要求在接流量前证明共享布局；未配置 source 仍保持首次业务调用时惰性解析。
             let results = futures_util::future::join_all(
@@ -357,9 +376,10 @@ impl ApplicationComponent for RedisComponent {
 
     /// 业务作用：取出 Redis 健康 monitor,交由 Runner 按关键任务监督。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 建连成功后首次调用返回 monitor 任务;未建连或重复调用返回 None。
+    /// 返回：Start 为启用来源装配任务后，首次取出返回固定名称与待轮询的 future；
+    /// 没有启用来源或任务已被取走时返回 None。取出动作不启动任务，也不表示首轮探测完成。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.critical_task
             .take()
@@ -369,6 +389,7 @@ impl ApplicationComponent for RedisComponent {
 
 /// 受管 Redis source 的 nonce 幂等计数指标桥；快照只读取进程内原子量，不访问 Redis。
 struct IdempotentMetricsSource {
+    /// 可读取本地幂等快照的来源；指标采集不发 Redis 命令。
     clients: Arc<std::sync::Mutex<Vec<Arc<RedisClient>>>>,
 }
 
@@ -386,7 +407,8 @@ impl nametrics_core::LegacyMetricsSource for IdempotentMetricsSource {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：每个 source 恒定十一条样本；未使用幂等 API 时保持全零且不初始化账本运行时。
+    /// 返回：每个来源十一条样本；未初始化账本时计数和 marker 为零，unresolved 模式为 1。
+    /// 读取不初始化账本、不访问 Redis，也不证明远端账本仍有效；各计数分别读取，不构成原子业务快照。
     fn snapshot(&self) -> Option<Vec<nametrics_core::MetricSample>> {
         let clients = self
             .clients
@@ -492,7 +514,9 @@ impl nametrics_core::LegacyMetricsSource for IdempotentMetricsSource {
 
     /// 业务作用：保留兼容 trait 入口，Prometheus 文本由统一 metrics hub 渲染结构化快照。
     ///
-    /// 参数说明：`_output` 是不由本源直接写入的兼容缓冲区。
+    /// 参数说明：
+    ///
+    /// - `_output`：兼容缓冲区，本源不直接向其写入。
     ///
     /// 返回：无。
     fn render_prometheus(&self, _output: &mut String) {}
@@ -500,7 +524,11 @@ impl nametrics_core::LegacyMetricsSource for IdempotentMetricsSource {
 
 /// 业务作用：建立一个 nonce 幂等 counter 样本，标签只来自冻结 source 与封闭枚举。
 ///
-/// 参数说明：`descriptor`、`labels` 与 `value` 分别指定固定 family、低基数维度和单调累计。
+/// 参数说明：
+///
+/// - `descriptor`：固定指标族的定义。
+/// - `labels`：来源于冻结配置的低基数维度。
+/// - `value`：单调累计值。
 ///
 /// 返回：统一 metrics hub 可校验并渲染的结构化样本。
 fn idempotent_counter_sample(
@@ -517,7 +545,11 @@ fn idempotent_counter_sample(
 
 /// 业务作用：建立一个 nonce 幂等 gauge 样本，表达已解析模式或 marker 确认事实。
 ///
-/// 参数说明：`descriptor`、`labels` 与 `value` 分别指定固定 family、低基数维度和当前值。
+/// 参数说明：
+///
+/// - `descriptor`：固定指标族的定义。
+/// - `labels`：来源于冻结配置的低基数维度。
+/// - `value`：当前采样值。
 ///
 /// 返回：统一 metrics hub 可校验并渲染的结构化样本。
 fn idempotent_gauge_sample(
@@ -532,26 +564,29 @@ fn idempotent_gauge_sample(
     }
 }
 
-/// 持有 Redis 客户端并在停机时显式调用其 shutdown 的可逆 action。
+/// 持有 Redis 来源的停机通知责任，不保证其它共享句柄随本动作关闭。
 struct RedisShutdown {
+    /// 首次执行清理时取走的来源句柄，防止重复通知。
     client: Option<Arc<RedisClient>>,
 }
 
 impl ShutdownAction for RedisShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；名称不含连接串或命名空间取值。
+    /// 返回：固定名称 redis-client，不附带连接串、来源或命名空间取值。
     fn label(&self) -> &'static str {
         "redis-client"
     }
 
-    /// 业务作用：调用客户端的显式停机，再释放组件侧强引用。
+    /// 业务作用：执行 Redis 来源的停机通知，并释放该清理动作持有的共享句柄。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `_context`：宿主停机上下文；当前底层通知不等待网络，该动作不单独计算超时。
     ///
-    /// - `_context`：共享停机预算；该动作只做常数时间通知，不做网络等待。
+    /// 返回：future 被轮询时先取走句柄，再调用底层 shutdown；完成或已取走时成功。
+    /// 当前 nadis 实现只记录通知，不撤销其它 Arc 的命令能力，连接释放仍依赖全部持有者结束使用。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             if let Some(client) = self.client.take() {
@@ -567,9 +602,12 @@ impl ShutdownAction for RedisShutdown {
 /// 段缺失是明确错误而不是默认值：`profile` 与 `namespace` 在 nadis 里无默认，静默兜底只会把
 /// 配置缺失推迟成第一条命令的运行期故障。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：提供当前不可变配置快照的共享上下文。
+///
+/// 返回：按 canonical qualifier 排序的客户端配置；显式 enabled=false 返回空列表，
+/// 段缺失、形态冲突或配置不合法返回 Start 阶段错误。此处不连接 Redis，也不安装客户端。
 pub(crate) fn read_redis_configs(
     application: &Application,
 ) -> ApplicationResult<Vec<(String, RedisConfig)>> {
@@ -587,10 +625,13 @@ pub(crate) fn read_redis_configs(
 ///
 /// 供启动期初始校验与配置热刷新使用；`profile` 必填正是在这一步暴露的。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：合并、插值完成但尚未发布的候选配置树。
 /// - `phase`：本次无副作用校验所属的生命周期阶段。
+///
+/// 返回：段缺失时跳过；存在时须通过形态、来源名称及客户端值校验，否则返回指定阶段的错误。
+/// 成功不代表网络可达、派生计划可用或热更已应用；声明 Redis 组件但缺段的错误由启动读取入口负责。
 pub(crate) fn validate_redis_section(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
@@ -608,7 +649,7 @@ pub(crate) fn validate_redis_section(
 /// - `section`: 最终配置树中的 `redis` 对象。
 /// - `phase`: 错误所属生命周期阶段。
 ///
-/// 返回：按 qualifier 稳定排序的非空客户端配置；形态混用、重复身份或任一配置非法时整体拒绝。
+/// 返回：启用时得到按 qualifier 排序的客户端配置，显式关闭时为空；形态混用或非法字段整体拒绝。
 fn parse_redis_configs(
     section: &serde_json::Value,
     phase: ApplicationPhase,
@@ -616,6 +657,21 @@ fn parse_redis_configs(
     let object = section
         .as_object()
         .ok_or_else(|| redis_error(phase, "`redis` configuration section must be an object"))?;
+    if let Some(enabled) = object.get("enabled") {
+        let enabled = enabled
+            .as_bool()
+            .ok_or_else(|| redis_error(phase, "redis.enabled must be boolean"))?;
+        if !enabled {
+            // 关闭声明不隐藏失效来源和派生任务，重新启用时必须提交完整配置。
+            if object.len() != 1 {
+                return Err(redis_error(phase, "disabled redis accepts only enabled"));
+            }
+            return Ok(Vec::new());
+        }
+        let mut configured = object.clone();
+        configured.remove("enabled");
+        return parse_redis_configs(&serde_json::Value::Object(configured), phase);
+    }
     let mut configs = BTreeMap::new();
     if let Some(properties) = object.get("properties") {
         if object
@@ -688,7 +744,9 @@ fn parse_redis_configs(
 
 /// 业务作用：统一受管 Redis source 与内置消费计划的 qualifier 字符集和长度边界。
 ///
-/// 参数说明：`value` 是配置 map key、兼容别名或计划引用给出的 Redis 名称。
+/// 参数说明：
+///
+/// - `value`：配置 map key、兼容别名或计划引用给出的 Redis 名称。
 ///
 /// 返回：名称非空、无首尾空白、只含 ASCII 字母数字及 `.`、`_`、`-`，且长度有界时返回真。
 pub(crate) fn is_canonical_redis_qualifier(value: &str) -> bool {
@@ -700,11 +758,16 @@ pub(crate) fn is_canonical_redis_qualifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-/// 业务作用：反序列化一个 RedisClient 配置并保留 phase/source 上下文，不暴露连接凭据。
+/// 业务作用：反序列化单个 Redis 来源，并用生命周期阶段和来源名称定位配置错误。
 ///
-/// 参数说明：`value`、生命周期阶段与脱敏 qualifier。
+/// 参数说明：
 ///
-/// 返回：配置对象；字段类型或必填项错误时返回组件错误。
+/// - `value`：合并后的单个 Redis 来源配置。
+/// - `phase`：当前生命周期阶段。
+/// - `qualifier`：用于错误归类的稳定来源名称，调用方须保证其中不含秘密。
+///
+/// 返回：配置对象；字段类型、未知字段或必填项错误时返回带原始 serde 原因的组件错误。
+/// 不在此验证网络、客户端值约束或执行错误脱敏。
 fn decode_redis_config(
     value: serde_json::Value,
     phase: ApplicationPhase,
@@ -723,7 +786,10 @@ fn decode_redis_config(
 
 /// 业务作用：执行受管模式额外门禁，确保每个 source 都有命令 deadline 且基础布局合法。
 ///
-/// 参数说明：`config` 为单个 source 配置，`phase` 为错误阶段。
+/// 参数说明：
+///
+/// - `config`：单个 Redis 来源配置。
+/// - `phase`：错误所属的生命周期阶段。
 ///
 /// 返回：全部门禁成立时成功；否则返回带 source 身份但不含 endpoint 凭据的错误。
 fn validate_managed_config(config: &RedisConfig, phase: ApplicationPhase) -> ApplicationResult<()> {
@@ -751,7 +817,9 @@ fn validate_managed_config(config: &RedisConfig, phase: ApplicationPhase) -> App
 
 /// 业务作用：只在受管资源边界把 `default` 归一成协议默认 source `primary`。
 ///
-/// 参数说明：`value` 为 properties map key 或引用该来源的 qualifier。
+/// 参数说明：
+///
+/// - `value`：properties map key 或引用该来源的 qualifier。
 ///
 /// 返回：canonical qualifier 文本。
 pub(crate) fn canonical_qualifier(value: &str) -> String {
@@ -766,10 +834,13 @@ pub(crate) fn canonical_qualifier(value: &str) -> String {
 ///
 /// 返回 `Arc` clone 是该客户端本身的共享语义，不是把资源移出容器。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：持有组件资源的共享应用上下文。
 /// - `name`：Redis 实例 qualifier；`default` 只作为 `primary` 的本地查询别名。
+///
+/// 返回：命名资源存在且可访问时取得共享客户端，否则传播资源查找错误；不创建连接、不探测健康，
+/// 也不保证借出之后客户端始终可用。别名依赖 Start 时的登记，此方法不执行名称规范化。
 pub(crate) async fn redis_handle(
     application: &Application,
     name: &str,
@@ -780,21 +851,25 @@ pub(crate) async fn redis_handle(
 
 /// 业务作用：创建 Redis 组件的稳定生命周期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含连接串和口令的稳定摘要。
+///
+/// 返回：归属于 Redis 组件和指定阶段的错误；保留传入摘要，此函数不检查或脱敏文本。
 fn redis_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Redis, phase, message)
 }
 
 /// 业务作用：创建带底层错误链的 Redis 错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含连接串和口令的稳定摘要。
-/// - `source`：只供诊断、输出前统一脱敏的底层错误。
+/// - `source`：保留在原因链中的底层错误，调用方须自行约束其中的敏感内容。
+///
+/// 返回：归属于 Redis 和指定阶段的错误；保留摘要及原因链，不在此执行自动脱敏、重试或资源清理。
 fn redis_error_src(
     phase: ApplicationPhase,
     message: impl Into<String>,
@@ -807,24 +882,34 @@ fn redis_error_src(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SnowflakePlan {
+    /// 是否装配生成器；默认关闭，关闭计划不领取编号。
     #[serde(default)]
     enabled: bool,
+    /// 引用的 Redis 来源，默认 primary，default 在资源边界按别名解析。
     #[serde(default = "default_snowflake_redis")]
     redis_ref: String,
+    /// 非复用编号的分配范围与本地发号参数。
     #[serde(default)]
     config: nadis::snowflake::SnowflakeConfig,
+    /// 已初始化账本的授权身份；启用时必填，装配流程不自动创建账本。
     namespace: Option<nadis::snowflake::WorkerIdNamespace>,
 }
 
 /// 业务作用：为未指定来源的生成器绑定标准 Redis 默认资源。
+///
 /// 参数说明：无。
+///
 /// 返回：默认来源的 canonical qualifier。
 fn default_snowflake_redis() -> String {
     "primary".to_owned()
 }
 
 /// 业务作用：所有 Redis 来源建立后装配显式启用的非复用生成器。
-/// 参数说明：`context` 提供资源登记和逆序清理责任。
+///
+/// 参数说明：
+///
+/// - `context`：提供资源登记和逆序清理责任。
+///
 /// 返回：所有启用计划可领取编号时发布命名资源；失败终止启动，已登记 owner 随回滚关闭。
 async fn install_snowflakes(context: &mut StartContext<'_>) -> ApplicationResult<()> {
     let application = context.application().clone();
@@ -886,18 +971,27 @@ async fn install_snowflakes(context: &mut StartContext<'_>) -> ApplicationResult
 }
 
 /// 发号权限由应用 owner 控制，即使调用方保留 Arc 也不能越过停机。
-struct SnowflakeShutdown(Arc<nadis::snowflake::ManagedSnowflake>);
+struct SnowflakeShutdown(
+    /// 当前应用负责撤销发号能力的生成器，共享句柄不能绕过其关闭状态。
+    Arc<nadis::snowflake::ManagedSnowflake>,
+);
 
 impl ShutdownAction for SnowflakeShutdown {
     /// 业务作用：提供稳定的关闭责任名称。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不包含动态来源或资源名的固定名称。
     fn label(&self) -> &'static str {
         "redis-snowflake"
     }
 
     /// 业务作用：在 Redis 客户端关闭前收回当前生成器的发号权限。
-    /// 参数说明：`context` 为宿主停机上下文；本动作不执行外部 I/O。
+    ///
+    /// 参数说明：
+    ///
+    /// - `_context`：宿主停机上下文；本动作不执行外部 I/O。
+    ///
     /// 返回：发号门禁关闭后成功，不回收已分配 workerId。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         self.0.close();
@@ -907,7 +1001,9 @@ impl ShutdownAction for SnowflakeShutdown {
 
 impl Drop for SnowflakeShutdown {
     /// 业务作用：启动取消或清理 owner 释放时收回发号权限。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同步关闭，不生成新的后台任务。
     fn drop(&mut self) {
         self.0.close();
@@ -916,7 +1012,11 @@ impl Drop for SnowflakeShutdown {
 
 impl Application {
     /// 业务作用：取得由 redis 子能力装配的命名 Snowflake 生成器。
-    /// 参数说明：`name` 为 redis.snowflake 中显式启用的计划名。
+    ///
+    /// 参数说明：
+    ///
+    /// - `name`：redis.snowflake 中显式启用的计划名。
+    ///
     /// 返回：成功取得共享句柄；未配置或尚未装配时返回资源错误，停机后句柄拒绝发号。
     pub async fn snowflake(
         &self,

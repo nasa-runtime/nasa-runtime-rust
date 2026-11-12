@@ -166,7 +166,10 @@ impl<H> SagaKafkaCommandConsumer<H> {
     ///
     /// 返回：不启动后台任务的轻量 consumer；生命周期由 `nafka` 统一托管。
     pub fn new(handler: Arc<H>, config: SagaKafkaCommandConsumerConfig) -> Self {
-        Self { handler, config }
+        Self {
+            handler,
+            config,
+        }
     }
 }
 
@@ -281,26 +284,46 @@ impl<H: SagaCommandHandler> SingleConsumer for SagaKafkaCommandConsumer<H> {
     type Message = SagaCommandEnvelope;
 
     /// 业务作用：返回启动时冻结的 owner 独占 command topics。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回冻结配置的 command topic 键集合副本，不探测 broker、独占性或订阅状态。
     fn topics(&self) -> Vec<String> {
         self.config.topic_routes.keys().cloned().collect()
     }
 
     /// 业务作用：只接收 Saga command 事件，避免 result 或普通业务事件进入 Participant。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回固定 Saga command 事件标识文本，不自行过滤消息。
     fn event(&self) -> String {
         COMMAND_EVENT_TYPE.into()
     }
 
     /// 业务作用：使用稳定 group 恢复已提交 offset，部署重启后继续未完成 command。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回配置组名的 Named 元数据，不在此处连接 broker、取得分区或恢复 offset。
     fn group(&self) -> GroupSpec {
         GroupSpec::Named(self.config.group.clone())
     }
 
     /// 业务作用：提供在协议演进期间稳定的 handler id，单个进程用一个 consumer 显式路由全部 Saga steps。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回固定 Saga command consumer 身份，不包含实例或请求数据。
     fn id(&self) -> &'static str {
         "nasaga-runtime::saga-command-consumer"
     }
 
     /// 业务作用：强制手动 ACK，使 ACK 严格晚于 Participant 本地事务 COMMIT。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 Manual 确认声明；事务提交与实际 ACK 的先后顺序由消费处理流程保证，本方法不执行 ACK。
     fn ack_mode(&self) -> AckMode {
         AckMode::Manual
     }
@@ -402,7 +425,10 @@ impl<H> SagaKafkaResultConsumer<H> {
     ///
     /// 返回：不启动后台任务的轻量 consumer；生命周期仍由 `nafka` 统一托管。
     pub fn new(handler: Arc<H>, config: SagaKafkaResultConsumerConfig) -> Self {
-        Self { handler, config }
+        Self {
+            handler,
+            config,
+        }
     }
 }
 
@@ -502,26 +528,46 @@ impl<H: SagaResultHandler> SingleConsumer for SagaKafkaResultConsumer<H> {
     type Message = SagaResultEnvelope;
 
     /// 业务作用：返回启动时冻结的 owner 独占 result topics。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回冻结配置的 result topic 键集合副本，不探测 broker、独占性或订阅状态。
     fn topics(&self) -> Vec<String> {
         self.config.topic_owners.keys().cloned().collect()
     }
 
     /// 业务作用：只接收 Saga result 事件，避免 command 或普通业务事件进入 Orchestrator。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回固定 Saga result 事件标识文本，不自行过滤消息。
     fn event(&self) -> String {
         RESULT_EVENT_TYPE.into()
     }
 
     /// 业务作用：使用稳定 group 恢复已提交 offset，部署重启后继续未完成结果。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回配置组名的 Named 元数据，不在此处连接 broker、取得分区或恢复 offset。
     fn group(&self) -> GroupSpec {
         GroupSpec::Named(self.config.group.clone())
     }
 
     /// 业务作用：提供在协议演进期间稳定的 handler id，供注册冲突检查和低基数指标使用。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回固定 Saga result consumer 身份，不包含实例或请求数据。
     fn id(&self) -> &'static str {
         "nasaga-runtime::saga-result-consumer"
     }
 
     /// 业务作用：强制手动 ACK，使 ACK 时点严格晚于 Orchestrator 本地事务提交。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 Manual 确认声明；事务提交与实际 ACK 的先后顺序由消费处理流程保证，本方法不执行 ACK。
     fn ack_mode(&self) -> AckMode {
         AckMode::Manual
     }
@@ -539,7 +585,9 @@ impl<H: SagaResultHandler> SingleConsumer for SagaKafkaResultConsumer<H> {
         record.ack()?;
         record_kafka_ack(matches!(outcome, HandleOutcome::Duplicate));
         match outcome {
-            HandleOutcome::Applied { status } => tracing::info!(
+            HandleOutcome::Applied {
+                status,
+            } => tracing::info!(
                 saga_id = %record.value.saga_id,
                 workflow = %record.value.workflow,
                 step = %record.value.step,

@@ -2,7 +2,11 @@
 use super::*;
 
 /// 业务作用：验证完整摘要并拒绝可解析但非规范的转发计划。
-/// 参数说明：bytes为完整归档，最大16MiB。返回：合法计划；全部格式和合同错误统一为CorruptPlan。
+///
+/// 参数说明：
+/// - `bytes`：bytes为完整归档。
+///
+/// 返回：合法计划；全部格式和合同错误统一为CorruptPlan。
 pub(super) fn decode(bytes: &[u8]) -> TransferResult<TransferPlan> {
     if bytes.len() < 44 || bytes.len() > TransferPlan::MAX_ENCODED_BYTES {
         return Err(TransferError::CorruptPlan);
@@ -22,7 +26,11 @@ pub(super) fn decode(bytes: &[u8]) -> TransferResult<TransferPlan> {
         .map_err(|_| TransferError::CorruptPlan)
 }
 /// 业务作用：在分配集合和文本之前逐项校验声明边界。
-/// 参数说明：payload为已验证完整性的正文。返回：完整计划；尾部或缺失字段均拒绝。
+///
+/// 参数说明：
+/// - `payload`：payload为已验证完整性的正文。
+///
+/// 返回：完整计划；尾部或缺失字段均拒绝。
 fn parse(payload: &[u8]) -> TransferResult<TransferPlan> {
     let mut input = Input {
         bytes: payload,
@@ -58,9 +66,16 @@ pub(crate) struct Spec {
 }
 
 /// 业务作用：从独立有界正文读取共同目标合同，禁止追加歧义内容。
-/// 参数说明：bytes 为完整目标规范正文。返回：字段合法且无尾部的合同，来源语义由外层计划绑定。
+///
+/// 参数说明：
+/// - `bytes`：bytes 为完整目标规范正文。
+///
+/// 返回：字段合法且无尾部的合同，来源语义由外层计划绑定。
 pub(crate) fn decode_spec(bytes: &[u8]) -> TransferResult<Spec> {
-    let mut input = Input { bytes, position: 0 };
+    let mut input = Input {
+        bytes,
+        position: 0,
+    };
     let spec = read_spec(&mut input)?;
     if input.position != bytes.len() {
         return Err(TransferError::CorruptPlan);
@@ -69,7 +84,11 @@ pub(crate) fn decode_spec(bytes: &[u8]) -> TransferResult<Spec> {
 }
 
 /// 业务作用：共用目标身份、路由和 schema 的受限解析，不授权任意来源消息。
-/// 参数说明：input 为已限长正文游标。返回：完整字段，规范排序及来源绑定仍由外层合同复验。
+///
+/// 参数说明：
+/// - `input`：input 为已限长正文游标。
+///
+/// 返回：完整字段，规范排序及来源绑定仍由外层合同复验。
 fn read_spec(input: &mut Input<'_>) -> TransferResult<Spec> {
     input.magic(b"NSKTSP01")?;
     let source_id = input.text(128, false)?;
@@ -153,7 +172,12 @@ struct Input<'a> {
     position: usize,
 }
 impl<'a> Input<'a> {
-    /// 业务作用：在切片之前拒绝超出正文的长度。参数说明：count为所需字节。返回：完整借用片段并移动游标。
+    /// 业务作用：在切片之前拒绝超出正文的长度。
+    ///
+    /// 参数说明：
+    /// - `count`：count为所需字节。
+    ///
+    /// 返回：完整借用片段并移动游标。
     fn take(&mut self, count: usize) -> TransferResult<&'a [u8]> {
         let end = self
             .position
@@ -166,11 +190,19 @@ impl<'a> Input<'a> {
         self.position = end;
         Ok(bytes)
     }
-    /// 业务作用：读取单字节协议判别值。参数说明：无。返回：完整字节或截断错误。
+    /// 业务作用：读取单字节协议判别值。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：完整字节或截断错误。
     fn u8(&mut self) -> TransferResult<u8> {
         Ok(self.take(1)?[0])
     }
-    /// 业务作用：读取共同大端数量或坐标字段。参数说明：无。返回：完整四字节整数。
+    /// 业务作用：读取共同大端数量或坐标字段。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：完整四字节整数。
     fn u32(&mut self) -> TransferResult<u32> {
         Ok(u32::from_be_bytes(
             self.take(4)?
@@ -178,7 +210,12 @@ impl<'a> Input<'a> {
                 .map_err(|_| TransferError::CorruptPlan)?,
         ))
     }
-    /// 业务作用：在集合分配前约束条目数。参数说明：empty表示允许零项。返回：最多4096项。
+    /// 业务作用：在集合分配前约束条目数。
+    ///
+    /// 参数说明：
+    /// - `empty`：empty表示允许零项。
+    ///
+    /// 返回：最多4096项。
     fn count(&mut self, empty: bool) -> TransferResult<usize> {
         let count = self.u32()? as usize;
         if count > 4096 || !empty && count == 0 {
@@ -187,7 +224,13 @@ impl<'a> Input<'a> {
             Ok(count)
         }
     }
-    /// 业务作用：拒绝非法身份或无界文本。参数说明：max为最大长度，empty为是否允许空值。返回：独立ASCII文本。
+    /// 业务作用：拒绝非法身份或无界文本。
+    ///
+    /// 参数说明：
+    /// - `max`：max为最大长度。
+    /// - `empty`：empty为是否允许空值。
+    ///
+    /// 返回：独立ASCII文本。
     fn text(&mut self, max: usize, empty: bool) -> TransferResult<String> {
         let count = u16::from_be_bytes(
             self.take(2)?
@@ -203,7 +246,11 @@ impl<'a> Input<'a> {
         }
         String::from_utf8(bytes.to_vec()).map_err(|_| TransferError::CorruptPlan)
     }
-    /// 业务作用：读取并立即复验Kafka坐标。参数说明：无。返回：合法分区。
+    /// 业务作用：读取并立即复验Kafka坐标。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：合法分区。
     fn partition(&mut self) -> TransferResult<Tp> {
         let tp = Tp {
             topic: self.text(249, false)?,
@@ -212,7 +259,12 @@ impl<'a> Input<'a> {
         valid_partition(&tp)?;
         Ok(tp)
     }
-    /// 业务作用：拒绝把其它持久协议当作转发合同。参数说明：expected为协议标识。返回：完全一致才继续。
+    /// 业务作用：拒绝把其它持久协议当作转发合同。
+    ///
+    /// 参数说明：
+    /// - `expected`：expected为协议标识。
+    ///
+    /// 返回：完全一致才继续。
     fn magic(&mut self, expected: &[u8]) -> TransferResult<()> {
         if self.take(expected.len())? != expected {
             Err(TransferError::CorruptPlan)

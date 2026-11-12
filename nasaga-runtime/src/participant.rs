@@ -12,7 +12,10 @@ use crate::{ParticipantHandled, ParticipantRuntime, SagaCommandEnvelope};
 pub trait SagaCommandService: Send + Sync + 'static {
     /// 业务作用：把一条已由 transport 认证并绑定 route 的命令交给完整参与方事务。
     ///
-    /// 参数说明：`runtime` 是 MySQL 参与方运行时，`envelope` 是命令，`producer` 是已认证 Orchestrator 身份。
+    /// 参数说明：
+    /// - `runtime`：是 MySQL 参与方运行时
+    /// - `envelope`：是命令
+    /// - `producer`：是已认证 Orchestrator 身份。
     ///
     /// 返回：本地事务 COMMIT 后返回可 ACK 结论；合同、业务瞬态或基础设施错误返回错误。
     fn handle_saga_command<'a>(
@@ -22,13 +25,15 @@ pub trait SagaCommandService: Send + Sync + 'static {
         producer: &'a ServiceIdentity,
     ) -> impl std::future::Future<Output = anyhow::Result<ParticipantHandled>> + Send + 'a;
 
-    /// 业务作用：在同一参与方事务中携带已验证收据链路上下文。
+    /// 业务作用：提供携带收据因果上下文的参与方入口；默认兼容实现委托无 trace 入口，生成适配可覆盖以传播上下文。
     ///
-    /// 默认实现保留旧宏展开的行为；当前宏会覆写本方法并把 trace 交给核心。
+    /// 参数说明：
+    /// - `runtime`：绑定 MySQL 本地事务能力的参与方运行时。
+    /// - `envelope`：已认证且仍需业务合同复验的命令 envelope。
+    /// - `producer`：transport 从可信凭据映射的编排服务身份。
+    /// - `receipt_trace`：可选且已验证的收据因果上下文。
     ///
-    /// 参数说明：`runtime`、`envelope`、`producer` 与无 trace 入口一致，`receipt_trace` 是可选受信收据上下文。
-    ///
-    /// 返回：语义与 [`handle_saga_command`](Self::handle_saga_command) 一致。
+    /// 返回：默认实现忽略 receipt_trace，直接返回无 trace 入口的 future；需要传播因果上下文的实现必须覆盖本方法，事务结果由实际 Service 入口保证。
     fn handle_saga_command_traced<'a>(
         &'a self,
         runtime: &'a ParticipantRuntime,

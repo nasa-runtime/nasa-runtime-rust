@@ -137,7 +137,9 @@ let settings: Settings = loaded.bind()?;
 let report = loaded.report();
 ```
 
-默认主文件为 `zcf/application.yml`。加载器创建时固定环境及绝对路径；同一实例重载不重新捕获进程环境。自定义主路径和 profile 模板分别通过 `base_file`、`profile_pattern` 指定。配置改变使用新候选，不修改上一次结果。
+两种加载器的 `standard()` 都优先使用非空环境变量 `APP_CONFIG_FILE` 指定的主文件；未设置或为空时使用 `zcf/application.yml`。支持绝对路径，例如 `APP_CONFIG_FILE=/etc/orders/application.yml`；也支持相对进程工作目录的路径，例如在项目根目录启动时使用 `APP_CONFIG_FILE=config/application.yml`。指定文件不可读时加载失败，不回退默认文件；路径原值保留，不展开 `~` 或 `${...}`。
+
+主路径在加载器创建时选定；显式 `base_file` 的优先级高于环境变量。严格加载器同时固定环境及绝对路径，同一实例重载不重新捕获进程环境。`APP_CONFIG_FILE` 不改变默认 profile 模板 `zcf/application-{profile}`，自定义 profile 模板分别使用兼容入口的 `profile_file_pattern` 或严格入口的 `profile_pattern`。配置改变使用新候选，不修改上一次结果。
 
 ```yaml
 application:
@@ -263,7 +265,8 @@ fn configuration() -> nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader>
 }
 
 /// 业务作用：将业务初始化登记到统一生命周期。
-/// 参数说明：`app` 是受管应用。
+/// 参数说明：
+/// - `app`：当前受管应用句柄，本示例不额外使用。
 /// 返回：登记成功后继续启动。
 #[nasa::application("log", "web", config = configuration)]
 async fn main(app: nasa::Application) -> anyhow::Result<()> { Ok(()) }

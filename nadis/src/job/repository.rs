@@ -603,8 +603,11 @@ pub(crate) struct JobReapFanoutRequest {
 /// Job 定义与 Run 仓库；持有连接、冻结键模型与配置标量。
 #[derive(Clone)]
 pub struct JobRepository {
+    /// 当前 source 的共享客户端，按操作选择控制或普通命令连接。
     client: Arc<RedisClient>,
+    /// 已冻结的 source 身份、命名空间和分片布局。
     keyspace: JobKeyspace,
+    /// 定义、Run 和完成记录操作共用的已校验容量及保留约束。
     config: Arc<JobConfig>,
 }
 
@@ -620,7 +623,8 @@ impl JobRepository {
 
     /// 业务作用：按冻结 keyspace 计算任务所属调度分片，供同 source 的运行循环筛选本地定义。
     ///
-    /// 参数说明：`job_name` 为已校验任务名。
+    /// 参数说明：
+    /// - `job_name`：已校验的任务名，按当前 source 的固定布局映射。
     ///
     /// 返回：小于冻结 `shard_count` 的稳定分片下标。
     pub(crate) fn schedule_shard(&self, job_name: &str) -> u32 {
@@ -643,9 +647,10 @@ impl JobRepository {
         }
     }
 
-    /// 业务作用：对普通调度分片的 Completion Stream 应用配置的长度上界与最小时间保留窗口。
+    /// 业务作用：对普通调度分片的 Completion Stream 应用近似长度上界和事件最长保留时间。
     ///
-    /// 参数说明：`shard` 为调度分片下标。
+    /// 参数说明：
+    /// - `shard`：当前冻结布局内的调度分片下标。
     ///
     /// 返回：本轮两类删除数、裁剪后最旧 ID 与权威时刻；命令或协议失败时返回错误。
     pub async fn trim_completion(&self, shard: u32) -> Result<CompletionTrimOutcome> {
@@ -655,7 +660,8 @@ impl JobRepository {
 
     /// 业务作用：在 Fanout 桶长期没有新完成写入时继续裁剪 Completion Stream，保证时间界仍然生效。
     ///
-    /// 参数说明：`bucket` 为固定 Fanout 桶下标。
+    /// 参数说明：
+    /// - `bucket`：当前冻结布局内的 Fanout 桶下标。
     ///
     /// 返回：本轮两类删除数、裁剪后最旧 ID 与权威时刻；命令或协议失败时返回错误。
     pub async fn trim_fanout_completion(&self, bucket: u32) -> Result<CompletionTrimOutcome> {
@@ -665,16 +671,26 @@ impl JobRepository {
 
     /// 业务作用：对一个已冻结 Completion key 执行有界双界裁剪，并读回可观测的最旧保留 ID。
     ///
-    /// 参数说明：`key` 必须由当前 JobKeyspace 的普通分片或 Fanout 桶派生。
+    /// 参数说明：
+    /// - `key`：当前 JobKeyspace 派生的普通分片或 Fanout 桶 Completion Stream 键。
     ///
-    /// 返回：长度界采用近似有界裁剪；时间界先读安全边界再精确删除，单轮不会超过配置批量。
+    /// 返回：分别报告近似长度裁剪和精确时间裁剪的数量，再读取最旧 ID；多个命令不构成原子快照，
+    /// 时间分量或毫秒范围非法时在删除前拒绝；后续步骤失败不会撤销已完成删除。
+    /// 时间裁剪按读取时的边界最多选择配置批量的过期项。
     async fn trim_completion_key(&self, key: &str) -> Result<CompletionTrimOutcome> {
         let mut connection = self.client.conn();
         let (seconds, micros): (i64, i64) = redis::cmd("TIME")
             .query_async(&mut connection)
             .await
             .map_err(NasaRedisError::Redis)?;
-        let redis_now = seconds.saturating_mul(1_000).saturating_add(micros / 1_000);
+        // 时间异常时不能把极值作为过期边界，也不能先做长度删除；先完整验证，再进入任何裁剪步骤。
+        if seconds < 0 || !(0..1_000_000).contains(&micros) {
+            return Err(protocol("Completion TIME 分量超出合法范围"));
+        }
+        let redis_now = seconds
+            .checked_mul(1_000)
+            .and_then(|millis| millis.checked_add(micros / 1_000))
+            .ok_or_else(|| protocol("Completion TIME 毫秒值超出整数范围"))?;
         let length_trimmed: i64 = redis::cmd("XTRIM")
             .arg(key)
             .arg("MAXLEN")
@@ -1570,7 +1586,8 @@ impl JobRepository {
 
     /// 业务作用：读取单个调度分片当前可见性积压量，供 source 聚合容量观测。
     ///
-    /// 参数说明：`shard` 为冻结布局内的调度分片下标。
+    /// 参数说明：
+    /// - `shard`：当前冻结布局内需要观测的调度分片下标。
     ///
     /// 返回：当前 visible ZSET 成员数；传输或类型异常时返回错误并交由扫描监督处理。
     pub async fn visible_size(&self, shard: u32) -> Result<i64> {
@@ -1584,7 +1601,8 @@ impl JobRepository {
 
     /// 业务作用：读取一个串行任务等待队列的当前深度，供本地 source 发布容量压力而不暴露任务名 label。
     ///
-    /// 参数说明：`job_name` 为已冻结定义名，调用方负责只查询当前分片的串行定义。
+    /// 参数说明：
+    /// - `job_name`：已冻结的任务定义名，调用方负责只查询当前分片的串行定义。
     ///
     /// 返回：waitq ZSET 当前成员数；传输或类型异常时返回错误并交由扫描监督处理。
     pub(crate) async fn serial_wait_depth(&self, job_name: &str) -> Result<i64> {
@@ -1839,7 +1857,8 @@ impl JobRepository {
 
     /// 业务作用：按固定批次终态化已删除任务遗留在 waitq 与共享可见/租约/等待索引的 Run，使删除控制动作保持常数复杂度。
     ///
-    /// 参数说明：`shard` 为调度分片下标；任务名由分片 reaping SET 在脚本内选择。
+    /// 参数说明：
+    /// - `shard`：需要推进删除收敛的调度分片下标，具体任务由该分片 reaping SET 选择。
     ///
     /// 返回：本批终态化数量、继续推进标志与到期 Fanout 根；跨 slot 请求必须在当前 control 周期内先关闭桶内执行权。
     pub async fn reap_deleted(&self, shard: u32) -> Result<JobReapOutcome> {
@@ -1896,8 +1915,11 @@ impl JobRepository {
     /// 参数说明：
     /// - `definition`: 根任务定义（决定分片）。
     /// - `run_id`: 根 Run 标识。
-    /// - `owner`/`attempt_token`: 当前执行权，必须与记录一致才能转入。
-    /// - `fanout_id`/`snapshot_id`/`shard_total`: 本批 Fanout 标识、快照标识与分片总数。
+    /// - `owner`：当前执行器身份，必须与根 Run 的持有者一致。
+    /// - `attempt_token`：当前 attempt 的 fencing token，防止旧持有者移交完成权。
+    /// - `fanout_id`：本批 Fanout 身份，作为跨 slot intent 的关联标识。
+    /// - `snapshot_id`：本批绑定的兼容能力快照身份。
+    /// - `shard_total`：本批计划创建的分片总数。
     ///
     /// 返回：首次转入返回 `Prepared`；同 fanoutId 重放返回 `Adopted`；删除 fence、非 RUNNING 或执行权不符返回对应结局。
     #[allow(clippy::too_many_arguments)]
@@ -1967,9 +1989,11 @@ impl JobRepository {
     /// 参数说明：
     /// - `definition`: 根任务定义（决定分片与串行队列）。
     /// - `run_id`: 根 Run 标识。
-    /// - `fanout_id`/`root_attempt`: 本批 Fanout 标识与根 attempt，必须与记录一致。
+    /// - `fanout_id`：本批 Fanout 身份，必须与根 Run 已保存的 intent 一致。
+    /// - `root_attempt`：移交完成权时的根 attempt，拒绝其它尝试的迟到回填。
     /// - `target_state`: 回填目标，`COMMITTED` 转入 WAITING_CHILDREN，或桶内终态线名。
-    /// - `error_type`/`result_summary`: 终态时写入的错误类型与结果摘要。
+    /// - `error_type`：终态时写入的错误分类，不应包含业务载荷或凭据。
+    /// - `result_summary`：终态时写入的结果摘要，调用方负责容量和敏感信息边界。
     ///
     /// 返回：回填成功返回状态与时刻；删除 fence 命中返回 `JobDeleted`；已回填、定位不符或根已终态返回对应结局。
     #[allow(clippy::too_many_arguments)]
@@ -1997,7 +2021,14 @@ impl JobRepository {
 
     /// 业务作用：不依赖本地定义对象，按任务名回填删除收敛发现的普通 Fanout 根。
     ///
-    /// 参数说明：`job_name` 定位调度分片与串行队列；其余参数携带普通根、桶终态与结果归因。
+    /// 参数说明：
+    /// - `job_name`：定位调度分片、串行队列和任务记录的根定义名。
+    /// - `run_id`：需要回填的普通根 Run 身份。
+    /// - `fanout_id`：桶内 Fanout 身份，必须与根 intent 匹配。
+    /// - `root_attempt`：根移交完成权时的 attempt，拒绝过期回填。
+    /// - `target_state`：桶内 COMMITTED 或终态的线协议名称。
+    /// - `error_type`：终态错误分类，调用方不得传入凭据或载荷正文。
+    /// - `result_summary`：终态结果摘要，调用方负责容量和敏感信息边界。
     ///
     /// 返回：语义与 `finish_fanout_root` 相同；供定义已从本节点移除后的 control loop 继续收敛。
     #[allow(clippy::too_many_arguments)]
@@ -2182,11 +2213,21 @@ fn interpret_register(raw: &[redis::Value]) -> Result<JobRegisterOutcome> {
         .parse::<i64>()
         .map_err(|_| protocol("job_register 修订号非法"))?;
     Ok(match code.as_str() {
-        "OK" => JobRegisterOutcome::Registered { revision },
-        "ADOPTED" => JobRegisterOutcome::Adopted { revision },
-        "STALE" => JobRegisterOutcome::Stale { revision },
-        "CONFLICT" => JobRegisterOutcome::Conflict { revision },
-        "DELETED" => JobRegisterOutcome::Deleted { revision },
+        "OK" => JobRegisterOutcome::Registered {
+            revision,
+        },
+        "ADOPTED" => JobRegisterOutcome::Adopted {
+            revision,
+        },
+        "STALE" => JobRegisterOutcome::Stale {
+            revision,
+        },
+        "CONFLICT" => JobRegisterOutcome::Conflict {
+            revision,
+        },
+        "DELETED" => JobRegisterOutcome::Deleted {
+            revision,
+        },
         _ => return Err(protocol("job_register 返回未知码")),
     })
 }
@@ -2203,7 +2244,9 @@ fn interpret_manual_fire(raw: &[redis::Value], run_id: String) -> Result<ManualF
     match code.as_str() {
         "NOT_FOUND" => Ok(ManualFireOutcome::NotFound),
         "STATE_MISMATCH" => Ok(ManualFireOutcome::StateMismatch),
-        "ADOPTED" => Ok(ManualFireOutcome::Adopted { run_id }),
+        "ADOPTED" => Ok(ManualFireOutcome::Adopted {
+            run_id,
+        }),
         "OK" => {
             if raw.len() != 4 {
                 return Err(protocol("manual_fire OK 返回结构非法"));
@@ -2341,7 +2384,9 @@ fn interpret_fire_due(raw: &[redis::Value], run_id: String) -> Result<FireDueOut
                 .parse::<i64>()
                 .map_err(|_| protocol("fire_due nextFireAt 非法"))?,
         },
-        "ADOPTED" => FireDueOutcome::Adopted { run_id },
+        "ADOPTED" => FireDueOutcome::Adopted {
+            run_id,
+        },
         "OK" => FireDueOutcome::Fired {
             run_id,
             redis_now: now_at(1)?,
@@ -2613,7 +2658,9 @@ fn interpret_cancel(raw: &[redis::Value]) -> Result<CancelOutcome> {
                 ),
                 _ => None,
             };
-            Ok(CancelOutcome::Ok { wake_delay_ms })
+            Ok(CancelOutcome::Ok {
+                wake_delay_ms,
+            })
         }
         _ => Err(protocol("request_cancel 返回未知码")),
     }
@@ -2913,7 +2960,12 @@ fn cfg(message: &str) -> NasaRedisError {
     crate::job::JobError::Config(message.to_owned()).into()
 }
 
-/// 业务作用：把可选字节解释为 UTF-8 文本；缺失或非法时按协议错误处理。
+/// 业务作用：严格解释可选定义字段的 UTF-8 文本，保留缺失字段的空串兼容语义。
+///
+/// 参数说明：
+/// - `value`：从 Redis 读取的可选字段字节，所有权随转换消费。
+///
+/// 返回：合法 UTF-8 原样转换，缺失返回空串；已存在但编码非法返回协议错误。
 fn utf8(value: Option<Vec<u8>>) -> Result<String> {
     match value {
         Some(bytes) => String::from_utf8(bytes).map_err(|_| protocol("job 字段不是合法 UTF-8")),
@@ -2922,6 +2974,11 @@ fn utf8(value: Option<Vec<u8>>) -> Result<String> {
 }
 
 /// 业务作用：把可选字节解释为 i64；缺失取 0，非法时协议错误。
+///
+/// 参数说明：
+/// - `value`：从 Redis 读取的可选数值字段，已有字段必须是合法十进制 UTF-8 文本。
+///
+/// 返回：缺失返回零，合法文本返回其 i64 数值；空文本、非法编码、非整数或超范围返回协议错误。
 fn parse_i64(value: Option<Vec<u8>>) -> Result<i64> {
     match value {
         None => Ok(0),
@@ -2932,7 +2989,12 @@ fn parse_i64(value: Option<Vec<u8>>) -> Result<i64> {
     }
 }
 
-/// 业务作用：构造 Job 协议错误。参数说明：`message` 摘要。返回：协议错误。
+/// 业务作用：把状态脚本或持久字段的合同违例归为 Job 协议错误，阻止继续采用非法证据。
+///
+/// 参数说明：
+/// - `message`：不包含载荷、凭据或任意响应正文的固定错误摘要。
+///
+/// 返回：复制摘要并生成 Job 协议错误，不改变状态或重放先前命令。
 fn protocol(message: &str) -> NasaRedisError {
     crate::job::JobError::Protocol(message.to_owned()).into()
 }

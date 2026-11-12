@@ -38,6 +38,7 @@ impl GroupState {
     /// 业务作用：判断当前 group 是否允许 operator 显式重建 consumer 会话。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：保护与自动重建等待允许申请恢复，正常推进及停机状态拒绝；实际重建仍须等待旧责任退出。
     pub(crate) fn permits_operator_restart(self) -> bool {
         matches!(
@@ -52,6 +53,10 @@ impl GroupState {
     }
 
     /// 业务作用：返回允许 restart 的状态名列表，用于生成可定位的拒绝错误文本。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：与 permits_operator_restart 判定一致的固定名称列表；文本只供诊断，不执行状态切换或授权重建。
     pub(crate) fn operator_restart_states() -> &'static str {
         "Degraded/Recovering/Crashed/CommitBlocked/DltBackpressure/ProgressBackpressure"
     }
@@ -172,14 +177,20 @@ pub enum ReadyRequirement {
 
 impl ReadyRequirement {
     /// 业务作用：统一启动门禁与受管监控对当前消费权威和分配条件的判断。
-    /// 参数说明：health 为单槽或聚合健康快照，不是跨线程持有的永久租约。
+    ///
+    /// 参数说明：
+    /// - `health`：health 为单槽或聚合健康快照。
+    ///
     /// 返回：仅 Running、有效分配代次且满足所选范围时为 true；重试、保护、失权及停机均拒绝开放。
     pub fn satisfied_by(&self, health: &GroupHealth) -> bool {
         self.reason(health) == ReadyReason::Ready
     }
 
     /// 业务作用：返回接流量条件未满足的首要稳定原因，不以错误文本承担业务判断。
-    /// 参数说明：health 为当前单槽或聚合快照。
+    ///
+    /// 参数说明：
+    /// - `health`：health 为当前单槽或聚合快照。
+    ///
     /// 返回：非法要求优先拒绝；状态与失权优先于分配缺口，用户暂停不撤销分配就绪。
     pub fn reason(&self, health: &GroupHealth) -> ReadyReason {
         if self.validate().is_err() {
@@ -207,9 +218,9 @@ impl ReadyRequirement {
             return ReadyReason::NotJoined;
         }
         match self {
-            Self::Assigned { min_partitions } if health.assignment.len() < *min_partitions => {
-                ReadyReason::InsufficientPartitions
-            }
+            Self::Assigned {
+                min_partitions,
+            } if health.assignment.len() < *min_partitions => ReadyReason::InsufficientPartitions,
             Self::AssignedTopics(topics)
                 if topics
                     .iter()
@@ -227,12 +238,16 @@ impl ReadyRequirement {
     }
 
     /// 业务作用：在查询或等待开始前排除永远不能满足的要求。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：合法要求返回成功，零分区、空白、重复或负坐标返回 Config。
     pub fn validate(&self) -> crate::Result<()> {
         let valid = match self {
             Self::Joined => true,
-            Self::Assigned { min_partitions } => *min_partitions > 0,
+            Self::Assigned {
+                min_partitions,
+            } => *min_partitions > 0,
             Self::AssignedTopics(topics) => {
                 !topics.is_empty()
                     && topics.iter().all(|topic| !topic.trim().is_empty())
@@ -316,7 +331,12 @@ pub struct ReadyStatus {
 
 impl ReadyStatus {
     /// 业务作用：从同一份健康观测构造原因，避免分配与状态跨次混合。
-    /// 参数说明：source_id 为源身份，requirement 为要求，health 为当前快照。
+    ///
+    /// 参数说明：
+    /// - `source_id`：source_id 为源身份。
+    /// - `requirement`：requirement 为要求。
+    /// - `health`：health 为当前快照。
+    ///
     /// 返回：拥有独立证据的诊断，无 broker 副作用。
     pub(crate) fn evaluate(
         source_id: &str,
@@ -332,7 +352,9 @@ impl ReadyStatus {
         }
     }
     /// 业务作用：供接流量门禁读取本次诊断。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仅当前要求已满足时为真。
     pub fn ready(&self) -> bool {
         self.reason == ReadyReason::Ready

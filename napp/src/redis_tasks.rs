@@ -57,7 +57,9 @@ struct SubscriptionExit {
 
 impl Drop for SubscriptionExit {
     /// 业务作用：即使 handler panic，也将实际退出反映到任务健康，避免长期保留虚假的连接状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：清除连接观测；未收到停机请求的退出被标记为失败。
     fn drop(&mut self) {
         self.connected.store(false, Ordering::Release);
@@ -88,14 +90,19 @@ pub struct ManagedRedisLeader {
 
 impl ManagedRedisLeader {
     /// 业务作用：读取当前来源的本地任期观测，Ready 前或关闭后不授予业务权威。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：处于开放生命周期且领域 leader 仍有效时为 true；不能代替外部 fencing。
     pub fn is_leader(&self) -> bool {
         self.ready.is_cancelled() && !self.cancel.is_cancelled() && self.leader.is_leader()
     }
 
     /// 业务作用：在受管调用责任内执行可响应失权的幂等任务。
-    /// 参数说明：`work` 接受当前任期的取消信号，不得派生未登记任务。
+    ///
+    /// 参数说明：
+    /// - `work`：`work` 接受当前任期的取消信号。
+    ///
     /// 返回：任内完成时 Some；未开放、非 leader 或失权时 None；关闭时拒绝。
     pub async fn run<F, Fut, T>(&self, work: F) -> ApplicationResult<Option<T>>
     where
@@ -116,7 +123,11 @@ impl ManagedRedisLeader {
 
 impl RedisTasks {
     /// 业务作用：登记启动期订阅策略，容量按命名计划固定。
-    /// 参数说明：`name` 为稳定计划名；`handler` 为业务处理函数。
+    ///
+    /// 参数说明：
+    /// - `name`：`name` 为稳定计划名。
+    /// - `handler`：`handler` 为业务处理函数。
+    ///
     /// 返回：未封口且名称唯一时成功，不创建任务。
     pub(crate) fn register(&self, name: &str, handler: Handler) -> ApplicationResult<()> {
         let mut handlers = self.handlers.lock().expect("Redis subscription plans");
@@ -134,7 +145,10 @@ impl RedisTasks {
     }
 
     /// 业务作用：准备独立 Redis 长期能力并立即登记唯一聚合清理责任。
-    /// 参数说明：`context` 提供已连接来源和资源目录。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供已连接来源和资源目录。
+    ///
     /// 返回：启用计划与 handler 全部匹配；任何错误阻止 Ready。
     pub(crate) async fn prepare(
         self: &Arc<Self>,
@@ -279,7 +293,9 @@ impl RedisTasks {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {},
-                    _ = consume(subscription, handler, limit, connected) => { failed.store(true, Ordering::Release); },
+                    _ = consume(subscription, handler, limit, connected) => {
+                        failed.store(true, Ordering::Release);
+                    }
                 }
             });
         }
@@ -292,7 +308,9 @@ impl RedisTasks {
     }
 
     /// 业务作用：在宿主 Ready 后放行订阅，并向既有 Redis monitor 提供任务健康。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：关键任务退出时拒绝继续运行；来源连接健康仍由 Redis 自身探测。
     pub(crate) fn observe(&self) -> ApplicationResult<()> {
         if self.cancel.is_cancelled() {
@@ -329,7 +347,9 @@ impl RedisTasks {
     }
 
     /// 业务作用：先同步关闭全部订阅与领导权调用，再等待退出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：准入永久关闭，后续 Ready 观测不能重开。
     fn close(&self) {
         self.cancel.cancel();
@@ -341,7 +361,9 @@ impl RedisTasks {
     }
 
     /// 业务作用：并发取得所有派生任务与领导权调用的退出证明。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部调用 future、订阅和竞选退出后完成。
     async fn drain(&self) {
         let leaders = self.leaders.lock().expect("Redis leaders").clone();
@@ -357,13 +379,18 @@ impl RedisTasks {
 struct RedisTasksShutdown(Arc<RedisTasks>);
 impl ShutdownAction for RedisTasksShutdown {
     /// 业务作用：标识独立 Redis 长期能力聚合清理。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定动作名。
     fn label(&self) -> &'static str {
         "redis-derived-tasks"
     }
     /// 业务作用：按同一期限停止所有独立竞选与订阅。
-    /// 参数说明：`context` 为宿主剩余预算。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 为宿主剩余预算。
+    ///
     /// 返回：全部退出时成功；超时明确报告未完成。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         self.0.close();
@@ -377,7 +404,9 @@ impl ShutdownAction for RedisTasksShutdown {
 }
 impl Drop for RedisTasksShutdown {
     /// 业务作用：启动失败或取消等待时收回全部派生能力准入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：提出停止请求，实际收口仍由任务 owner 持有。
     fn drop(&mut self) {
         self.0.close();
@@ -385,7 +414,13 @@ impl Drop for RedisTasksShutdown {
 }
 
 /// 业务作用：顺序处理有界消息，断线后有界退避重订阅；不承诺补回 Pub/Sub 缺口。
-/// 参数说明：`subscription` 持有来源连接；`handler` 为策略；`limit` 限制交给业务的正文；`connected` 报告链路状态。
+///
+/// 参数说明：
+/// - `subscription`：`subscription` 持有来源连接。
+/// - `handler`：`handler` 为策略。
+/// - `limit`：`limit` 限制交给业务的正文。
+/// - `connected`：`connected` 报告链路状态。
+///
 /// 返回：handler 失败或超大消息时退出，由聚合 owner 分类；取消直接释放本次 future。
 async fn consume(
     mut subscription: nadis::pubsub::Subscription,
@@ -420,7 +455,10 @@ async fn consume(
 
 impl Application {
     /// 业务作用：取得按来源绑定的命名竞选入口。
-    /// 参数说明：`name` 为 redis_leaders 计划名称。
+    ///
+    /// 参数说明：
+    /// - `name`：`name` 为 redis_leaders 计划名称。
+    ///
     /// 返回：受 Ready 与关闭门禁保护的句柄；不存在时拒绝。
     pub async fn redis_leader(&self, name: &str) -> ApplicationResult<ManagedRedisLeader> {
         Ok(self
@@ -431,14 +469,20 @@ impl Application {
 }
 
 /// 业务作用：保持派生任务名称有界，避免资源与指标身份无限增长。
-/// 参数说明：`name` 为声明名称。
+///
+/// 参数说明：
+/// - `name`：`name` 为声明名称。
+///
 /// 返回：合法稳定名称为 true。
 fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 128 && name.trim() == name
 }
 
 /// 业务作用：按明确关键性设置独立长期任务健康。
-/// 参数说明：`critical` 指示该能力是否影响服务可用。
+///
+/// 参数说明：
+/// - `critical`：`critical` 指示该能力是否影响服务可用。
+///
 /// 返回：固定阈值与过期窗口的策略。
 fn policy(critical: bool) -> ReadinessPolicy {
     ReadinessPolicy {
@@ -450,7 +494,10 @@ fn policy(critical: bool) -> ReadinessPolicy {
 }
 
 /// 业务作用：返回不包含 key、channel 和凭据的稳定错误。
-/// 参数说明：`message` 为固定原因。
+///
+/// 参数说明：
+/// - `message`：`message` 为固定原因。
+///
 /// 返回：Redis 子能力错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Redis, ApplicationPhase::Prepare, message)

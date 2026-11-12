@@ -56,7 +56,7 @@ pub struct MapperStream<T> {
 impl<T> MapperStream<T> {
     /// 业务作用：包装一个 owned stream。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `stream`: 由 `sqlx::query_as(...).fetch(...)` 等调用返回的 owned stream；
     ///   生成代码会把 datasource pool 生命周期一起移动进 stream，避免借用外部连接。
     ///
@@ -72,7 +72,11 @@ impl<T> MapperStream<T> {
     }
 
     /// 业务作用：将宏生成的结果流与独立生命周期观测绑定，保留从未 poll 的丢弃事实。
-    /// 参数说明：`stream` 为拥有型 SQLx 行流，`observation` 为构造时创建的守卫。
+    ///
+    /// 参数说明：
+    /// - `stream`：为拥有型 SQLx 行流
+    /// - `observation`：为构造时创建的守卫。
+    ///
     /// 返回：连接和守卫共同随 EOF、错误或 Drop 收口的结果流。
     pub fn observed<S>(stream: S, observation: observability::MapperStreamGuard) -> Self
     where
@@ -85,7 +89,9 @@ impl<T> MapperStream<T> {
     }
 
     /// 业务作用：经同一轮询边界读取下一行，使显式 next 与 StreamExt 保持一致的观测语义。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：行值或 SQLx 错误；None 表示结果集结束并完成终态计量。
     pub async fn next(&mut self) -> Option<Result<T, sqlx::Error>> {
         futures_util::StreamExt::next(self).await
@@ -96,7 +102,10 @@ impl<T> futures_core::Stream for MapperStream<T> {
     type Item = Result<T, sqlx::Error>;
 
     /// 业务作用：围绕底层取行记录活跃等待、首行和唯一终态，不把消费者间隔算入数据库耗时。
-    /// 参数说明：`cx` 为异步运行时的唤醒上下文。
+    ///
+    /// 参数说明：
+    /// - `cx`：为异步运行时的唤醒上下文。
+    ///
     /// 返回：保留内部流的行、错误或等待状态；EOF 和错误只结算一次观测。
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -132,22 +141,28 @@ pub struct EnumOrdinal<E: MapperEnum>(
 impl<E: MapperEnum> EnumOrdinal<E> {
     /// 业务作用：创建 ordinal enum 包装值。
     ///
-    /// # 参数
-    /// - `value`: 需要按 ordinal 语义写库、读库或序列化缓存的业务 enum。
+    /// 参数说明：
+    /// - `value`：需要按 ordinal 语义写库、读库或序列化缓存的业务 enum。
+    ///
+    /// 返回：返回接管该枚举的包装值，不计算或验证其 ordinal。
     pub fn new(value: E) -> Self {
         Self(value)
     }
 
-    /// 业务作用：取回内部 enum。
+    /// 业务作用：取回内部 enum。 该方法用于业务层已经完成数据库/cache 交互后恢复原始 enum 类型。
     ///
-    /// 该方法用于业务层已经完成数据库/cache 交互后恢复原始 enum 类型。
+    /// 参数说明: 无。
+    ///
+    /// 返回：消费包装并返回原枚举，不重新解码或访问数据库。
     pub fn into_inner(self) -> E {
         self.0
     }
 
-    /// 业务作用：返回当前 enum 的 ordinal。
+    /// 业务作用：返回当前 enum 的 ordinal。 该值会作为 MySQL 整数字段和缓存 JSON 整数值。
     ///
-    /// 该值会作为 MySQL 整数字段和缓存 JSON 整数值。
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回业务 MapperEnum 实现提供的 i32 序号，不访问数据库或证明跨部署映射未变化。
     pub fn ordinal(self) -> i32 {
         self.0.ordinal()
     }
@@ -156,8 +171,10 @@ impl<E: MapperEnum> EnumOrdinal<E> {
 impl<E: MapperEnum> From<E> for EnumOrdinal<E> {
     /// 业务作用：从业务 enum 直接构造 ordinal 包装。
     ///
-    /// # 参数
-    /// - `value`: 需要进入 Mapper 编解码流程的业务 enum。
+    /// 参数说明：
+    /// - `value`：需要进入 Mapper 编解码流程的业务 enum。
+    ///
+    /// 返回：返回直接包装原值的 EnumOrdinal，不执行额外转换或校验。
     fn from(value: E) -> Self {
         Self(value)
     }
@@ -167,16 +184,22 @@ impl<E: MapperEnum> Deref for EnumOrdinal<E> {
     type Target = E;
 
     /// 业务作用：允许业务代码以只读方式访问内部 enum。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用内部枚举，生命周期不超过当前包装值。
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl<E: MapperEnum> serde::Serialize for EnumOrdinal<E> {
-    /// 业务作用：将 enum ordinal 写成 JSON 整数。
+    /// 业务作用：以整数序号形式序列化 Mapper 枚举，保持缓存表示与数据库绑定一致。
     ///
-    /// # 参数
-    /// - `serializer`: serde 提供的目标序列化器。
+    /// 参数说明：
+    /// - `serializer`：serde 提供的目标序列化器。
+    ///
+    /// 返回：向目标序列化器提交 i32 ordinal，返回其成功值或错误；不限定只用于 JSON，也不序列化枚举变体名。
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -186,10 +209,12 @@ impl<E: MapperEnum> serde::Serialize for EnumOrdinal<E> {
 }
 
 impl<'de, E: MapperEnum> serde::Deserialize<'de> for EnumOrdinal<E> {
-    /// 业务作用：从 JSON 整数还原 enum ordinal 包装。
+    /// 业务作用：从整数序号恢复 Mapper 枚举包装。
     ///
-    /// # 参数
-    /// - `deserializer`: serde 提供的来源反序列化器。
+    /// 参数说明：
+    /// - `deserializer`：serde 提供的来源反序列化器。
+    ///
+    /// 返回：先读取 i32，再调用业务反向映射；读取失败或序号无对应变体时返回反序列化错误。
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -206,14 +231,20 @@ impl<'de, E: MapperEnum> serde::Deserialize<'de> for EnumOrdinal<E> {
 
 impl<E: MapperEnum> sqlx::Type<sqlx::MySql> for EnumOrdinal<E> {
     /// 业务作用：告诉 sqlx 该包装类型在 MySQL 中按 `i32` 类型绑定。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 sqlx 的 MySQL i32 类型信息，不依据枚举变体数量选择更窄类型。
     fn type_info() -> <sqlx::MySql as sqlx::Database>::TypeInfo {
         <i32 as sqlx::Type<sqlx::MySql>>::type_info()
     }
 
     /// 业务作用：判断数据库列类型是否可以按 `i32` 解码。
     ///
-    /// # 参数
-    /// - `ty`: sqlx 从 MySQL 元数据读取到的列类型信息。
+    /// 参数说明：
+    /// - `ty`：sqlx 从 MySQL 元数据读取到的列类型信息。
+    ///
+    /// 返回：返回 sqlx i32 对该 MySQL 类型信息的兼容判断，不验证该列实际值能映射到当前枚举。
     fn compatible(ty: &<sqlx::MySql as sqlx::Database>::TypeInfo) -> bool {
         <i32 as sqlx::Type<sqlx::MySql>>::compatible(ty)
     }
@@ -222,8 +253,10 @@ impl<E: MapperEnum> sqlx::Type<sqlx::MySql> for EnumOrdinal<E> {
 impl<'q, E: MapperEnum> sqlx::Encode<'q, sqlx::MySql> for EnumOrdinal<E> {
     /// 业务作用：按值把 enum ordinal 编码进 MySQL 参数缓冲区。
     ///
-    /// # 参数
-    /// - `buf`: sqlx 提供的 MySQL 参数缓冲区。
+    /// 参数说明：
+    /// - `buf`：sqlx 提供的 MySQL 参数缓冲区。
+    ///
+    /// 返回：消费包装并将 ordinal 交给 sqlx i32 编码器，追加参数字节并返回其空值标记或编码错误，不执行 SQL。
     fn encode(self, buf: &mut Vec<u8>) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError>
     where
         Self: Sized,
@@ -233,8 +266,10 @@ impl<'q, E: MapperEnum> sqlx::Encode<'q, sqlx::MySql> for EnumOrdinal<E> {
 
     /// 业务作用：按引用把 enum ordinal 编码进 MySQL 参数缓冲区。
     ///
-    /// # 参数
-    /// - `buf`: sqlx 提供的 MySQL 参数缓冲区。
+    /// 参数说明：
+    /// - `buf`：sqlx 提供的 MySQL 参数缓冲区。
+    ///
+    /// 返回：借用枚举取得 ordinal 后委托 sqlx i32 编码器，追加缓冲并返回空值标记或错误，不消费包装。
     fn encode_by_ref(
         &self,
         buf: &mut Vec<u8>,
@@ -247,8 +282,10 @@ impl<'q, E: MapperEnum> sqlx::Encode<'q, sqlx::MySql> for EnumOrdinal<E> {
 impl<'r, E: MapperEnum> sqlx::Decode<'r, sqlx::MySql> for EnumOrdinal<E> {
     /// 业务作用：从 MySQL 整数字段解码 enum ordinal。
     ///
-    /// # 参数
-    /// - `value`: sqlx 传入的 MySQL 原始列值引用。
+    /// 参数说明：
+    /// - `value`：sqlx 传入的 MySQL 原始列值引用。
+    ///
+    /// 返回：sqlx i32 解码成功且 ordinal 可映射时返回包装；列值解码失败或未知序号返回错误，不自动补充枚举变体。
     fn decode(
         value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
@@ -265,8 +302,10 @@ impl<'r, E: MapperEnum> sqlx::Decode<'r, sqlx::MySql> for EnumOrdinal<E> {
 
 /// 业务作用：生成 `IN (#{ids})` 列表参数需要的 prepared 占位符。
 ///
-/// # 参数
-/// - `len`: 集合参数元素个数；为 0 时拒绝生成非法 `IN ()` SQL。
+/// 参数说明：
+/// - `len`：集合参数元素个数；为 0 时拒绝生成非法 `IN ()` SQL。
+///
+/// 返回：len 非零时返回对应数量的问号并用逗号分隔；零时返回错误。不绑定实际值，也不检查数据库参数数量上限。
 #[doc(hidden)]
 pub fn sql_in_placeholders(len: usize) -> anyhow::Result<String> {
     if len == 0 {
@@ -275,9 +314,11 @@ pub fn sql_in_placeholders(len: usize) -> anyhow::Result<String> {
     Ok((0..len).map(|_| "?").collect::<Vec<_>>().join(","))
 }
 
-/// 业务作用：当前是否处于 ambient 事务中。
+/// 业务作用：当前是否处于 ambient 事务中。 Mapper 宏用它决定查询是否要走事务连接，以及是否允许业务显式启用事务内 L2 cache。
 ///
-/// Mapper 宏用它决定查询是否要走事务连接，以及是否允许业务显式启用事务内 L2 cache。
+/// 参数说明: 无。
+///
+/// 返回：返回当前 Tokio task 是否处于 natx 的 ambient 事务 scope；spawn 的新 task 不自动继承该上下文，不确认持久提交状态。
 pub fn in_transaction() -> bool {
     natx::in_transaction()
 }
@@ -291,43 +332,50 @@ pub fn current_datasource() -> Option<natx::DatasourceRef> {
     natx::current_datasource()
 }
 
-/// 业务作用：获取指定 datasource 的连接池 clone。
+/// 业务作用：获取指定 datasource 的连接池 clone。 该入口不加入 ambient 事务，主要给 `#[StreamQuery]` 这类需要拥有连接池生命周期的 无事务流式查询使用。
 ///
-/// 该入口不加入 ambient 事务，主要给 `#[StreamQuery]` 这类需要拥有连接池生命周期的
-/// 无事务流式查询使用。
+/// 参数说明：
+/// - `datasource`：`#[Mapper(datasource = "...")]` 指定的数据源名称。
 ///
-/// # 参数
-/// - `datasource`: `#[Mapper(datasource = "...")]` 指定的数据源名称。
+/// 返回：成功返回 natx 查找到的具名 MySqlPool 共享句柄，查找失败返回错误；不取得具体连接，也不参与当前事务。
 pub fn pool_for(datasource: &'static str) -> anyhow::Result<sqlx::MySqlPool> {
     natx::pool_for_datasource(datasource)
 }
 
-/// 业务作用：获取当前 Mapper SQL 执行连接。
+/// 业务作用：获取当前 Mapper SQL 执行连接。 无 ambient 事务时会从默认 datasource 连接池取连接；事务内会复用当前事务连接。
 ///
-/// 无 ambient 事务时会从默认 datasource 连接池取连接；事务内会复用当前事务连接。
+/// 参数说明: 无。
+///
+/// 返回：返回默认数据源的受控连接：有匹配 ambient 事务时复用其连接，否则从池获取；归属或获取失败返回错误。
 pub async fn conn() -> anyhow::Result<natx::Conn> {
     natx::conn().await
 }
 
 /// 业务作用：从指定 datasource 获取 Mapper SQL 执行连接。
 ///
-/// # 参数
-/// - `datasource`: `#[Mapper(datasource = "...")]` 指定的数据源名称。
+/// 参数说明：
+/// - `datasource`：`#[Mapper(datasource = "...")]` 指定的数据源名称。
+///
+/// 返回：返回指定数据源的受控连接；事务内必须与其归属一致，否则拒绝，事务外从对应池获取，失败返回错误。
 pub async fn conn_for(datasource: &'static str) -> anyhow::Result<natx::Conn> {
     natx::conn_for(datasource).await
 }
 
-/// 业务作用：获取必须处于事务中的 Mapper SQL 执行连接。
+/// 业务作用：获取必须处于事务中的 Mapper SQL 执行连接。 该入口用于 `tx = true` 的 Mapper 方法，事务缺失时立即报错。
 ///
-/// 该入口用于 `tx = true` 的 Mapper 方法，事务缺失时立即报错。
+/// 参数说明: 无。
+///
+/// 返回：当前存在默认数据源 ambient 事务时返回其受控连接；缺少事务、归属不符或获取失败返回错误，不回退池外自动提交。
 pub async fn mandatory_conn() -> anyhow::Result<natx::Conn> {
     natx::mandatory_conn().await
 }
 
 /// 业务作用：从指定 datasource 获取必须处于事务中的 Mapper SQL 执行连接。
 ///
-/// # 参数
-/// - `datasource`: `#[Mapper(datasource = "...")]` 指定的数据源名称。
+/// 参数说明：
+/// - `datasource`：`#[Mapper(datasource = "...")]` 指定的数据源名称。
+///
+/// 返回：当前 ambient 事务归属于指定数据源时返回受控事务连接；缺少事务、归属不符或获取失败返回错误，不静默改用独立池连接。
 pub async fn mandatory_conn_for(datasource: &'static str) -> anyhow::Result<natx::Conn> {
     natx::mandatory_conn_for(datasource).await
 }
@@ -355,7 +403,7 @@ pub async fn never_conn_for(datasource: &'static str) -> anyhow::Result<natx::Co
 
 /// 业务作用：在无事务时立即清理缓存；在事务内注册 commit 后清理。
 ///
-/// # 参数
+/// 参数说明：
 /// - `cache`: 当前 client 注入的缓存实现。
 /// - `keys`: 需要清理的缓存组。
 ///

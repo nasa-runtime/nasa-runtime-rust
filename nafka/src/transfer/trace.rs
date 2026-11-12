@@ -17,7 +17,10 @@ pub struct TransferResource {
 }
 impl TransferResource {
     /// 业务作用：拒绝未完成物理身份绑定或超额的路径节点。
-    /// 参数说明：无。返回：有界 ASCII 身份和合法 topic 才通过。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：有界 ASCII 身份和合法 topic 才通过。
     pub(crate) fn validate(&self) -> TransferResult<()> {
         token(&self.cluster_id, 1024)
             .and_then(|()| token(&self.generation, 1024))
@@ -49,7 +52,13 @@ pub struct TransferTrace {
 }
 impl TransferTrace {
     /// 业务作用：为转发与DLT采用相同的实际Kafka事件身份，避免目的offset改变重复识别。
-    /// 参数说明：origin为物理资源，partition/offset为原坐标。返回：规范坐标的SHA-256文本，不承担身份认证。
+    ///
+    /// 参数说明：
+    /// - `origin`：origin为物理资源。
+    /// - `partition`：事件在原始物理资源中的分区号。
+    /// - `offset`：事件在该分区中的原始日志位点。
+    ///
+    /// 返回：规范坐标的SHA-256文本，不承担身份认证。
     pub(crate) fn identity(origin: &TransferResource, partition: i32, offset: i64) -> String {
         identity(origin, partition, offset)
     }
@@ -59,7 +68,10 @@ impl TransferTrace {
     pub const MAX_HEADER_BYTES: usize = 65536;
 
     /// 业务作用：从目标原文解析来源幂等身份，不把消息头当作访问授权。
-    /// 参数说明：headers 为包含重复项和 null 的完整有序消息头。
+    ///
+    /// 参数说明：
+    /// - `headers`：headers 为包含重复项和 null 的完整有序消息头。
+    ///
     /// 返回：普通记录为 None；非规范、重复或损坏证据拒绝。
     pub fn read(headers: &KafkaHeaders) -> TransferResult<Option<Self>> {
         let mut encoded = None;
@@ -81,7 +93,12 @@ impl TransferTrace {
     }
 
     /// 业务作用：在任何目的副作用之前追加经过复验的目标节点，保留业务头的全部字节语义。
-    /// 参数说明：plan 为冻结合同，record 为实际来源，destination 为批准目标分区。
+    ///
+    /// 参数说明：
+    /// - `plan`：plan 为冻结合同。
+    /// - `record`：record 为实际来源。
+    /// - `destination`：destination 为批准目标分区。
+    ///
     /// 返回：新头集合；回环、跳数、结构或容量违规时拒绝。
     pub(super) fn forward(
         plan: &TransferPlan,
@@ -148,7 +165,10 @@ impl TransferTrace {
     }
 
     /// 业务作用：复验公开结构的来源坐标和路径唯一性，防止通过可变字段绕过编码边界。
-    /// 参数说明：无。返回：坐标、路径、节点和事件摘要全部合法才通过。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：坐标、路径、节点和事件摘要全部合法才通过。
     pub(crate) fn validate(&self) -> TransferResult<()> {
         self.origin.validate()?;
         if self.partition < 0
@@ -165,7 +185,10 @@ impl TransferTrace {
     }
 
     /// 业务作用：输出来源证据唯一共同表达，附加检测内容变化的摘要。
-    /// 参数说明：无。返回：有界规范字节；不能作为认证或授权证明。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：有界规范字节；不能作为认证或授权证明。
     pub(crate) fn encode(&self) -> TransferResult<Vec<u8>> {
         self.validate()?;
         let mut bytes = b"NSKTRH01".to_vec();
@@ -187,7 +210,11 @@ impl TransferTrace {
     }
 
     /// 业务作用：限制长度并拒绝截断、损坏、歧义及非规范证据。
-    /// 参数说明：encoded 为单个原始头字节。返回：完整合法结构，不执行网络访问。
+    ///
+    /// 参数说明：
+    /// - `encoded`：encoded 为单个原始头字节。
+    ///
+    /// 返回：完整合法结构，不执行网络访问。
     pub(crate) fn decode(encoded: &[u8]) -> TransferResult<Self> {
         if !(82..=Self::MAX_HEADER_BYTES).contains(&encoded.len()) {
             return Err(TransferError::HeaderInvalid);
@@ -244,7 +271,11 @@ impl TransferTrace {
 }
 
 /// 业务作用：限制包含重复项的总头容量，防止来源路径把记录膨胀为无界分配。
-/// 参数说明：headers 为完整集合。返回：最多256项且名称与值合计不超过共同上限。
+///
+/// 参数说明：
+/// - `headers`：headers 为完整集合。
+///
+/// 返回：最多256项且名称与值合计不超过共同上限。
 fn check_headers(headers: &KafkaHeaders) -> TransferResult<()> {
     let bytes = headers.iter().try_fold(0usize, |size, h| {
         size.checked_add(h.name.len())?
@@ -256,7 +287,13 @@ fn check_headers(headers: &KafkaHeaders) -> TransferResult<()> {
     Ok(())
 }
 /// 业务作用：固定来源事件身份的原始摘要，不混入任务名或目标坐标。
-/// 参数说明：origin 为实际资源，partition/offset 为原始坐标。返回：共同 SHA-256。
+///
+/// 参数说明：
+/// - `origin`：origin 为实际资源。
+/// - `partition`：来源资源内的分区号，以大端整数编码。
+/// - `offset`：来源分区内的原始位点，以大端整数编码。
+///
+/// 返回：固定域前缀、物理资源和坐标的 SHA-256；不校验输入合法性，也不证明来源真实性。
 fn identity_bytes(origin: &TransferResource, partition: i32, offset: i64) -> [u8; 32] {
     let mut bytes = b"NSKTID01".to_vec();
     resource(&mut bytes, origin);
@@ -265,27 +302,50 @@ fn identity_bytes(origin: &TransferResource, partition: i32, offset: i64) -> [u8
     Sha256::digest(bytes).into()
 }
 /// 业务作用：以公开共同十六进制表示来源事件身份。
-/// 参数说明：origin 为资源，partition/offset 为原始坐标。返回：小写64字符摘要。
+///
+/// 参数说明：
+/// - `origin`：origin 为资源。
+/// - `partition`：原始事件所属分区。
+/// - `offset`：原始事件在该分区内的位置，不使用目标投递位点。
+///
+/// 返回：小写64字符摘要。
 fn identity(origin: &TransferResource, partition: i32, offset: i64) -> String {
     hex(&identity_bytes(origin, partition, offset))
 }
 /// 业务作用：避免字节摘要在跨语言文本表示时出现大小写歧义。
-/// 参数说明：bytes 为摘要。返回：小写十六进制。
+///
+/// 参数说明：
+/// - `bytes`：bytes 为摘要。
+///
+/// 返回：小写十六进制。
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 /// 业务作用：以固定字段顺序编码合法物理资源。
-/// 参数说明：out 为正文，node 为已校验节点。返回：写入三段长度前缀ASCII身份。
+///
+/// 参数说明：
+/// - `out`：out 为正文。
+/// - `node`：node 为已校验节点。
+///
+/// 返回：写入三段长度前缀ASCII身份。
 fn resource(out: &mut Vec<u8>, node: &TransferResource) {
     for value in [&node.cluster_id, &node.topic, &node.generation] {
         out.extend((value.len() as u16).to_be_bytes());
         out.extend(value.as_bytes());
     }
 }
-struct Reader<'a>(&'a [u8]);
+/// 借用有界证据正文并逐段消费，不持有独立载荷副本。
+struct Reader<'a>(
+    /// 尚未消费的原始字节后缀。
+    &'a [u8],
+);
 impl<'a> Reader<'a> {
     /// 业务作用：解析前核对剩余边界，禁止截断输入导致越界。
-    /// 参数说明：count 为所需字节。返回：借用片段并推进游标，不足拒绝。
+    ///
+    /// 参数说明：
+    /// - `count`：count 为所需字节。
+    ///
+    /// 返回：借用片段并推进游标，不足拒绝。
     fn take(&mut self, count: usize) -> TransferResult<&'a [u8]> {
         if count > self.0.len() {
             return Err(TransferError::HeaderInvalid);
@@ -295,7 +355,11 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
     /// 业务作用：在分配身份字符串前核对长度和共同字符集。
-    /// 参数说明：max 为身份长度限制。返回：合法可见ASCII文本。
+    ///
+    /// 参数说明：
+    /// - `max`：max 为身份长度限制。
+    ///
+    /// 返回：合法可见ASCII文本。
     fn text(&mut self, max: usize) -> TransferResult<String> {
         let size = usize::from(u16::from_be_bytes(
             self.take(2)?
@@ -312,7 +376,10 @@ impl<'a> Reader<'a> {
         String::from_utf8(bytes.to_vec()).map_err(|_| TransferError::HeaderInvalid)
     }
     /// 业务作用：重建并校验路径节点的三段物理身份。
-    /// 参数说明：无。返回：合法资源，错误不接受部分身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：合法资源，错误不接受部分身份。
     fn resource(&mut self) -> TransferResult<TransferResource> {
         let node = TransferResource {
             cluster_id: self.text(1024)?,

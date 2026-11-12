@@ -61,6 +61,8 @@ struct MigrationPlan {
     schema: String,
     session_url: Option<String>,
     topology: PgConnectionTopology,
+    /// SQLite 原生迁移执行预算；其它后端使用各自连接与迁移策略，不保存此值。
+    #[cfg(feature = "db-sqlite")]
     execution_timeout_ms: u64,
     explicit: bool,
 }
@@ -96,7 +98,9 @@ enum ManagedPool {
 
 impl ManagedPool {
     /// 业务作用：把 SQLite 持续隔离转成固定 readiness 原因，避免被普通探针恢复覆盖。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：关键文件故障的稳定原因；其它后端保留原有探针语义。
     fn unavailable_reason(&self) -> &'static str {
         match self {
@@ -827,6 +831,7 @@ impl ApplicationComponent for DbComponent {
                         schema: "public".to_owned(),
                         session_url: None,
                         topology: PgConnectionTopology::Direct,
+                        #[cfg(feature = "db-sqlite")]
                         execution_timeout_ms: 30_000,
                         explicit: false,
                     });
@@ -901,11 +906,11 @@ impl ApplicationComponent for DbComponent {
                                 && plan.session_url.is_none()
                             {
                                 return Err(db_error(
-                                ApplicationPhase::Prepare,
-                                format!(
-                                    "datasource `{name}` requires migrations.session_url for transaction pooling"
-                                ),
-                            ));
+                                    ApplicationPhase::Prepare,
+                                    format!(
+                                        "datasource `{name}` requires migrations.session_url for transaction pooling"
+                                    ),
+                                ));
                             }
                             if plan.settings.mode == namigrate_core::MigrationMode::Disabled {
                                 namigrate_pgsql::run_gate_with_evidence_for(
@@ -1094,7 +1099,7 @@ impl DbComponent {
                 return Err(db_error(
                     ApplicationPhase::Prepare,
                     "UserHook did not install one adoptable default datasource",
-                ))
+                ));
             }
         };
         let catalog = Arc::new(
@@ -1118,7 +1123,7 @@ impl DbComponent {
                 return Err(db_error(
                     ApplicationPhase::Prepare,
                     "SQLite does not support Saga UserHook deferred bootstrap",
-                ))
+                ));
             }
             DatabaseDriver::MySql => {
                 #[cfg(feature = "db")]
@@ -1373,7 +1378,7 @@ fn build_monitor_inputs(
                 return Err(db_error(
                     ApplicationPhase::Start,
                     "PostgreSQL datasource support is not compiled",
-                ))
+                ));
             }
             DatabaseDriver::MySql => {
                 #[cfg(feature = "db")]
@@ -1555,27 +1560,28 @@ fn read_datasources(
                 error,
             )
         })?;
-    let values =
-        match (root.database, root.datasources) {
-            (Some(_), Some(_)) => {
-                return Err(db_error(
-                    phase,
-                    "configuration conflict: declare either `database` or `datasources`, not both",
-                ))
-            }
-            (Some(value), None) => BTreeMap::from([(DEFAULT_DATASOURCE.to_owned(), value)]),
-            (None, Some(values)) if !values.is_empty() => values,
-            (None, Some(_)) => return Err(db_error(
+    let values = match (root.database, root.datasources) {
+        (Some(_), Some(_)) => {
+            return Err(db_error(
+                phase,
+                "configuration conflict: declare either `database` or `datasources`, not both",
+            ));
+        }
+        (Some(value), None) => BTreeMap::from([(DEFAULT_DATASOURCE.to_owned(), value)]),
+        (None, Some(values)) if !values.is_empty() => values,
+        (None, Some(_)) => {
+            return Err(db_error(
                 phase,
                 "`datasources` is declared but empty; remove it or declare at least one datasource",
-            )),
-            (None, None) => {
-                return Err(db_error(
-                    phase,
-                    "database component requires database or datasources configuration",
-                ))
-            }
-        };
+            ));
+        }
+        (None, None) => {
+            return Err(db_error(
+                phase,
+                "database component requires database or datasources configuration",
+            ));
+        }
+    };
     if values.len() > natx_core::MAX_MANAGED_DATASOURCES {
         return Err(db_error(
             phase,
@@ -1713,13 +1719,13 @@ fn split_datasource(
                 return Err(db_error(
                     phase,
                     format!("datasource `{name}` PostgreSQL driver must be explicit"),
-                ))
+                ));
             }
             Some(_) => {
                 return Err(db_error(
                     phase,
                     format!("datasource `{name}` driver is invalid"),
-                ))
+                ));
             }
         };
         let migration = parse_migration_plan(
@@ -1735,7 +1741,7 @@ fn split_datasource(
                 return Err(db_error(
                     phase,
                     "SQLite configuration must use the file datasource parser",
-                ))
+                ));
             }
             DatabaseDriver::MySql => {
                 if !url.starts_with("mysql://") {
@@ -1849,6 +1855,14 @@ fn parse_migration_plan(
     driver: DatabaseDriver,
     phase: ApplicationPhase,
 ) -> ApplicationResult<Option<MigrationPlan>> {
+    // 未编入的后端不能取得迁移计划，避免把后端专属预算误当作通用迁移字段接受。
+    #[cfg(not(feature = "db-sqlite"))]
+    if driver == DatabaseDriver::Sqlite {
+        return Err(db_error(
+            phase,
+            "SQLite datasource requires napp feature `db-sqlite`",
+        ));
+    }
     let explicit = raw.is_some();
     let mut raw = raw.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
     let session_url = match raw
@@ -1872,6 +1886,7 @@ fn parse_migration_plan(
             "this database driver does not accept migrations.session_url",
         ));
     }
+    #[cfg(feature = "db-sqlite")]
     let execution_timeout_ms = if driver == DatabaseDriver::Sqlite {
         match raw
             .as_object_mut()
@@ -1915,6 +1930,7 @@ fn parse_migration_plan(
     }
     Ok(Some(MigrationPlan {
         explicit,
+        #[cfg(feature = "db-sqlite")]
         execution_timeout_ms,
         settings,
         schema,
@@ -1941,22 +1957,23 @@ pub(crate) fn validate_datasource_sections(
             error,
         )
     })?;
-    let values =
-        match (root.database, root.datasources) {
-            (Some(_), Some(_)) => {
-                return Err(db_error(
-                    phase,
-                    "configuration conflict: declare either `database` or `datasources`, not both",
-                ))
-            }
-            (Some(value), None) => BTreeMap::from([(DEFAULT_DATASOURCE.to_owned(), value)]),
-            (None, Some(values)) if !values.is_empty() => values,
-            (None, Some(_)) => return Err(db_error(
+    let values = match (root.database, root.datasources) {
+        (Some(_), Some(_)) => {
+            return Err(db_error(
+                phase,
+                "configuration conflict: declare either `database` or `datasources`, not both",
+            ));
+        }
+        (Some(value), None) => BTreeMap::from([(DEFAULT_DATASOURCE.to_owned(), value)]),
+        (None, Some(values)) if !values.is_empty() => values,
+        (None, Some(_)) => {
+            return Err(db_error(
                 phase,
                 "`datasources` is declared but empty; remove it or declare at least one datasource",
-            )),
-            (None, None) => return Ok(()),
-        };
+            ));
+        }
+        (None, None) => return Ok(()),
+    };
     if values.len() > natx_core::MAX_MANAGED_DATASOURCES {
         return Err(db_error(
             phase,
@@ -2208,9 +2225,11 @@ fn db_error_src(
 }
 
 /// 业务作用：在 Application 和进程目录同时确认身份后提供 SQLite 来源使用句柄。
+///
 /// 参数说明：
 /// - `application`：当前宿主实例。
 /// - `name`：来源名称。
+///
 /// 返回：属于该宿主的来源句柄，不授予关闭权。
 #[cfg(feature = "db-sqlite")]
 pub(crate) async fn sqlite_datasource_handle(

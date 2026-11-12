@@ -84,7 +84,8 @@ pub enum DefinitionCatalogError {
 impl DefinitionCatalogError {
     /// 业务作用：从持久事务上下文包裹的错误链提取 Catalog 确定性拒绝。
     ///
-    /// 参数说明：`error` 是 Catalog 写入口返回的完整错误链。
+    /// 参数说明：
+    /// - `error`：是 Catalog 写入口返回的完整错误链。
     ///
     /// 返回：命中封闭拒绝时返回对应类别；其它失败返回 `None`。
     pub fn from_error(error: &anyhow::Error) -> Option<Self> {
@@ -97,7 +98,8 @@ impl DefinitionCatalogError {
 impl std::fmt::Display for DefinitionCatalogError {
     /// 业务作用：输出不携带 definition 正文或租户信息的稳定 Catalog 拒绝摘要。
     ///
-    /// 参数说明：`formatter` 是标准格式化输出目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化输出目标。
     ///
     /// 返回：摘要写入成功时返回 `Ok`；格式化失败返回对应错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -130,7 +132,8 @@ pub enum DefinitionCompensation {
 impl From<DefinitionCompensation> for Compensation {
     /// 业务作用：把控制面补偿声明转换为状态机强类型。
     ///
-    /// 参数说明：`value` 是公开补偿枚举。
+    /// 参数说明：
+    /// - `value`：是公开补偿枚举。
     ///
     /// 返回：对应的核心补偿类型。
     fn from(value: DefinitionCompensation) -> Self {
@@ -144,7 +147,8 @@ impl From<DefinitionCompensation> for Compensation {
 impl From<Compensation> for DefinitionCompensation {
     /// 业务作用：把状态机补偿类型投影为可持久化字段。
     ///
-    /// 参数说明：`value` 是已校验步骤的补偿能力。
+    /// 参数说明：
+    /// - `value`：是已校验步骤的补偿能力。
     ///
     /// 返回：稳定的控制面补偿枚举。
     fn from(value: Compensation) -> Self {
@@ -170,7 +174,8 @@ pub enum DefinitionCancelMode {
 impl From<DefinitionCancelMode> for CancelMode {
     /// 业务作用：把控制面取消声明转换为状态机强类型。
     ///
-    /// 参数说明：`value` 是公开取消枚举。
+    /// 参数说明：
+    /// - `value`：是公开取消枚举。
     ///
     /// 返回：对应的核心取消形态。
     fn from(value: DefinitionCancelMode) -> Self {
@@ -185,7 +190,8 @@ impl From<DefinitionCancelMode> for CancelMode {
 impl From<CancelMode> for DefinitionCancelMode {
     /// 业务作用：把状态机取消形态投影为可持久化字段。
     ///
-    /// 参数说明：`value` 是已校验步骤的取消形态。
+    /// 参数说明：
+    /// - `value`：是已校验步骤的取消形态。
     ///
     /// 返回：稳定的控制面取消枚举。
     fn from(value: CancelMode) -> Self {
@@ -212,7 +218,8 @@ pub enum DefinitionResolutionMode {
 impl From<DefinitionResolutionMode> for ResolutionMode {
     /// 业务作用：把控制面解决模式转换为状态机强类型。
     ///
-    /// 参数说明：`value` 是公开解决模式。
+    /// 参数说明：
+    /// - `value`：是公开解决模式。
     ///
     /// 返回：对应的核心解决模式。
     fn from(value: DefinitionResolutionMode) -> Self {
@@ -227,7 +234,8 @@ impl From<DefinitionResolutionMode> for ResolutionMode {
 impl From<ResolutionMode> for DefinitionResolutionMode {
     /// 业务作用：把状态机解决模式投影为可持久化字段。
     ///
-    /// 参数说明：`value` 是已校验步骤的解决通道。
+    /// 参数说明：
+    /// - `value`：是已校验步骤的解决通道。
     ///
     /// 返回：稳定的控制面解决枚举。
     fn from(value: ResolutionMode) -> Self {
@@ -267,7 +275,8 @@ pub enum DefinitionTimeoutPolicy {
 impl From<DefinitionTimeoutPolicy> for TimeoutPolicy {
     /// 业务作用：把控制面超时策略转换为状态机强类型。
     ///
-    /// 参数说明：`value` 是公开超时策略。
+    /// 参数说明：
+    /// - `value`：是公开超时策略。
     ///
     /// 返回：对应的核心策略。
     fn from(value: DefinitionTimeoutPolicy) -> Self {
@@ -281,7 +290,8 @@ impl From<DefinitionTimeoutPolicy> for TimeoutPolicy {
 impl From<TimeoutPolicy> for DefinitionTimeoutPolicy {
     /// 业务作用：把状态机超时策略投影为可持久化字段。
     ///
-    /// 参数说明：`value` 是已校验步骤的迟到结果策略。
+    /// 参数说明：
+    /// - `value`：是已校验步骤的迟到结果策略。
     ///
     /// 返回：稳定的控制面超时策略。
     fn from(value: TimeoutPolicy) -> Self {
@@ -353,9 +363,10 @@ impl DefinitionArtifact {
                 DefinitionResolution::Forbidden(_) => {
                     anyhow::bail!("definition resolution text must be `forbidden`");
                 }
-                DefinitionResolution::Allowed { mode, budget_ms } => {
-                    ResolutionSpec::allowed((*mode).into(), Duration::from_millis(*budget_ms))
-                }
+                DefinitionResolution::Allowed {
+                    mode,
+                    budget_ms,
+                } => ResolutionSpec::allowed((*mode).into(), Duration::from_millis(*budget_ms)),
             };
             steps.push(
                 StepDefinition::new(
@@ -381,7 +392,10 @@ impl DefinitionArtifact {
 
     /// 业务作用：从已校验 definition 生成可发布 artifact，确保 seal 与实际步骤合同同源。
     ///
-    /// 参数说明：`tenant` 是租户域，`workflow_owner` 是发布主体，`definition` 是完整流程。
+    /// 参数说明：
+    /// - `tenant`：是租户域
+    /// - `workflow_owner`：是发布主体
+    /// - `definition`：是完整流程。
     ///
     /// 返回：字段顺序稳定且 seal 已计算的 artifact。
     pub fn from_definition(
@@ -463,12 +477,14 @@ pub struct DefinitionLifecycleOperation {
 }
 
 impl DefinitionLifecycleOperation {
-    /// 业务作用：校验并构造可进入 Catalog 事务的生命周期操作合同。
+    /// 业务作用：校验并冻结一次定义生命周期人工动作的摘要及幂等身份。
     ///
-    /// 参数说明：`expected_sha256` 是调用方观察到的 seal，`operation_id` 是主体范围内的幂等键，
-    /// `reason` 是必须持久保存的人工动作原因。
+    /// 参数说明：
+    /// - `expected_sha256`：调用方观察到的定义 seal，必须是 64 位十六进制文本。
+    /// - `operation_id`：主体范围内的稳定操作幂等键，须非空、无首尾空白或控制字符且不超过 190 字节。
+    /// - `reason`：需持久记录的人工动作原因，须非空、无首尾空白或控制字符且不超过 512 字节。
     ///
-    /// 返回：字段格式和长度均安全时返回合同；空值、非法摘要或超长文本返回错误。
+    /// 返回：合法时返回 seal 已转小写的操作合同，否则返回校验错误；不读取数据库或执行动作。
     pub fn new(
         expected_sha256: impl Into<String>,
         operation_id: impl Into<String>,
@@ -505,7 +521,10 @@ impl DefinitionLifecycleOperation {
 
     /// 业务作用：为 validated 自动激活构造绑定 definition seal、身份和 Catalog generation 的定长幂等操作。
     ///
-    /// 参数说明：`artifact` 是待激活的完整 definition，`catalog_generation` 是已确认快照，`reason` 是持久审计原因。
+    /// 参数说明：
+    /// - `artifact`：是待激活的完整 definition
+    /// - `catalog_generation`：是已确认快照
+    /// - `reason`：是持久审计原因。
     ///
     /// 返回：返回长度不受租户或流程名影响的合法操作；seal 或原因不符合生命周期合同时返回错误。
     pub fn for_validated_activation(
@@ -563,12 +582,15 @@ impl DefinitionLifecycleOperation {
 }
 
 impl DefinitionActivationGate {
-    /// 业务作用：构造只能由同代 Ready 副本和指定数据面共同满足的激活门禁。
+    /// 业务作用：构造关联控制服务、目录快照和数据面协议的定义激活门禁。
     ///
-    /// 参数说明：`orchestrator_service_identity` 定位逻辑控制面，`catalog_generation` 与
-    /// `snapshot_digest` 固定副本已确认快照，`transport` 固定本次部署的数据面协议。
+    /// 参数说明：
+    /// - `orchestrator_service_identity`：需要确认同代快照的逻辑编排服务身份。
+    /// - `catalog_generation`：期望副本确认的共享目录代际，构造时原样保存。
+    /// - `snapshot_digest`：需要副本确认的 64 位十六进制快照摘要。
+    /// - `transport`：只允许 http、grpc、kafka 或 redis-stream 的数据面协议。
     ///
-    /// 返回：摘要和协议属于封闭集合时返回门禁；无效输入拒绝进入数据库激活事务。
+    /// 返回：摘要及协议有效时返回已计算激活合同摘要的门禁；非法时返回错误。可选数据面约束初始为空，不在此核实副本 Ready 或数据库事实。
     pub fn new(
         orchestrator_service_identity: ServiceIdentity,
         catalog_generation: u64,
@@ -608,7 +630,8 @@ impl DefinitionActivationGate {
     /// 业务作用：把 Redis Cluster 的实际同槽配置绑定进 definition 激活门禁，确保数据库裁决
     /// 与稍后构造 publisher 使用同一份 route 上下文。
     ///
-    /// 参数说明：`key_tag` 是运行配置要求 capability stream 首个生效 hash tag 匹配的值。
+    /// 参数说明：
+    /// - `key_tag`：是运行配置要求 capability stream 首个生效 hash tag 匹配的值。
     ///
     /// 返回：仅在 transport 为 Redis Streams 且 tag 满足名称合同时返回门禁；其它组合返回错误。
     pub fn with_redis_key_tag(mut self, key_tag: impl Into<String>) -> anyhow::Result<Self> {
@@ -624,7 +647,8 @@ impl DefinitionActivationGate {
 
     /// 业务作用：把当前 transport 的受信地址政策绑定进副本确认与 definition 激活门禁。
     ///
-    /// 参数说明：`digest` 是调用方对 transport 专属 canonical allowlist 计算的 SHA-256。
+    /// 参数说明：
+    /// - `digest`：是调用方对 transport 专属 canonical allowlist 计算的 SHA-256。
     ///
     /// 返回：摘要合法时返回更新后的门禁；格式无效时拒绝形成可持久确认的运行时合同。
     pub fn with_address_policy_digest(mut self, digest: impl Into<String>) -> anyhow::Result<Self> {
@@ -641,7 +665,8 @@ impl DefinitionActivationGate {
     /// 业务作用：把最终 publisher 使用的路由、凭据、client 与超时合同绑定进副本确认，
     /// 防止同一 Catalog 快照被运行参数不同的副本同时发布为权威。
     ///
-    /// 参数说明：`digest` 是调用方对已解析 publisher 输入计算的 canonical SHA-256。
+    /// 参数说明：
+    /// - `digest`：是调用方对已解析 publisher 输入计算的 canonical SHA-256。
     ///
     /// 返回：摘要格式合法时返回更新后的门禁；格式无效时拒绝形成持久确认。
     pub fn with_publisher_contract_digest(
@@ -661,7 +686,8 @@ impl DefinitionActivationGate {
     /// 业务作用：把 Kafka result 返回路径的后端身份绑定进激活事务，确保参与方能力与
     /// Orchestrator consumer 使用同一套 broker 命名边界。
     ///
-    /// 参数说明：`digest` 是规范化 broker 地址集合与 result topic 前缀形成的 SHA-256。
+    /// 参数说明：
+    /// - `digest`：是规范化 broker 地址集合与 result topic 前缀形成的 SHA-256。
     ///
     /// 返回：仅在 transport 为 Kafka 且摘要格式合法时返回门禁；其它组合拒绝激活。
     pub fn with_result_backend_digest(mut self, digest: impl Into<String>) -> anyhow::Result<Self> {
@@ -679,7 +705,9 @@ impl DefinitionActivationGate {
 
     /// 业务作用：把一个 participant owner 的 result 发送凭据与 Orchestrator 接收凭据绑定进激活事务。
     ///
-    /// 参数说明：`owner` 是 definition step 的服务身份，`digest` 是协议专属凭据合同的 SHA-256。
+    /// 参数说明：
+    /// - `owner`：是 definition step 的服务身份
+    /// - `digest`：是协议专属凭据合同的 SHA-256。
     ///
     /// 返回：身份与摘要合法时返回门禁；非法输入拒绝形成副本确认合同。
     pub fn with_result_contract_digest(
@@ -806,7 +834,9 @@ impl DefinitionActivationGate {
 
     /// 业务作用：判断 capability 声明的 result 凭据合同是否属于该 owner 的受信接收集合。
     ///
-    /// 参数说明：`owner` 是步骤服务身份，`digest` 是 participant 发布的协议专属合同摘要。
+    /// 参数说明：
+    /// - `owner`：是步骤服务身份
+    /// - `digest`：是 participant 发布的协议专属合同摘要。
     ///
     /// 返回：门禁中存在完全一致的 owner 与摘要时为真。
     pub fn accepts_result_contract(&self, owner: &str, digest: &str) -> bool {
@@ -901,7 +931,10 @@ impl CapabilityDescriptor {
 
     /// 业务作用：复验 capability 与 definition 中被引用步骤的不可变语义一致。
     ///
-    /// 参数说明：`tenant` 是候选流程的授权租户，`definition` 是候选流程，`step` 是其中一个步骤。
+    /// 参数说明：
+    /// - `tenant`：是候选流程的授权租户
+    /// - `definition`：是候选流程
+    /// - `step`：是其中一个步骤。
     ///
     /// 返回：owner、步骤身份、版本与能力完全一致时为真。
     pub fn matches_step(
@@ -926,7 +959,8 @@ impl CapabilityDescriptor {
 /// 业务作用：按 command transport 复验 capability 的完整可发布 route 合同，确保目录准入、
 /// candidate 激活与实际 publisher 对同一 descriptor 得出一致结论。
 ///
-/// 参数说明：`descriptor` 携带 transport、endpoint、HTTP 专属有效路径与 result 凭据合同摘要。
+/// 参数说明：
+/// - `descriptor`：携带 transport、endpoint、HTTP 专属有效路径与 result 凭据合同摘要。
 ///
 /// 返回：HTTP origin 与路径、gRPC HTTPS origin、Kafka topic 或 Redis stream 名称完整合法时成功；
 /// transport 专属字段缺失、越界或出现在其它 transport 时返回参数错误。
@@ -990,7 +1024,9 @@ pub fn validate_capability_route_contract(
 
 /// 业务作用：判断 capability 网络 endpoint 是否为 publisher 与地址政策都能安全解释的纯 origin。
 ///
-/// 参数说明：`endpoint` 是目录输入，`schemes` 是当前 transport 允许的协议集合。
+/// 参数说明：
+/// - `endpoint`：是目录输入
+/// - `schemes`：是当前 transport 允许的协议集合。
 ///
 /// 返回：URI 含合法 host、允许协议且不携带凭据、路径、query 或 fragment 时为真。
 fn valid_capability_origin(endpoint: &str, schemes: &[&str]) -> bool {
@@ -1020,7 +1056,9 @@ fn valid_capability_origin(endpoint: &str, schemes: &[&str]) -> bool {
 
 /// 业务作用：按 Redis Cluster 实际选 slot 的规则校验 stream 名与运行配置的同槽合同。
 ///
-/// 参数说明：`stream` 是 capability 或 publisher 使用的完整 key，`key_tag` 是可选的受信配置值。
+/// 参数说明：
+/// - `stream`：是 capability 或 publisher 使用的完整 key
+/// - `key_tag`：是可选的受信配置值。
 ///
 /// 返回：名称有界，且提供 tag 时首个生效 hash tag 精确匹配则成功；否则返回参数错误。
 pub fn validate_redis_stream_route(
@@ -1042,7 +1080,8 @@ pub fn validate_redis_stream_route(
 
 /// 业务作用：校验运行配置中的 Redis Cluster hash tag 可安全嵌入 stream key。
 ///
-/// 参数说明：`tag` 是不含花括号的配置值。
+/// 参数说明：
+/// - `tag`：是不含花括号的配置值。
 ///
 /// 返回：非空、有界、无控制字符和花括号时为真。
 fn valid_redis_key_tag(tag: &str) -> bool {
@@ -1055,7 +1094,8 @@ fn valid_redis_key_tag(tag: &str) -> bool {
 /// 业务作用：按 Redis 服务端规则解析 key 首对花括号形成的实际 hash tag，保持 activation 与
 /// publisher 的 Cluster slot 裁决一致。
 ///
-/// 参数说明：`name` 是完整 Redis key。
+/// 参数说明：
+/// - `name`：是完整 Redis key。
 ///
 /// 返回：首对花括号之间非空时返回 tag；空 tag、未闭合或不存在时返回空。
 fn first_redis_hash_tag(name: &str) -> Option<&str> {
@@ -1069,7 +1109,8 @@ fn first_redis_hash_tag(name: &str) -> Option<&str> {
 
 /// 业务作用：判断 HTTP capability 的有效 Saga path 是否能无歧义地追加固定操作名并参与签名。
 ///
-/// 参数说明：`path` 是已经包含应用 context 的目录路径。
+/// 参数说明：
+/// - `path`：是已经包含应用 context 的目录路径。
 ///
 /// 返回：非根、无尾斜杠、编码、模板或特殊路径段的 canonical path 为真。
 fn valid_capability_http_base_path(path: &str) -> bool {
@@ -1155,9 +1196,16 @@ pub fn select_capability_route<'a>(
     Ok(selected)
 }
 
-/// 业务作用：取得同一步骤的完整逐实例直接路由集合，允许 HTTP/gRPC 副本使用独立 endpoint。
-/// 参数说明：`capabilities` 是仍在租期内的同代快照；`transport`、`tenant`、`definition`、`step` 共同限定步骤合同。
-/// 返回：合法 HTTP/gRPC 路由按 endpoint 与副本身份排序；消息代理仍要求唯一目标，非法或同副本冲突时拒绝。
+/// 业务作用：从给定能力快照选择与步骤合同匹配的直接路由。
+///
+/// 参数说明：
+/// - `capabilities`：调用方已经确认租约与代际有效的能力记录，本函数不复验租期。
+/// - `transport`：本次需要的 HTTP、gRPC 或消息代理协议。
+/// - `tenant`：必须与能力声明匹配的受信租户。
+/// - `definition`：提供工作流名、定义版本及摘要的冻结定义。
+/// - `step`：本次要执行的冻结步骤合同。
+///
+/// 返回：HTTP/gRPC 返回按端点及副本排序去重的路由引用；同副本声明互斥合同或路由非法时拒绝。消息代理委托单路由选择，允许空结果，不发布路由或执行网络。
 pub fn select_capability_routes<'a>(
     capabilities: &'a [RegisteredCapability],
     transport: &str,
@@ -1211,7 +1259,10 @@ pub struct DynamicCatalogSnapshot {
 impl DynamicCatalogSnapshot {
     /// 业务作用：把已复验的 definition 与 capability 组合为带确定性内容摘要的代际快照。
     ///
-    /// 参数说明：`generation` 是共享代际，`registry` 是运行定义，`capabilities` 是有效路由。
+    /// 参数说明：
+    /// - `generation`：是共享代际
+    /// - `registry`：是运行定义
+    /// - `capabilities`：是有效路由。
     ///
     /// 返回：返回可供多副本确认的不可拆分快照。
     pub fn new(
@@ -1222,12 +1273,15 @@ impl DynamicCatalogSnapshot {
         Self::with_definition_records(generation, registry, Vec::new(), capabilities)
     }
 
-    /// 业务作用：把 candidate、active、deprecated definition 与有效 capability 共同绑定进快照摘要。
+    /// 业务作用：把运行注册表、定义生命周期记录和逐副本能力组合为带内容摘要的目录快照。
     ///
-    /// 参数说明：`generation` 是共享代际，`registry` 只承载可运行定义，`definition_records` 还包含
-    /// 尚未激活的候选定义，`capabilities` 是读取时有效的逐实例路由。
+    /// 参数说明：
+    /// - `generation`：调用方为整份快照指定的共享目录代际。
+    /// - `registry`：当前可运行的工作流定义注册表。
+    /// - `definition_records`：包含候选、活跃及弃用状态的完整定义记录。
+    /// - `capabilities`：调用方已验证可用的逐实例能力记录。
     ///
-    /// 返回：摘要覆盖租户、owner、生命周期、seal 和路由且字段边界无歧义的不可拆分快照。
+    /// 返回：返回保留排序后记录及注册表的拥有式快照，摘要覆盖目录代际、可运行定义、定义记录和能力摘要；构造时不验证租户一致性、生命周期转换或租约有效性。
     pub fn with_definition_records(
         generation: u64,
         registry: DefinitionRegistry,
@@ -1316,7 +1370,9 @@ impl DynamicCatalogSnapshot {
 
 /// 业务作用：以长度前缀把可变字段加入 Catalog 摘要，避免相邻字段拼接产生边界歧义。
 ///
-/// 参数说明：`digest` 是当前 SHA-256 状态，`value` 是一个完整领域字段的原始字节。
+/// 参数说明：
+/// - `digest`：是当前 SHA-256 状态
+/// - `value`：是一个完整领域字段的原始字节。
 ///
 /// 返回：无；字段长度和内容按固定顺序写入摘要状态。
 fn update_snapshot_digest(digest: &mut Sha256, value: &[u8]) {

@@ -18,10 +18,13 @@ use syn::{
     FnArg, GenericArgument, Ident, ItemTrait, Lit, LitBool, LitInt, LitStr, Local, Meta, Pat,
     PatIdent, Path, PathArguments, ReturnType, Stmt, TraitItem, TraitItemFn, Type, TypePath,
 };
-/// 业务作用：解析并展开 `#[Mapper]` trait，生成带查询绑定、事务与缓存约束的实现代码。
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
-/// - `item`: 被属性宏或派生宏处理的 Rust item token stream。
+/// 业务作用：展开 MySQL Mapper trait，绑定 SQL、事务与缓存执行合同。
+///
+/// 参数说明：
+/// - `attr`：Mapper 属性中的数据源、缓存和生成选项 token。
+/// - `item`：待展开的 Rust trait token。
+///
+/// 返回：成功返回实现 token；输入非法时返回编译错误 token，不在宏展开时连接数据库。
 #[proc_macro_attribute]
 #[allow(non_snake_case)]
 pub fn Mapper(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -33,7 +36,7 @@ pub fn Mapper(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// 业务作用：解析并展开 PostgreSQL `#[Mapper]` trait，生成 `$n` 占位符、Pg 执行器和独立缓存身份。
 ///
-/// # 参数
+/// 参数说明：
 /// - `attr`: 属性宏括号内的 token stream。
 /// - `item`: 被处理的 Mapper trait。
 ///
@@ -46,9 +49,12 @@ pub fn PgMapper(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(err) => err.to_compile_error().into(),
     }
 }
-/// 业务作用：展开 `MapperOrderField` 派生入口，生成受控排序字段映射并拒绝非法枚举形态。
-/// # 参数
-/// - `item`: 被属性宏或派生宏处理的 Rust item token stream。
+/// 业务作用：为排序字段枚举生成 MySQL 运行时的白名单列映射。
+///
+/// 参数说明：
+/// - `item`：待派生的无字段排序枚举 token。
+///
+/// 返回：成功返回字段映射实现；枚举形态、列名或依赖不合法时生成编译错误。
 #[proc_macro_derive(MapperOrderField, attributes(mapper_order_field))]
 #[allow(non_snake_case)]
 pub fn derive_mapper_order_field(item: TokenStream) -> TokenStream {
@@ -60,7 +66,7 @@ pub fn derive_mapper_order_field(item: TokenStream) -> TokenStream {
 
 /// 业务作用：为 PostgreSQL Mapper 生成白名单排序字段映射。
 ///
-/// # 参数
+/// 参数说明：
 /// - `item`: 被派生的字段 enum。
 ///
 /// 返回：成功时实现 PostgreSQL runtime 的 `MapperOrderField`；非法 enum 生成编译错误。
@@ -71,9 +77,12 @@ pub fn derive_pg_mapper_order_field(item: TokenStream) -> TokenStream {
         Err(err) => err.to_compile_error().into(),
     }
 }
-/// 业务作用：展开 `MapperEnum` 派生入口，生成枚举序号转换并在无效声明处给出编译期错误。
-/// # 参数
-/// - `item`: 被属性宏或派生宏处理的 Rust item token stream。
+/// 业务作用：为业务枚举生成按声明次序的数据库整数映射。
+///
+/// 参数说明：
+/// - `item`：待派生的无字段枚举 token。
+///
+/// 返回：成功返回 ordinal 与反向映射实现；不支持的枚举或依赖生成编译错误，显式判别值不决定生成的序号。
 #[proc_macro_derive(MapperEnum)]
 #[allow(non_snake_case)]
 pub fn derive_mapper_enum(item: TokenStream) -> TokenStream {
@@ -85,7 +94,7 @@ pub fn derive_mapper_enum(item: TokenStream) -> TokenStream {
 
 /// 业务作用：为 PostgreSQL Mapper 生成稳定 enum ordinal 转换。
 ///
-/// # 参数
+/// 参数说明：
 /// - `item`: 被派生的无字段 enum。
 ///
 /// 返回：成功时实现 PostgreSQL runtime 的 `MapperEnum`；非法 enum 生成编译错误。
@@ -98,9 +107,11 @@ pub fn derive_pg_mapper_enum(item: TokenStream) -> TokenStream {
 }
 
 /// 业务作用：为 SQLite Mapper 生成同名 SQL 注解的受控执行实现。
+///
 /// 参数说明：
 /// - `attr`：数据源与缓存声明。
 /// - `item`：业务 Mapper trait。
+///
 /// 返回：固定绑定 SQLite 的客户端实现或编译期错误。
 #[proc_macro_attribute]
 #[allow(non_snake_case)]
@@ -112,8 +123,10 @@ pub fn SqliteMapper(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// 业务作用：生成 SQLite 业务枚举的稳定序号映射。
+///
 /// 参数说明：
 /// - `item`：无字段业务枚举。
+///
 /// 返回：SQLite MapperEnum 实现或编译期错误。
 #[proc_macro_derive(SqliteMapperEnum)]
 pub fn derive_sqlite_mapper_enum(item: TokenStream) -> TokenStream {
@@ -124,8 +137,10 @@ pub fn derive_sqlite_mapper_enum(item: TokenStream) -> TokenStream {
 }
 
 /// 业务作用：生成 SQLite 排序字段白名单，避免业务值成为 SQL 标识符。
+///
 /// 参数说明：
 /// - `item`：排序字段枚举。
+///
 /// 返回：受控字段映射或编译期错误。
 #[proc_macro_derive(SqliteMapperOrderField, attributes(mapper_order_field))]
 pub fn derive_sqlite_mapper_order_field(item: TokenStream) -> TokenStream {
@@ -173,9 +188,11 @@ macro_rules! sql_attr_stub {
     ($name:ident) => {
         /// 业务作用：拒绝脱离 `#[Mapper]` trait 单独使用的 SQL 方法注解，避免生成语义不完整的实现。
         ///
-        /// # 参数
-        /// - `attr`: 属性宏括号内的 token stream。
-        /// - `item`: 被属性宏或派生宏处理的 Rust item token stream。
+        /// 参数说明：
+        /// - `_attr`：此独立入口不解析的 SQL 方法属性 token。
+        /// - `item`：随编译错误一并保留的原 Rust item。
+        ///
+        /// 返回：输出 compile_error 与原 item，要求 SQL 方法属性由 Mapper trait 统一消费。
         #[proc_macro_attribute]
         #[allow(non_snake_case)]
         pub fn $name(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -199,7 +216,8 @@ sql_attr_stub!(Update);
 sql_attr_stub!(Delete);
 sql_attr_stub!(Execute);
 /// 业务作用：完成 Mapper 宏 `mapper_enum_impl` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
+///
+/// 参数说明：
 /// - `item`: 被宏处理的 Rust item token stream。
 /// - `backend`: 派生实现所绑定的 Mapper 数据库后端。
 ///
@@ -248,15 +266,20 @@ fn mapper_enum_impl(item: TokenStream2, backend: MapperBackend) -> syn::Result<T
         impl #root::MapperEnum for #ident {
             /// 业务作用：返回 enum 变体在数据库中保存的稳定序号。
             ///
-            /// 序号按源码声明顺序生成，用于 enum 与整数字段之间的轻量映射。
+            /// 参数说明: 无。
+            ///
+            /// 返回：从零开始的声明位置序号，不采用显式判别值；重排变体会改变持久映射。
             fn ordinal(self) -> i32 {
                 match self {
                     #(#ordinal_arms,)*
                 }
             }
-            /// 业务作用：完成 Mapper 宏 `from_ordinal` 的编译期转换步骤，并把失败定位到调用方源码。
-            /// # 参数
-            /// - `value`: 从数据库整数字段读取到的 enum 序号。
+            /// 业务作用：把持久整数序号映射回当前枚举变体。
+            ///
+            /// 参数说明：
+            /// - `value`：按枚举声明位置保存的整数序号。
+            ///
+            /// 返回：命中生成的序号时返回对应变体，否则返回 None，不读取数据库。
             fn from_ordinal(value: i32) -> ::core::option::Option<Self> {
                 match value {
                     #(#from_arms,)*
@@ -267,7 +290,8 @@ fn mapper_enum_impl(item: TokenStream2, backend: MapperBackend) -> syn::Result<T
     })
 }
 /// 业务作用：完成 Mapper 宏 `mapper_order_field_impl` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
+///
+/// 参数说明：
 /// - `item`: 被宏处理的 Rust item token stream。
 /// - `backend`: 派生实现所绑定的 Mapper 数据库后端。
 ///
@@ -317,9 +341,11 @@ fn mapper_order_field_impl(
 
     Ok(quote! {
         impl #root::MapperOrderField for #ident {
-            /// 业务作用：返回该排序枚举变体绑定的真实数据库列名。
+            /// 业务作用：把排序枚举变体映射为声明中的白名单列名。
             ///
-            /// mapper 的 `order_by` 动态片段只允许从这里取列名,避免业务侧拼接任意 SQL。
+            /// 参数说明: 无。
+            ///
+            /// 返回：静态列名或别名限定列名；字符形态已在派生时检查，不证明目标数据库实际存在该列。
             fn mapper_order_field(self) -> &'static str {
                 match self {
                     #(#arms,)*
@@ -328,9 +354,12 @@ fn mapper_order_field_impl(
         }
     })
 }
-/// 业务作用：完成 Mapper 宏 `mapper_order_field_column` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `variant`: 枚举派生处理中正在生成映射的变体。
+/// 业务作用：从枚举变体属性读取排序列名，缺省时由变体名派生。
+///
+/// 参数说明：
+/// - `variant`：需要读取 mapper_order_field 属性的枚举变体。
+///
+/// 返回：返回显式字符串或蛇形名称；重复属性或属性形态非法时返回错误。本函数不验证列名白名单字符，由调用方继续校验。
 fn mapper_order_field_column(variant: &syn::Variant) -> syn::Result<String> {
     let mut column = None;
     for attr in &variant.attrs {
@@ -371,9 +400,12 @@ fn mapper_order_field_column(variant: &syn::Variant) -> syn::Result<String> {
     }
     Ok(column.unwrap_or_else(|| camel_to_snake(&variant.ident.to_string())))
 }
-/// 业务作用：完成 Mapper 宏 `camel_to_snake` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `value`: Rust 标识符或 enum 变体名。
+/// 业务作用：将变体名称转换为默认 SQL 列名。
+///
+/// 参数说明：
+/// - `value`：待转换的枚举变体名称。
+///
+/// 返回：每个 ASCII 大写字母转小写，除首字符外在前面加下划线；其它字符原样保留，连续大写字母分别分隔。
 fn camel_to_snake(value: &str) -> String {
     let mut out = String::new();
     for (idx, ch) in value.chars().enumerate() {
@@ -409,9 +441,12 @@ enum SqlKind {
 }
 
 impl SqlKind {
-    /// 业务作用：完成 Mapper 宏 `of` 的编译期转换步骤，并把失败定位到调用方源码。
-    /// # 参数
-    /// - `attr`: 属性宏括号内的 token stream。
+    /// 业务作用：按属性路径末段识别支持的 SQL 方法注解。
+    ///
+    /// 参数说明：
+    /// - `attr`：待识别的 Rust 方法属性。
+    ///
+    /// 返回：末段为 Query、StreamQuery、Insert、Update、Delete 或 Execute 时返回对应类型，否则返回 None；不验证路径来源。
     fn of(attr: &Attribute) -> Option<Self> {
         let ident = attr.path().segments.last()?.ident.to_string();
         match ident.as_str() {
@@ -425,26 +460,38 @@ impl SqlKind {
         }
     }
 
-    /// 业务作用：判断当前 mapper 方法是否是普通查询。
+    /// 业务作用：区分普通查询与其它 SQL 方法种类。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅 Query 返回 true，StreamQuery 及写操作返回 false。
     fn is_query(self) -> bool {
         matches!(self, Self::Query)
     }
 
-    /// 业务作用：判断当前 mapper 方法是否是读请求。
+    /// 业务作用：标记无需默认刷新缓存的读取方法。
     ///
-    /// 普通查询和流式查询都属于读请求,默认不会触发缓存清理。
+    /// 参数说明: 无。
+    ///
+    /// 返回：Query 和 StreamQuery 返回 true，其它方法返回 false。
     fn is_read(self) -> bool {
         matches!(self, Self::Query | Self::StreamQuery)
     }
 
-    /// 业务作用：判断当前 mapper 方法是否是流式查询。
+    /// 业务作用：识别按行流式读取的 SQL 方法。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅 StreamQuery 返回 true。
     fn is_stream(self) -> bool {
         matches!(self, Self::StreamQuery)
     }
 
-    /// 业务作用：返回该 SQL 类型默认是否需要清理缓存。
+    /// 业务作用：确定 SQL 方法未显式指定时的缓存失效默认值。
     ///
-    /// 写操作默认清理 L2,读操作默认不清理；方法级 `flush_cache` 可覆盖该行为。
+    /// 参数说明: 无。
+    ///
+    /// 返回：读取方法返回 false，Insert、Update、Delete 和 Execute 返回 true，不执行实际失效。
     fn default_flush_cache(self) -> bool {
         !self.is_read()
     }
@@ -462,11 +509,13 @@ enum CacheErrors {
 }
 
 impl CacheErrors {
-    /// 业务作用：解析 `cache_errors` 属性值。
+    /// 业务作用：解析缓存失败时绕过或严格返回的策略。
     ///
-    /// # 参数
-    /// - `value`: mapper 属性中的缓存错误策略字符串。
-    /// - `span`: 源码位置,用于生成精确的编译期错误。
+    /// 参数说明：
+    /// - `value`：cache_errors 声明的原始字符串。
+    /// - `span`：产生编译错误时使用的调用方源码位置。
+    ///
+    /// 返回：精确字符串 bypass 或 strict 返回对应策略；其它值返回位于 span 的编译错误，不去空白或转换大小写。
     fn parse(value: &str, span: proc_macro2::Span) -> syn::Result<Self> {
         match value {
             "bypass" => Ok(Self::Bypass),
@@ -478,9 +527,11 @@ impl CacheErrors {
         }
     }
 
-    /// 业务作用：判断缓存错误策略是否是严格模式。
+    /// 业务作用：判断缓存失败是否应影响 Mapper 调用结果。
     ///
-    /// 严格模式会把缓存读写错误返回给业务,旁路模式则降级为只走数据库。
+    /// 参数说明: 无。
+    ///
+    /// 返回：Strict 返回 true，Bypass 返回 false。
     fn is_strict(self) -> bool {
         matches!(self, Self::Strict)
     }
@@ -502,7 +553,7 @@ enum TxMode {
 impl TxMode {
     /// 业务作用：解析 `tx` 属性值。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: mapper 属性中的事务策略字符串。
     /// - `span`: 源码位置,用于生成精确的编译期错误。
     ///
@@ -538,9 +589,11 @@ struct TraitArgs {
 }
 
 impl Default for TraitArgs {
-    /// 业务作用：构造 mapper trait 级别的默认属性。
+    /// 业务作用：建立 Mapper trait 的属性缺省值。
     ///
-    /// 默认启用缓存但不在事务内写共享 L2,缓存异常走旁路,保证未配置业务以数据库结果为准。
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回启用普通缓存、禁用事务内缓存和严格参数检查、错误绕过且没有数据源、TTL、codec 或失效依赖的选项。
     fn default() -> Self {
         Self {
             key: None,
@@ -717,7 +770,10 @@ struct MethodPlan {
 type ParsedSqlTemplate = (String, Vec<String>, Vec<BindInfo>, Option<DynamicSqlPlan>);
 
 /// 业务作用：为静态元数据编码无歧义的 Rust 名称片段，保留大小写、下划线和 Unicode 的区别。
-/// 参数说明：`ident` 是 trait 或方法的原始标识符。
+///
+/// 参数说明：
+/// - `ident`：是 trait 或方法的原始标识符。
+///
 /// 返回：逐 UTF-8 字节的定宽大写十六进制字符串，组合时不会因分隔符或大小写折叠产生碰撞。
 fn metadata_ident_component(ident: &Ident) -> String {
     use std::fmt::Write;
@@ -730,7 +786,8 @@ fn metadata_ident_component(ident: &Ident) -> String {
 }
 
 /// 业务作用：完成 Mapper 宏 `mapper_impl` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
+///
+/// 参数说明：
 /// - `attr`: 属性宏括号内的 token stream。
 /// - `item`: 被宏处理的 Rust item token stream。
 /// - `backend`: 当前 Mapper 固定使用的数据库后端。
@@ -866,10 +923,12 @@ fn mapper_impl(
             quote!(datasource: #root::SourceBinding,),
             quote!(datasource: #root::SourceBinding::default(),),
             quote! {
-                /// 业务作用：固定 client 的数据源 owner，防止同名来源替换后静默改绑。
+                /// 业务作用：将 SQLite client 固定到受管数据源身份，避免同名来源替换后静默改绑。
+                ///
                 /// 参数说明：
-                /// - `source`：Application 或 standalone owner 提供的来源句柄。
-                /// 返回：首次绑定成功返回 client；身份冲突时失败。
+                /// - `source`：应用或独立调用方提供的受管 SQLite 来源。
+                ///
+                /// 返回：来源名在声明集合内且绑定槽接受该身份时返回 client；未声明或身份冲突时失败。
                 pub fn with_datasource(self, source: #root::SqliteDataSource) -> #root::__private::anyhow::Result<Self> {
                     if ![#(#datasources),*].contains(&source.name()) {
                         return Err(#root::__private::anyhow::anyhow!("SQLite source name is not declared by this Mapper"));
@@ -903,9 +962,11 @@ fn mapper_impl(
 
         impl #client_ident {
             #source_builder
-            /// 业务作用：创建 mapper client。
+            /// 业务作用：构造 Mapper client，采用当前全局 L2 缓存及 trait 声明的 codec。
             ///
-            /// 默认接入全局 L2 缓存和 trait 级 codec；特殊场景可用 builder 方法覆盖。
+            /// 参数说明: 无。
+            ///
+            /// 返回：带共享缓存与可选 codec 的 client；配置 codec 工厂时立即调用，SQLite 数据源仍需显式绑定。
             pub fn new() -> Self {
                 Self {
                     #source_init
@@ -913,9 +974,12 @@ fn mapper_impl(
                     cache_codec: #trait_cache_codec,
                 }
             }
-            /// 业务作用：完成 Mapper 宏 `with_l2_cache` 的编译期转换步骤，并把失败定位到调用方源码。
-            /// # 参数
-            /// - `cache`: mapper 方法上的缓存配置。
+            /// 业务作用：为当前 client 替换实际执行查询缓存读写的 L2 适配器。
+            ///
+            /// 参数说明：
+            /// - `cache`：共享的 L2 缓存实现。
+            ///
+            /// 返回：保存新适配器后的 client；不改变全局默认值，不执行缓存读写。
             pub fn with_l2_cache(
                 mut self,
                 cache: ::std::sync::Arc<dyn #root::MapperL2Cache>,
@@ -923,9 +987,12 @@ fn mapper_impl(
                 self.l2_cache = ::core::option::Option::Some(cache);
                 self
             }
-            /// 业务作用：完成 Mapper 宏 `with_cache_codec` 的编译期转换步骤，并把失败定位到调用方源码。
-            /// # 参数
-            /// - `codec`: mapper 缓存值使用的序列化 codec 类型。
+            /// 业务作用：为当前 client 设置普通缓存值编解码器。
+            ///
+            /// 参数说明：
+            /// - `codec`：共享的普通缓存值编码与解码实现。
+            ///
+            /// 返回：保存新 codec 后的 client；方法显式指定的 codec 仍具有更高优先级。
             pub fn with_cache_codec(
                 mut self,
                 codec: ::std::sync::Arc<dyn #root::MapperCacheCodec>,
@@ -951,9 +1018,12 @@ fn mapper_impl(
     };
     Ok(expanded)
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_trait_args` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
+/// 业务作用：读取 Mapper trait 层级的数据源、缓存和客户端生成选项。
+///
+/// 参数说明：
+/// - `attr`：Mapper 属性括号内的 token。
+///
+/// 返回：空输入采用默认值；支持项按解析顺序覆盖，未知项、字面量类型或数据源标识非法时返回错误。客户端名由 Ident 构造，其非法名称可能展开。
 fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
     let mut args = TraitArgs::default();
     if attr.is_empty() {
@@ -997,7 +1067,8 @@ fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
     Ok(args)
 }
 /// 业务作用：完成 Mapper 宏 `plan_method` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
+///
+/// 参数说明：
 /// - `method`: trait 方法 AST 或 HTTP 方法。
 /// - `trait_args`: rest client 或 mapper trait 级配置参数。
 /// - `backend`: 当前 Mapper 固定使用的数据库后端。
@@ -1200,11 +1271,14 @@ fn plan_method(
         backend,
     })
 }
-/// 业务作用：校验 Mapper DSL 的 `validate_checked_query` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `binds`: SQL 动态片段收集出的绑定列表。
-/// - `dynamic`: 动态 SQL 节点或动态绑定上下文。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：限制编译期 checked 查询只使用静态 SQL 和标量绑定。
+///
+/// 参数说明：
+/// - `binds`：按 SQL 出现顺序排列的绑定描述。
+/// - `dynamic`：存在动态 SQL 时携带的已解析节点计划。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：不存在动态计划且没有列表绑定时成功，否则返回编译错误；不验证 SQL 方言或返回行类型。
 fn validate_checked_query(
     binds: &[BindInfo],
     dynamic: Option<&DynamicSqlPlan>,
@@ -1224,11 +1298,14 @@ fn validate_checked_query(
     }
     Ok(())
 }
-/// 业务作用：校验 Mapper DSL 的 `validate_stream_query` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `binds`: SQL 动态片段收集出的绑定列表。
-/// - `dynamic`: 动态 SQL 节点或动态绑定上下文。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：限制流式查询只使用静态 SQL 和标量绑定。
+///
+/// 参数说明：
+/// - `binds`：按 SQL 出现顺序排列的绑定描述。
+/// - `dynamic`：存在动态 SQL 时携带的已解析节点计划。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：不存在动态计划且没有列表绑定时成功，否则返回编译错误；不验证 SQL 方言或返回行类型。
 fn validate_stream_query(
     binds: &[BindInfo],
     dynamic: Option<&DynamicSqlPlan>,
@@ -1248,9 +1325,12 @@ fn validate_stream_query(
     }
     Ok(())
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_method_attr` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
+/// 业务作用：读取单个 SQL 方法注解中的 SQL 与执行策略。
+///
+/// 参数说明：
+/// - `attr`：Query、StreamQuery 或写操作的 Rust 属性。
+///
+/// 返回：支持单字符串、位置 SQL 加选项或命名选项；重复 SQL、未知选项、非法字面量或数据源返回错误。缺 SQL 的命名选项结果可返回，由上层最终检查。
 fn parse_method_attr(attr: &Attribute) -> syn::Result<MethodArgs> {
     let mut args = MethodArgs::default();
     match &attr.meta {
@@ -1339,9 +1419,12 @@ fn parse_method_attr(attr: &Attribute) -> syn::Result<MethodArgs> {
         )),
     }
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_params` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `method`: trait 方法 AST 或 HTTP 方法。
+/// 业务作用：提取 Mapper 方法可用于 SQL 绑定的简单参数。
+///
+/// 参数说明：
+/// - `method`：待检查或生成实现的 Mapper trait 方法。
+///
+/// 返回：首项为接收者且其余为非 mut、非 ref 的标识模式时返回参数信息，否则报错；此处不复验接收者必须恰为 &self，也不做 Rust 类型检查。
 fn parse_params(method: &TraitItemFn) -> syn::Result<Vec<ParamInfo>> {
     let mut inputs = method.sig.inputs.iter();
     match inputs.next() {
@@ -1379,7 +1462,8 @@ fn parse_params(method: &TraitItemFn) -> syn::Result<Vec<ParamInfo>> {
     Ok(params)
 }
 /// 业务作用：解析 Mapper DSL 的 `parse_sql_template` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
+///
+/// 参数说明：
 /// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
 /// - `params`: 已解析的函数参数或宏参数列表。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
@@ -1413,7 +1497,8 @@ fn parse_sql_template(
     Ok((normalized_sql, fragments, binds, None))
 }
 /// 业务作用：校验 Mapper DSL 的 `validate_sql_template_safety` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
+///
+/// 参数说明：
 /// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
 /// - `backend`: 当前 SQL 模板所属的数据库后端。
@@ -1473,7 +1558,7 @@ fn validate_sql_template_safety(
 
 /// 业务作用：从普通 SQL 的 fragment/bind 结构生成 PostgreSQL 静态 `$n` SQL。
 ///
-/// # 参数
+/// 参数说明：
 /// - `fragments`: 每个业务 bind 前后的原始 SQL 文本。
 /// - `binds`: 按源码顺序解析的标量 bind；调用方已排除列表 bind。
 ///
@@ -1491,11 +1576,14 @@ fn render_postgres_static_sql(fragments: &[String], binds: &[BindInfo]) -> Strin
     }
     normalize_sql_whitespace(&sql)
 }
-/// 业务作用：推进 Mapper DSL 的 `skip_single_quote` 扫描位置，同时保持引号、注释和标签边界正确。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `start`: 起始位置或范围下界。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：跳过 SQL 中的单引号片段，避免将其内容识别为标签。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `start`：待识别片段起始的有效 UTF-8 字节边界位置。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回闭合引号之后的字节偏移，支持双写同引号和反斜线跳过下一字节；未闭合返回编译错误。调用方须保证 start 指向起始引号。
 fn skip_single_quote(sql: &str, start: usize, span: proc_macro2::Span) -> syn::Result<usize> {
     let bytes = sql.as_bytes();
     let mut idx = start + 1;
@@ -1514,11 +1602,14 @@ fn skip_single_quote(sql: &str, start: usize, span: proc_macro2::Span) -> syn::R
     }
     Err(syn::Error::new(span, "SQL 字符串字面量缺少闭合单引号"))
 }
-/// 业务作用：推进 Mapper DSL 的 `skip_double_quote` 扫描位置，同时保持引号、注释和标签边界正确。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `start`: 起始位置或范围下界。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：跳过 SQL 中的双引号片段，避免将其内容识别为标签。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `start`：待识别片段起始的有效 UTF-8 字节边界位置。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回闭合引号之后的字节偏移，支持双写同引号和反斜线跳过下一字节；未闭合返回编译错误。调用方须保证 start 指向起始引号。
 fn skip_double_quote(sql: &str, start: usize, span: proc_macro2::Span) -> syn::Result<usize> {
     let bytes = sql.as_bytes();
     let mut idx = start + 1;
@@ -1537,11 +1628,14 @@ fn skip_double_quote(sql: &str, start: usize, span: proc_macro2::Span) -> syn::R
     }
     Err(syn::Error::new(span, "SQL 字符串字面量缺少闭合双引号"))
 }
-/// 业务作用：推进 Mapper DSL 的 `skip_backtick` 扫描位置，同时保持引号、注释和标签边界正确。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `start`: 起始位置或范围下界。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：跳过 SQL 的反引号标识符片段。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `start`：待识别片段起始的有效 UTF-8 字节边界位置。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回遇到的首个后续反引号之后的位置；未闭合返回错误，不处理双写或转义反引号。
 fn skip_backtick(sql: &str, start: usize, span: proc_macro2::Span) -> syn::Result<usize> {
     let bytes = sql.as_bytes();
     let mut idx = start + 1;
@@ -1553,11 +1647,14 @@ fn skip_backtick(sql: &str, start: usize, span: proc_macro2::Span) -> syn::Resul
     }
     Err(syn::Error::new(span, "SQL 标识符缺少闭合反引号"))
 }
-/// 业务作用：推进 Mapper DSL 的 `skip_block_comment` 扫描位置，同时保持引号、注释和标签边界正确。
-/// # 参数
-/// - `bytes`: 原始字节切片。
-/// - `idx`: 扫描下标或集合位置。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：跳过 SQL 块注释主体。
+///
+/// 参数说明：
+/// - `bytes`：SQL 模板的原始字节。
+/// - `idx`：已越过 /* 后的注释主体起始偏移。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：找到首个 */ 时返回其后字节位置，否则返回编译错误；不处理嵌套注释。
 fn skip_block_comment(bytes: &[u8], mut idx: usize, span: proc_macro2::Span) -> syn::Result<usize> {
     while idx + 1 < bytes.len() {
         if bytes[idx] == b'*' && bytes[idx + 1] == b'/' {
@@ -1567,10 +1664,13 @@ fn skip_block_comment(bytes: &[u8], mut idx: usize, span: proc_macro2::Span) -> 
     }
     Err(syn::Error::new(span, "SQL 块注释缺少闭合 */"))
 }
-/// 业务作用：判定 Mapper DSL 的 `starts_dangerous_xml_tag_at` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
+/// 业务作用：识别动态模板不允许的绑定、引用和选择键标签。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+///
+/// 返回：当前位置命中 bind、include、sql 或 selectKey 的开闭标签时返回 true，否则返回 false；调用方负责在 SQL 词法环境中调用。
 fn starts_dangerous_xml_tag_at(sql: &str, pos: usize) -> bool {
     ["bind", "include", "sql", "selectKey"]
         .into_iter()
@@ -1578,11 +1678,14 @@ fn starts_dangerous_xml_tag_at(sql: &str, pos: usize) -> bool {
             starts_open_tag_at(sql, pos, tag) || starts_close_tag_at(sql, pos, tag).is_some()
         })
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_plain_sql_template` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：将普通 SQL 的命名占位符映射为有序绑定与问号模板。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回规范空白后的 SQL、原文本片段及绑定描述；未闭合、未知参数、非法路径或集合上下文不匹配时报错。直接查找所有 #{，自身不跳过字符串或注释。
 fn parse_plain_sql_template(
     sql: &str,
     params: &[ParamInfo],
@@ -1662,10 +1765,13 @@ fn parse_plain_sql_template(
     prepared.push_str(rest);
     Ok((normalize_sql_whitespace(&prepared), fragments, binds))
 }
-/// 业务作用：判定 Mapper DSL 的 `has_dynamic_sql_tag` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：在 SQL 词法片段之外探测受支持的动态标签。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：找到已知开闭标签返回 true，没有则 false；未闭合引号或块注释返回错误。此处不跳过行注释，也不解析节点层次。
 fn has_dynamic_sql_tag(sql: &str, span: proc_macro2::Span) -> syn::Result<bool> {
     let bytes = sql.as_bytes();
     let mut idx = 0;
@@ -1687,11 +1793,14 @@ fn has_dynamic_sql_tag(sql: &str, span: proc_macro2::Span) -> syn::Result<bool> 
     }
     Ok(false)
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_dynamic_sql_template` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：完整解析动态 SQL 为节点计划。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：全部输入消费且没有遗留关闭标签时返回计划；标签不匹配、节点或绑定非法时返回编译错误，不验证数据库 SQL 的可执行性。
 fn parse_dynamic_sql_template(
     sql: &str,
     params: &[ParamInfo],
@@ -1711,14 +1820,17 @@ fn parse_dynamic_sql_template(
         nodes,
     })
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_dynamic_nodes` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
-/// - `stop_tags`: 动态 SQL 解析时需要停止扫描的标签集合。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：按嵌套层次读取动态 SQL 文本、绑定、条件、裁剪与循环节点。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+/// - `stop_tags`：允许结束当前递归层的关闭标签名称。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `local_items`：当前可引用的外层 foreach 局部元素标识。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：遇允许的关闭标签时消费标签并返回节点、下一偏移和标签名；输入结束时标签名为 None。未知层次、绑定或属性非法时报错，不设置递归深度上限。
 fn parse_dynamic_nodes(
     sql: &str,
     mut pos: usize,
@@ -1882,13 +1994,16 @@ fn parse_dynamic_nodes(
     }
     Ok((nodes, pos, None))
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_choose_node` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：解析按声明顺序选择的 when 分支与可选 otherwise。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `local_items`：当前可引用的外层 foreach 局部元素标识。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：至少一个 when 且闭合时返回 Choose 节点与后续位置；otherwise 重复或其后仍有 when、其它子内容或缺关闭标签时失败。
 fn parse_choose_node(
     sql: &str,
     mut pos: usize,
@@ -1953,14 +2068,17 @@ fn parse_choose_node(
         ));
     }
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_dynamic_foreach` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `body_start`: 动态 SQL 标签体在源码字符串中的起始位置。
-/// - `attrs`: 属性列表,用于解析宏配置或 XML 属性。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：验证循环集合与局部元素名称并解析动态 SQL 循环主体。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `body_start`：开始解析标签主体的有效字节偏移。
+/// - `attrs`：已经读取的 XML 风格属性名和值序列。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `local_items`：当前可引用的外层 foreach 局部元素标识。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：集合为顶层集合参数、元素名不遮蔽现有参数或外层元素、分隔片段合法且主体引用元素时返回节点；缺失属性、名称或主体非法时失败。
 fn parse_dynamic_foreach(
     sql: &str,
     body_start: usize,
@@ -2045,12 +2163,14 @@ fn parse_dynamic_foreach(
     ))
 }
 /// 业务作用：为动态 SQL 确定单值或显式列表绑定，沿用适配层确认的 BLOB 单值语义。
+///
 /// 参数说明：
 /// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
 /// - `start`: 起始位置或范围下界。
 /// - `params`: 已解析的函数参数或宏参数列表。
 /// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
+///
 /// 返回：绑定计划与占位符终点；非字节集合误作单值或非法字段路径在编译期拒绝。
 fn parse_dynamic_bind(
     sql: &str,
@@ -2124,10 +2244,13 @@ fn parse_dynamic_bind(
         abs_end,
     ))
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_test_expr` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `value`: `<if test>` 或 `<when test>` 中声明的条件表达式文本。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：把动态 SQL 条件转为 Rust 表达式，支持 Option 空值比较。
+///
+/// 参数说明：
+/// - `value`：test 属性中的条件原文。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：非空合法条件返回 Expr；四种边缘 null 比较转为 is_some/is_none，其余在重写 and/or 后交给 syn。语法或路径非法时报错，不证明表达式无副作用。
 fn parse_test_expr(value: &str, span: proc_macro2::Span) -> syn::Result<Expr> {
     let normalized = value.trim();
     if normalized.is_empty() {
@@ -2161,9 +2284,12 @@ fn parse_test_expr(value: &str, span: proc_macro2::Span) -> syn::Result<Expr> {
     syn::parse_str::<Expr>(&rust_expr)
         .map_err(|err| syn::Error::new(span, format!("test 表达式不合法: {err}")))
 }
-/// 业务作用：规范化 Mapper DSL 的 `rewrite_test_logical_ops` 表达，保持语义不变并生成稳定代码。
-/// # 参数
-/// - `value`: `<if test>` 中的条件表达式文本。
+/// 业务作用：在保留字符串和字符片段时改写模板逻辑连接词。
+///
+/// 参数说明：
+/// - `value`：动态条件表达式文本。
+///
+/// 返回：返回将指定空白或括号边界的 and/or 转为 &&/|| 的文本；其它内容保留，不验证表达式，未闭合字面量留给后续 syn 报错。
 fn rewrite_test_logical_ops(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let bytes = value.as_bytes();
@@ -2208,10 +2334,13 @@ fn rewrite_test_logical_ops(value: &str) -> String {
 
     out
 }
-/// 业务作用：完成 Mapper 宏 `rust_raw_string_end` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `value`: 需要检查当前位置是否为 Rust raw string 的表达式文本。
-/// - `start`: 起始位置或范围下界。
+/// 业务作用：识别原始字符串片段的结束位置，避免改写其内部连接词。
+///
+/// 参数说明：
+/// - `value`：完整条件表达式文本。
+/// - `start`：待识别片段起始的有效 UTF-8 字节边界位置。
+///
+/// 返回：当前位置不是可识别的 r 或 br 原始字符串起始时返回 None；识别后返回闭合位置，未闭合时返回输入长度，不验证前方标识符边界。
 fn rust_raw_string_end(value: &str, start: usize) -> Option<usize> {
     let bytes = value.as_bytes();
     if start >= bytes.len() {
@@ -2248,11 +2377,14 @@ fn rust_raw_string_end(value: &str, start: usize) -> Option<usize> {
     }
     Some(bytes.len())
 }
-/// 业务作用：推进 Mapper DSL 的 `skip_rust_quoted_literal` 扫描位置，同时保持引号、注释和标签边界正确。
-/// # 参数
-/// - `value`: 需要跳过字符串字面量的表达式文本。
-/// - `start`: 起始位置或范围下界。
-/// - `quote`: 当前字符串字面量使用的引号字符。
+/// 业务作用：跳过条件表达式中的带引号片段。
+///
+/// 参数说明：
+/// - `value`：条件表达式原文。
+/// - `start`：待识别片段起始的有效 UTF-8 字节边界位置。
+/// - `quote`：起始和结束使用的单字节引号。
+///
+/// 返回：返回匹配引号后的字节位置，反斜线跳过后一字节；未闭合返回输入末尾，不判断 Rust 生命周期或完整字面量是否合法。
 fn skip_rust_quoted_literal(value: &str, start: usize, quote: u8) -> usize {
     let bytes = value.as_bytes();
     let mut idx = start + 1;
@@ -2265,11 +2397,14 @@ fn skip_rust_quoted_literal(value: &str, start: usize, quote: u8) -> usize {
     }
     bytes.len()
 }
-/// 业务作用：判定 Mapper DSL 的 `is_test_logical_word_at` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `value`: `<if test>` 中待扫描的条件表达式文本。
-/// - `start`: 起始位置或范围下界。
-/// - `word`: 动态 SQL 解析过程中读取到的标识符。
+/// 业务作用：按模板连接词边界判断当前位置是否可改写。
+///
+/// 参数说明：
+/// - `value`：条件表达式原文。
+/// - `start`：待识别片段起始的有效 UTF-8 字节边界位置。
+/// - `word`：待匹配的 ASCII 逻辑词 and 或 or。
+///
+/// 返回：精确匹配 word 且前方为开始、指定空白或左括号，后方为末尾、指定空白或括号时返回 true；调用方须保证相关切片位置有效。
 fn is_test_logical_word_at(value: &str, start: usize, word: &str) -> bool {
     let end = start + word.len();
     if end > value.len() || &value[start..end] != word {
@@ -2282,10 +2417,13 @@ fn is_test_logical_word_at(value: &str, start: usize, word: &str) -> bool {
         end == bytes.len() || matches!(bytes[end], b' ' | b'\t' | b'\n' | b'\r' | b'(' | b')');
     prev_ok && next_ok
 }
-/// 业务作用：校验 Mapper DSL 的 `validate_test_path` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `path`: `<if test="...">` 中声明的字段访问路径。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：限制 null 比较左值为点分隔的标识路径。
+///
+/// 参数说明：
+/// - `path`：准备转换成 Option 判断的字段路径。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：所有分段满足本层标识字符规则时成功，否则报错；不验证字段是否存在或完整 Rust 关键字语义。
 fn validate_test_path(path: &str, span: proc_macro2::Span) -> syn::Result<()> {
     if path.split('.').all(is_rust_ident) {
         Ok(())
@@ -2296,12 +2434,15 @@ fn validate_test_path(path: &str, span: proc_macro2::Span) -> syn::Result<()> {
         ))
     }
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_xml_open_attrs` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：读取已识别开标签的属性与主体起始位置。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回属性序列及闭合 > 后的位置；引号、属性或标签结尾非法时返回错误。调用方负责先确认标签名与起始位置。
 fn parse_xml_open_attrs(
     sql: &str,
     pos: usize,
@@ -2312,12 +2453,15 @@ fn parse_xml_open_attrs(
     let attrs = &sql[pos + tag.len() + 1..tag_end];
     Ok((parse_xml_attrs(attrs, tag, span)?, tag_end + 1))
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_xml_self_closing_attrs` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：读取必须自闭合的动态 SQL 标签属性。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：属性片段以 / 结束时返回属性和 > 后的位置；非自闭合、属性或结尾非法时失败。
 fn parse_xml_self_closing_attrs(
     sql: &str,
     pos: usize,
@@ -2331,12 +2475,15 @@ fn parse_xml_self_closing_attrs(
     })?;
     Ok((parse_xml_attrs(attrs, tag, span)?, tag_end + 1))
 }
-/// 业务作用：推进 Mapper DSL 的 `find_xml_tag_end` 扫描位置，同时保持引号、注释和标签边界正确。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `start`: 起始位置或范围下界。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：寻找引号片段之外的 XML 风格标签结束符。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `start`：待识别片段起始的有效 UTF-8 字节边界位置。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回首个未被引号包裹的 > 偏移；未闭合引号或找不到结尾返回错误，不验证开标签名称。
 fn find_xml_tag_end(
     sql: &str,
     start: usize,
@@ -2356,11 +2503,14 @@ fn find_xml_tag_end(
     }
     Err(syn::Error::new(span, format!("<{tag}> 缺少闭合的 `>`")))
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_xml_attrs` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `input`: 宏或解析器收到的原始输入。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：解析动态标签中带引号的键值属性。
+///
+/// 参数说明：
+/// - `input`：去除标签名与结束符后的属性文本。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回按出现顺序保留的属性对，包括重复名称；非法名称、等号或引号返回错误，不处理 XML 实体与反斜线转义。
 fn parse_xml_attrs(
     input: &str,
     tag: &str,
@@ -2417,12 +2567,15 @@ fn parse_xml_attrs(
     }
     Ok(attrs)
 }
-/// 业务作用：完成 Mapper 宏 `required_attr` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `attrs`: 属性列表,用于解析宏配置或 XML 属性。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：读取动态标签必须声明的属性。
+///
+/// 参数说明：
+/// - `attrs`：已经读取的 XML 风格属性名和值序列。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+/// - `name`：需要查找的属性名称。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回首个同名属性的原值，包括空字符串；缺失时返回定位到标签的编译错误。
 fn required_attr(
     attrs: &[(String, String)],
     tag: &str,
@@ -2432,22 +2585,28 @@ fn required_attr(
     optional_attr(attrs, name)
         .ok_or_else(|| syn::Error::new(span, format!("<{tag}> 缺少 {name} 属性")))
 }
-/// 业务作用：完成 Mapper 宏 `optional_attr` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `attrs`: 属性列表,用于解析宏配置或 XML 属性。
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+/// 业务作用：读取动态标签可省略的属性。
+///
+/// 参数说明：
+/// - `attrs`：已经读取的 XML 风格属性名和值序列。
+/// - `name`：需要查找的属性名称。
+///
+/// 返回：返回首个同名属性的值副本，缺失时返回 None，不检查重复或空值。
 fn optional_attr(attrs: &[(String, String)], name: &str) -> Option<String> {
     attrs
         .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value.clone())
 }
-/// 业务作用：校验 Mapper DSL 的 `validate_raw_sql_attr` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
-/// - `attr`: 属性宏括号内的 token stream。
-/// - `value`: `<trim>`、`<foreach>` 或 `<order_by>` 属性中的静态 SQL 片段。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：拒绝动态标签的原始 SQL 片段夹带值占位符、注释或标签。
+///
+/// 参数说明：
+/// - `tag`：用于识别标签或定位错误的标签名称。
+/// - `attr`：用于错误定位的属性名。
+/// - `value`：编译期固定 SQL 前后缀或分隔符文本。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：包含 ${、#{、?、#、--、/* 或 < 时失败，其余成功；这是受控模板片段限制，不是通用 SQL 安全解析。
 fn validate_raw_sql_attr(
     tag: &str,
     attr: &str,
@@ -2503,23 +2662,29 @@ fn validate_raw_sql_attr(
     }
     Ok(())
 }
-/// 业务作用：校验 Mapper DSL 的 `reject_attrs` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `attrs`: 属性列表,用于解析宏配置或 XML 属性。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：为不接受属性的动态标签拒绝额外声明。
+///
+/// 参数说明：
+/// - `attrs`：已经读取的 XML 风格属性名和值序列。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：属性列表为空时成功，否则按首个属性返回错误。
 fn reject_attrs(attrs: &[(String, String)], tag: &str, span: proc_macro2::Span) -> syn::Result<()> {
     if let Some((key, _)) = attrs.first() {
         return Err(syn::Error::new(span, format!("<{tag}> 不支持属性 `{key}`")));
     }
     Ok(())
 }
-/// 业务作用：校验 Mapper DSL 的 `reject_unknown_attrs` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `attrs`: 属性列表,用于解析宏配置或 XML 属性。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
-/// - `allowed`: 允许出现在当前语法位置的标签或属性集合。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：限制动态标签仅使用明确允许的属性。
+///
+/// 参数说明：
+/// - `attrs`：已经读取的 XML 风格属性名和值序列。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+/// - `allowed`：当前标签明确支持的属性名列表。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：每项名称均在 allowed 中时成功，遇首个未知项报错；不检查重复属性或属性值语义。
 fn reject_unknown_attrs(
     attrs: &[(String, String)],
     tag: &str,
@@ -2533,9 +2698,12 @@ fn reject_unknown_attrs(
     }
     Ok(())
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_overrides` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `value`: `prefix_overrides` 或 `suffix_overrides` 属性中的管道分隔 token 列表。
+/// 业务作用：读取 trim 节点的前后缀移除候选。
+///
+/// 参数说明：
+/// - `value`：prefixOverrides 或 suffixOverrides 的属性原文。
+///
+/// 返回：按竖线切分、去除各项首尾空白并丢弃空项，保留剩余项原次序，不校验其 SQL 语义。
 fn parse_overrides(value: &str) -> Vec<String> {
     value
         .split('|')
@@ -2544,11 +2712,14 @@ fn parse_overrides(value: &str) -> Vec<String> {
         .map(ToOwned::to_owned)
         .collect()
 }
-/// 业务作用：校验 Mapper DSL 的 `require_close_tag` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `close_tag`: 当前动态 SQL 节点期望匹配的闭合标签。
-/// - `expected`: 协议或状态机期望值。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：确认递归节点返回了当前开标签所要求的关闭标签。
+///
+/// 参数说明：
+/// - `close_tag`：递归解析返回的可选关闭标签名。
+/// - `expected`：当前层期望的关闭标签名。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：名称精确一致时成功，否则返回缺少匹配关闭标签的编译错误。
 fn require_close_tag(
     close_tag: Option<String>,
     expected: &str,
@@ -2562,11 +2733,14 @@ fn require_close_tag(
         )),
     }
 }
-/// 业务作用：推进 Mapper DSL 的 `next_dynamic_special` 扫描位置，同时保持引号、注释和标签边界正确。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：定位 SQL 文本之后的下一个绑定或动态标签起点。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：跳过引号片段和块注释，返回 #{ 或已知开闭标签的位置，未找到返回输入长度；词法片段未闭合返回错误，不跳过行注释。
 fn next_dynamic_special(sql: &str, pos: usize, span: proc_macro2::Span) -> syn::Result<usize> {
     let bytes = sql.as_bytes();
     let mut idx = pos;
@@ -2591,10 +2765,13 @@ fn next_dynamic_special(sql: &str, pos: usize, span: proc_macro2::Span) -> syn::
     }
     Ok(sql.len())
 }
-/// 业务作用：完成 Mapper 宏 `known_open_tag_at` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
+/// 业务作用：从支持列表识别当前动态 SQL 开标签。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+///
+/// 返回：当前起点命中已知标签及名称边界时返回静态名称，否则返回 None，不解析属性和主体。
 fn known_open_tag_at(sql: &str, pos: usize) -> Option<&'static str> {
     [
         "if",
@@ -2610,10 +2787,13 @@ fn known_open_tag_at(sql: &str, pos: usize) -> Option<&'static str> {
     .into_iter()
     .find(|tag| starts_open_tag_at(sql, pos, tag))
 }
-/// 业务作用：完成 Mapper 宏 `known_close_tag_at` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
+/// 业务作用：从支持列表识别当前动态 SQL 关闭标签。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+///
+/// 返回：当前位置精确命中已知 </tag> 时返回静态名称，否则返回 None，不容许关闭标签内增加空白。
 fn known_close_tag_at(sql: &str, pos: usize) -> Option<&'static str> {
     [
         "if",
@@ -2629,11 +2809,14 @@ fn known_close_tag_at(sql: &str, pos: usize) -> Option<&'static str> {
     .into_iter()
     .find(|tag| starts_close_tag_at(sql, pos, tag).is_some())
 }
-/// 业务作用：判定 Mapper DSL 的 `starts_open_tag_at` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
+/// 业务作用：检查开标签名称与其后分隔边界。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+///
+/// 返回：位置为有效字符边界、命中 <tag 且后续为 >、/ 或 ASCII 空白时返回 true，否则 false；不确认整个标签闭合。
 fn starts_open_tag_at(sql: &str, pos: usize, tag: &str) -> bool {
     if !sql.is_char_boundary(pos) {
         return false;
@@ -2648,11 +2831,14 @@ fn starts_open_tag_at(sql: &str, pos: usize, tag: &str) -> bool {
         .next()
         .is_some_and(|ch| ch == '>' || ch == '/' || ch.is_ascii_whitespace())
 }
-/// 业务作用：判定 Mapper DSL 的 `starts_close_tag_at` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
-/// - `tag`: 协议字段 tag 或 Redis Search 标签名。
+/// 业务作用：识别一个精确的动态 SQL 关闭标签。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+/// - `tag`：用于识别标签或定位错误的标签名称。
+///
+/// 返回：有效字符边界上精确匹配 </tag> 时返回其后位置，否则返回 None。
 fn starts_close_tag_at(sql: &str, pos: usize, tag: &str) -> Option<usize> {
     if !sql.is_char_boundary(pos) {
         return None;
@@ -2660,20 +2846,26 @@ fn starts_close_tag_at(sql: &str, pos: usize, tag: &str) -> Option<usize> {
     let close = format!("</{tag}>");
     sql[pos..].starts_with(&close).then_some(pos + close.len())
 }
-/// 业务作用：推进 Mapper DSL 的 `skip_ascii_whitespace` 扫描位置，同时保持引号、注释和标签边界正确。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `pos`: 字符串扫描位置。
+/// 业务作用：跳过动态标签之间不参与节点选择的 ASCII 空白。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `pos`：当前 SQL 模板中的有效 UTF-8 字节边界位置。
+///
+/// 返回：返回首个非 ASCII 空白的字节偏移或输入末尾，不跳过其它 Unicode 空白。
 fn skip_ascii_whitespace(sql: &str, mut pos: usize) -> usize {
     while pos < sql.len() && sql.as_bytes()[pos].is_ascii_whitespace() {
         pos += 1;
     }
     pos
 }
-/// 业务作用：收集并标记 Mapper 宏 `collect_node_binds` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `nodes`: 动态 SQL 节点列表。
-/// - `out`: 输出缓冲区,用于收集解析结果。
+/// 业务作用：按节点结构收集全部可能的 SQL 绑定，用于编译期合同检查。
+///
+/// 参数说明：
+/// - `nodes`：需要递归检查或生成签名的动态 SQL 节点序列。
+/// - `out`：接收绑定描述的可追加输出序列。
+///
+/// 返回：将各分支及循环主体的绑定副本依次追加到 out；不求值条件、不去重，排序节点不产生绑定。
 fn collect_node_binds(nodes: &[SqlNode], out: &mut Vec<BindInfo>) {
     for node in nodes {
         match node {
@@ -2708,10 +2900,13 @@ fn collect_node_binds(nodes: &[SqlNode], out: &mut Vec<BindInfo>) {
         }
     }
 }
-/// 业务作用：完成 Mapper 宏 `nodes_contain_bind_root` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `nodes`: 动态 SQL 节点列表。
-/// - `ident`: Rust 标识符。
+/// 业务作用：检查循环主体是否实际包含以指定元素为根的绑定。
+///
+/// 参数说明：
+/// - `nodes`：需要递归检查或生成签名的动态 SQL 节点序列。
+/// - `ident`：需要与方法参数或局部绑定比较的 Rust 标识。
+///
+/// 返回：任意嵌套绑定的根标识匹配时返回 true；仅在条件或排序节点中出现不算绑定。
 fn nodes_contain_bind_root(nodes: &[SqlNode], ident: &Ident) -> bool {
     nodes.iter().any(|node| match node {
         SqlNode::Text(_) => false,
@@ -2742,9 +2937,12 @@ fn nodes_contain_bind_root(nodes: &[SqlNode], ident: &Ident) -> bool {
         } => false,
     })
 }
-/// 业务作用：完成 Mapper 宏 `render_nodes_for_signature` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `nodes`: 动态 SQL 节点列表。
+/// 业务作用：生成用于 Mapper 方法静态身份的 SQL 结构文本。
+///
+/// 参数说明：
+/// - `nodes`：需要递归检查或生成签名的动态 SQL 节点序列。
+///
+/// 返回：返回不求值条件的结构串，合并全部选择分支、每个绑定写问号、foreach 保留一次主体，不是直接执行的最终 SQL。
 fn render_nodes_for_signature(nodes: &[SqlNode]) -> String {
     let mut sql = String::new();
     for node in nodes {
@@ -2794,9 +2992,12 @@ fn render_nodes_for_signature(nodes: &[SqlNode]) -> String {
     }
     sql
 }
-/// 业务作用：规范化 Mapper DSL 的 `normalize_sql_whitespace` 表达，保持语义不变并生成稳定代码。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
+/// 业务作用：规范 SQL 结构空白，保留引号与块注释内部内容。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+///
+/// 返回：返回合并 ASCII 空白并移除逗号及括号附近部分空格的文本；不验证片段闭合，不识别行注释或 PostgreSQL 美元引号。
 fn normalize_sql_whitespace(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
@@ -2912,10 +3113,13 @@ fn normalize_sql_whitespace(sql: &str) -> String {
 
     out
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_hash_key_suffix_placeholders` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `suffix`: key 后缀或文件后缀。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：读取显式缓存键后缀中的字段路径占位符。
+///
+/// 参数说明：
+/// - `suffix`：包含 {字段路径} 的缓存键后缀模板。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：返回按出现顺序排列的原名称与 Ident 路径；缺少 }、路径非法或最后剩余文本含 } 时报错，不对其它位置作通用括号配平。
 fn parse_hash_key_suffix_placeholders(
     suffix: &str,
     span: proc_macro2::Span,
@@ -2945,12 +3149,15 @@ fn parse_hash_key_suffix_placeholders(
     }
     Ok(placeholders)
 }
-/// 业务作用：校验 Mapper DSL 的 `validate_hash_key_suffix` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `suffix`: key 后缀或文件后缀。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `binds`: SQL 动态片段收集出的绑定列表。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：限制显式缓存后缀只引用 SQL 已绑定的标量路径。
+///
+/// 参数说明：
+/// - `suffix`：待验证的显式缓存键后缀模板。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `binds`：按 SQL 出现顺序排列的绑定描述。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：每个占位符根参数存在、不是集合且同名 SQL 绑定为标量时成功；否则返回编译错误，不读取参数实际值。
 fn validate_hash_key_suffix(
     suffix: &str,
     params: &[ParamInfo],
@@ -2993,13 +3200,16 @@ fn validate_hash_key_suffix(
     }
     Ok(())
 }
-/// 业务作用：校验 Mapper DSL 的 `validate_strict_params` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `binds`: SQL 动态片段收集出的绑定列表。
-/// - `dynamic`: 动态 SQL 节点或动态绑定上下文。
-/// - `hash_key_suffix`: 业务 key 或 Redis key,用于定位数据。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：拒绝声明后未在 SQL、动态条件或缓存后缀中使用的方法参数。
+///
+/// 参数说明：
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `binds`：按 SQL 出现顺序排列的绑定描述。
+/// - `dynamic`：存在动态 SQL 时携带的已解析节点计划。
+/// - `hash_key_suffix`：可选的显式缓存键后缀模板。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：收集到全部显式参数时成功，否则返回包含未用参数名的编译错误；表达式遍历是本层支持语法的静态分析，不执行条件。
 fn validate_strict_params(
     params: &[ParamInfo],
     binds: &[BindInfo],
@@ -3040,11 +3250,14 @@ fn validate_strict_params(
         ))
     }
 }
-/// 业务作用：收集并标记 Mapper 宏 `mark_used_param` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `ident`: Rust 标识符。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `used`: 已被 SQL、表达式或宏展开消费的参数集合。
+/// 业务作用：把已识别的引用根登记为方法参数使用事实。
+///
+/// 参数说明：
+/// - `ident`：需要与方法参数或局部绑定比较的 Rust 标识。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `used`：原位累积已引用方法参数名的集合。
+///
+/// 返回：标识与某个方法参数相同时加入 used，否则不改变集合。
 fn mark_used_param(
     ident: &Ident,
     params: &[ParamInfo],
@@ -3054,11 +3267,14 @@ fn mark_used_param(
         used.insert(ident.to_string());
     }
 }
-/// 业务作用：收集并标记 Mapper 宏 `collect_dynamic_used_params` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `nodes`: 动态 SQL 节点列表。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `used`: 已被 SQL、表达式或宏展开消费的参数集合。
+/// 业务作用：遍历动态 SQL 的绑定、条件、循环集合与排序引用。
+///
+/// 参数说明：
+/// - `nodes`：需要递归检查或生成签名的动态 SQL 节点序列。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `used`：原位累积已引用方法参数名的集合。
+///
+/// 返回：将可识别的显式参数引用原位合并进 used，不求值条件、不生成 SQL。
 fn collect_dynamic_used_params(
     nodes: &[SqlNode],
     params: &[ParamInfo],
@@ -3103,11 +3319,14 @@ fn collect_dynamic_used_params(
         }
     }
 }
-/// 业务作用：收集并标记 Mapper 宏 `collect_expr_used_params` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `expr`: Rust 表达式 AST,用于宏期分析。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `used`: 已被 SQL、表达式或宏展开消费的参数集合。
+/// 业务作用：从动态条件的最外层启动参数引用收集。
+///
+/// 参数说明：
+/// - `expr`：需要遍历的动态条件 Rust 表达式。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `used`：原位累积已引用方法参数名的集合。
+///
+/// 返回：使用空局部遮蔽集遍历表达式，将识别到的参数名加入 used；不执行表达式。
 fn collect_expr_used_params(
     expr: &Expr,
     params: &[ParamInfo],
@@ -3116,12 +3335,15 @@ fn collect_expr_used_params(
     let mut shadowed = ::std::collections::HashSet::new();
     collect_expr_used_params_inner(expr, params, used, &mut shadowed);
 }
-/// 业务作用：收集并标记 Mapper 宏 `collect_expr_used_params_inner` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `expr`: Rust 表达式 AST,用于宏期分析。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `used`: 已被 SQL、表达式或宏展开消费的参数集合。
-/// - `shadowed`: 当前作用域内被局部变量遮蔽的参数名集合。
+/// 业务作用：遍历受支持的 Rust 表达式并区分方法参数与局部同名绑定。
+///
+/// 参数说明：
+/// - `expr`：需要遍历的动态条件 Rust 表达式。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `used`：原位累积已引用方法参数名的集合。
+/// - `shadowed`：当前作用域内已遮蔽方法参数同名引用的局部名称集合。
+///
+/// 返回：将未遮蔽引用加入 used，闭包、匹配分支和循环使用局部遮蔽副本；未匹配的表达式类型跳过。宏仅扫描 token 标识，不能完整推断宏展开与所有 Rust 作用域语义。
 fn collect_expr_used_params_inner(
     expr: &Expr,
     params: &[ParamInfo],
@@ -3290,12 +3512,15 @@ fn collect_expr_used_params_inner(
         _ => {}
     }
 }
-/// 业务作用：收集并标记 Mapper 宏 `mark_used_param_unshadowed` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `ident`: Rust 标识符。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `used`: 已被 SQL、表达式或宏展开消费的参数集合。
-/// - `shadowed`: 当前作用域内被局部变量遮蔽的参数名集合。
+/// 业务作用：避免把已经由局部绑定接管的名字算作方法参数使用。
+///
+/// 参数说明：
+/// - `ident`：需要与方法参数或局部绑定比较的 Rust 标识。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `used`：原位累积已引用方法参数名的集合。
+/// - `shadowed`：当前作用域内已遮蔽方法参数同名引用的局部名称集合。
+///
+/// 返回：名称未在 shadowed 中时委托登记，已遮蔽时不改变 used。
 fn mark_used_param_unshadowed(
     ident: &Ident,
     params: &[ParamInfo],
@@ -3306,12 +3531,15 @@ fn mark_used_param_unshadowed(
         mark_used_param(ident, params, used);
     }
 }
-/// 业务作用：收集并标记 Mapper 宏 `collect_block_used_params` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `block`: mapper 方法体中的 Rust block AST。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `used`: 已被 SQL、表达式或宏展开消费的参数集合。
-/// - `shadowed`: 当前作用域内被局部变量遮蔽的参数名集合。
+/// 业务作用：按语句顺序收集代码块引用并限制局部名称的遮蔽范围。
+///
+/// 参数说明：
+/// - `block`：待遍历的条件表达式代码块。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `used`：原位累积已引用方法参数名的集合。
+/// - `shadowed`：当前作用域内已遮蔽方法参数同名引用的局部名称集合。
+///
+/// 返回：克隆进入块时的遮蔽集，顺序处理局部声明、表达式和宏；忽略 item，块内新增遮蔽不写回外层，但参数使用事实合并到 used。
 fn collect_block_used_params(
     block: &syn::Block,
     params: &[ParamInfo],
@@ -3334,12 +3562,15 @@ fn collect_block_used_params(
         }
     }
 }
-/// 业务作用：收集并标记 Mapper 宏 `collect_local_used_params` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `local`: 本地变量或模式绑定是否来自当前作用域。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `used`: 已被 SQL、表达式或宏展开消费的参数集合。
-/// - `shadowed`: 当前作用域内被局部变量遮蔽的参数名集合。
+/// 业务作用：先检查局部声明的初始化引用，再登记其绑定名称。
+///
+/// 参数说明：
+/// - `local`：待分析的 let 局部声明。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `used`：原位累积已引用方法参数名的集合。
+/// - `shadowed`：当前作用域内已遮蔽方法参数同名引用的局部名称集合。
+///
+/// 返回：收集初始化及 let-else 分歧表达式的参数引用，然后更新 shadowed；不求值声明。
 fn collect_local_used_params(
     local: &Local,
     params: &[ParamInfo],
@@ -3354,10 +3585,13 @@ fn collect_local_used_params(
     }
     collect_pat_shadowed_params(&local.pat, shadowed);
 }
-/// 业务作用：收集并标记 Mapper 宏 `collect_pat_shadowed_params` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `pat`: 过程宏正在分析的模式节点。
-/// - `shadowed`: 当前作用域内被局部变量遮蔽的参数名集合。
+/// 业务作用：收集模式绑定的局部名称，供后续参数引用排除。
+///
+/// 参数说明：
+/// - `pat`：闭包、分支、循环或局部声明中的 Rust 模式。
+/// - `shadowed`：当前作用域内已遮蔽方法参数同名引用的局部名称集合。
+///
+/// 返回：递归将支持模式中的 Ident 名称加入 shadowed，忽略通配及其它未处理模式，不检查这些名字是否属于方法参数。
 fn collect_pat_shadowed_params(pat: &Pat, shadowed: &mut ::std::collections::HashSet<String>) {
     match pat {
         Pat::Ident(PatIdent {
@@ -3401,12 +3635,15 @@ fn collect_pat_shadowed_params(pat: &Pat, shadowed: &mut ::std::collections::Has
         _ => {}
     }
 }
-/// 业务作用：收集并标记 Mapper 宏 `collect_tokens_used_params` 阶段使用的参数信息，供严格参数校验与代码生成复用。
-/// # 参数
-/// - `tokens`: 过程宏生成或解析的 token 流。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `used`: 已被 SQL、表达式或宏展开消费的参数集合。
-/// - `shadowed`: 当前作用域内被局部变量遮蔽的参数名集合。
+/// 业务作用：保守检查宏 token 中可见的未遮蔽参数名。
+///
+/// 参数说明：
+/// - `tokens`：动态条件内宏调用的参数 token。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `used`：原位累积已引用方法参数名的集合。
+/// - `shadowed`：当前作用域内已遮蔽方法参数同名引用的局部名称集合。
+///
+/// 返回：递归扫描 token 组中的 Ident 并合并使用事实，忽略字面量与标点；不展开宏，不区分宏内新绑定和引用。
 fn collect_tokens_used_params(
     tokens: &TokenStream2,
     params: &[ParamInfo],
@@ -3426,6 +3663,7 @@ fn collect_tokens_used_params(
     }
 }
 /// 业务作用：在原方法体外建立唯一逻辑调用边界，收口缓存提前返回、执行前拒绝及取消。
+///
 /// 参数说明：
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `key_expr`: 业务 key 或 Redis key,用于定位数据。
@@ -3476,11 +3714,14 @@ fn gen_method(
     });
     Ok(quote! { #method })
 }
-/// 业务作用：生成 Mapper 宏 `gen_query_method` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `key_expr`: 业务 key 或 Redis key,用于定位数据。
-/// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
+/// 业务作用：生成查询方法的数据库、缓存加载及失效编排。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `key_expr`：生成代码中 Mapper 缓存命名空间的表达式 token。
+/// - `plan`：已经解析并通过上层合同检查的 SQL 方法执行计划。
+///
+/// 返回：成功返回方法实现；返回类型或绑定不符合生成条件时报错。缓存成功会提前返回，普通数据库尾路径才执行其后的失效片段；宏展开阶段不执行查询。
 fn gen_query_method(
     root: &TokenStream2,
     key_expr: &TokenStream2,
@@ -3589,7 +3830,8 @@ fn gen_query_method(
     })
 }
 /// 业务作用：生成持有受控连接的 Mapper 行流，并在 SQLite 流交付前登记来源消费预算。
-/// # 参数
+///
+/// 参数说明：
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
 ///
@@ -3642,11 +3884,14 @@ fn gen_stream_method(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<Toke
         }
     })
 }
-/// 业务作用：生成 Mapper 宏 `gen_write_method` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `key_expr`: 业务 key 或 Redis key,用于定位数据。
-/// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
+/// 业务作用：生成写方法的受控连接、执行计量和成功后缓存失效流程。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `key_expr`：生成代码中 Mapper 缓存命名空间的表达式 token。
+/// - `plan`：已经解析并通过上层合同检查的 SQL 方法执行计划。
+///
+/// 返回：返回写方法 token；按成功返回类型选择空值、影响行数或 sqlx 执行结果，绑定不合法时报错，其余类型兼容性留给 Rust 编译检查。
 fn gen_write_method(
     root: &TokenStream2,
     key_expr: &TokenStream2,
@@ -3725,10 +3970,13 @@ enum FetchMode<'a> {
     /// 读取单列标量值。
     Scalar(&'a Type),
 }
-/// 业务作用：完成 Mapper 宏 `fetch_mode` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
-/// - `result_ty`: mapper 方法最终返回的结果类型。
+/// 业务作用：根据显式 fetch 声明或返回类型推导查询取数模式。
+///
+/// 参数说明：
+/// - `plan`：已经解析并通过上层合同检查的 SQL 方法执行计划。
+/// - `result_ty`：Result 成功分支的返回类型。
+///
+/// 返回：返回借用目标行类型的模式；Vec、Option、单行及标量声明不匹配时失败。按语法末段识别容器和常见标量，不解析类型别名。
 fn fetch_mode<'a>(plan: &MethodPlan, result_ty: &'a Type) -> syn::Result<FetchMode<'a>> {
     if let Some(fetch) = &plan.fetch {
         return match fetch.as_str() {
@@ -3783,10 +4031,13 @@ fn fetch_mode<'a>(plan: &MethodPlan, result_ty: &'a Type) -> syn::Result<FetchMo
         Ok(FetchMode::One(result_ty))
     }
 }
-/// 业务作用：校验 Mapper DSL 的 `reject_container_fetch_ty` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
-/// - `msg`: 业务消息体或事件载荷。
+/// 业务作用：限制单行或标量查询不得使用集合或可选容器返回形态。
+///
+/// 参数说明：
+/// - `ty`：需要按语法形态识别的 Rust 类型。
+/// - `msg`：不符合单行模式时展示的编译错误说明。
+///
+/// 返回：末段是带类型参数的 Vec 或 Option 时返回指定错误，其它形态成功，不做完整类型解析。
 fn reject_container_fetch_ty(ty: &Type, msg: &str) -> syn::Result<()> {
     if first_generic_inner(ty, "Vec").is_some() || first_generic_inner(ty, "Option").is_some() {
         return Err(syn::Error::new_spanned(ty, msg));
@@ -3794,6 +4045,7 @@ fn reject_container_fetch_ty(ty: &Type, msg: &str) -> syn::Result<()> {
     Ok(())
 }
 /// 业务作用：只围绕真实 SQLx future 记录数据库时长、原始错误类别与准确返回行数。
+///
 /// 参数说明：
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
@@ -3844,11 +4096,14 @@ fn query_tokens(
         __mapper_db_result
     } })
 }
-/// 业务作用：生成 Mapper 宏 `query_builder_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
-/// - `fetch`: 本次发现或 HTTP 取数操作的结果。
+/// 业务作用：生成运行时类型化查询并按计划添加绑定。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `plan`：已经解析并通过上层合同检查的 SQL 方法执行计划。
+/// - `fetch`：已选定的行集合、可选单行、单行或标量模式。
+///
+/// 返回：标量模式使用 query_scalar，其它使用 query_as；动态或静态绑定生成失败时返回错误，成功结果仍需后续执行。
 fn query_builder_tokens(
     root: &TokenStream2,
     plan: &MethodPlan,
@@ -3877,11 +4132,14 @@ fn query_builder_tokens(
     };
     Ok(parameter_query_tokens(root, query))
 }
-/// 业务作用：生成 Mapper 宏 `checked_query_builder_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
-/// - `fetch`: 本次发现或 HTTP 取数操作的结果。
+/// 业务作用：生成由 sqlx 宏检查静态 SQL 的查询表达式。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `plan`：已经解析并通过上层合同检查的 SQL 方法执行计划。
+/// - `fetch`：已选定的行集合、可选单行、单行或标量模式。
+///
+/// 返回：返回 query_scalar! 或 query_as! 及参数捕获包装 token；绑定缺失时报错，SQL 检查在生成代码编译阶段完成，不在本函数访问数据库。
 fn checked_query_builder_tokens(
     root: &TokenStream2,
     plan: &MethodPlan,
@@ -3914,11 +4172,14 @@ fn checked_query_builder_tokens(
     };
     Ok(parameter_query_tokens(root, query))
 }
-/// 业务作用：生成 Mapper 宏 `stream_query_builder_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
-/// - `row_ty`: 数据库行转换时使用的业务结构类型。
+/// 业务作用：生成流式查询使用的拥有值绑定表达式。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `plan`：已经解析并通过上层合同检查的 SQL 方法执行计划。
+/// - `row_ty`：流中每行应解码为的 Rust 类型。
+///
+/// 返回：返回 query_as 与流式绑定包装 token；绑定缺失时报错，不在此处取数。
 fn stream_query_builder_tokens(
     root: &TokenStream2,
     plan: &MethodPlan,
@@ -3934,10 +4195,13 @@ fn stream_query_builder_tokens(
         apply_stream_binds_tokens(query, &plan.binds, &plan.params)?,
     ))
 }
-/// 业务作用：生成 Mapper 宏 `write_query_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
+/// 业务作用：生成写 SQL 的 sqlx 查询及绑定表达式。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `plan`：已经解析并通过上层合同检查的 SQL 方法执行计划。
+///
+/// 返回：返回静态或动态绑定完成的查询 token，绑定生成失败时报错；执行和事务提交由调用方法及运行时负责。
 fn write_query_tokens(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<TokenStream2> {
     let query = quote! {
         #root::__private::sqlx::query(
@@ -3953,7 +4217,11 @@ fn write_query_tokens(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<Tok
 }
 
 /// 业务作用：为实际构造的 prepared query 提供独立参数预算，不在缓存命中路径格式化参数。
-/// 参数说明：`root` 为运行时路径，`query` 为原有 SQLx 查询构造表达式。
+///
+/// 参数说明：
+/// - `root`：为运行时路径
+/// - `query`：为原有 SQLx 查询构造表达式。
+///
 /// 返回：保持查询类型和参数所有权不变的表达式，绑定完成后发送开发参数事件。
 fn parameter_query_tokens(root: &TokenStream2, query: TokenStream2) -> TokenStream2 {
     quote! {{
@@ -3966,6 +4234,7 @@ fn parameter_query_tokens(root: &TokenStream2, query: TokenStream2) -> TokenStre
     }}
 }
 /// 业务作用：按 prepared 占位符顺序绑定标量或列表，并在不重复求值的前提下采集开发参数。
+///
 /// 参数说明：
 /// - `query`: 查询对象或 query 参数集合。
 /// - `binds`: SQL 动态片段收集出的绑定列表。
@@ -4007,6 +4276,7 @@ fn apply_binds_tokens(
     Ok(query)
 }
 /// 业务作用：让结果流拥有其 bind 材料，并保持开发显示不改变传入 SQLx 的值。
+///
 /// 参数说明：
 /// - `query`: 查询对象或 query 参数集合。
 /// - `binds`: SQL 动态片段收集出的绑定列表。
@@ -4030,11 +4300,14 @@ fn apply_stream_binds_tokens(
     }
     Ok(query)
 }
-/// 业务作用：生成 Mapper 宏 `apply_dynamic_binds_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `query`: 查询对象或 query 参数集合。
-/// - `dynamic`: 动态 SQL 节点或动态绑定上下文。
-/// - `params`: 已解析的函数参数或宏参数列表。
+/// 业务作用：将动态 SQL 节点对应的运行时绑定步骤包入查询表达式。
+///
+/// 参数说明：
+/// - `query`：待追加绑定的 sqlx 查询表达式 token。
+/// - `dynamic`：存在动态 SQL 时携带的已解析节点计划。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+///
+/// 返回：返回依次更新并交回查询对象的 token；子节点绑定生成失败时返回错误，不在宏展开时求值条件。
 fn apply_dynamic_binds_tokens(
     query: TokenStream2,
     dynamic: &DynamicSqlPlan,
@@ -4049,11 +4322,14 @@ fn apply_dynamic_binds_tokens(
         }
     })
 }
-/// 业务作用：生成 Mapper 宏 `dynamic_bind_steps_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `nodes`: 动态 SQL 节点列表。
-/// - `params`: 已解析的函数参数或宏参数列表。
-/// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
+/// 业务作用：按动态节点控制流生成匹配 SQL 结构的绑定步骤。
+///
+/// 参数说明：
+/// - `nodes`：需要递归检查或生成签名的动态 SQL 节点序列。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+/// - `local_items`：当前可引用的外层 foreach 局部元素标识。
+///
+/// 返回：返回条件、选择和循环对应的绑定 token；非法绑定传播错误。条件在生成代码执行时求值，排序与固定文本不增加值绑定。
 fn dynamic_bind_steps_tokens(
     nodes: &[SqlNode],
     params: &[ParamInfo],
@@ -4125,6 +4401,7 @@ fn dynamic_bind_steps_tokens(
     Ok(quote! { #(#steps)* })
 }
 /// 业务作用：对已选中的动态 SQL 节点绑定真实参数，仅将实际进入查询的值记入开发事件。
+///
 /// 参数说明：
 /// - `bind`: SQL 占位符绑定信息。
 /// - `params`: 已解析的函数参数或宏参数列表。
@@ -4162,7 +4439,8 @@ fn dynamic_bind_one_token(
     }
 }
 /// 业务作用：生成 Mapper 宏 `sql_init_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
+///
+/// 参数说明：
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
@@ -4239,10 +4517,12 @@ fn raw_sql_init_tokens(
     }
 }
 /// 业务作用：生成最终 SQL，并在 SQLite 缓存命中前执行真实只读权限验证。
+///
 /// 参数说明：
 /// - `root`：当前后端 runtime。
 /// - `plan`：方法 SQL 和缓存合同。
 /// - `span`：调用方源码位置。
+///
 /// 返回：SQL 构建与必要的执行前门禁代码。
 fn sql_init_tokens(
     root: &TokenStream2,
@@ -4258,7 +4538,8 @@ fn sql_init_tokens(
 }
 
 /// 业务作用：生成 Mapper 宏 `dynamic_sql_init_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
+///
+/// 参数说明：
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `dynamic`: 动态 SQL 节点或动态绑定上下文。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
@@ -4288,7 +4569,8 @@ fn dynamic_sql_init_tokens(
     }
 }
 /// 业务作用：生成 Mapper 宏 `push_dynamic_sql_nodes_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
+///
+/// 参数说明：
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `nodes`: 动态 SQL 节点列表。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
@@ -4444,10 +4726,13 @@ fn push_dynamic_sql_nodes_tokens(
     }
     quote! { #(#parts)* }
 }
-/// 业务作用：生成 Mapper 宏 `build_hash_key_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
+/// 业务作用：生成基于规范 SQL 和当前绑定值的缓存键构造表达式。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `plan`：已经解析并通过上层合同检查的 SQL 方法执行计划。
+///
+/// 返回：返回结果为 Option 的运行时代码；构键失败记录分类指标，Strict 提前返回调用错误，Bypass 返回 None。动态条件会在构键时再次求值，表达式应由调用方保持无副作用与稳定。
 fn build_hash_key_tokens(root: &TokenStream2, plan: &MethodPlan) -> TokenStream2 {
     let args = if let Some(dynamic) = &plan.dynamic {
         dynamic_cache_arg_steps_tokens(root, &dynamic.nodes, &[])
@@ -4511,11 +4796,14 @@ fn build_hash_key_tokens(root: &TokenStream2, plan: &MethodPlan) -> TokenStream2
         }
     }
 }
-/// 业务作用：生成 Mapper 宏 `dynamic_cache_arg_steps_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `nodes`: 动态 SQL 节点列表。
-/// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
+/// 业务作用：按动态节点控制流生成缓存参数收集代码。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `nodes`：需要递归检查或生成签名的动态 SQL 节点序列。
+/// - `local_items`：当前可引用的外层 foreach 局部元素标识。
+///
+/// 返回：返回仅在运行时选中分支和循环迭代中追加参数的 token；不在宏展开时序列化，不保证与其它阶段反复求值的条件天然一致。
 fn dynamic_cache_arg_steps_tokens(
     root: &TokenStream2,
     nodes: &[SqlNode],
@@ -4586,11 +4874,14 @@ fn dynamic_cache_arg_steps_tokens(
     }
     quote! { #(#steps)* }
 }
-/// 业务作用：生成 Mapper 宏 `dynamic_cache_arg_one_token` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `bind`: SQL 占位符绑定信息。
-/// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
+/// 业务作用：为单个动态绑定生成缓存键参数收集代码。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `bind`：根参数、字段路径、原名称与标量或列表种类组成的绑定描述。
+/// - `local_items`：当前可引用的外层 foreach 局部元素标识。
+///
+/// 返回：标量添加一个 CacheArg，列表逐项添加；本地 foreach 元素按其借用形态访问，运行时参数编码失败通过 ? 传播。
 fn dynamic_cache_arg_one_token(
     root: &TokenStream2,
     bind: &BindInfo,
@@ -4618,14 +4909,17 @@ fn dynamic_cache_arg_one_token(
         }
     }
 }
-/// 业务作用：生成 Mapper 宏 `cache_get_or_load_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `cache_ty`: mapper 缓存层注入的缓存实现类型。
-/// - `cache_errors`: 缓存读写错误处理策略。
-/// - `conn`: 生成代码里传给 mapper 缓存层的数据库连接表达式。
-/// - `query`: 查询对象或 query 参数集合。
-/// - `typed_cache_codec`: 强类型缓存使用的 codec 表达式。
+/// 业务作用：生成 L2 缓存读取、数据库加载和编码回写编排。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `cache_ty`：缓存解码后需要恢复的查询成功返回类型。
+/// - `cache_errors`：缓存失败时采用严格返回还是绕过策略。
+/// - `conn`：数据库加载时获取受控连接的表达式。
+/// - `query`：待追加绑定的 sqlx 查询表达式 token。
+/// - `typed_cache_codec`：可选的强类型 codec 工厂路径，存在时选择强类型编解码分支。
+///
+/// 返回：返回运行时代码：有缓存与键时委托 get_or_load，成功提前返回值；Strict 对加载或解码失败报错，Bypass 可复用已取数据库值或落回后续查询。旧格式回写失败只告警，不覆盖已解码结果。
 fn cache_get_or_load_tokens(
     root: &TokenStream2,
     cache_ty: &Type,
@@ -4957,11 +5251,14 @@ fn cache_get_or_load_tokens(
         }
     }
 }
-/// 业务作用：生成 Mapper 宏 `cache_get_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `cache_ty`: mapper 缓存层注入的缓存实现类型。
-/// - `cache_errors`: 缓存读写错误处理策略。
+/// 业务作用：生成单独的 L2 缓存读取和解码短路代码。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `cache_ty`：缓存解码后需要恢复的查询成功返回类型。
+/// - `cache_errors`：缓存失败时采用严格返回还是绕过策略。
+///
+/// 返回：返回运行时代码：命中并解码成功时提前返回；未命中继续后续路径，读取或解码失败按 Strict 返回错误或按 Bypass 继续。
 #[allow(dead_code)]
 fn cache_get_tokens(
     root: &TokenStream2,
@@ -5089,10 +5386,13 @@ fn cache_get_tokens(
         }
     }
 }
-/// 业务作用：生成 Mapper 宏 `cache_put_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `cache_errors`: 缓存读写错误处理策略。
+/// 业务作用：生成查询成功值的缓存编码与写回代码。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `cache_errors`：缓存失败时采用严格返回还是绕过策略。
+///
+/// 返回：返回运行时代码：缓存与键存在时编码并写回；失败按 Strict 提前报错或按 Bypass 保留来源值，宏展开阶段不写缓存。
 #[allow(dead_code)]
 fn cache_put_tokens(root: &TokenStream2, cache_errors: CacheErrors) -> TokenStream2 {
     let encode_err = if cache_errors.is_strict() {
@@ -5201,12 +5501,15 @@ fn cache_put_tokens(root: &TokenStream2, cache_errors: CacheErrors) -> TokenStre
         }
     }
 }
-/// 业务作用：生成 Mapper 宏 `clear_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `key_expr`: 业务 key 或 Redis key,用于定位数据。
-/// - `flush_cache`: 写方法完成后需要刷新的缓存声明。
-/// - `flush_refs`: 写方法完成后需要刷新的关联缓存引用。
+/// 业务作用：生成写入成功后的命名空间及引用缓存失效步骤。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `key_expr`：生成代码中 Mapper 缓存命名空间的表达式 token。
+/// - `flush_cache`：是否生成当前缓存命名空间的失效步骤。
+/// - `flush_refs`：是否把引用当前命名空间的关联缓存纳入失效目标。
+///
+/// 返回：flush_cache 为 false 时返回空 token，否则生成目标解析及交由运行时延后到提交或立即失效的异步调用；失败以 ? 传播，不等于数据库操作回滚。
 fn clear_tokens(
     root: &TokenStream2,
     key_expr: &TokenStream2,
@@ -5222,13 +5525,15 @@ fn clear_tokens(
         quote! {}
     }
 }
-/// 业务作用：生成 Mapper 宏 `conn_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `tx`: 后台任务发送消息的通道或事务句柄。
-/// - `datasource`: mapper 方法绑定的数据源名称。
+/// 业务作用：按数据库后端和事务要求生成连接获取表达式。
 ///
-/// 返回：按事务模式和 datasource 选定默认、强制事务或拒绝事务连接入口的 token。
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `tx`：自动参与、必须存在或禁止存在事务的连接模式。
+/// - `datasource`：已校验的可选具名数据源名称。
+/// - `backend`：生成代码绑定的数据库后端。
+///
+/// 返回：SQLite 从受管 source 获取连接；其它后端使用具名数据源，缺省为 default，并按 Auto、Mandatory 或 Never 选择入口。获取失败由生成代码传播，不在宏展开时建连。
 fn conn_tokens(
     root: &TokenStream2,
     tx: TxMode,
@@ -5256,10 +5561,13 @@ fn conn_tokens(
         __mapper_connection
     }}
 }
-/// 业务作用：完成 Mapper 宏 `bind_expr` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `bind`: SQL 占位符绑定信息。
-/// - `params`: 已解析的函数参数或宏参数列表。
+/// 业务作用：为普通查询生成不转移参数所有权的绑定表达式。
+///
+/// 参数说明：
+/// - `bind`：根参数、字段路径、原名称与标量或列表种类组成的绑定描述。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+///
+/// 返回：顶层引用参数直接使用，其它顶层参数及字段路径加借用；根参数不存在时返回编译错误，不检查字段是否存在。
 fn bind_expr(bind: &BindInfo, params: &[ParamInfo]) -> syn::Result<TokenStream2> {
     let ident = &bind.root;
     let param = params
@@ -5276,10 +5584,13 @@ fn bind_expr(bind: &BindInfo, params: &[ParamInfo]) -> syn::Result<TokenStream2>
         Ok(quote! { &#ident })
     }
 }
-/// 业务作用：完成 Mapper 宏 `stream_bind_expr` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `bind`: SQL 占位符绑定信息。
-/// - `params`: 已解析的函数参数或宏参数列表。
+/// 业务作用：为流式查询生成可由查询持有的绑定值。
+///
+/// 参数说明：
+/// - `bind`：根参数、字段路径、原名称与标量或列表种类组成的绑定描述。
+/// - `params`：Mapper 方法的已解析显式参数及其类型信息。
+///
+/// 返回：字段路径生成 clone，顶层引用生成 to_owned，拥有参数直接使用；未知根参数报错，Clone 与编码能力由后续编译验证。
 fn stream_bind_expr(bind: &BindInfo, params: &[ParamInfo]) -> syn::Result<TokenStream2> {
     let ident = &bind.root;
     let param = params
@@ -5296,16 +5607,22 @@ fn stream_bind_expr(bind: &BindInfo, params: &[ParamInfo]) -> syn::Result<TokenS
         Ok(quote! { #ident })
     }
 }
-/// 业务作用：完成 Mapper 宏 `bind_value_expr` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `bind`: SQL 占位符绑定信息。
+/// 业务作用：生成用于缓存参数编码的字段值借用。
+///
+/// 参数说明：
+/// - `bind`：根参数、字段路径、原名称与标量或列表种类组成的绑定描述。
+///
+/// 返回：返回完整字段访问表达式的借用 token，不验证字段或类型。
 fn bind_value_expr(bind: &BindInfo) -> TokenStream2 {
     let value = bind_access_tokens(bind);
     quote! { &#value }
 }
-/// 业务作用：完成 Mapper 宏 `foreach_item_bind_expr` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `bind`: SQL 占位符绑定信息。
+/// 业务作用：为迭代元素生成适合 SQL 绑定的借用形态。
+///
+/// 参数说明：
+/// - `bind`：根参数、字段路径、原名称与标量或列表种类组成的绑定描述。
+///
+/// 返回：无字段路径时直接使用元素标识，存在字段路径时借用该字段；不额外查验作用域。
 fn foreach_item_bind_expr(bind: &BindInfo) -> TokenStream2 {
     let value = bind_access_tokens(bind);
     if bind.path.is_empty() {
@@ -5314,15 +5631,21 @@ fn foreach_item_bind_expr(bind: &BindInfo) -> TokenStream2 {
         quote! { &#value }
     }
 }
-/// 业务作用：完成 Mapper 宏 `foreach_item_bind_value_expr` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `bind`: SQL 占位符绑定信息。
+/// 业务作用：为迭代元素生成与 SQL 绑定一致的缓存参数表达式。
+///
+/// 参数说明：
+/// - `bind`：根参数、字段路径、原名称与标量或列表种类组成的绑定描述。
+///
+/// 返回：原样返回 foreach_item_bind_expr 的 token，不求值或序列化。
 fn foreach_item_bind_value_expr(bind: &BindInfo) -> TokenStream2 {
     foreach_item_bind_expr(bind)
 }
-/// 业务作用：生成 Mapper 宏 `bind_access_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `bind`: SQL 占位符绑定信息。
+/// 业务作用：把绑定根和字段路径组合为 Rust 访问表达式。
+///
+/// 参数说明：
+/// - `bind`：根参数、字段路径、原名称与标量或列表种类组成的绑定描述。
+///
+/// 返回：返回逐段字段访问 token，不验证根作用域、字段存在性或访问权限。
 fn bind_access_tokens(bind: &BindInfo) -> TokenStream2 {
     let root = &bind.root;
     let mut value = quote! { #root };
@@ -5331,11 +5654,14 @@ fn bind_access_tokens(bind: &BindInfo) -> TokenStream2 {
     }
     value
 }
-/// 业务作用：生成 Mapper 宏 `cache_arg_steps_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `binds`: SQL 动态片段收集出的绑定列表。
-/// - `foreach_item`: foreach 动态 SQL 当前循环项变量名。
+/// 业务作用：为静态绑定顺序生成缓存键参数编码步骤。
+///
+/// 参数说明：
+/// - `root`：宏展开代码应引用的目标 Mapper 运行时路径 token。
+/// - `binds`：按 SQL 出现顺序排列的绑定描述。
+/// - `foreach_item`：当前可选的 foreach 元素根标识。
+///
+/// 返回：标量追加一次，列表按迭代顺序逐项追加；匹配 foreach_item 时保留元素借用形态，生成代码中的编码失败通过 ? 传播。
 fn cache_arg_steps_tokens(
     root: &TokenStream2,
     binds: &[BindInfo],
@@ -5366,9 +5692,12 @@ fn cache_arg_steps_tokens(
     });
     quote! { #(#steps)* }
 }
-/// 业务作用：完成 Mapper 宏 `result_inner` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `output`: 过程宏拼装后的代码输出 token 流。
+/// 业务作用：提取 Mapper 方法 Result 成功类型，供后续取数模式选择。
+///
+/// 参数说明：
+/// - `output`：Mapper 方法签名中的返回类型声明。
+///
+/// 返回：返回末段名为 Result 的路径类型首个类型实参；省略返回值或不匹配时报错。不要求路径确为 anyhow，也不校验额外泛型参数。
 fn result_inner(output: &ReturnType) -> syn::Result<&Type> {
     let ReturnType::Type(_, ty) = output else {
         return Err(syn::Error::new_spanned(
@@ -5379,10 +5708,13 @@ fn result_inner(output: &ReturnType) -> syn::Result<&Type> {
     first_generic_inner(ty, "Result")
         .ok_or_else(|| syn::Error::new_spanned(ty, "Mapper 方法必须返回 anyhow::Result<T>"))
 }
-/// 业务作用：完成 Mapper 宏 `first_generic_inner` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+/// 业务作用：按语法末段名称读取容器的首个类型参数。
+///
+/// 参数说明：
+/// - `ty`：需要按语法形态识别的 Rust 类型。
+/// - `name`：希望匹配的容器末段名称。
+///
+/// 返回：路径末段名匹配且首个角括号实参为类型时返回借用，否则返回 None，不解析类型别名或完整路径身份。
 fn first_generic_inner<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
     let Type::Path(TypePath {
         path,
@@ -5407,16 +5739,22 @@ fn first_generic_inner<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
         _ => None,
     }
 }
-/// 业务作用：判定 Mapper DSL 的 `is_unit` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
+/// 业务作用：识别无需向调用方返回执行结果的空元组类型。
+///
+/// 参数说明：
+/// - `ty`：需要按语法形态识别的 Rust 类型。
+///
+/// 返回：仅空 Type::Tuple 返回 true，其它形态返回 false，不展开类型别名。
 fn is_unit(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(tuple) if tuple.elems.is_empty())
 }
-/// 业务作用：判定 Mapper DSL 的 `is_type_ident` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+/// 业务作用：按路径末段识别生成代码关心的返回类型名称。
+///
+/// 参数说明：
+/// - `ty`：需要按语法形态识别的 Rust 类型。
+/// - `name`：期望匹配的类型末段名称。
+///
+/// 返回：路径类型末段标识匹配时返回 true，不核实路径来源、泛型或类型别名。
 fn is_type_ident(ty: &Type, name: &str) -> bool {
     let Type::Path(TypePath {
         path,
@@ -5429,9 +5767,12 @@ fn is_type_ident(ty: &Type, name: &str) -> bool {
         .last()
         .is_some_and(|segment| segment.ident == name)
 }
-/// 业务作用：判定 Mapper DSL 的 `is_scalar_type` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
+/// 业务作用：识别需要显式声明 scalar 取数的常见标量名称。
+///
+/// 参数说明：
+/// - `ty`：需要按语法形态识别的 Rust 类型。
+///
+/// 返回：路径末段为内置数值、bool 或 String 白名单时返回 true；引用、别名及其它类型返回 false，不做类型解析。
 fn is_scalar_type(ty: &Type) -> bool {
     let Type::Path(TypePath {
         path,
@@ -5463,9 +5804,12 @@ fn is_scalar_type(ty: &Type) -> bool {
             | "String"
     )
 }
-/// 业务作用：判定 Mapper DSL 的 `is_collection_type` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
+/// 业务作用：按声明语法识别用于列表绑定的集合形态。
+///
+/// 参数说明：
+/// - `ty`：需要按语法形态识别的 Rust 类型。
+///
+/// 返回：引用递归解包，切片、数组及路径末段 Vec 或 VecDeque 返回 true；其它返回 false，不验证泛型和别名。
 fn is_collection_type(ty: &Type) -> bool {
     match ty {
         Type::Reference(reference) => is_collection_type(&reference.elem),
@@ -5479,11 +5823,14 @@ fn is_collection_type(ty: &Type) -> bool {
         _ => false,
     }
 }
-/// 业务作用：判定 Mapper DSL 的 `is_in_list_placeholder` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
-/// - `start`: 起始位置或范围下界。
-/// - `end`: 结束位置或范围上界。
+/// 业务作用：识别模板占位符是否独占 IN 后的一对括号内容。
+///
+/// 参数说明：
+/// - `sql`：方法声明中的 SQL 模板原文。
+/// - `start`：待识别片段起始的有效 UTF-8 字节边界位置。
+/// - `end`：占位符结束之后的有效字节偏移。
+///
+/// 返回：前方忽略空白后为 IN 关键字加左括号，后方忽略空白后为右括号时返回 true；否则 false。start/end 必须是有效占位符字节范围，本检查不是完整 SQL 解析。
 fn is_in_list_placeholder(sql: &str, start: usize, end: usize) -> bool {
     let before = &sql[..start];
     let before_trimmed = before.trim_end();
@@ -5498,10 +5845,13 @@ fn is_in_list_placeholder(sql: &str, start: usize, end: usize) -> bool {
 
     sql[end..].trim_start().starts_with(')')
 }
-/// 业务作用：判定 Mapper DSL 的 `ends_with_keyword_ignore_ascii_case` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `value`: 已裁剪空白的 SQL 前缀文本。
-/// - `keyword`: 业务 key 或 Redis key,用于定位数据。
+/// 业务作用：判断文本尾部是否是有标识边界的 SQL 关键字。
+///
+/// 参数说明：
+/// - `value`：待检查关键字后缀的 SQL 前缀。
+/// - `keyword`：要匹配的 ASCII SQL 关键字。
+///
+/// 返回：去除尾空白后 ASCII 忽略大小写匹配，且前一字符不是 ASCII 标识继续字符时返回 true。按字节计算后缀位置，调用方须保证该位置是字符边界，否则切片会展开。
 fn ends_with_keyword_ignore_ascii_case(value: &str, keyword: &str) -> bool {
     let trimmed = value.trim_end();
     if trimmed.len() < keyword.len() {
@@ -5516,14 +5866,18 @@ fn ends_with_keyword_ignore_ascii_case(value: &str, keyword: &str) -> bool {
         .next_back()
         .is_none_or(|ch| !is_ident_continue(ch))
 }
-/// 业务作用：判定 Mapper DSL 的 `is_ident_continue` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `ch`: 当前扫描到的字符。
+/// 业务作用：为 SQL 关键字边界识别提供 ASCII 标识继续字符规则。
+///
+/// 参数说明：
+/// - `ch`：关键字之前待检查的字符。
+///
+/// 返回：下划线或 ASCII 字母数字返回 true，其它字符返回 false，不覆盖全部 SQL 方言标识字符。
 fn is_ident_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 /// 业务作用：完成 Mapper 宏 `key_expr` 的编译期转换步骤，并把失败定位到调用方源码。
-/// # 参数
+///
+/// 参数说明：
 /// - `key`: `#[mapper(key = "...")]` 显式指定的 mapper 名称。
 /// - `trait_ident`: 生成 mapper 实现时使用的 trait 标识符。
 /// - `backend`: 当前 Mapper 固定使用的数据库后端。
@@ -5567,9 +5921,12 @@ fn key_expr(
         }
     }
 }
-/// 业务作用：生成 Mapper 宏 `str_array_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `values`: 待校验、写入或比较的值列表。
+/// 业务作用：生成缓存命名空间依赖等静态字符串列表表达式。
+///
+/// 参数说明：
+/// - `values`：需要嵌入生成代码的字符串序列。
+///
+/// 返回：返回字符串字面量引用数组的 token，保持顺序并按 Rust 字面量规则转义。
 fn str_array_tokens(values: &[String]) -> TokenStream2 {
     let values = values
         .iter()
@@ -5577,7 +5934,8 @@ fn str_array_tokens(values: &[String]) -> TokenStream2 {
     quote! { &[#(#values),*] }
 }
 /// 业务作用：为缓存关联键补齐 PostgreSQL driver 与 datasource 身份，防止跨后端或跨数据源误清理。
-/// # 参数
+///
+/// 参数说明：
 /// - `values`: `clear_also` 或 `clear_when` 声明的 Mapper key。
 /// - `backend`: 当前 Mapper 的数据库后端。
 /// - `datasource`: trait 级命名数据源；省略时采用 `default`。
@@ -5605,27 +5963,36 @@ fn cache_reference_array_tokens(
     });
     quote! { &[#(#values),*] }
 }
-/// 业务作用：生成 Mapper 宏 `option_u64_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `value`: mapper 缓存 TTL 的毫秒数;`None` 表示使用缓存实现默认值。
+/// 业务作用：把可选 TTL 等无符号数值嵌入生成代码。
+///
+/// 参数说明：
+/// - `value`：准备嵌入的可选 u64 数值。
+///
+/// 返回：返回完全限定的 Some 数值或 None 表达式，不验证数值业务范围。
 fn option_u64_tokens(value: Option<u64>) -> TokenStream2 {
     match value {
         Some(value) => quote! { ::core::option::Option::Some(#value) },
         None => quote! { ::core::option::Option::None },
     }
 }
-/// 业务作用：生成 Mapper 宏 `cache_codec_factory_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `path`: `cache_codec` 或 `typed_cache_codec` 指向的工厂函数路径。
+/// 业务作用：生成可选缓存 codec 工厂的调用表达式。
+///
+/// 参数说明：
+/// - `path`：可选的 codec 工厂 Rust 路径。
+///
+/// 返回：路径存在时生成 Some(path())，否则生成 None；不在宏展开阶段调用工厂。
 fn cache_codec_factory_tokens(path: Option<&Path>) -> TokenStream2 {
     match path {
         Some(path) => quote! { ::core::option::Option::Some(#path()) },
         None => quote! { ::core::option::Option::None },
     }
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_string_array` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `expr`: Rust 表达式 AST,用于宏期分析。
+/// 业务作用：读取 Mapper 属性中声明的字符串列表。
+///
+/// 参数说明：
+/// - `expr`：准备解析为字符串数组的 Rust 表达式。
+///
+/// 返回：数组且每项均为字符串字面量时返回原值列表，否则返回位于非法表达式的编译错误；不检查空值或重复。
 fn parse_string_array(expr: Expr) -> syn::Result<Vec<String>> {
     let Expr::Array(ExprArray {
         elems,
@@ -5645,16 +6012,22 @@ fn parse_string_array(expr: Expr) -> syn::Result<Vec<String>> {
         })
         .collect()
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_lit_int` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `lit`: 过程宏正在读取的字符串字面量。
+/// 业务作用：把属性整数字面量转换为 u64 配置值。
+///
+/// 参数说明：
+/// - `lit`：已由 syn 解析的整数字面量。
+///
+/// 返回：成功返回数值，解析或范围超限返回 syn 错误，不检查 TTL 等业务上下界。
 fn parse_lit_int(lit: LitInt) -> syn::Result<u64> {
     lit.base10_parse::<u64>()
 }
-/// 业务作用：校验 Mapper DSL 的 `validate_datasource_literal` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `value`: `datasource` 属性中的数据源名称字面量。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：在宏展开前拒绝空白数据源名称或首尾空白。
+///
+/// 参数说明：
+/// - `value`：datasource 属性提供的具名数据源原文。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：非空且无首尾空白时成功，否则报错；不验证该数据源是否已配置。
 fn validate_datasource_literal(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
     if value.trim().is_empty() || value.trim() != value {
         Err(syn::Error::new(
@@ -5665,10 +6038,13 @@ fn validate_datasource_literal(value: &str, span: proc_macro2::Span) -> syn::Res
         Ok(())
     }
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_placeholder_path` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
-/// - `value`: SQL 占位符中的参数路径,例如 `id` 或 `page.offset`。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：把 SQL 或缓存占位符的点分隔字段路径转换为标识序列。
+///
+/// 参数说明：
+/// - `value`：不含占位符定界符的字段路径。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：每段满足 ASCII 标识字符规则时返回 Ident 列表，否则报错；不解析字段类型，不证明标识在 Rust 语义上可用。
 fn parse_placeholder_path(value: &str, span: proc_macro2::Span) -> syn::Result<Vec<Ident>> {
     let mut path = Vec::new();
     for segment in value.split('.') {
@@ -5685,10 +6061,13 @@ fn parse_placeholder_path(value: &str, span: proc_macro2::Span) -> syn::Result<V
     }
     Ok(path)
 }
-/// 业务作用：校验 Mapper DSL 的 `validate_order_column_literal` 约束，阻止不安全或歧义输入进入代码生成。
-/// # 参数
-/// - `value`: `MapperOrderField` 属性中的列名或 `alias.column` 字面量。
-/// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 业务作用：在生成排序白名单前验证静态列名形态。
+///
+/// 参数说明：
+/// - `value`：声明的 column 或 alias.column 静态列名。
+/// - `span`：产生编译错误时使用的调用方源码位置。
+///
+/// 返回：一段或两段名称均满足当前 ASCII 标识规则时成功，否则返回编译错误，不检查数据库真实列。
 fn validate_order_column_literal(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
     if is_valid_order_column_literal(value) {
         Ok(())
@@ -5699,9 +6078,12 @@ fn validate_order_column_literal(value: &str, span: proc_macro2::Span) -> syn::R
         ))
     }
 }
-/// 业务作用：判定 Mapper DSL 的 `is_valid_order_column_literal` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `value`: 需要校验的排序列名字面量。
+/// 业务作用：限制原样写入 ORDER BY 的列名只含一到两个标识段。
+///
+/// 参数说明：
+/// - `value`：待检查的静态排序列名。
+///
+/// 返回：恰为一个或两个合法 ASCII 段时返回 true；空段、额外点或其它字符返回 false，不识别 SQL 关键字。
 fn is_valid_order_column_literal(value: &str) -> bool {
     let mut parts = value.split('.');
     let Some(first) = parts.next() else {
@@ -5719,9 +6101,12 @@ fn is_valid_order_column_literal(value: &str) -> bool {
     }
     true
 }
-/// 业务作用：判定 Mapper DSL 的 `is_rust_ident` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+/// 业务作用：检查模板路径使用的非空 ASCII 标识字符形态。
+///
+/// 参数说明：
+/// - `name`：待识别的标识字符串。
+///
+/// 返回：首字符为下划线或 ASCII 字母且后续只含下划线或 ASCII 字母数字时返回 true；不排除关键字，也不识别原始或 Unicode 标识符。
 fn is_rust_ident(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -5730,9 +6115,12 @@ fn is_rust_ident(name: &str) -> bool {
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
-/// 业务作用：判定 Mapper DSL 的 `has_async_trait_attr` 边界条件，避免错误匹配或无效语法继续展开。
-/// # 参数
-/// - `attrs`: 属性列表,用于解析宏配置或 XML 属性。
+/// 业务作用：识别 trait 是否已声明异步方法转换属性。
+///
+/// 参数说明：
+/// - `attrs`：trait 上已经解析的 Rust 属性列表。
+///
+/// 返回：任一属性路径末段为 async_trait 时返回 true，否则 false，不验证属性路径的实际来源。
 fn has_async_trait_attr(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         attr.path()

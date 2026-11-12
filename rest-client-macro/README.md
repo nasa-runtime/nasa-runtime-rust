@@ -77,7 +77,9 @@ use serde_json::Value;
 #[rest_client]
 pub trait GoogleDnsApi {
     /// 业务作用：通过 Google 公网接口查询 DNS 记录。
-    /// 参数说明：domain 为域名；record_type 为 A、AAAA 等记录类型。
+    /// 参数说明：
+    /// - `domain`：需要查询的 DNS 域名。
+    /// - `record_type`：A、AAAA 等 DNS 记录类型。
     /// 返回：原始 DNS JSON；请求或解析失败时返回错误，DNS 状态由调用方判断。
     #[GetMapping(url = "https://dns.google/resolve", response = "json")]
     async fn resolve(
@@ -88,7 +90,8 @@ pub trait GoogleDnsApi {
 }
 
 /// 业务作用：在已装配的应用中调用 Google DNS API。
-/// 参数说明：app 提供受管 HTTP 客户端。
+/// 参数说明：
+/// - `app`：提供已装配 HTTP 客户端集合的应用。
 /// 返回：Google JSON 响应；客户端获取或调用失败时返回错误。
 pub async fn query_google(app: &Application) -> anyhow::Result<Value> {
     let api = GoogleDnsApiClient::with_clients(app.discovery()?.rest_clients()?);

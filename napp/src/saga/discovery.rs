@@ -56,7 +56,13 @@ pub(super) struct ManagedSagaDiscovery {
 
 impl ManagedSagaDiscovery {
     /// 业务作用：校验发现引用和出站地址边界；固定 URL 保持显式配置语义。
-    /// 参数说明：`application` 提供受管发现会话，`settings` 提供信任政策，`reference` 选择逻辑服务，`protocol` 固定线上协议。
+    ///
+    /// 参数说明：
+    /// - `application`：`application` 提供受管发现会话。
+    /// - `settings`：`settings` 提供信任政策。
+    /// - `reference`：`reference` 选择逻辑服务。
+    /// - `protocol`：`protocol` 固定线上协议。
+    ///
     /// 返回：固定地址返回空；已配置发现引用返回解析器，缺少服务身份、地址政策或发现组件时拒绝装配。
     fn from_reference(
         application: &Application,
@@ -146,7 +152,10 @@ impl ManagedSagaDiscovery {
     }
 
     /// 业务作用：在原调用期限内查询并校验所有当前成员，拒绝使用已撤下或越界的路由。
-    /// 参数说明：`deadline` 同时约束发现等待、后续连接与收据读取。
+    ///
+    /// 参数说明：
+    /// - `deadline`：`deadline` 同时约束发现等待、后续连接与收据读取。
+    ///
     /// 返回：至少一个合法成员时返回完整集合；失败、空集合、代次回退或同代漂移时关闭本次投递。
     pub(super) async fn routes(
         &self,
@@ -220,7 +229,10 @@ impl ManagedSagaDiscovery {
     }
 
     /// 业务作用：把一个实例的 provider 元数据校验为受信协议端点和有效路径。
-    /// 参数说明：`metadata` 必须来自同一注册实例，不能从服务级默认值补齐安全字段。
+    ///
+    /// 参数说明：
+    /// - `metadata`：`metadata` 必须来自同一注册实例。
+    ///
     /// 返回：身份、地址范围、代次与规范路径均合法时返回路由；其它实例不进入候选集合。
     #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     fn parse_route(
@@ -300,7 +312,9 @@ impl ManagedSagaDiscovery {
 
 impl ManagedHttpTarget {
     /// 业务作用：为本次请求取得同一实例的拨号地址与签名路径，并计算剩余传输预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：静态目标或当前合法发现目标及剩余期限；发现失败时不发送请求。
     pub(super) async fn resolve(&self) -> ApplicationResult<(Self, Duration)> {
         let deadline = tokio::time::Instant::now() + self.timeout;
@@ -339,7 +353,10 @@ impl ManagedHttpTarget {
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl grpc_target::GrpcDiscoveryResolver for ManagedSagaDiscovery {
     /// 业务作用：向 mTLS 连接池投影受信成员与完整实例代次，保留同次发现绑定。
-    /// 参数说明：`deadline` 是原调用期限。
+    ///
+    /// 参数说明：
+    /// - `deadline`：`deadline` 是原调用期限。
+    ///
     /// 返回：身份代次和端点成对返回，发现失败时拒绝连接池发布。
     fn routes(
         &self,
@@ -363,7 +380,15 @@ impl grpc_target::GrpcDiscoveryResolver for ManagedSagaDiscovery {
 }
 
 /// 业务作用：统一 client、result 与 Registry 的静态地址和受信发现引用装配。
-/// 参数说明：应用、设置与 reference 决定目标；operation 为固定相对操作名，authenticator 为调用身份凭据，timeout 为总预算。
+///
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `settings`：当前角色使用的已校验配置。
+/// - `reference`：应用、设置与 reference 决定目标。
+/// - `operation`：operation 为固定相对操作名。
+/// - `authenticator`：authenticator 为调用身份凭据。
+/// - `timeout`：timeout 为总预算。
+///
 /// 返回：固定地址或发现目标；逻辑引用缺少受信绑定时拒绝装配。
 pub(super) fn managed_http_discovery_target(
     application: &Application,
@@ -394,7 +419,14 @@ pub(super) fn managed_http_discovery_target(
 }
 
 /// 业务作用：为所有协调侧 gRPC 调用绑定受信发现和当前 mTLS 材料。
-/// 参数说明：应用、设置与 reference 选择服务；timeout 为完整期限，credential 为经配置平面校验的客户端材料。
+///
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `settings`：当前角色使用的已校验配置。
+/// - `reference`：应用、设置与 reference 选择服务。
+/// - `timeout`：timeout 为完整期限。
+/// - `credential`：credential 为经配置平面校验的客户端材料。
+///
 /// 返回：固定或动态 gRPC 目标；发现合同不完整时拒绝装配。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 pub(super) fn managed_grpc_discovery_target(
@@ -429,7 +461,13 @@ pub(super) fn managed_grpc_discovery_target(
 }
 
 /// 业务作用：只在受管 listener 已建立后公布本协调实例的实际端点和有效 Saga 路径。
-/// 参数说明：`application` 提供当前角色与 listener，`host` 和 `port` 来自本次实际服务注册，`protocol` 在新模式限定对应 listener 的协议。
+///
+/// 参数说明：
+/// - `application`：`application` 提供当前角色与 listener。
+/// - `host`：本次服务注册公布的主机名或地址，IPv6 地址在构造 URI 时加方括号。
+/// - `port`：本次服务注册公布的端口，用于校验受管监听及生成端点元数据。
+/// - `protocol`：`protocol` 在新模式限定对应 listener 的协议。
+///
 /// 返回：协调角色的框架元数据；其它角色返回空，实际路径或端点不可用时拒绝注册。
 #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
 pub(crate) fn registration_metadata(
@@ -518,7 +556,12 @@ pub(crate) fn registration_metadata(
 mod http;
 
 /// 业务作用：在任何组件连接网络之前拒绝具名 Saga 目标中的跨环境或未绑定服务引用。
-/// 参数说明：`tree` 是同一完整配置，`settings` 包含 Saga 目标，`phase` 保留原校验阶段。
+///
+/// 参数说明：
+/// - `tree`：`tree` 是同一完整配置。
+/// - `settings`：`settings` 包含 Saga 目标。
+/// - `phase`：`phase` 保留原校验阶段。
+///
 /// 返回：旧模式保留原入口；新模式所有目标必须属于启用的连接目录。
 #[cfg(feature = "discovery-runtime")]
 pub(super) fn validate_bindings(
@@ -578,7 +621,10 @@ pub(super) fn validate_bindings(
 
 impl PartialEq for SagaDiscoveredRoute {
     /// 业务作用：比较同一 incarnation 的线上路由投影，不让本地观察句柄参与协议代次判定。
-    /// 参数说明：`other` 是另一份完整路由事实。
+    ///
+    /// 参数说明：
+    /// - `other`：`other` 是另一份完整路由事实。
+    ///
     /// 返回：身份、代次、地址和路径全部相同才相等。
     fn eq(&self, other: &Self) -> bool {
         self.incarnation == other.incarnation
@@ -611,7 +657,11 @@ struct SagaCandidate {
 #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
 impl SagaSource {
     /// 业务作用：从唯一装配权威选择明确连接，未知引用不得回退到旧环境。
-    /// 参数说明：`application` 提供受管能力，`connection` 为空时才允许采用已有兼容默认入口。
+    ///
+    /// 参数说明：
+    /// - `application`：`application` 提供受管能力。
+    /// - `connection`：`connection` 为空时才允许采用已有兼容默认入口。
+    ///
     /// 返回：新目录或旧单 Nacos 句柄；新模式中的任何选择错误直接拒绝。
     fn new(application: &Application, connection: Option<&str>) -> ApplicationResult<Self> {
         #[cfg(feature = "discovery-runtime")]
@@ -638,7 +688,11 @@ impl SagaSource {
     }
 
     /// 业务作用：保留完整当前实例事实，为新模式绑定同一候选的实际发送许可。
-    /// 参数说明：`service` 为精确服务别名，`deadline` 延续原调用预算。
+    ///
+    /// 参数说明：
+    /// - `service`：`service` 为精确服务别名。
+    /// - `deadline`：`deadline` 延续原调用预算。
+    ///
     /// 返回：严格证据对应的候选；权限或观察失败不沿用宽限缓存。
     async fn instances(
         &self,

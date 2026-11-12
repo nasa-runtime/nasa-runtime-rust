@@ -38,7 +38,9 @@ struct WorkerScope {
 
 impl Drop for WorkerScope {
     /// 业务作用：执行单元异常退出时撤销整个来源的业务权，禁止重建连接掩盖执行收据丢失。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：正常关闭不改变来源健康，异常展开保持隔离及文件保活责任。
     fn drop(&mut self) {
         if !self.completed {
@@ -49,7 +51,9 @@ impl Drop for WorkerScope {
 
 impl Actor {
     /// 业务作用：只复用没有原生事务或不确定状态的物理连接。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：可作为下一个根调用的连接时为真。
     pub(crate) fn usable(&self) -> bool {
         !self.sender.is_closed()
@@ -60,7 +64,7 @@ impl Actor {
                 .state
                 .maintenance
                 .lock()
-                .map_or(false, |gate| gate.is_none())
+                .is_ok_and(|gate| gate.is_none())
     }
 }
 
@@ -72,10 +76,12 @@ pub(crate) struct Lease {
 
 impl Lease {
     /// 业务作用：保留同文件维护门和连接，直到 worker 确认原生动作已经结束。
+    ///
     /// 参数说明：
     /// - `operation`：固定维护动作。
     /// - `gate`：本次同文件维护的唯一许可。
     /// - `deadline`：不延长的总截止点。
+    ///
     /// 返回：维护结果；取消只撤销等待，不提前释放原生责任。
     pub(crate) async fn maintain(
         self: &Arc<Self>,
@@ -108,11 +114,13 @@ impl Lease {
     }
 
     /// 业务作用：将调用期限、借用容量、来源身份和实际连接交接到同一生命周期。
+    ///
     /// 参数说明：
     /// - `source`：受管来源。
     /// - `actor`：独占执行连接。
     /// - `permit`：本次借用的容量凭证。
     /// - `deadline`：调用链的固定截止点，包含借出后首次 SQL 之前的等待。
+    ///
     /// 返回：可接纳时返回借用责任；关闭已决定或状态失效时交还凭证供选择其他候选。
     pub(crate) fn new(
         source: SqliteDataSource,
@@ -132,16 +140,20 @@ impl Lease {
     }
 
     /// 业务作用：读取借用责任所固定的原生执行状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：连接尚未回池期间始终存在的状态。
     pub(crate) fn state(&self) -> &Arc<NativeState> {
         &self.actor.as_ref().expect("active SQLite lease").state
     }
 
     /// 业务作用：提交框架事务动作，调用取消时标记连接不可复用。
+    ///
     /// 参数说明：
     /// - `action`：开始、提交或回滚动作。
     /// - `deadline`：动作允许的最晚完成时间。
+    ///
     /// 返回：原生 worker 确认后的结果。
     pub(crate) async fn control(
         self: &Arc<Self>,
@@ -176,7 +188,9 @@ impl Lease {
 
 impl Drop for Lease {
     /// 业务作用：仅把确定可复用且仍接纳业务的连接交还池，其他连接转入物理关闭。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：活动事务与不确定写入不会泄漏给下一位调用者。
     fn drop(&mut self) {
         if let Some(id) = self
@@ -265,7 +279,9 @@ struct Cancellation(Arc<AtomicBool>);
 
 impl Drop for Cancellation {
     /// 业务作用：调用方离开后通知原生执行停止，连接责任由 worker 继续保留。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：后续 VM 和 busy 回调拒绝继续消耗预算。
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
@@ -281,7 +297,9 @@ pub struct SqliteConn {
 
 impl SqliteConn {
     /// 业务作用：在流交付给业务之前登记消费期限，覆盖从未开始轮询的拥有型流。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与底层执行器共享、由原生执行单元监督的消费预算。
     pub fn stream_budget(&self) -> crate::SqliteStreamBudget {
         crate::SqliteStreamBudget::new(
@@ -291,8 +309,10 @@ impl SqliteConn {
     }
 
     /// 业务作用：向固定框架流程授予对应阶段的权限，不向业务暴露原始连接。
+    ///
     /// 参数说明：
     /// - `policy`：迁移脚本、历史操作或维护阶段。
+    ///
     /// 返回：仅本 crate 可构造的阶段执行器。
     pub(crate) fn framework_executor(&mut self, policy: ExecutionPolicy) -> SqliteExecutor<'_> {
         SqliteExecutor {
@@ -302,8 +322,10 @@ impl SqliteConn {
     }
 
     /// 业务作用：缓存命中前核验最终 SQL 的只读性、单语句和文件身份。
+    ///
     /// 参数说明：
     /// - `sql`：已完成动态分支和列表展开的 SQL。
+    ///
     /// 返回：原生 prepare 确认可读取才成功，不执行查询。
     pub async fn validate_read(&mut self, sql: &str) -> anyhow::Result<()> {
         let lease = self.lease.clone();
@@ -321,8 +343,10 @@ impl SqliteConn {
     }
 
     /// 业务作用：把已通过调用上下文门禁的只读验证交给原生 worker，取消时保留 worker 清理责任。
+    ///
     /// 参数说明：
     /// - `sql`：待确认只读性与单语句边界的最终 SQL。
+    ///
     /// 返回：worker 完成 prepare 验证后成功，失败或取消不执行查询。
     async fn validate_read_inner(&mut self, sql: &str) -> anyhow::Result<()> {
         crate::transaction::check_source(&self.lease.source)?;
@@ -353,8 +377,10 @@ impl SqliteConn {
     }
 
     /// 业务作用：为业务 SQL 选择只读或显式写入合同。
+    ///
     /// 参数说明：
     /// - `write`：调用方是否声明本次 SQL 可产生数据库写入。
+    ///
     /// 返回：仍执行单语句、权限、预算和连接身份门禁的 SQLx executor。
     pub fn executor(&mut self, write: bool) -> SqliteExecutor<'_> {
         SqliteExecutor {
@@ -368,7 +394,9 @@ impl SqliteConn {
     }
 
     /// 业务作用：把写后映射失败传播到事务或数据源缓存隔离状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：显式事务只允许回滚，独立写入停止复用旧缓存。
     pub fn mark_write_failed(&self) {
         let state = self.lease.state();
@@ -395,8 +423,10 @@ pub struct SqliteExecutor<'a> {
 
 impl fmt::Debug for SqliteExecutor<'_> {
     /// 业务作用：提供不含 SQL、文件路径和绑定值的执行器诊断身份。
+    ///
     /// 参数说明：
     /// - `formatter`：诊断输出目标。
+    ///
     /// 返回：仅输出类型和数据源名称。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -410,8 +440,10 @@ impl<'c> Executor<'c> for SqliteExecutor<'c> {
     type Database = Sqlite;
 
     /// 业务作用：把查询转交给有界 worker，并在取消后保留真实执行责任。
+    ///
     /// 参数说明：
     /// - `query`：SQLx 已编码参数的业务查询。
+    ///
     /// 返回：只有收到 worker 最终确认才正常结束的有界结果流。
     fn fetch_many<'e, 'q: 'e, E>(self, mut query: E) -> BoxStream<'e, Step>
     where
@@ -527,8 +559,10 @@ impl<'c> Executor<'c> for SqliteExecutor<'c> {
     }
 
     /// 业务作用：读取首行同时耗尽语句，确保 RETURNING 的数据库动作完成后才返回。
+    ///
     /// 参数说明：
     /// - `query`：已声明执行合同的查询。
+    ///
     /// 返回：首行或空值；后续行或提交阶段失败仍向调用方传播。
     fn fetch_optional<'e, 'q: 'e, E>(
         self,
@@ -553,9 +587,11 @@ impl<'c> Executor<'c> for SqliteExecutor<'c> {
     }
 
     /// 业务作用：拒绝脱离受控执行过程的持久 statement，避免权限阶段变化后的缓存复用。
+    ///
     /// 参数说明：
     /// - `_sql`：外部请求准备的语句。
     /// - `_parameters`：外部传入的参数提示。
+    ///
     /// 返回：调用方应直接使用 query、query_as 或 query_scalar 的明确错误。
     fn prepare_with<'e>(
         self,
@@ -573,8 +609,10 @@ impl<'c> Executor<'c> for SqliteExecutor<'c> {
     }
 
     /// 业务作用：拒绝运行期推断 SQL 类型时绕过业务单语句权限边界。
+    ///
     /// 参数说明：
     /// - `_sql`：外部请求推断的 SQL。
+    ///
     /// 返回：明确不支持离线宏描述入口。
     fn describe<'e>(
         self,
@@ -592,10 +630,12 @@ impl<'c> Executor<'c> for SqliteExecutor<'c> {
 }
 
 /// 业务作用：在不可被 async 取消提前释放的阻塞域内打开并持续驱动物理连接。
+///
 /// 参数说明：
 /// - `source`：已持有文件权威的数据源。
 /// - `created`：本次启动是否创建主文件。
 /// - `deadline`：建立连接的绝对截止点。
+///
 /// 返回：校验完成才发布的 actor；等待取消不撤销原生关闭责任。
 pub(crate) async fn connect_actor(
     source: &SqliteDataSource,
@@ -691,11 +731,13 @@ pub(crate) async fn connect_actor(
 }
 
 /// 业务作用：建立私有连接并回读关键 PRAGMA，已有文件不隐式切换 journal_mode。
+///
 /// 参数说明：
 /// - `source`：冻结配置与文件身份。
 /// - `created`：允许初始化日志模式的新文件标记。
 /// - `lifetime`：物理连接保活责任。
 /// - `deadline`：初始化总预算。
+///
 /// 返回：原生能力及配置验证通过的连接和状态。
 async fn open_connection(
     source: &SqliteDataSource,
@@ -918,10 +960,12 @@ async fn open_connection(
 }
 
 /// 业务作用：顺序执行同一连接的动作，并按引擎实际事务状态决定后续准入。
+///
 /// 参数说明：
 /// - `connection`：worker 独占的物理连接。
 /// - `state`：连接权限与事务连续性状态。
 /// - `command`：包含独立预算及保活责任的操作。
+///
 /// 返回：向调用方发出最终确认，事务失败或不确定写入不会被静默复用。
 async fn process(connection: &mut SqliteConnection, state: &Arc<NativeState>, command: Command) {
     match command {
@@ -1164,9 +1208,11 @@ async fn process(connection: &mut SqliteConnection, state: &Arc<NativeState>, co
                         connection,
                         sql,
                         arguments,
-                        deadline,
-                        &cancel,
-                        &output,
+                        RowDelivery {
+                            deadline,
+                            cancel: &cancel,
+                            output: &output,
+                        },
                         &_lease.source,
                         state,
                     )
@@ -1218,27 +1264,40 @@ async fn process(connection: &mut SqliteConnection, state: &Arc<NativeState>, co
     }
 }
 
+/// 单次行交付共用的截止点、取消信号和有界输出；不延长连接或事务的生命周期。
+struct RowDelivery<'a> {
+    /// 当前操作固定的总截止点，逐行输出不得重新计算总预算。
+    deadline: Instant,
+    /// 消费者退出或预算耗尽时通知原生工作停止的共享信号。
+    cancel: &'a Arc<AtomicBool>,
+    /// 接收行与查询完成事实的有界通道，等待受总预算和空闲预算共同限制。
+    output: &'a mpsc::Sender<Option<Step>>,
+}
+
 /// 业务作用：有界消费原生结果并对停滞消费者及时中断，避免连接被无限持有。
+///
 /// 参数说明：
 /// - `connection`：已通过权限验证的连接。
 /// - `sql`：唯一受控语句或框架脚本。
 /// - `arguments`：全部已编码参数。
-/// - `deadline`：操作总截止点。
-/// - `cancel`：调用方取消信号。
-/// - `output`：有界结果通道。
+/// - `delivery`：同一次消费的截止点、取消信号及输出通道，保证每行沿用原有交付预算。
 /// - `source`：结果和空闲预算配置。
 /// - `state`：接收结果缓冲可消费通知的原生连接状态。
+///
 /// 返回：全部结果与语句结束均成功时完成，否则保留原始数据库错误。
 async fn execute_rows(
     connection: &mut SqliteConnection,
     sql: SqlStr,
     arguments: SqliteArguments,
-    deadline: Instant,
-    cancel: &Arc<AtomicBool>,
-    output: &mpsc::Sender<Option<Step>>,
+    delivery: RowDelivery<'_>,
     source: &SqliteDataSource,
     state: &NativeState,
 ) -> Result<(), sqlx::Error> {
+    let RowDelivery {
+        deadline,
+        cancel,
+        output,
+    } = delivery;
     let mut rows = 0usize;
     let mut bytes = 0usize;
     let query = sqlx::query_with(sql, arguments).persistent(false);

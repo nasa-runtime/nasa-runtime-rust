@@ -25,7 +25,10 @@ struct ObjectPlan {
 }
 
 /// 业务作用：装配显式选择的有界命名对象存储；未启用时不读取凭据、不访问网络。
-/// 参数说明：`context` 提供同代材料、统一指标目录和生命周期所有权。
+///
+/// 参数说明：
+/// - `context`：`context` 提供同代材料、统一指标目录和生命周期所有权。
+///
 /// 返回：启用计划满足启动门禁后返回待监督的健康任务；没有周期探测时为空，装配失败时拒绝启动。
 pub(crate) async fn prepare(
     context: &mut PrepareContext<'_>,
@@ -171,7 +174,11 @@ pub(crate) async fn prepare(
 }
 
 /// 业务作用：为全部命名 HEAD bucket 计划刷新远端证据，避免空闲资源依赖业务请求维持健康。
-/// 参数说明：`handles` 是已通过启动探测的有界集合；`lifecycle` 接收全部原因触发的宿主状态转换。
+///
+/// 参数说明：
+/// - `handles`：`handles` 是已通过启动探测的有界集合。
+/// - `lifecycle`：`lifecycle` 接收全部原因触发的宿主状态转换。
+///
 /// 返回：停止时取消本轮只读探测并退出，由宿主监督器等待真实完成；各来源独立发布探测结果。
 #[cfg(feature = "object-store")]
 async fn monitor(
@@ -216,14 +223,21 @@ async fn monitor(
 }
 
 /// 业务作用：产生固定结构错误，不将配置或凭据拼入错误正文。
-/// 参数说明：`message` 为稳定原因。
+///
+/// 参数说明：
+/// - `message`：`message` 为稳定原因。
+///
 /// 返回：阻止适配器进入 Ready 的准备错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Application, ApplicationPhase::Prepare, message)
 }
 
 /// 业务作用：复制同一秘密快照中的 S3 认证材料到自动清零容器。
-/// 参数说明：`snapshot` 为当前代次；`locator` 必须是显式 secret:// 引用。
+///
+/// 参数说明：
+/// - `snapshot`：`snapshot` 为当前代次。
+/// - `locator`：`locator` 必须是显式 secret:// 引用。
+///
 /// 返回：材料存在时返回独立受保护字节；缺失或明文配置拒绝。
 #[cfg(feature = "object-store")]
 fn material(
@@ -249,7 +263,10 @@ struct ObjectHandle {
 #[cfg(feature = "object-store")]
 impl ObjectHandle {
     /// 业务作用：用实际调用结局更新远端可用证据，按声明关键性决定是否摘流。
-    /// 参数说明：`result` 为领域结果，未读取远端错误正文。
+    ///
+    /// 参数说明：
+    /// - `result`：`result` 为领域结果。
+    ///
     /// 返回：保持原结果；远端或完整性失败使关键依赖 NotReady、非关键依赖 Degraded，本地拒绝不改观测。
     fn observe<T>(
         &self,
@@ -293,7 +310,9 @@ impl ObjectHandle {
     }
 
     /// 业务作用：在受管调用边界内执行不产生对象副作用的周期探测。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：最多占用 5 秒，超时按传输失败更新健康；关闭后的旧 owner 不发起网络调用。
     async fn probe(&self) {
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -314,7 +333,10 @@ impl ObjectHandle {
 #[async_trait::async_trait]
 impl naobject::ObjectStore for ObjectHandle {
     /// 业务作用：在宿主完整调用责任内上传对象，发送后不自动重放。
-    /// 参数说明：`request` 为有界正文及原有条件写约束。
+    ///
+    /// 参数说明：
+    /// - `request`：`request` 为有界正文及原有条件写约束。
+    ///
     /// 返回：保持领域确认和未知结果语义；关闭后拒绝新调用。
     async fn put(
         &self,
@@ -329,7 +351,10 @@ impl naobject::ObjectStore for ObjectHandle {
     }
 
     /// 业务作用：在宿主完整调用责任内下载并校验有界正文。
-    /// 参数说明：`key` 为已经校验的对象身份。
+    ///
+    /// 参数说明：
+    /// - `key`：`key` 为已经校验的对象身份。
+    ///
     /// 返回：完整正文或原领域错误；关闭后拒绝新调用。
     async fn get(
         &self,
@@ -344,7 +369,10 @@ impl naobject::ObjectStore for ObjectHandle {
     }
 
     /// 业务作用：在宿主完整调用责任内读取对象元数据。
-    /// 参数说明：`key` 为已经校验的对象身份。
+    ///
+    /// 参数说明：
+    /// - `key`：`key` 为已经校验的对象身份。
+    ///
     /// 返回：原领域元数据和错误；关闭后拒绝新调用。
     async fn head(
         &self,
@@ -359,7 +387,10 @@ impl naobject::ObjectStore for ObjectHandle {
     }
 
     /// 业务作用：在宿主完整调用责任内删除对象，不改变已存在的幂等边界。
-    /// 参数说明：`key` 为已经校验的对象身份。
+    ///
+    /// 参数说明：
+    /// - `key`：`key` 为已经校验的对象身份。
+    ///
     /// 返回：远端确认或领域错误；关闭后拒绝新调用，不隐式重放。
     async fn delete(&self, key: &naobject::ObjectKey) -> Result<(), naobject::ObjectStoreError> {
         let guard = self
@@ -374,7 +405,10 @@ impl naobject::ObjectStore for ObjectHandle {
 #[cfg(feature = "object-store")]
 impl crate::Application {
     /// 业务作用：取得当前应用命名对象存储，所有克隆共享永久关闭门禁。
-    /// 参数说明：`name` 为 object_stores 中显式启用的资源名称。
+    ///
+    /// 参数说明：
+    /// - `name`：`name` 为 object_stores 中显式启用的资源名称。
+    ///
     /// 返回：已验证的领域调用入口；未知名称或关闭时拒绝。
     pub async fn object_store(
         &self,

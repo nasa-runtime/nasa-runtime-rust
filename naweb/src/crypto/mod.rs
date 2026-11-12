@@ -60,9 +60,9 @@ struct KeyUsageRegistry {
 impl KeyUsageRegistry {
     /// 业务作用：建立空的进程级密钥使用注册表。
     ///
-    /// # 返回
+    /// 返回：返回尚未绑定任何 key ring 的有界注册表。
     ///
-    /// 返回尚未绑定任何 key ring 的有界注册表。
+    /// 参数说明: 无。
     fn new() -> Self {
         Self {
             records: Mutex::new(HashMap::new()),
@@ -71,13 +71,11 @@ impl KeyUsageRegistry {
 
     /// 业务作用：原子校验并把一组新快照 key ring 绑定到持续计数器。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `rings`: 待启动或待发布快照中的完整有限 key ring 集合。
     ///
-    /// # 返回
-    ///
-    /// 所有身份均兼容时返回空值；同一 kid 偷换算法或材料、恢复 retired 身份、耗尽新上限、
+    /// 返回：所有身份均兼容时返回空值；同一 kid 偷换算法或材料、恢复 retired 身份、耗尽新上限、
     /// 超过注册表容量或内部锁异常时拒绝整个快照。
     fn attach(
         &self,
@@ -168,9 +166,9 @@ impl KeyUsageRegistry {
 
     /// 业务作用：返回当前持续记忆的公开密钥身份数量。
     ///
-    /// # 返回
+    /// 返回：锁可用时返回记录数；锁异常时返回上限值，使调试摘要保持低敏感且不触发 panic。
     ///
-    /// 锁可用时返回记录数；锁异常时返回上限值，使调试摘要保持低敏感且不触发 panic。
+    /// 参数说明: 无。
     fn len(&self) -> usize {
         self.records
             .lock()
@@ -231,13 +229,11 @@ pub struct CryptoRuntime {
 impl std::fmt::Debug for CryptoRuntime {
     /// 业务作用：输出组件数量和公开限制，不输出密钥材料、旁路值或后端连接信息。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回脱敏格式化结果。
+    /// 返回：返回脱敏格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CryptoRuntime")
@@ -258,13 +254,11 @@ impl std::fmt::Debug for CryptoRuntime {
 impl CryptoRuntime {
     /// 业务作用：从经过 secret 合并的完整配置建立不可变密码运行时。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `config`: 应用启动期创建的全部协议、provider、condition、ring、guard 与资源限制。
     ///
-    /// # 返回
-    ///
-    /// 组件 ID 唯一、默认项存在且 replay TTL 足够时返回运行时；任一步失败都拒绝发布快照。
+    /// 返回：组件 ID 唯一、默认项存在且 replay TTL 足够时返回运行时；任一步失败都拒绝发布快照。
     pub fn new(config: CryptoRuntimeConfig) -> Result<Self, MappingBuildError> {
         config.limits.validate()?;
         config.memory_budget.validate_limits(&config.limits)?;
@@ -341,13 +335,11 @@ impl CryptoRuntime {
 
     /// 业务作用：在快照发布前接管当前运行时的持续密钥调用次数与生命周期记录。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `previous`: 当前仍在服务旧请求的 last-good 密码运行时。
     ///
-    /// # 返回
-    ///
-    /// 新快照全部密钥身份均兼容时返回空值并完成计数器绑定；失败时保持当前运行时不变，调用方
+    /// 返回：新快照全部密钥身份均兼容时返回空值并完成计数器绑定；失败时保持当前运行时不变，调用方
     /// 必须拒绝发布新快照。
     pub(crate) fn adopt_key_usage_registry(
         &self,
@@ -361,13 +353,11 @@ impl CryptoRuntime {
 
     /// 业务作用：在端口监听前检查一条加密路由的全部依赖和算法能力。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `route`: 过程宏生成的静态安全合同。
     ///
-    /// # 返回
-    ///
-    /// 协议、provider、condition、key scope 与 replay 均可安全服务时返回空值，否则拒绝启动。
+    /// 返回：协议、provider、condition、key scope 与 replay 均可安全服务时返回空值，否则拒绝启动。
     pub fn audit(&self, route: &RoutePolicy) -> Result<(), MappingBuildError> {
         let protocol_id = route
             .crypto_protocol
@@ -523,40 +513,38 @@ impl CryptoRuntime {
 
     /// 业务作用：返回当前运行时默认的匿名租户域。
     ///
-    /// # 返回
+    /// 返回：返回 public 或匿名路由使用的固定域；认证路由应优先使用 [`crate::auth::AuthContext`] 中的 tenant。
     ///
-    /// 返回 public 或匿名路由使用的固定域；认证路由应优先使用 [`crate::auth::AuthContext`] 中的 tenant。
+    /// 参数说明: 无。
     pub fn default_tenant_scope(&self) -> Arc<str> {
         self.default_tenant_scope.clone()
     }
 
     /// 业务作用：返回固定快照的公开单请求限制。
     ///
-    /// # 返回
+    /// 返回：返回共享限制值，调用方不得跨请求修改。
     ///
-    /// 返回共享限制值，调用方不得跨请求修改。
+    /// 参数说明: 无。
     pub fn limits(&self) -> Arc<CryptoLimits> {
         self.limits.clone()
     }
 
     /// 业务作用：返回全进程共享的临时内存预算。
     ///
-    /// # 返回
+    /// 返回：返回克隆句柄，所有请求仍竞争同一个加权 semaphore。
     ///
-    /// 返回克隆句柄，所有请求仍竞争同一个加权 semaphore。
+    /// 参数说明: 无。
     pub fn memory_budget(&self) -> CryptoMemoryBudget {
         self.memory_budget.clone()
     }
 
     /// 业务作用：解析 route 固定协议实现。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `route`: 已通过启动审计的静态路由合同。
     ///
-    /// # 返回
-    ///
-    /// 返回共享协议；快照异常时 fail closed。
+    /// 返回：返回共享协议；快照异常时 fail closed。
     pub fn protocol(&self, route: &RoutePolicy) -> Result<Arc<dyn CryptoProtocol>, CryptoError> {
         let id = route
             .crypto_protocol
@@ -572,13 +560,11 @@ impl CryptoRuntime {
 
     /// 业务作用：解析 route 固定 provider 实现。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `route`: 已通过启动审计的静态路由合同。
     ///
-    /// # 返回
-    ///
-    /// 返回共享 provider；不按请求 kid 做远程动态发现。
+    /// 返回：返回共享 provider；不按请求 kid 做远程动态发现。
     pub fn provider(&self, route: &RoutePolicy) -> Result<Arc<dyn WebCryptoProvider>, CryptoError> {
         let id = route
             .crypto_provider
@@ -594,14 +580,12 @@ impl CryptoRuntime {
 
     /// 业务作用：按已认证 tenant 和 route key scope 解析有限 key ring。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `tenant_scope`: auth context 或固定服务域提供的可信租户。
     /// - `route`: 已通过启动审计且声明 key scope 的路由合同。
     ///
-    /// # 返回
-    ///
-    /// 精确匹配时返回 ring；不存在时不根据外部 kid 动态查找其它来源。
+    /// 返回：精确匹配时返回 ring；不存在时不根据外部 kid 动态查找其它来源。
     pub fn key_ring(
         &self,
         tenant_scope: &str,
@@ -618,9 +602,10 @@ impl CryptoRuntime {
 
     /// 业务作用：解析当前 route 使用的重放 guard。
     ///
-    /// # 返回
+    /// 参数说明：
+    /// - `route`：决定是否要求重放防护的当前静态路由合同。
     ///
-    /// required route 返回共享 guard，关闭重放时返回 `None`；缺失配置 fail closed。
+    /// 返回：Disabled 时直接返回 None；其它要求按默认 ID 返回共享 guard，ID 未配置或不存在时返回 Policy 错误，不在本方法执行重放占位。
     pub fn replay_guard(
         &self,
         route: &RoutePolicy,
@@ -640,14 +625,12 @@ impl CryptoRuntime {
 
     /// 业务作用：根据只读可信元数据收窄 route 声明的密码方向。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `route`: 已匹配路由的静态方向上限。
     /// - `input`: 不含 body 的请求视图。
     ///
-    /// # 返回
-    ///
-    /// 返回声明方向的子集；condition 缺失、错误或尝试扩张都会 fail closed。
+    /// 返回：返回声明方向的子集；condition 缺失、错误或尝试扩张都会 fail closed。
     pub async fn evaluate_condition(
         &self,
         route: &RoutePolicy,
@@ -673,31 +656,29 @@ impl CryptoRuntime {
 
     /// 业务作用：返回重放占位 TTL。
     ///
-    /// # 返回
+    /// 返回：返回已经过启动关系校验的保留时间。
     ///
-    /// 返回已经过启动关系校验的保留时间。
+    /// 参数说明: 无。
     pub const fn replay_ttl(&self) -> Duration {
         self.replay_ttl
     }
 
     /// 业务作用：返回单次重放后端操作超时。
     ///
-    /// # 返回
+    /// 返回：返回小于请求总 deadline 的后端调用预算。
     ///
-    /// 返回小于请求总 deadline 的后端调用预算。
+    /// 参数说明: 无。
     pub const fn replay_request_timeout(&self) -> Duration {
         self.replay_request_timeout
     }
 
     /// 业务作用：探测当前快照中 required 路由依赖的共享重放后端。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `routes`: 与当前运行时快照一起完成启动审计的完整静态路由集合。
     ///
-    /// # 返回
-    ///
-    /// 没有 required replay 路由或后端探测成功时返回空值；后端缺失、超时或不可用时返回不含
+    /// 返回：没有 required replay 路由或后端探测成功时返回空值；后端缺失、超时或不可用时返回不含
     /// 连接细节的构建错误，使 readiness 关闭流量但不销毁 last-good 快照。
     pub async fn readiness(&self, routes: &[RoutePolicy]) -> Result<(), MappingBuildError> {
         if !routes
@@ -727,15 +708,13 @@ impl CryptoRuntime {
 /// - `T`: 可通过 trait object 共享的组件类型。
 /// - `F`: 从组件引用读取静态 ID 的函数类型。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `values`: 应用启动期创建的有限组件列表。
 /// - `id_of`: 不读取 secret 的静态 ID 提取函数。
 /// - `kind`: 启动错误使用的组件类别。
 ///
-/// # 返回
-///
-/// ID 合法且唯一时返回不可变 map，否则拒绝启动。
+/// 返回：ID 合法且唯一时返回不可变 map，否则拒绝启动。
 fn collect_components<T: ?Sized, F>(
     values: Vec<Arc<T>>,
     id_of: F,
@@ -756,13 +735,11 @@ where
 
 /// 业务作用：校验可公开的静态组件 ID。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `id`: provider、protocol、condition 或 guard 的静态标识。
 ///
-/// # 返回
-///
-/// 非空、至多 64 字节且只含安全 ASCII 字符时返回 `true`。
+/// 返回：非空、至多 64 字节且只含安全 ASCII 字符时返回 `true`。
 fn valid_component_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -777,15 +754,13 @@ fn valid_component_id(id: &str) -> bool {
 ///
 /// - `T`: 注册表中的共享组件类型。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `map`: 已完成唯一性校验的组件注册表。
 /// - `id`: 可选默认 ID。
 /// - `kind`: 启动错误中的默认项类别。
 ///
-/// # 返回
-///
-/// 未配置或已注册时返回空值；悬空默认 ID 会拒绝启动。
+/// 返回：未配置或已注册时返回空值；悬空默认 ID 会拒绝启动。
 fn validate_default<T: ?Sized>(
     map: &HashMap<&'static str, Arc<T>>,
     id: Option<&'static str>,

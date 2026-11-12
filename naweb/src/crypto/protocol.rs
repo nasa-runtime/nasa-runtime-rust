@@ -65,13 +65,11 @@ pub struct RequestCryptoContext {
 impl std::fmt::Debug for RequestCryptoContext {
     /// 业务作用：输出不含 key、rid 与租户原值的协议摘要。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回脱敏格式化结果。
+    /// 返回：返回脱敏格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RequestCryptoContext")
@@ -116,27 +114,25 @@ pub struct ProtocolEncryptOutput {
 pub trait CryptoProtocol: Send + Sync + 'static {
     /// 业务作用：返回 route policy 使用的稳定协议 ID。
     ///
-    /// # 返回
+    /// 返回：返回非空、有限长度的 ASCII 标识。
     ///
-    /// 返回非空、有限长度的 ASCII 标识。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str;
 
     /// 业务作用：返回请求外层信封要求的精确 Content-Type。
     ///
-    /// # 返回
+    /// 返回：返回静态媒体类型；调用方只允许协议明确声明的参数。
     ///
-    /// 返回静态媒体类型；调用方只允许协议明确声明的参数。
+    /// 参数说明: 无。
     fn request_content_type(&self) -> &'static str;
 
     /// 业务作用：严格解析、认证并解密请求信封。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 拥有信封并固定 route、target、tenant、ring、provider 与重放存储的完整输入。
     ///
-    /// # 返回
-    ///
-    /// 成功返回业务 JSON 和响应上下文；失败不允许按明文或另一协议重试。
+    /// 返回：成功返回业务 JSON 和响应上下文；失败不允许按明文或另一协议重试。
     fn decrypt<'a>(
         &'a self,
         input: ProtocolDecryptInput,
@@ -144,13 +140,11 @@ pub trait CryptoProtocol: Send + Sync + 'static {
 
     /// 业务作用：按请求固定上下文加密 handler 响应。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 拥有完整响应明文、状态与请求固定上下文的有界输入。
     ///
-    /// # 返回
-    ///
-    /// 成功返回完整外层信封与媒体类型；合同不匹配时禁止透传半处理响应。
+    /// 返回：成功返回完整外层信封与媒体类型；合同不匹配时禁止透传半处理响应。
     fn encrypt<'a>(
         &'a self,
         input: ProtocolEncryptInput,
@@ -159,14 +153,12 @@ pub trait CryptoProtocol: Send + Sync + 'static {
 
 /// 业务作用：确认 provider 返回值在协议编码前没有异常膨胀。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `encrypted`: provider 返回的密文与可选辅助字段。
 /// - `max_ciphertext_bytes`: 当前方向允许的二进制密文上限。
 ///
-/// # 返回
-///
-/// 在上限内原样返回；超限返回公开大小错误。
+/// 返回：在上限内原样返回；超限返回公开大小错误。
 pub fn enforce_encrypted_limit(
     encrypted: EncryptedBytes,
     max_ciphertext_bytes: usize,

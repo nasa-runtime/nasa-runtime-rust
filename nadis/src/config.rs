@@ -50,10 +50,12 @@ pub enum CompatibilityProfile {
 }
 
 impl CompatibilityProfile {
-    /// 业务作用：**持久化标识名**(protocol marker / naming_config canonical 用),与 Rust 枚举名解耦。
-    /// `LegacyV1` 的 wire 名固定为历史值 **`"LegacyV1"`**:marker 是落盘的持久 wire,改 Rust 枚举名
-    /// (去品牌化)**不能**改已写入的 marker 标识,否则既有 namespace 升级后 profile 名不符会
-    /// fail-closed 拒启动。marker 比对/生成一律用本方法而非 `format!("{self:?}")`。(RustV2 wire 名不变。)
+    /// 业务作用：提供协议标记使用的稳定名称，使持久数据身份不依赖枚举的显示格式。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：对应协议的固定字符串 `LegacyV1` 或 `RustV2`，用于持久标记生成和比较。
+    /// 更改这些名称会改变同一命名空间的兼容性判定，不能作为展示文案调整。
     pub fn wire_name(&self) -> &'static str {
         match self {
             CompatibilityProfile::LegacyV1 => "LegacyV1",
@@ -98,8 +100,13 @@ pub struct RedisConfig {
     pub idempotent_counter: Option<crate::idempotent::IdempotentCounterCfg>,
 }
 
-/// 业务作用：去掉 redis 连接串里的 userinfo(`scheme://[user][:password]@` → `scheme://***@`),用于脱敏日志。
-/// 无 userinfo(如 `redis://host:port`)则原样返回。
+/// 业务作用：在配置显示时遮蔽标准 Redis URL 的用户信息，避免直接展示用户名和密码。
+///
+/// 参数说明：
+/// - `url`：按标准 URL 转义规则构造的连接串，用户信息中的保留字符须已编码。
+///
+/// 返回：将协议分隔符之后首个 `@` 之前的用户信息替换为 `***`；无此结构则原样返回。
+/// 不验证 URL，也不移除查询参数或片段；端点诊断应使用 [`RedisConfig::safe_endpoint`]。
 pub(crate) fn redact_url(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
         let after = scheme_end + 3;
@@ -112,10 +119,12 @@ pub(crate) fn redact_url(url: &str) -> String {
 }
 
 impl std::fmt::Debug for RedisConfig {
-    /// 业务作用：输出 Redis 配置的调试视图;url 会移除 userinfo,避免日志泄露凭据。
+    /// 业务作用：输出带用户信息遮蔽的配置视图，便于核对连接参数和子系统配置。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收配置摘要的格式化目标。
+    ///
+    /// 返回：输出完成时成功，目标拒绝写入时传播格式化错误；URL 查询参数与其它配置字段不自动脱敏。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisConfig")
             .field("url", &redact_url(&self.url))
@@ -133,12 +142,14 @@ impl std::fmt::Debug for RedisConfig {
 }
 
 impl RedisConfig {
-    /// 业务作用：代码内构造(替代配置文件;profile 仍强制显式)。
+    /// 业务作用：以显式协议身份构造 Redis 配置，其余子系统使用类型默认值。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `url`: Redis 连接串。
     /// - `namespace`: 协议命名空间,用于协议标记和 key 前缀隔离。
     /// - `profile`: 兼容性 profile,决定持久化 key 布局和运行协议。
+    ///
+    /// 返回：默认数据源身份为 `primary` 的配置；本方法不校验、不建连，连接前仍须执行校验。
     pub fn new(
         url: impl Into<String>,
         namespace: impl Into<String>,
@@ -158,15 +169,12 @@ impl RedisConfig {
         }
     }
 
-    /// 业务作用：返回可安全写入日志与错误的定位信息:`scheme://host:port[/db]`,移除 userinfo(用户名/密码)与
-    /// query/fragment(可能含 TLS 私钥路径等)。
+    /// 业务作用：为连接失败归因提取端点，去掉用户信息、查询参数及片段，避免展示这些位置的凭据。
     ///
-    /// 供启动连接诊断复用:错误摘要凭它定位是哪个 host/port/db 失败,而不泄漏连接串凭据。无法解析(无
-    /// `://` 或 host 段为空)时返回固定占位符 `<unknown-endpoint>`,**绝不**回退打印含凭据的原始连接串。
+    /// 参数说明：无。
     ///
-    /// # 参数
-    ///
-    /// 本方法无参数;只读取自身 `url`,不访问网络。
+    /// 返回：裁剪首尾空白后的协议、主机和路径文本；缺少协议分隔符或主机路径为空时返回
+    /// 固定占位符 `<unknown-endpoint>`。本方法不执行完整 URL 合法性校验，也不访问网络。
     pub fn safe_endpoint(&self) -> String {
         let url = self.url.trim();
         let Some(scheme_end) = url.find("://") else {
@@ -190,8 +198,12 @@ impl RedisConfig {
         format!("{scheme}://{host_and_path}")
     }
 
-    /// 业务作用：启动期校验(connect 内调用)。
+    /// 业务作用：在连接前拒绝无效身份、冲突路由及无法执行的容量或时间参数，限制启动资源规模。
     ///
+    /// 参数说明：无。
+    ///
+    /// 返回：已覆盖的配置约束全部满足时成功，首个违反约束的字段返回配置错误。
+    /// 不建立连接或检查远端能力；排空窗口短于处理超时时记录告警，但允许保留后台排空责任。
     pub fn validate(&self) -> crate::error::Result<()> {
         if self.partition.enabled {
             self.partition.limits.validate(self.stream.batch_size)?;
@@ -597,7 +609,9 @@ pub struct CommandCfg {
 impl Default for CommandCfg {
     /// 业务作用：构造命令层默认配置。
     ///
-    /// 默认不限制单命令业务超时,但给连接级响应超时 30s 兜底,避免 Redis 可达但不响应时 future 永久挂起。
+    /// 参数说明：无。
+    ///
+    /// 返回：不额外限制单命令业务等待、连接级响应上限为 30 秒的配置；不会立即创建计时器。
     fn default() -> Self {
         Self {
             timeout_ms: 0,
@@ -624,7 +638,9 @@ pub struct PipelineCfg {
 impl Default for PipelineCfg {
     /// 业务作用：构造 pipeline 默认配置。
     ///
-    /// 默认 1000 条或 4MiB 触发自动滚动 flush,并启用独立 pipeline 连接 lane,避免大批量响应阻塞普通命令。
+    /// 参数说明：无。
+    ///
+    /// 返回：以 1000 条或 4 MiB 参数字节为滚动组批阈值、启用独立连接的配置；连接仍由运行时惰性创建。
     fn default() -> Self {
         Self {
             session_max_commands: 1000,
@@ -646,7 +662,9 @@ pub struct LockCfg {
 impl Default for LockCfg {
     /// 业务作用：构造分布式锁默认配置。
     ///
-    /// 默认前缀为 DISTRIBUTED-LOCK:，lease 为 30s；看门狗按 lease/3 续租,因此业务锁默认能覆盖常见短事务。
+    /// 参数说明：无。
+    ///
+    /// 返回：键前缀为 `DISTRIBUTED-LOCK:`、租约为 30 秒的配置；不会加锁或启动续租，持权仍需远端确认。
     fn default() -> Self {
         Self {
             prefix: "DISTRIBUTED-LOCK:".into(),
@@ -678,7 +696,10 @@ pub struct StreamCfg {
 impl Default for StreamCfg {
     /// 业务作用：构造 stream 消费默认配置。
     ///
-    /// 默认以 500ms 冷流轮询、100 条批量和 1 小时数据保留窗运行，并限制组内同时读取的批次数。
+    /// 参数说明：无。
+    ///
+    /// 返回：轮询间隔 500 毫秒、批量 100 条、保留窗口 1 小时的配置，启用周期裁剪与确认后异步删除。
+    /// 同时读取上限为 1000，运行时还须受总责任预算约束；构造本身不读取或删除数据。
     fn default() -> Self {
         Self {
             poll_timeout_ms: 500,
@@ -733,8 +754,7 @@ pub struct PartitionCfg {
     /// 超时保留 PEL 进入精确重试；正常停机等待期限不自动升级为强停。
     /// handler 必须协作让出，不能派生脱离监督的副作用任务；不让出的同步代码不能由异步超时证明终止。
     pub handler_timeout_ms: u64,
-    /// 毒消息策略(默认 Park——fail-closed:停拉隔离等运维处置,**不自动删数据**;
-    ///文档 V2 默认即 Park,Drop 是显式选择的不可恢复丢弃)。
+    /// 毒消息策略，默认 Park：停止拉取并隔离，等待管理端处置；Drop 须显式选择且无法恢复消息。
     pub poison_policy: PoisonPolicy,
     /// **隔离组**:把高频/重 topic 隔离到独立 stream 组,
     /// 各组具有独立物理 Stream 和读取参数，执行与容量隔离由 `executor.scope` 决定；空配置仅启用默认组。
@@ -746,7 +766,10 @@ pub struct PartitionCfg {
 impl Default for PartitionCfg {
     /// 业务作用：构造 partition 模式默认配置。
     ///
-    /// 默认关闭 partition，使用默认组名、64 分区、10s 再平衡与 Park 毒消息策略。
+    /// 参数说明：无。
+    ///
+    /// 返回：默认关闭消费，使用 `SINGLE-CONSUME` 组、64 个分区和 10 秒再均衡周期。
+    /// 处理超时为 30 秒、排空等待为 35 秒，毒消息进入 Park 状态，不自动丢弃。
     fn default() -> Self {
         Self {
             limits: Default::default(),
@@ -803,8 +826,13 @@ pub struct PartitionGroupCfg {
 }
 
 impl PartitionGroupCfg {
-    /// 业务作用：resolve 本组的 `PartitionCfg`(per-group 覆盖 → 父级;`count` 由调用方传 resolved 值)。
-    /// 用于 `GroupRuntime`:`cfg.groups` 清空(per-group 无嵌套组),`enabled/default_group` 沿父级(runtime 不读)。
+    /// 业务作用：展开隔离组的运行参数覆盖与父级继承，得到不再嵌套分组的有效配置。
+    ///
+    /// 参数说明：
+    /// - `parent`：提供共享资源限制、执行器及未覆盖参数的父级配置。
+    /// - `count`：调用方已按继承规则确定的有效分区数量，本方法不再解析零值继承。
+    ///
+    /// 返回：本组覆盖值优先、缺席值沿用父级的配置，分组映射为空；不重复校验或启动运行时。
     pub(crate) fn resolved_partition(&self, parent: &PartitionCfg, count: u32) -> PartitionCfg {
         PartitionCfg {
             limits: parent.limits.clone(),
@@ -825,7 +853,12 @@ impl PartitionGroupCfg {
         }
     }
 
-    /// 业务作用：resolve 本组的 `StreamCfg`(per-group 覆盖 → 全局 stream)。
+    /// 业务作用：展开隔离组的读取参数，使每组可独立控制轮询、批量和在途读取规模。
+    ///
+    /// 参数说明：
+    /// - `global`：全局 Stream 配置，提供未覆盖的读取参数及统一保留、裁剪和异步删除策略。
+    ///
+    /// 返回：读取参数采用本组覆盖值的配置，其余字段继承全局值；本方法不校验有效范围或访问 Redis。
     pub(crate) fn resolved_stream(&self, global: &StreamCfg) -> StreamCfg {
         StreamCfg {
             poll_timeout_ms: self.poll_timeout_ms.unwrap_or(global.poll_timeout_ms),

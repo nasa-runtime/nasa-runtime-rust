@@ -565,7 +565,8 @@ fn configuration() -> nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader>
 }
 
 /// 业务作用：将应用启动和停机交给统一生命周期。
-/// 参数说明：`_app` 是供业务登记资源与任务的受管应用。
+/// 参数说明：
+/// - `_app`：供业务登记资源与任务的受管应用，本例不额外使用。
 /// 返回：登记完成后由运行时继续准备资源，未通过门禁时不开放服务。
 #[nasa::application("log", "web", config = configuration)]
 async fn main(_app: nasa::Application) -> anyhow::Result<()> {
@@ -791,8 +792,8 @@ driver mismatch；显式配置 PostgreSQL `schema` 时，它同时设置业务�
 
 ## YML 配置与使用
 
-门面本身不读取 yml。声明式应用要求 `zcf/application.yml` 存在，内容可为 `{}`；具体根节点由对应
-组件读取。
+门面本身不读取 yml。声明式应用使用非空环境变量 `APP_CONFIG_FILE` 指定的主路径，未设置或为空时
+使用 `zcf/application.yml`。相对路径按进程工作目录解析，所选文件必须存在，内容可为 `{}`；具体根节点由对应组件读取。
 
 ```yaml
 application:

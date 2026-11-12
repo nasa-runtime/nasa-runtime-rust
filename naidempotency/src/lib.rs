@@ -88,7 +88,12 @@ pub struct IdempotencyError {
 }
 
 impl IdempotencyError {
-    /// 业务作用：用脱敏原因构造。
+    /// 业务作用：构造仅描述 store 故障的错误，保留业务裁决与持久层失败的区分。
+    ///
+    /// 参数说明：
+    /// - `reason`：不含凭据、请求体或后端敏感信息的原因文本。
+    ///
+    /// 返回：返回保存原文的错误，不自动脱敏或验证原因，调用方必须只传入可公开的稳定说明。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -97,7 +102,12 @@ impl IdempotencyError {
 }
 
 impl std::fmt::Display for IdempotencyError {
-    /// 业务作用：输出稳定脱敏原因，不包含 key、指纹、响应体或后端连接信息。
+    /// 业务作用：按固定 store 错误前缀展示调用方提供的原因。
+    ///
+    /// 参数说明：
+    /// - `formatter`：用于写入稳定前缀与原因文本的格式器。
+    ///
+    /// 返回：格式器写入成功时成功，写入失败传播格式错误；输出原 reason，不能替代调用方的脱敏。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "idempotency store error: {}", self.reason)
     }
@@ -113,6 +123,13 @@ impl std::error::Error for IdempotencyError {}
 #[async_trait::async_trait]
 pub trait IdempotencyStore {
     /// 业务作用：尝试开始一次幂等请求,返回裁决(见 [`IdempotencyOutcome`])。
+    ///
+    /// 参数说明：
+    /// - `key`：租户、主体、路由与客户端幂等键组成的完整命名空间。
+    /// - `fingerprint`：本次请求等价类的固定指纹。
+    /// - `lease`：调用方生成并在完成或放弃时原样携带的执行租约。
+    ///
+    /// 返回：不存在时建立 InFlight 并返回首次执行；相同指纹返回在途或完成重放，不同指纹返回冲突。后端故障返回错误，调用方应关闭请求；首次占位与业务副作用的原子性由具体 store 和事务装配决定。
     async fn begin(
         &self,
         key: &IdempotencyKey,
@@ -121,6 +138,14 @@ pub trait IdempotencyStore {
     ) -> Result<IdempotencyOutcome, IdempotencyError>;
 
     /// 业务作用：完成：仅当 fingerprint + lease 仍属于调用方时落为 Completed。返回是否成功持有并完成租约。
+    ///
+    /// 参数说明：
+    /// - `key`：租户、主体、路由与客户端幂等键组成的完整命名空间。
+    /// - `fingerprint`：本次请求等价类的固定指纹。
+    /// - `lease`：调用方生成并在完成或放弃时原样携带的执行租约。
+    /// - `response`：已由调用方限制大小与重放范围的响应副本。
+    ///
+    /// 返回：仍为同 fingerprint 与 lease 的 InFlight 时保存响应并返回 true，其它状态返回 false。存储故障返回错误；响应的大小、状态码与可重放 header 由调用方约束。
     async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -130,6 +155,13 @@ pub trait IdempotencyStore {
     ) -> Result<bool, IdempotencyError>;
 
     /// 业务作用：放弃仍属于调用方的 InFlight 占位。已完成、已换 owner 或不存在均返回 `false`。
+    ///
+    /// 参数说明：
+    /// - `key`：租户、主体、路由与客户端幂等键组成的完整命名空间。
+    /// - `fingerprint`：本次请求等价类的固定指纹。
+    /// - `lease`：调用方生成并在完成或放弃时原样携带的执行租约。
+    ///
+    /// 返回：仅删除同 fingerprint 与 lease 的 InFlight，删除时 true，不存在、已完成或换 owner 时 false。存储故障返回错误，不代表业务副作用已经撤销。
     async fn abort(
         &self,
         key: &IdempotencyKey,
@@ -146,6 +178,10 @@ pub struct InMemoryIdempotencyStore {
 
 impl InMemoryIdempotencyStore {
     /// 业务作用：创建空 store。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回空的进程内 store；没有 TTL、容量上限或重启后的重放保证。
     pub fn new() -> Self {
         Self::default()
     }
@@ -154,6 +190,13 @@ impl InMemoryIdempotencyStore {
 #[async_trait::async_trait]
 impl IdempotencyStore for InMemoryIdempotencyStore {
     /// 业务作用：原子占位或读取现有进程内记录，区分首次、在途、重放与指纹冲突。
+    ///
+    /// 参数说明：
+    /// - `key`：租户、主体、路由与客户端幂等键组成的完整命名空间。
+    /// - `fingerprint`：本次请求等价类的固定指纹。
+    /// - `lease`：调用方生成并在完成或放弃时原样携带的执行租约。
+    ///
+    /// 返回：不存在时建立 InFlight 并返回首次执行；相同指纹返回在途或完成重放，不同指纹返回冲突。锁中原子裁决，毒化锁仍恢复内部状态；本实现没有 TTL、清理或持久性，也不生成租约。
     async fn begin(
         &self,
         key: &IdempotencyKey,
@@ -166,7 +209,13 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let outcome = match records.get(key) {
             None => {
-                records.insert(key.clone(), RecordState::InFlight { fingerprint, lease });
+                records.insert(
+                    key.clone(),
+                    RecordState::InFlight {
+                        fingerprint,
+                        lease,
+                    },
+                );
                 IdempotencyOutcome::FirstExecution
             }
             Some(RecordState::InFlight {
@@ -194,6 +243,14 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     }
 
     /// 业务作用：仅由仍持有 fingerprint 与 lease 的 owner 将在途记录转换为完成记录。
+    ///
+    /// 参数说明：
+    /// - `key`：租户、主体、路由与客户端幂等键组成的完整命名空间。
+    /// - `fingerprint`：本次请求等价类的固定指纹。
+    /// - `lease`：调用方生成并在完成或放弃时原样携带的执行租约。
+    /// - `response`：已由调用方限制大小与重放范围的响应副本。
+    ///
+    /// 返回：仍为同 fingerprint 与 lease 的 InFlight 时保存响应并返回 true，其它状态返回 false。进程内锁中完成，不验证响应大小、状态码或 header 白名单。
     async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -225,6 +282,13 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     }
 
     /// 业务作用：仅删除仍属于调用方 lease 的在途占位，避免旧 owner 清除新请求。
+    ///
+    /// 参数说明：
+    /// - `key`：租户、主体、路由与客户端幂等键组成的完整命名空间。
+    /// - `fingerprint`：本次请求等价类的固定指纹。
+    /// - `lease`：调用方生成并在完成或放弃时原样携带的执行租约。
+    ///
+    /// 返回：仅删除同 fingerprint 与 lease 的 InFlight，删除时 true，不存在、已完成或换 owner 时 false。本实现只改变进程内记录，不撤销业务副作用。
     async fn abort(
         &self,
         key: &IdempotencyKey,

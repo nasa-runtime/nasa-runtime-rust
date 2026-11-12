@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{NasaRedisError, Result};
 use crate::job::model::{JobPubSubMode, JobSerialOverflowPolicy};
 
-/// 首版只支持的协议版本；registry 无协议范围、共享 Stream 无兼容消费者选择，禁止靠调高版本滚动升级。
+/// 当前支持的持久协议版本；注册表和共享 Stream 不协商消费者兼容范围，禁止仅调高版本进行滚动切换。
 const SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 
 /// Job 运行时配置；字段与既有 Job 属性对齐，缺省即生产可用的保守边界。
@@ -19,7 +19,7 @@ const SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 pub struct JobConfig {
     /// 命名空间；持久布局的一部分。
     pub namespace: String,
-    /// 协议版本；首版只接受 1。
+    /// 持久协议版本；当前仅接受 1，不能通过配置扩展协议能力。
     pub protocol_version: u32,
     /// 调度分片数；持久布局。
     pub shard_count: u32,
@@ -29,7 +29,7 @@ pub struct JobConfig {
     pub application_name: String,
     /// 稳定实例身份；受管 Fanout 模式要求显式配置。
     pub instance_identity: String,
-    /// 单连接每秒扫描的最小间隔。
+    /// 扫描轮次之间的最小等待时间，单位毫秒。
     pub min_scan_interval_ms: u64,
     /// 无到期任务时的最大扫描间隔。
     pub max_scan_interval_ms: u64,
@@ -135,11 +135,13 @@ pub struct JobSourceConfig {
 
 /// Job 根配置的拥有式 builder；默认值与反序列化路径相同，最终仍统一经过 `validate`。
 pub struct JobConfigBuilder {
+    /// 尚未通过最终构造校验的根级配置。
     config: JobConfig,
 }
 
 /// 单个 source 稀疏覆盖 builder；只记录业务显式设置的字段，未设置项继承根配置。
 pub struct JobSourceConfigBuilder {
+    /// 仅记录当前数据源显式覆盖值的暂存配置。
     source: JobSourceConfig,
 }
 
@@ -373,8 +375,10 @@ impl JobConfig {
     /// - `qualifier`: 计划实际引用的 canonical source id。
     /// - `client_namespace`: 该 RedisClient 自身命名空间；根级未配置 namespace 时作为默认值。
     ///
-    /// 返回：覆盖合并且全部门禁通过时返回配置；source 被禁用、字段未知或类型非法时返回配置错误。
+    /// 返回：根配置和合并配置均通过门禁时返回独立配置；禁用数据源、身份覆盖、未知字段或非法值返回错误。
     pub fn resolve_source(&self, qualifier: &str, client_namespace: &str) -> Result<Self> {
+        // 合并后会清除稀疏来源表，必须先检查原始覆盖，防止执行器身份约束随来源信息丢失。
+        self.validate()?;
         let source = self.sources.get(qualifier);
         if source.and_then(|value| value.enabled) == Some(false) {
             return Err(crate::job::JobError::SourceDisabled(qualifier.to_owned()).into());
@@ -406,7 +410,8 @@ impl JobConfig {
 impl JobConfigBuilder {
     /// 业务作用：设置全部实际 source 的默认 Job namespace。
     ///
-    /// 参数说明：`namespace` 为持久键布局的一部分。
+    /// 参数说明：
+    /// - `namespace`：任务持久键布局的默认命名空间，已有数据时不能任意替换。
     ///
     /// 返回：更新后的 builder。
     pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
@@ -416,7 +421,8 @@ impl JobConfigBuilder {
 
     /// 业务作用：设置执行器稳定应用名，参与节点身份派生。
     ///
-    /// 参数说明：`application_name` 为部署稳定名称。
+    /// 参数说明：
+    /// - `application_name`：部署中稳定的应用名，与实例身份共同派生执行器节点身份。
     ///
     /// 返回：更新后的 builder。
     pub fn application_name(mut self, application_name: impl Into<String>) -> Self {
@@ -426,7 +432,8 @@ impl JobConfigBuilder {
 
     /// 业务作用：设置跨进程重启稳定的实例身份，供执行器与 Fanout 定向路由使用。
     ///
-    /// 参数说明：`instance_identity` 为当前副本稳定标识。
+    /// 参数说明：
+    /// - `instance_identity`：当前副本跨进程重启保持稳定的身份，用于恢复定向路由。
     ///
     /// 返回：更新后的 builder。
     pub fn instance_identity(mut self, instance_identity: impl Into<String>) -> Self {
@@ -473,7 +480,8 @@ impl JobConfigBuilder {
 impl JobSourceConfigBuilder {
     /// 业务作用：显式启用或禁用当前 source；被计划引用且禁用时 prepare 拒绝。
     ///
-    /// 参数说明：`enabled` 为部署门禁。
+    /// 参数说明：
+    /// - `enabled`：当前数据源的部署门禁；设为假且仍被任务计划引用时拒绝准备。
     ///
     /// 返回：更新后的稀疏 builder。
     pub fn enabled(mut self, enabled: bool) -> Self {
@@ -483,7 +491,8 @@ impl JobSourceConfigBuilder {
 
     /// 业务作用：覆盖当前 source 的 Job namespace，不影响 RedisClient 自身通用 namespace。
     ///
-    /// 参数说明：`namespace` 为该 source 的持久 Job 布局名称。
+    /// 参数说明：
+    /// - `namespace`：当前数据源的任务持久布局名称，不修改 Redis 客户端的通用命名空间。
     ///
     /// 返回：更新后的稀疏 builder。
     pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
@@ -496,9 +505,10 @@ impl JobSourceConfigBuilder {
 
     /// 业务作用：覆盖当前 source 的本地 Handler 并发上限。
     ///
-    /// 参数说明：`capacity` 为正整数容量。
+    /// 参数说明：
+    /// - `capacity`：当前数据源 Handler 的并发容量，合并后须为正且不超过执行器容量。
     ///
-    /// 返回：更新后的稀疏 builder；最终与 executor_capacity 的关系由 `build/resolve_source` 校验。
+    /// 返回：更新后的稀疏构造器；本方法只保存覆盖值，与执行器容量的关系在数据源合并后校验。
     pub fn handler_capacity(mut self, capacity: u32) -> Self {
         self.source.overrides.insert(
             "handler_capacity".to_owned(),
@@ -508,12 +518,12 @@ impl JobSourceConfigBuilder {
     }
 }
 
-/// 业务作用：构造带 `job` 前缀的配置错误，便于业务定位启动门禁问题。
+/// 业务作用：将任务配置门禁的拒绝原因包装为统一的任务配置错误。
 ///
 /// 参数说明：
 /// - `message`: 稳定错误摘要。
 ///
-/// 返回：`JobError::Config` 错误。
+/// 返回：保留原摘要的 `JobError::Config`，不额外添加文本前缀。
 fn cfg(message: &str) -> NasaRedisError {
     crate::job::JobError::Config(message.to_owned()).into()
 }

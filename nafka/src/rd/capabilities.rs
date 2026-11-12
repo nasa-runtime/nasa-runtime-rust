@@ -4,7 +4,10 @@ use crate::{NafkaError, Result};
 use std::{collections::BTreeSet, sync::OnceLock};
 
 /// 业务作用：读取实际链接的librdkafka能力，并限制为组件显式开放的feature。
-/// 参数说明：无。返回：固定规范能力名；查询失败明确拒绝，不能只看配置文字宣称支持。
+///
+/// 参数说明: 无。
+///
+/// 返回：固定规范能力名；查询失败明确拒绝，不能只看配置文字宣称支持。
 pub(crate) fn supported() -> Result<BTreeSet<String>> {
     static VALUE: OnceLock<Result<BTreeSet<String>>> = OnceLock::new();
     VALUE
@@ -40,7 +43,10 @@ pub(crate) fn supported() -> Result<BTreeSet<String>> {
 }
 
 /// 业务作用：报告实际链接的底层客户端版本，供部署判断支持范围。
-/// 参数说明：无。返回：librdkafka版本文本，不读取配置或连接信息。
+///
+/// 参数说明: 无。
+///
+/// 返回：librdkafka版本文本，不读取配置或连接信息。
 pub(crate) fn version() -> String {
     rdkafka::util::get_rdkafka_version().1
 }

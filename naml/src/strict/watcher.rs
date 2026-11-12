@@ -55,7 +55,11 @@ pub struct ConfigWatcher {
 
 impl Targets {
     /// 业务作用：在回调外固定所有路径别名，回调只做内存匹配。
-    /// 参数说明：`plan` 是真实加载及缺失候选；`policy` 约束目录规模。
+    ///
+    /// 参数说明：
+    /// - `plan`：是真实加载及缺失候选
+    /// - `policy`：约束目录规模。
+    ///
     /// 返回：含模式目录与恢复祖先的完整目标。
     fn prepare(plan: &WatchPlan, policy: &LoadPolicy) -> Result<Self> {
         policy.check_cancelled()?;
@@ -106,7 +110,11 @@ impl Targets {
     }
 
     /// 业务作用：缺失目录使用最近可观察祖先，避免递归观察无关文件系统。
-    /// 参数说明：`directory` 为所需目录；`policy` 包含允许根及限额。
+    ///
+    /// 参数说明：
+    /// - `directory`：为所需目录
+    /// - `policy`：包含允许根及限额。
+    ///
     /// 返回：有限的非递归目录观察计划。
     fn observe_directory(&mut self, directory: PathBuf, policy: &LoadPolicy) -> Result<()> {
         let mut ancestor = directory.as_path();
@@ -146,7 +154,10 @@ impl Targets {
     }
 
     /// 业务作用：仅通过既定身份与共同模式判断事件相关性。
-    /// 参数说明：`path` 为后端提供的路径。
+    ///
+    /// 参数说明：
+    /// - `path`：为后端提供的路径。
+    ///
     /// 返回：命中已读文件、模式或缺失目录恢复边界时为真。
     fn matches(&self, path: &Path) -> bool {
         if self.exact.contains(path)
@@ -171,7 +182,12 @@ impl Targets {
 
 impl ConfigWatcher {
     /// 业务作用：为严格来源建立精确观察和无路径重扫通知。
-    /// 参数说明：`plan` 是加载来源；`policy` 为观察预算；`handler` 应只发送合并唤醒信号。
+    ///
+    /// 参数说明：
+    /// - `plan`：是加载来源
+    /// - `policy`：为观察预算
+    /// - `handler`：应只发送合并唤醒信号。
+    ///
     /// 返回：全部必要目录可观察才返回实例；失败不留下半可用实例。
     pub fn new(
         plan: &WatchPlan,
@@ -252,7 +268,10 @@ impl ConfigWatcher {
     }
 
     /// 业务作用：即使候选值未变化也按新的来源计划对账观察。
-    /// 参数说明：`plan` 是新的来源事实。
+    ///
+    /// 参数说明：
+    /// - `plan`：是新的来源事实。
+    ///
     /// 返回：新增观察全部就绪才切换目标；撤销失败保留资源并记录状态。
     pub fn reconcile(&mut self, plan: &WatchPlan) -> Result<()> {
         let next = Targets::prepare(plan, &self.policy)?;
@@ -304,7 +323,9 @@ impl ConfigWatcher {
     }
 
     /// 业务作用：查询观察健康与新旧集合切换的资源占用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与业务配置版本无关的观察状态。
     pub fn health(&self) -> WatchHealth {
         self.health
@@ -314,7 +335,9 @@ impl ConfigWatcher {
     }
 
     /// 业务作用：调用方完成全量补读后确认重扫信号已经处理。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：清除重扫标记，后端健康仍由成功重建或后续状态决定。
     pub fn acknowledge_rescan(&self) {
         self.health
@@ -324,7 +347,10 @@ impl ConfigWatcher {
     }
 
     /// 业务作用：对账结束后发布完整观察规模与退化状态。
-    /// 参数说明：`success` 表示本次新增观察全部成功。
+    ///
+    /// 参数说明：
+    /// - `success`：表示本次新增观察全部成功。
+    ///
     /// 返回：更新内部健康快照。
     fn update_health(&self, success: bool) {
         let targets = self

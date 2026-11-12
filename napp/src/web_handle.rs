@@ -91,9 +91,9 @@ pub enum WebRouteOrigin {
 impl WebRouteOrigin {
     /// 业务作用：返回适合日志、指标标签和管理端响应使用的稳定名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回值不会包含业务输入。
+    /// 返回：业务路由为 business，运行时管理路由为 runtime，名称不含业务输入。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Business => "business",
@@ -140,9 +140,11 @@ pub struct RouteInfo {
 impl RouteInfo {
     /// 业务作用：从一条已通过预检的业务路由元数据创建只读信息。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `route`：属性入口生成并已完成冲突检查的静态路由元数据。
+    ///
+    /// 返回：复制静态声明且来源为 Business 的只读信息；不执行 schema 工厂或重复校验路由冲突。
     pub(crate) const fn business(route: RouteMeta) -> Self {
         Self {
             method: route.method,
@@ -164,11 +166,13 @@ impl RouteInfo {
 
     /// 业务作用：创建一条由运行时拥有的管理路由信息。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `method`：规范化的大写请求方法。
     /// - `path`：相对于统一上下文前缀的静态路由模板。
     /// - `handler`：不包含业务输入的稳定处理器名称。
+    ///
+    /// 返回：来源为 Runtime、成功状态为 200 且未填媒体类型或 schema 工厂的只读声明；认证标记默认为 false，不替代管理端实际访问控制。
     pub(crate) const fn runtime(
         method: &'static str,
         path: &'static str,
@@ -194,86 +198,126 @@ impl RouteInfo {
 
     /// 业务作用：返回规范化的大写请求方法。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回值与清单共同存活。
+    /// 返回：预检时保存的静态方法名，不从具体入站请求推断。
     pub const fn method(&self) -> &'static str {
         self.method
     }
 
     /// 业务作用：返回相对于统一上下文前缀的路由模板。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；完整对外路径应由 `WebHandle::context_path` 与该值组合。
+    /// 返回：静态路由模板；完整对外路径还需结合 WebHandle::context_path，不包含当前请求的实际参数值。
     pub const fn path(&self) -> &'static str {
         self.path
     }
 
     /// 业务作用：返回用于诊断的稳定处理器名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；该名称不能用于直接调用处理器。
+    /// 返回：预检时保存的处理器名称，仅用于诊断关联，不提供函数调用能力。
     pub const fn handler(&self) -> &'static str {
         self.handler
     }
 
     /// 业务作用：返回静态响应媒体类型。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：端点声明的响应媒体类型，未声明则为 None；不保证处理器实际返回相同 Content-Type。
     pub const fn produces(&self) -> Option<&'static str> {
         self.produces
     }
 
     /// 业务作用：返回静态请求媒体类型。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：端点声明的请求媒体类型，未声明则为 None；本访问器不验证请求头或正文格式。
     pub const fn consumes(&self) -> Option<&'static str> {
         self.consumes
     }
 
     /// 业务作用：返回显式请求 DTO schema 工厂。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：声明的请求结构工厂，未声明则为 None；不执行工厂，不验证当前请求。
     pub const fn request_schema(&self) -> Option<naweb::ApiSchemaFactory> {
         self.request_schema
     }
 
     /// 业务作用：返回显式响应 DTO schema 工厂。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：声明的响应结构工厂，未声明则为 None；只提供文档元数据，不执行响应校验。
     pub const fn response_schema(&self) -> Option<naweb::ApiSchemaFactory> {
         self.response_schema
     }
 
     /// 业务作用：返回显式 query 参数集工厂。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：声明的查询参数描述工厂，未声明则为 None；不会解析实际查询串。
     pub const fn query_parameters(&self) -> Option<naweb::ApiParametersFactory> {
         self.query_parameters
     }
 
     /// 业务作用：返回显式 header 参数集工厂。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：声明的请求头描述工厂，未声明则为 None；不会读取或验证实际头部。
     pub const fn header_parameters(&self) -> Option<naweb::ApiParametersFactory> {
         self.header_parameters
     }
 
     /// 业务作用：返回主要成功 HTTP 状态码。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：用于接口描述的成功状态码，运行时管理路由缺省为 200；不改写处理器的实际响应。
     pub const fn success_status(&self) -> u16 {
         self.success_status
     }
 
     /// 业务作用：返回额外响应集工厂。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：端点额外响应描述的工厂，未声明则为 None；不调用工厂或生成业务响应。
     pub const fn additional_responses(&self) -> Option<naweb::ApiResponsesFactory> {
         self.additional_responses
     }
 
     /// 业务作用：返回是否为流式响应。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：端点的静态流式声明，运行时管理路由缺省为 false；不观察实际响应体传输进度。
     pub const fn streaming(&self) -> bool {
         self.streaming
     }
 
     /// 业务作用：返回端点属性是否要求认证；运行时 route policy 可能进一步把公开声明收紧。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：端点声明的认证标记；false 只表示没有静态要求，不能用它绕过运行时访问控制。
     pub const fn auth_required(&self) -> bool {
         self.auth_required
     }
 
     /// 业务作用：返回该路由属于业务端点还是运行时管理端点。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；来源不依赖路径文本推断。
+    /// 返回：构造时固定的业务或运行时来源，不按路径推断，也不表示当前调用者具有管理权限。
     pub const fn origin(&self) -> WebRouteOrigin {
         self.origin
     }
@@ -297,9 +341,9 @@ pub enum WebReadinessState {
 impl WebReadinessState {
     /// 业务作用：返回适合管理端响应和指标标签使用的稳定名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回值不会包含故障详情。
+    /// 返回：对应状态的固定小写名称，仅表达生命周期分类，不附带故障详情。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Starting => "starting",
@@ -312,9 +356,9 @@ impl WebReadinessState {
 
     /// 业务作用：判断 Web 数据面是否处于统一应用定义的可接流状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；只有 `Ready` 返回 `true`。
+    /// 返回：仅 Ready 为 true；这是已读取状态的判断，不保证返回后的请求仍获准进入。
     pub const fn is_ready(self) -> bool {
         matches!(self, Self::Ready)
     }
@@ -323,9 +367,11 @@ impl WebReadinessState {
 impl From<ApplicationState> for WebReadinessState {
     /// 业务作用：将统一应用状态映射为 Web 数据面的对外状态。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `state`：从共享生命周期原子单元读取的当前状态。
+    ///
+    /// 返回：Stopping 映射为 Draining、Stopped 映射为 Closed，其余保持相应生命周期含义；不主动探测监听或依赖健康。
     fn from(state: ApplicationState) -> Self {
         match state {
             ApplicationState::Starting => Self::Starting,
@@ -357,45 +403,45 @@ pub struct WebMetricsSnapshot {
 impl WebMetricsSnapshot {
     /// 业务作用：返回已经进入 Web 观测边界的请求总数。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；计数包含业务路由、管理探针和未匹配请求。
+    /// 返回：快照保存的入站累计数，包含进入观测边界的业务路由、管理探针及未匹配请求，不实时刷新。
     pub const fn requests_started(&self) -> u64 {
         self.requests_started
     }
 
     /// 业务作用：返回已经正常生成响应的请求总数。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；被取消且未生成响应的请求不计入该值。
+    /// 返回：快照保存的已生成响应累计数，未生成响应就取消的不计入；不等于响应体已经发送完毕。
     pub const fn requests_completed(&self) -> u64 {
         self.requests_completed
     }
 
     /// 业务作用：返回读取快照时仍处于处理过程中的请求数。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；请求 future 被取消时守卫也会递减该值。
+    /// 返回：快照读取时尚持有请求观测守卫的数量；生成响应或取消导致守卫释放后递减，不统计后续响应体传输。
     pub const fn requests_in_flight(&self) -> u64 {
         self.requests_in_flight
     }
 
     /// 业务作用：返回已经生成的 4xx 响应总数。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；该值按响应状态分类，不解析响应正文。
+    /// 返回：快照保存的 4xx 响应数量，仅按状态码分类，不读取响应正文或推断具体拒绝原因。
     pub const fn responses_client_error(&self) -> u64 {
         self.responses_client_error
     }
 
     /// 业务作用：返回已经生成的 5xx 响应总数。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；连接在形成响应前中断不会计入该值。
+    /// 返回：快照保存的 5xx 响应数量，形成响应前的中断不计入；不能据此统计所有连接故障。
     pub const fn responses_server_error(&self) -> u64 {
         self.responses_server_error
     }
@@ -416,10 +462,12 @@ pub struct WebHandle {
 impl WebHandle {
     /// 业务作用：从容器内部共享状态创建一个只读能力句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：Web 组件独占写入、外部只读查询的运行时状态。
     /// - `application_state`：与 Application 共用的生命周期状态单元。
+    ///
+    /// 返回：仅持有元数据、计数器与生命周期状态的只读句柄；不取得监听器或路由服务图的所有权。
     pub(crate) fn new(runtime: Arc<WebRuntimeState>, application_state: Arc<StateCell>) -> Self {
         Self {
             runtime,
@@ -429,9 +477,9 @@ impl WebHandle {
 
     /// 业务作用：返回监听器成功绑定后的真实本地地址。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；绑定完成前返回 `None`，配置端口为零时返回系统分配后的真实端口。
+    /// 返回：成功发布的历史绑定地址，端口零已替换为系统分配值；发布前为 None，停机后仍可保留该值，不证明端口在线。
     pub fn local_addr(&self) -> Option<SocketAddr> {
         self.runtime
             .published
@@ -441,9 +489,9 @@ impl WebHandle {
 
     /// 业务作用：返回 Web 配置采用的统一上下文前缀。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；Start 发布配置前暂时返回空字符串，之后固定为本次进程使用的值。
+    /// 返回：Start 阶段一次发布的上下文前缀，发布前为空字符串；读取不触发配置刷新或判断监听状态。
     pub fn context_path(&self) -> &str {
         self.runtime
             .context_path
@@ -456,9 +504,9 @@ impl WebHandle {
     ///
     /// 清单包含自动收集端点和运行时探针；通过不透明路由定制闭包追加的端点无法可靠枚举，因而不在清单中。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；绑定完成前返回空切片，调用方只能读取，不能增删路由。
+    /// 返回：发布后共享不可变路由元数据，发布前为空集合；停机后仍可读取，不能据此修改路由或证明其可访问。
     pub fn routes(&self) -> Arc<[RouteInfo]> {
         self.runtime
             .published
@@ -469,18 +517,18 @@ impl WebHandle {
 
     /// 业务作用：从与 Application 共用的原子状态来源读取 Web 就绪状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；不会维护第二份可能与应用状态漂移的布尔标志。
+    /// 返回：当前应用状态对应的 Web 生命周期状态；不额外探测网络或汇总依赖健康，不形成持续准入许可。
     pub fn readiness(&self) -> WebReadinessState {
         self.application_state.load().into()
     }
 
     /// 业务作用：返回当前 Web 请求计数的只读瞬时快照。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；不会交出内部原子计数器或指标注册表的所有权。
+    /// 返回：独立读取各原子计数得到的快照，字段间不保证同一时刻；调用方不能借此更新计数或注册指标。
     pub fn metrics(&self) -> WebMetricsSnapshot {
         self.runtime.metrics.snapshot()
     }
@@ -489,9 +537,11 @@ impl WebHandle {
 impl fmt::Debug for WebHandle {
     /// 业务作用：写出不包含路由服务对象和业务资源的只读诊断摘要。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`：接收结构化调试字段的格式化缓冲区。
+    ///
+    /// 返回：写出历史地址、上下文前缀、当前生命周期和计数后完成；输出失败传播格式化错误，各字段不构成原子快照。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WebHandle")
@@ -516,9 +566,9 @@ pub(crate) struct WebRuntimeState {
 impl WebRuntimeState {
     /// 业务作用：创建尚未发布配置和监听信息的 Web 运行时状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；真实地址与路由清单由 Ready 阶段成组发布。
+    /// 返回：前缀及绑定信息均未发布、计数全为零的状态；真实地址和路由清单等待 Ready 阶段成组发布。
     pub(crate) fn new() -> Self {
         Self {
             context_path: OnceLock::new(),
@@ -529,42 +579,48 @@ impl WebRuntimeState {
 
     /// 业务作用：一次性发布已经完成配置校验的上下文前缀。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context_path`：本次 Web 服务统一使用的已校验路径前缀。
+    ///
+    /// 返回：首次设置成功时完成；已发布时原值不变并交还传入前缀，不执行运行期替换。
     pub(crate) fn set_context_path(&self, context_path: Arc<str>) -> Result<(), Arc<str>> {
         self.context_path.set(context_path)
     }
 
     /// 业务作用：一次性发布真实监听地址与已经完成预检的不可变路由清单。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `local_addr`：监听器绑定后读取的真实本地地址。
     /// - `routes`：按方法、路径和处理器稳定排序的路由信息。
+    ///
+    /// 返回：首次成组发布成功时为 true；已有身份时为 false 且保留原值，不开放准入或复验监听状态。
     pub(crate) fn publish(&self, local_addr: SocketAddr, routes: Arc<[RouteInfo]>) -> bool {
+        // 地址与路由清单共享单次发布边界，读者不能看到新地址配旧清单的部分身份。
         self.published
-            .set(WebPublishedState { local_addr, routes })
+            .set(WebPublishedState {
+                local_addr,
+                routes,
+            })
             .is_ok()
     }
 
     /// 业务作用：判断 Web 运行身份是否已经由 Ready 阶段发布。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；只用于阻止同一 Application 重复提交运行时身份。
+    /// 返回：曾完成绑定身份发布时为 true，用于阻止重复提交；停机不会将其清零，不代表当前监听可用。
     pub(crate) fn is_published(&self) -> bool {
         self.published.get().is_some()
     }
 
     /// 业务作用：在请求进入最外层观测边界时创建计数守卫。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：当前服务任务持有的共享 Web 运行时状态。
     /// - `http2`：请求是否由 HTTP/2 stream 承载，用于固定协议维度和在途请求会计。
-    ///
-    /// # 返回
     ///
     /// 返回：在请求完成或 future 取消时自动结束在途会计的守卫。
     pub(crate) fn begin_request(runtime: &Arc<Self>, http2: bool) -> WebRequestGuard {
@@ -599,11 +655,9 @@ impl WebRuntimeState {
 
     /// 业务作用：记录一条已经由操作系统 accept 的 Web TCP 连接。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
-    ///
-    /// # 返回
     ///
     /// 返回：无；只累加连接接纳事实。
     pub(crate) fn accept_connection(runtime: &Arc<Self>) {
@@ -615,11 +669,9 @@ impl WebRuntimeState {
 
     /// 业务作用：记录因 listener 容量门禁而在协议解析前关闭的连接。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
-    ///
-    /// # 返回
     ///
     /// 返回：无；只累加容量拒绝事实。
     pub(crate) fn reject_connection(runtime: &Arc<Self>) {
@@ -631,11 +683,9 @@ impl WebRuntimeState {
 
     /// 业务作用：记录一次可恢复的 TCP accept 错误。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
-    ///
-    /// # 返回
     ///
     /// 返回：无；只累加 accept 错误事实。
     pub(crate) fn record_accept_error(runtime: &Arc<Self>) {
@@ -647,11 +697,9 @@ impl WebRuntimeState {
 
     /// 业务作用：记录一条在协议判定或 HTTP driver 阶段失败的连接。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
-    ///
-    /// # 返回
     ///
     /// 返回：无；只累加连接级错误事实。
     pub(crate) fn record_connection_error(runtime: &Arc<Self>) {
@@ -663,11 +711,9 @@ impl WebRuntimeState {
 
     /// 业务作用：创建覆盖协议判定、请求处理和排空阶段的活跃连接守卫。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
-    ///
-    /// # 返回
     ///
     /// 返回：析构时自动递减活跃连接数的所有权守卫。
     pub(crate) fn track_connection(runtime: &Arc<Self>) -> WebConnectionGuard {
@@ -854,22 +900,30 @@ struct WebMetrics {
 
 /// Web transport 指标源一次读取使用的内部值快照。
 struct WebTransportMetricsSnapshot {
+    /// 进入观测边界的 HTTP/1 请求累计数。
     requests_http1: u64,
+    /// 进入观测边界的 HTTP/2 请求累计数。
     requests_http2: u64,
+    /// 读取时仍持有 HTTP/2 请求守卫的数量。
     http2_requests_in_flight: u64,
+    /// 操作系统 accept 成功的连接累计数。
     connections_accepted: u64,
+    /// 按容量门禁拒绝的连接累计数。
     connections_rejected: u64,
+    /// 读取时仍持有连接守卫的数量。
     connections_active: u64,
+    /// 可恢复的 accept 调用失败累计数。
     accept_errors: u64,
+    /// 协议判定或 HTTP 驱动报告的连接失败累计数。
     connection_errors: u64,
 }
 
 impl WebMetrics {
     /// 业务作用：读取全部原子计数并组成一个不携带可变能力的值快照。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；Relaxed 顺序足以满足独立单调计数的观测用途。
+    /// 返回：独立读取各请求计数形成的值快照；Relaxed 适用于观测，不保证跨字段一致性，在途数也不具有单调性。
     fn snapshot(&self) -> WebMetricsSnapshot {
         WebMetricsSnapshot {
             requests_started: self.requests_started.load(Ordering::Relaxed),
@@ -882,11 +936,7 @@ impl WebMetrics {
 
     /// 业务作用：读取协议、连接与 HTTP/2 在途请求原子计数供统一指标源导出。
     ///
-    /// # 参数
-    ///
     /// 参数说明: 无。
-    ///
-    /// # 返回
     ///
     /// 返回：只包含固定低基数 transport 数值的内部快照。
     fn transport_snapshot(&self) -> WebTransportMetricsSnapshot {
@@ -912,11 +962,7 @@ pub(crate) struct WebConnectionGuard {
 impl Drop for WebConnectionGuard {
     /// 业务作用：在连接所有权结束时统一递减活跃连接计数。
     ///
-    /// # 参数
-    ///
     /// 参数说明: 无。
-    ///
-    /// # 返回
     ///
     /// 返回：无；守卫释放时只递减活跃连接计数。
     fn drop(&mut self) {
@@ -938,9 +984,11 @@ pub(crate) struct WebRequestGuard {
 impl WebRequestGuard {
     /// 业务作用：记录一次已经形成响应的请求结果。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `status`：响应的三位 HTTP 状态码，用于归入客户端错误或服务端错误计数。
+    ///
+    /// 返回：累计已生成响应数，400 至 499 计客户端错误、500 及以上计服务端错误；消费守卫后自动减少在途数，不等待响应体发送。
     pub(crate) fn complete(self, status: u16) {
         self.runtime
             .metrics
@@ -963,13 +1011,9 @@ impl WebRequestGuard {
 impl Drop for WebRequestGuard {
     /// 业务作用：在正常响应和取消路径上统一结束一次在途计数。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；原子递减不访问 Application 生命周期或服务任务。
-    ///
-    /// # 返回
-    ///
-    /// 返回：无；同时结束通用在途请求与 HTTP/2 在途请求会计。
+    /// 返回：减少通用在途计数，HTTP/2 请求额外减少其协议在途数；取消路径不增加完成数，不访问应用生命周期。
     fn drop(&mut self) {
         self.runtime
             .metrics

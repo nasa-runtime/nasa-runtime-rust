@@ -55,6 +55,10 @@ pub(crate) struct LatencyHistogram {
 
 impl LatencyHistogram {
     /// 业务作用：构造全零直方图。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：桶计数、总样本数和总耗时均为零的独立直方图，不登记任何观测。
     pub(crate) fn new() -> Self {
         Self {
             buckets: std::array::from_fn(|_| AtomicU64::new(0)),

@@ -80,7 +80,11 @@ struct ProducerLaneInner {
 
 impl ProducerLane {
     /// 业务作用：为配置中的 lane 创建独立原生 producer、队列和交付观察资源。
-    /// 参数说明：name 为已校验并冻结的 lane 名；runtime 提供源配置、异步执行和指标出口。
+    ///
+    /// 参数说明：
+    /// - `name`：为已校验并冻结的 lane 名
+    /// - `runtime`：提供源配置、异步执行和指标出口。
+    ///
     /// 返回：持有独立资源的通道；配置或原生构造失败时返回错误。原生后台线程可开始连接 broker，返回成功不证明 broker 可用。
     pub(crate) fn new(name: impl Into<Arc<str>>, runtime: &Arc<KafkaProxyInner>) -> Result<Self> {
         let name = name.into();
@@ -100,13 +104,20 @@ impl ProducerLane {
         })
     }
 
-    /// 业务作用：返回固定 lane 名。
+    /// 业务作用：提供配置冻结后的物理发布通道标识，供调用方区分独立队列与容量域。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用固定名称，不表示通道当前仍可准入或 broker 在线。
     pub fn name(&self) -> &str {
         &self.inner.name
     }
 
     /// 业务作用：将宿主的永久准入边界附加到 lane 及后续 builder 克隆。
-    /// 参数说明：scope 为宿主在最终清理时关闭的准入域。
+    ///
+    /// 参数说明：
+    /// - `scope`：为宿主在最终清理时关闭的准入域。
+    ///
     /// 返回：保留既有全部边界的视图；关闭不取消已准入交付，也不取得底层资源关闭权。
     pub fn with_access_scope(mut self, scope: &crate::KafkaAccessScope) -> Self {
         scope.attach(&mut self.scopes);
@@ -114,11 +125,17 @@ impl ProducerLane {
     }
 
     /// 业务作用：返回当前物理 lane 的容量与累计结果快照。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：分别采样容量、代次与成功失败计数的只读数据；并发字段不构成同一时刻的原子快照，也不触发 flush。
     pub fn stats(&self) -> ProducerLaneStats {
         self.inner.client.stats()
     }
     /// 业务作用：读取当前交付责任和终态未知累计量，不触发 flush 或恢复。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：关闭诊断所需纯数据，不授予重新开放准入的权力。
     pub(crate) fn close_report(&self) -> crate::CloseLane {
         self.inner.client.close_report()
@@ -126,10 +143,12 @@ impl ProducerLane {
 
     /// 业务作用：创建类型化发布 builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `payload`: 借用的业务载荷。
+    ///
+    /// 返回：继承本 lane 全部准入边界的未发送声明；此时不编码、校验目标或取得投递额度，实际发送时仍须复验关闭状态。
     pub fn publish<'a, T: EncodePayload>(
         &'a self,
         topic: &'a str,
@@ -140,7 +159,7 @@ impl ProducerLane {
 
     /// 业务作用：创建显式 tombstone builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `key`: tombstone 必需的字符串 key，允许空字符串并保留为零长度字节键。
@@ -152,7 +171,7 @@ impl ProducerLane {
 
     /// 业务作用：创建不经过 codec 的 raw bytes 发布 builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `payload`: 借用到同步入底层队列为止的原始字节。
@@ -163,7 +182,11 @@ impl ProducerLane {
     }
 
     /// 业务作用：在固定 lane 保留原始可空 value，不施加显式删除 API 的字符串键约束。
-    /// 参数说明：topic 为目标；payload 的 None 为 Kafka null，Some 空 slice 为零长度 value。
+    ///
+    /// 参数说明：
+    /// - `topic`：为目标
+    /// - `payload`：的 None 为 Kafka null，Some 空 slice 为零长度 value。
+    ///
     /// 返回：尚未准入的 raw builder，可独立选择缺失、空字节或任意二进制 key。
     pub fn publish_raw_nullable<'a>(
         &'a self,
@@ -178,7 +201,10 @@ impl ProducerLane {
     /// # 错误
     ///
     /// 排空超时或底层客户端失败时返回带 lane 归因的错误。
-    /// 参数说明：无。返回：冻结责任全部成功时成功；确定失败、交付未知与仍未退出分别返回对应错误。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：冻结责任全部成功时成功；确定失败、交付未知与仍未退出分别返回对应错误。
     pub async fn flush(&self) -> Result<()> {
         let runtime = self
             .inner
@@ -196,7 +222,9 @@ impl ProducerLane {
     /// # 错误
     ///
     /// 运行时已释放或进入关闭阶段时返回生命周期错误。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所属源与全部附加宿主域允许发布时通过；任一关闭边界拒绝新准入。
     fn ensure_publish_open(&self) -> Result<()> {
         for scope in &self.scopes {
@@ -211,7 +239,10 @@ impl ProducerLane {
     }
 
     /// 业务作用：借用应用的只写追踪入口，保持 exporter 生命周期归属不变。
-    /// 参数说明：无。返回：记录器副本；源已释放或未启用遥测时为 None。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：记录器副本；源已释放或未启用遥测时为 None。
     fn span_recorder(&self) -> Option<SpanRecorder> {
         self.inner
             .runtime
@@ -220,7 +251,12 @@ impl ProducerLane {
     }
 
     /// 业务作用：将已编码记录交给本 lane，并等待真实交付结果。
-    /// 参数说明：record 借用至同步入队完成；deadline 为编码前冻结的总期限；trace 随实际原生责任收口。
+    ///
+    /// 参数说明：
+    /// - `record`：借用至同步入队完成
+    /// - `deadline`：为编码前冻结的总期限
+    /// - `trace`：随实际原生责任收口。
+    ///
     /// 返回：broker 交付坐标或发布错误；调用方超时、取消后，独立观察者仍持有已入队记录的交付责任。
     async fn send_record(
         &self,
@@ -256,7 +292,12 @@ impl ProducerLane {
     }
 
     /// 业务作用：将已编码记录同步入队，并移交给独立交付观察者。
-    /// 参数说明：record 借用至同步入队完成；deadline 为编码前冻结的总期限；trace 随实际原生责任收口。
+    ///
+    /// 参数说明：
+    /// - `record`：借用至同步入队完成
+    /// - `deadline`：为编码前冻结的总期限
+    /// - `trace`：随实际原生责任收口。
+    ///
     /// 返回：观察额度已保留且同步入队成功；准入、期限或入队失败返回错误。成功不表示 broker 已交付，最终结果由观察者记录。
     fn fire_record(
         &self,
@@ -291,8 +332,13 @@ impl ProducerLane {
     }
 
     /// 业务作用：报告本 lane 的观察额度占用百分比及实际在途责任数。
-    /// 参数说明：runtime 为源级异步指标出口；labels 仅携带 lane 身份，不加 topic，以免同一占用在多个序列中重复计数。
+    ///
+    /// 参数说明：
+    /// - `runtime`：源级异步指标出口，不在发布调用中运行用户导出代码。
+    /// - `labels`：仅携带 lane 身份，不加 topic，以免同一占用在多个序列中重复计数。
+    ///
     /// 返回：提交百分比及在途数样本，不等待用户后端；send 与 fire 共用观察额度，取消等待不释放该额度。
+    ///
     /// active 表示实际责任，不能与 observer 数相加；两者读取时间不同，不构成原子快照。
     fn report_queue_pressure(&self, runtime: &KafkaProxyInner, labels: crate::MetricLabels<'_>) {
         // 走无锁取数：本函数在每条消息（含高频 fire 路径）上都会执行。
@@ -313,37 +359,47 @@ impl ProducerLane {
     }
 
     /// 业务作用：拒绝新的业务发布，供统一关闭流程使用。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：仅将开放相位推进到 Draining，已进入后续关闭相位则保持；不取消已准入交付，也不等待原生资源释放。
     pub(crate) fn begin_draining(&self) {
         self.inner.client.begin_draining();
     }
 
     /// 业务作用：关闭业务入口后只保留框架收尾发布。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：单调推进到 InternalOnly，已经 Closed 时不重新开放；既有交付责任保留，内部发送仍受其余准入条件限制。
     pub(crate) fn enter_internal_only(&self) {
         self.inner.client.enter_internal_only();
     }
 
     /// 业务作用：在全局绝对截止时刻前排空本 lane。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `deadline`: shutdown 共享的绝对截止时刻。
     ///
-    /// # 错误
-    ///
-    /// 观察任务或底层队列未能及时排空时返回错误。
+    /// 返回：等待实际交付责任与底层队列排空；期限耗尽或原生 flush 失败时返回错误，取消等待不取消已转交的阻塞工作，也不释放原生客户端。
     pub(crate) async fn flush_until(&self, deadline: Instant) -> Result<()> {
         self.inner.client.flush_until(deadline).await
     }
 
     /// 业务作用：关闭全部发布准入，并等待真实回执及原生线程和连接释放。
-    /// 参数说明：deadline 为总停机截止时刻。返回：全部代次释放后成功，超时保留责任供下次继续。
+    ///
+    /// 参数说明：
+    /// - `deadline`：为总停机截止时刻。
+    ///
+    /// 返回：全部代次释放后成功，超时保留责任供下次继续。
     pub(crate) async fn close_until(&self, deadline: Instant) -> Result<()> {
         self.inner.client.close_until(deadline).await
     }
 
     /// 业务作用：为普通 DLT 发布框架原文并等待实际交付，保留并发与信封责任直至原生终态。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `payload`: 可空原始 payload。
@@ -376,7 +432,10 @@ impl ProducerLane {
     }
 
     /// 业务作用：只向框架转发 worker 开放固定分区、无额外线路头的实际交付等待。
-    /// 参数说明：record 为已经完成目的身份、schema 和来源证据校验的原文记录。
+    ///
+    /// 参数说明：
+    /// - `record`：为已经完成目的身份、schema 和来源证据校验的原文记录。
+    ///
     /// 返回：真实 native 终态；调用方必须保持同步责任直到完成，不得附加超时或取消。
     pub(crate) async fn send_transfer(&self, record: OutboundRecord<'_>) -> Result<Delivery> {
         self.inner.client.send_actual(record).await
@@ -385,7 +444,10 @@ impl ProducerLane {
 
 /// 业务作用：从最终 headers 读取发布事件名，非法 UTF-8 仅用于观测时回退固定分类。
 ///
+/// 参数说明：
 /// - `headers`: builder 已完成校验的有序 headers。
+///
+/// 返回：最后一个事件头中的非空 UTF-8 名称；缺失、空值或非法编码时使用 DEFAULT_EVENT，不修改实际线路头部。
 fn outbound_event(headers: &KafkaHeaders) -> &str {
     headers
         .last(HEADER_EVENT)
@@ -421,7 +483,10 @@ struct BuilderFields {
 impl BuilderFields {
     /// 业务作用：冻结 key 的输入方式，防止二进制身份被后续字符串入口静默替换。
     ///
-    /// 参数说明：`key` 为拥有型原始字节；`is_bytes` 区分原始字节和 UTF-8 文本入口。
+    /// 参数说明：
+    /// - `key`：拥有型原始字节，空值保留为显式零长度 key。
+    /// - `is_bytes`：区分原始字节与 UTF-8 文本入口，首次设置后禁止混用。
+    ///
     /// 返回：同入口覆盖原值；跨入口混用记录配置错误，在交给 producer 前拒绝发送。
     fn set_key(&mut self, key: Vec<u8>, is_bytes: bool) {
         // 两种入口代表不同的 key 身份声明，不能用后一次赋值掩盖冲突并写入另一分区。
@@ -439,10 +504,12 @@ impl BuilderFields {
 
     /// 业务作用：写入一个业务 header，并记录保留名误用。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`: 大小写敏感的 header 名。
     /// - `value`: 可空 header 值。
+    ///
+    /// 返回：合法名称按顺序追加拥有型副本；空名、含 NUL 或保留名不追加并保存首个错误，在发送前统一拒绝。
     fn push_header(&mut self, name: &str, value: Option<&[u8]>) {
         if name.is_empty() || name.contains('\0') {
             self.invalid
@@ -512,6 +579,12 @@ impl BuilderFields {
                 value: Some(mode_wire_name(mode).as_bytes().to_vec()),
             });
         }
+        if codec == Some(PayloadCodec::Raw) {
+            headers.push(KafkaHeader {
+                name: HEADER_PAYLOAD_MODE.into(),
+                value: Some(b"raw".to_vec()),
+            });
+        }
         if !self.passthrough.is_empty() {
             let value = serde_json::to_vec(&self.passthrough)
                 .map_err(|error| NafkaError::Codec(format!("透传上下文编码失败: {error}")))?;
@@ -539,11 +612,13 @@ pub struct PublishBuilder<'a, T> {
 impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
     /// 业务作用：构造类型化发布 builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `lane`: 固定发布 lane。
     /// - `topic`: 目标 topic。
     /// - `payload`: 借用的载荷。
+    ///
+    /// 返回：使用默认元数据的未发送声明；保留载荷借用与指定 lane，不进行编码或连接可用性检查。
     fn new(lane: ProducerLane, topic: &'a str, payload: &'a T) -> Self {
         Self {
             lane,
@@ -555,9 +630,11 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
 
     /// 业务作用：设置业务事件名。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `event`: 非空事件名；最终校验在发送时完成。
+    ///
+    /// 返回：持有事件名副本的 builder，覆盖之前的事件选择；不发送消息，空白名称在发送时拒绝。
     pub fn event(mut self, event: &str) -> Self {
         self.fields.event = Some(event.to_owned());
         self
@@ -565,9 +642,11 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
 
     /// 业务作用：设置字符串 key。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `key`: 用于分区和业务去重的 key。
+    ///
+    /// 返回：保存 UTF-8 字节的 builder，同一入口覆盖旧值；与 key_bytes 混用则记录错误并在发送时拒绝，框架不据此执行业务去重。
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.fields.set_key(key.into().into_bytes(), false);
         self
@@ -575,7 +654,9 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
 
     /// 业务作用：使用完整字节 key 发布类型化消息，避免跨语言转发改变分区身份。
     ///
-    /// 参数说明：`key` 为原始 key；空字节仍是显式 key，区别于未设置的 null。
+    /// 参数说明：
+    /// - `key`：为原始 key；空字节仍是显式 key，区别于未设置的 null。
+    ///
     /// 返回：持有 key 副本的 builder；不校验 UTF-8，也不改变 payload codec。
     pub fn key_bytes(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.fields.set_key(key.into(), true);
@@ -584,9 +665,11 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
 
     /// 业务作用：固定目标分区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `partition`: 非负分区号。
+    ///
+    /// 返回：覆盖固定分区选择后的 builder；负值在发送时拒绝，当前不查询 broker 验证分区是否存在。
     pub fn partition(mut self, partition: i32) -> Self {
         self.fields.partition = Some(partition);
         self
@@ -594,9 +677,11 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
 
     /// 业务作用：设置消息时间戳。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `epoch_ms`: Unix epoch 毫秒。
+    ///
+    /// 返回：保留该数值的 builder，后次设置覆盖前值；此处不做范围校验，最终写入语义仍取决于底层 producer 与 broker。
     pub fn timestamp(mut self, epoch_ms: i64) -> Self {
         self.fields.timestamp = Some(epoch_ms);
         self
@@ -604,16 +689,23 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
 
     /// 业务作用：追加业务 header；同名项保留顺序，不做 Map 折叠。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`: header 名。
     /// - `value`: 可空 header 值。
+    ///
+    /// 返回：包含头部副本的 builder；非法名称或保留名记录首个错误供发送时拒绝，None 与零长度值保持区别。
     pub fn header(mut self, name: &str, value: Option<&[u8]>) -> Self {
         self.fields.push_header(name, value);
         self
     }
 
     /// 业务作用：绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
+    ///
+    /// 参数说明：
+    /// - `parent`: 当前操作的父追踪上下文，复制后优先于发送时的环境上下文。
+    ///
+    /// 返回：保存父上下文的 builder；此时不创建跨度，实际发送生成子上下文，未启用记录器时仍传播线路信息。
     pub fn trace_context(mut self, parent: &TraceContext) -> Self {
         self.fields.trace_parent = Some(*parent);
         self
@@ -621,9 +713,11 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
 
     /// 业务作用：复制消费上下文中的透传 Map，便于消费后继续发布。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `ctx`: 当前消费记录上下文。
+    ///
+    /// 返回：以消费透传字段整体替换已有 Map，并采用其有效追踪父上下文；不复制来源 topic、key、位点或确认权威，也不确认消费成功。
     pub fn ctx(mut self, ctx: &ConsumeCtx) -> Self {
         self.fields.passthrough = ctx.passthrough.clone();
         self.fields.trace_parent = ctx.trace_context();
@@ -632,14 +726,12 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
 
     /// 业务作用：写入一个可序列化透传字段。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `key`: 透传字段名。
     /// - `value`: 可转换为 JSON value 的字段值。
     ///
-    /// # 错误
-    ///
-    /// `value` 无法转换为 JSON value 时返回 codec 错误。
+    /// 返回：转换成功则插入或覆盖该透传字段并返回 builder；编码失败返回 Codec 错误，尚未向 producer 提交任何消息。
     pub fn passthrough(mut self, key: &str, value: impl Serialize) -> Result<Self> {
         let value = serde_json::to_value(value)
             .map_err(|error| NafkaError::Codec(format!("透传字段编码失败: {error}")))?;
@@ -652,7 +744,9 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
     /// # 错误
     ///
     /// 编码、准入、入队、投递或超时失败时返回错误；超时会区分结果未知。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：实际交付结果；同步编码与准入共用总预算，native 接管前超期不会发送，接管后的等待超时保留独立观察责任。
     pub async fn send(self) -> Result<Delivery> {
         let deadline = self.lane.inner.client.publish_deadline();
@@ -686,7 +780,9 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
     /// # 错误
     ///
     /// 只有观察槽位预留成功且消息同步入队后才返回成功。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同步编码及原生准入成功；编码耗尽总预算时拒绝，成功不等于 broker 确认。
     pub fn fire(self) -> Result<()> {
         let deadline = self.lane.inner.client.publish_deadline();
@@ -728,7 +824,7 @@ pub struct RawPublishBuilder<'a> {
 impl<'a> RawPublishBuilder<'a> {
     /// 业务作用：构造 raw 发布 builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `lane`: 固定发布 lane。
     /// - `topic`: 目标 topic。
@@ -746,9 +842,11 @@ impl<'a> RawPublishBuilder<'a> {
 
     /// 业务作用：设置业务事件名。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `event`: 非空事件名。
+    ///
+    /// 返回：保存事件名副本的原文 builder；覆盖前值但不改变 payload 字节，空白名称在发送时拒绝。
     pub fn event(mut self, event: &str) -> Self {
         self.fields.event = Some(event.to_owned());
         self
@@ -756,9 +854,11 @@ impl<'a> RawPublishBuilder<'a> {
 
     /// 业务作用：设置字符串 key。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `key`: 用于分区和业务去重的 key。
+    ///
+    /// 返回：保存 UTF-8 key 的原文 builder，允许空字符串；同入口覆盖旧值，与 key_bytes 混用记录发送错误，框架不执行去重。
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.fields.set_key(key.into().into_bytes(), false);
         self
@@ -766,7 +866,9 @@ impl<'a> RawPublishBuilder<'a> {
 
     /// 业务作用：保留原始字节消息的 key 身份，用于二进制路由和受管转发。
     ///
-    /// 参数说明：`key` 为原始 key，允许非 UTF-8 与空字节。
+    /// 参数说明：
+    /// - `key`：为原始 key，允许非 UTF-8 与空字节。
+    ///
     /// 返回：持有 key 副本的 builder；未调用 key 入口时保留 null。
     pub fn key_bytes(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.fields.set_key(key.into(), true);
@@ -775,9 +877,11 @@ impl<'a> RawPublishBuilder<'a> {
 
     /// 业务作用：固定目标分区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `partition`: 非负分区号。
+    ///
+    /// 返回：覆盖目标分区声明的原文 builder；负值留待发送校验拒绝，不查询元数据或重编码原文。
     pub fn partition(mut self, partition: i32) -> Self {
         self.fields.partition = Some(partition);
         self
@@ -785,9 +889,11 @@ impl<'a> RawPublishBuilder<'a> {
 
     /// 业务作用：设置消息时间戳。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `epoch_ms`: Unix epoch 毫秒。
+    ///
+    /// 返回：保留原数值的原文 builder，覆盖先前时间戳；不进行文本转换或范围校验，最终是否采用该时间由 broker 配置决定。
     pub fn timestamp(mut self, epoch_ms: i64) -> Self {
         self.fields.timestamp = Some(epoch_ms);
         self
@@ -795,16 +901,23 @@ impl<'a> RawPublishBuilder<'a> {
 
     /// 业务作用：追加业务 header。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`: header 名。
     /// - `value`: 可空 header 值。
+    ///
+    /// 返回：合法头部按顺序复制进原文 builder，保留同名项与空值；非法名称暂存首个错误，在发送前统一拒绝。
     pub fn header(mut self, name: &str, value: Option<&[u8]>) -> Self {
         self.fields.push_header(name, value);
         self
     }
 
     /// 业务作用：绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
+    ///
+    /// 参数说明：
+    /// - `parent`: 原文发布操作的父上下文，复制后覆盖之前的选择。
+    ///
+    /// 返回：保存显式父上下文的原文 builder，发送时优先于环境上下文；仅影响传播元数据，不改变正文。
     pub fn trace_context(mut self, parent: &TraceContext) -> Self {
         self.fields.trace_parent = Some(*parent);
         self
@@ -815,8 +928,10 @@ impl<'a> RawPublishBuilder<'a> {
     /// # 错误
     ///
     /// 准入、入队、投递或超时失败时返回错误。
+    ///
     /// 参数说明：无。
-    /// 返回：实际交付结果；同步编码与准入共用总预算，native 接管前超期不会发送，接管后的等待超时保留独立观察责任。
+    ///
+    /// 返回：原文交付坐标或错误，不编码 payload；元数据构造及准入共用总预算，native 接管前超期不发送，接管后等待超时仍保留独立观察责任。
     pub async fn send(self) -> Result<Delivery> {
         let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
@@ -848,8 +963,10 @@ impl<'a> RawPublishBuilder<'a> {
     /// # 错误
     ///
     /// 观察槽位不足、准入或同步入队失败时返回错误。
+    ///
     /// 参数说明：无。
-    /// 返回：同步编码及原生准入成功；编码耗尽总预算时拒绝，成功不等于 broker 确认。
+    ///
+    /// 返回：原文同步入队且观察责任已登记；元数据构造或准入耗尽总预算时拒绝，正文不经 codec，成功不等于 broker 确认。
     pub fn fire(self) -> Result<()> {
         let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
@@ -889,7 +1006,7 @@ pub struct TombstoneBuilder<'a> {
 impl<'a> TombstoneBuilder<'a> {
     /// 业务作用：构造 tombstone builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `lane`: 固定发布 lane。
     /// - `topic`: 目标 topic。
@@ -907,9 +1024,11 @@ impl<'a> TombstoneBuilder<'a> {
 
     /// 业务作用：设置业务事件名。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `event`: 非空事件名。
+    ///
+    /// 返回：覆盖事件名的 tombstone builder，仍保留 null value 与原始删除 key；空白事件在发送时拒绝。
     pub fn event(mut self, event: &str) -> Self {
         self.fields.event = Some(event.to_owned());
         self
@@ -917,16 +1036,23 @@ impl<'a> TombstoneBuilder<'a> {
 
     /// 业务作用：追加业务 header。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`: header 名。
     /// - `value`: 可空 header 值。
+    ///
+    /// 返回：在 tombstone 声明中保留头部副本、重复项和空值，不改变删除 key；非法名称暂存首个错误并在发送前拒绝。
     pub fn header(mut self, name: &str, value: Option<&[u8]>) -> Self {
         self.fields.push_header(name, value);
         self
     }
 
     /// 业务作用：绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
+    ///
+    /// 参数说明：
+    /// - `parent`: 删除事件的父追踪上下文，复制后优先于发送时的环境值。
+    ///
+    /// 返回：保存父上下文的 tombstone builder，尚未创建跨度或取得发布额度；删除记录仍使用原始 key 和 null value。
     pub fn trace_context(mut self, parent: &TraceContext) -> Self {
         self.fields.trace_parent = Some(*parent);
         self
@@ -937,8 +1063,10 @@ impl<'a> TombstoneBuilder<'a> {
     /// # 错误
     ///
     /// 目标声明、准入、入队、投递或超时失败时返回错误。
+    ///
     /// 参数说明：无。
-    /// 返回：实际交付结果；同步编码与准入共用总预算，native 接管前超期不会发送，接管后的等待超时保留独立观察责任。
+    ///
+    /// 返回：删除事件的交付坐标或错误，value 保持 null；元数据构造与准入共用总预算，native 接管后等待超时不取消交付，成功也不表示日志压缩已完成。
     pub async fn send(self) -> Result<Delivery> {
         let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
@@ -970,8 +1098,10 @@ impl<'a> TombstoneBuilder<'a> {
     /// # 错误
     ///
     /// 目标声明无效、观察槽位不足或同步入队失败时返回错误。
+    ///
     /// 参数说明：无。
-    /// 返回：同步编码及原生准入成功；编码耗尽总预算时拒绝，成功不等于 broker 确认。
+    ///
+    /// 返回：带原始 key 的 null value 已同步入队并保留观察责任；期限或准入失败返回错误，成功不证明 broker 确认或日志压缩完成。
     pub fn fire(self) -> Result<()> {
         let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
@@ -1009,9 +1139,11 @@ pub struct PublishItem<T> {
 impl<T> PublishItem<T> {
     /// 业务作用：以 payload 构造批量发布项。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `payload`: 拥有型业务载荷。
+    ///
+    /// 返回：持有载荷且未指定 key 或事件的发布项；未发送、未编码，实际发布时由默认 lane 与事件策略补齐选择。
     pub fn new(payload: T) -> Self {
         Self {
             payload,
@@ -1022,9 +1154,11 @@ impl<T> PublishItem<T> {
 
     /// 业务作用：设置消息 key。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `key`: 字符串 key。
+    ///
+    /// 返回：覆盖本发布项 key 后的拥有型声明；空字符串保留为显式零长度 key，其它项不受影响。
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
@@ -1032,9 +1166,11 @@ impl<T> PublishItem<T> {
 
     /// 业务作用：设置事件名。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `event`: 非空事件名。
+    ///
+    /// 返回：覆盖本项事件的声明；此时不校验，批量发布轮到该项时才进行发送校验，错误不会撤回先前已交付项。
     pub fn event(mut self, event: impl Into<String>) -> Self {
         self.event = Some(event.into());
         self
@@ -1055,13 +1191,11 @@ pub struct BatchPublishError {
 impl KafkaProxy {
     /// 业务作用：返回已配置 producer lane 的轻量句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`: `default` 或配置中的命名 lane。
     ///
-    /// # 错误
-    ///
-    /// lane 未配置时返回 [`NafkaError::NoSuchProducerLane`]。
+    /// 返回：冻结表中的共享句柄；表未初始化或名称不存在时返回 NoSuchProducerLane。取得句柄不证明准入开放或 broker 在线。
     pub fn producer_lane(&self, name: &str) -> Result<ProducerLane> {
         self.inner
             .producer_lanes
@@ -1073,10 +1207,12 @@ impl KafkaProxy {
 
     /// 业务作用：使用 default lane 创建类型化发布 builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `payload`: 借用的业务载荷。
+    ///
+    /// 返回：绑定冻结默认通道的未发送声明；不编码或预留额度，发送时复验准入与目标合法性。默认通道缺失属于连接初始化不变量破坏。
     pub fn publish<'a, T: EncodePayload>(
         &'a self,
         topic: &'a str,
@@ -1087,7 +1223,7 @@ impl KafkaProxy {
 
     /// 业务作用：使用 default lane 创建 tombstone builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `key`: tombstone 必需 key，允许空字符串并保留为零长度字节键。
@@ -1099,7 +1235,7 @@ impl KafkaProxy {
 
     /// 业务作用：使用 default lane 创建 raw bytes 发布 builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `payload`: 原始 payload。
@@ -1110,7 +1246,11 @@ impl KafkaProxy {
     }
 
     /// 业务作用：在 default lane 发布原始可空 value，保留 null 与空字节的区别。
-    /// 参数说明：topic 为目标；payload 的 None 表示 Kafka null，Some 保留原文字节。
+    ///
+    /// 参数说明：
+    /// - `topic`：为目标
+    /// - `payload`：的 None 表示 Kafka null，Some 保留原文字节。
+    ///
     /// 返回：尚未准入的 raw builder，未设置 key 时保持缺失键，不要求删除键。
     pub fn publish_raw_nullable<'a>(
         &'a self,
@@ -1122,14 +1262,12 @@ impl KafkaProxy {
 
     /// 业务作用：按输入顺序逐条发布，并在首个失败处停止。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 全部输入项的目标 topic。
     /// - `items`: 拥有型发布项迭代器。
     ///
-    /// # 错误
-    ///
-    /// 返回已经确认的成功前缀、失败下标和原始错误。
+    /// 返回：全部成功时按输入顺序返回交付坐标，空输入返回空列表；首个错误返回已确认前缀、失败下标和原因，后继不发送，结果未知的失败项可能已经交付，整个批次不具备事务原子性。
     pub async fn publish_batch<T: EncodePayload>(
         &self,
         topic: &str,
@@ -1164,7 +1302,10 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// 任一 lane 未排空时返回带 lane 归因的错误。
-    /// 参数说明：无。返回：全部冻结责任成功时成功；待退出优先报告期限耗尽，已退出的未知交付不降为确定失败。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：全部冻结责任成功时成功；待退出优先报告期限耗尽，已退出的未知交付不降为确定失败。
     pub async fn flush(&self) -> Result<()> {
         let deadline =
             Instant::now() + Duration::from_millis(self.inner.config.behavior.shutdown_timeout_ms);
@@ -1191,8 +1332,12 @@ impl KafkaProxy {
             if let Err(error) = result {
                 tracing::error!(lane, error = %error, "producer lane 排空失败");
                 match error {
-                    NafkaError::ShutdownTimeout { .. } => pending.push(lane.clone()),
-                    error @ NafkaError::OutcomeUnknown { .. } => {
+                    NafkaError::ShutdownTimeout {
+                        ..
+                    } => pending.push(lane.clone()),
+                    error @ NafkaError::OutcomeUnknown {
+                        ..
+                    } => {
                         if unknown.is_none() {
                             unknown = Some(error);
                         }
@@ -1217,6 +1362,10 @@ impl KafkaProxy {
     }
 
     /// 业务作用：构造 default lane 轻量句柄。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：冻结默认通道的共享句柄，不创建新的原生连接；初始化表或默认项缺失时触发不变量 panic。
     fn default_lane(&self) -> ProducerLane {
         let Some(lanes) = self.inner.producer_lanes.get() else {
             unreachable!("connect 必须先冻结 producer lane 表")
@@ -1230,7 +1379,7 @@ impl KafkaProxy {
 
 /// 业务作用：校验所有发布 builder 共有的目标字段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `topic`: 目标 topic。
 /// - `fields`: builder 元数据。
@@ -1238,6 +1387,7 @@ impl KafkaProxy {
 /// # 错误
 ///
 /// topic、event 或 partition 非法时返回确定失败。
+///
 /// 返回：声明满足共同线路合同；非法声明以 Config 拒绝，不进入 native 准入。
 fn validate_destination(topic: &str, fields: &BuilderFields) -> Result<()> {
     if topic.trim().is_empty() {
@@ -1257,15 +1407,13 @@ fn validate_destination(topic: &str, fields: &BuilderFields) -> Result<()> {
     Ok(())
 }
 
-/// 业务作用：解析命名 lane 的有效覆盖，供底层配置构建使用。
+/// 业务作用：枚举需要构建的物理发布通道，确保默认通道先于命名通道初始化。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `lanes`: 配置中的命名 lane 表。
 ///
-/// # 返回
-///
-/// 保持名字排序的 lane 名列表。
+/// 返回：首项为 default，后续按 BTreeMap 键顺序排列；本函数不应用覆盖配置或去重，调用方须先校验命名表不占用 default。
 pub(crate) fn configured_lane_names(
     lanes: &BTreeMap<String, crate::config::ProducerLaneOverride>,
 ) -> Vec<String> {

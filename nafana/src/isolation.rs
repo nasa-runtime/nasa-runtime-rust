@@ -54,9 +54,11 @@ static ISOLATION: std::sync::OnceLock<IsolationTable> = std::sync::OnceLock::new
 /// 业务作用：启动时调用一次:把 yml 的 `grafana.isolation` 建成 Trie。
 /// 规则为空则不初始化 → [`dispatch`] 全部放行(= 配置驱动隔离未启用)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `rules`: 「模式 → 规则」表,来自配置根 `grafana.isolation`。
 /// - `context_path`: 服务 context-path;匹配前会从请求 path 剥掉。
+///
+/// 返回：首次存在有效规则时安装全局匹配表；非法模式记录告警并跳过，空表或重复安装保持已有状态。
 pub fn init_isolation(
     rules: &std::collections::HashMap<String, IsolationRule>,
     context_path: &str,
@@ -111,8 +113,10 @@ pub fn init_isolation(
 /// 业务作用：把 "/download/*" 风格通配归一成 matchit 0.8 的命名 catch-all "/download/{*rest}"。
 /// 非 "/*" 结尾的具体路由原样返回。
 ///
-/// # 参数
+/// 参数说明：
 /// - `pattern`: yml 里的路由模式。
+///
+/// 返回：仅将结尾的 /* 改为命名 catch-all；其余模式按原文返回，合法性由 Trie 插入阶段验证。
 fn normalize_pattern(pattern: &str) -> String {
     if let Some(prefix) = pattern.strip_suffix("/*") {
         format!("{prefix}/{{*rest}}")
@@ -122,6 +126,12 @@ fn normalize_pattern(pattern: &str) -> String {
 }
 
 /// 业务作用：仅在完整路径段边界上剥离 context-path，避免 `/app` 错误匹配 `/application`。
+///
+/// 参数说明：
+/// - `path`：待匹配的请求路径。
+/// - `context_path`：需要按完整路径段剥离的服务前缀。
+///
+/// 返回：命中完整路径段时返回剥离后的借用切片；路径恰好等于前缀时返回 /，否则保持原路径。
 fn strip_context_path<'a>(path: &'a str, context_path: &str) -> &'a str {
     if context_path.is_empty() {
         return path;
@@ -140,9 +150,11 @@ fn strip_context_path<'a>(path: &'a str, context_path: &str) -> &'a str {
 ///
 /// 用法:整个 app 套一层 `.layer(axum::middleware::from_fn(nasa::grafana::dispatch))`。
 ///
-/// # 参数
+/// 参数说明：
 /// - `req`: 本次进入全局中间件的 HTTP 请求。
 /// - `next`: 未命中或执行通过时的 axum 放行句柄。
+///
+/// 返回：未命中规则时直接返回下游响应；命中时返回受并发和超时约束的执行或降级响应。
 pub async fn dispatch(req: Request, next: Next) -> Response {
     let Some(table) = ISOLATION.get() else {
         return next.run(req).await;

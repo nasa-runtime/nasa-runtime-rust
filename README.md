@@ -915,7 +915,8 @@ config_watch:
 ## YML 配置总览
 
 根 README 只给组合方式；每个组件的完整字段、默认值、初始化代码和使用场景在各自 README 中维护。
-下面是 `#[nasa::application]` 各组件读取的配置根（`zcf/application.yml`，必须存在、内容可为 `{}`）：
+`#[nasa::application]` 优先从非空环境变量 `APP_CONFIG_FILE` 指定的路径读取主配置，未设置或为空时使用 `zcf/application.yml`。支持绝对路径 `APP_CONFIG_FILE=/etc/orders/application.yml`，以及在项目根目录启动时的相对路径 `APP_CONFIG_FILE=config/application.yml`；所选文件必须存在，内容可为 `{}`。
+下面是各组件读取的配置根：
 
 ```yaml
 application:            # 仅启动期读取，远端不可改写
@@ -1102,7 +1103,7 @@ HTTP/1/h2c listener。
 | [async-macro](async-macro/README.md) | `scheduling` | `#[Async]`、`#[scheduled]` 宏 | 由 `nasched` 运行时读取 |
 | [napart](napart/README.md) | `partition` | 命名 Runner 隔离、严格 FIFO 的保序任务窃取、有界背压、延迟稳定终态与可证明停机 | 直接模式运行期动态创建并显式停机；Application 模式由 YAML/UserHook 提交启动期计划 |
 | [naws](naws/README.md) | `ws` / `ws-client` / `ws-redis` / `ws-socketio` / `ws-kafka` | TCP/WebSocket 服务端、原生 TCP Client、鉴权、广播、背压与真实退出等待 | 入站 `ws.*`；命名出站 `ws_clients` |
-| [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
+| [naws-proto](naws-proto/README.md) | `ws` | 长连接 schema 与 ProtocolBytes 编解码 | 显式 Mode 与 schema，无独立配置根 |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
 | [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` / `kafka-mysql-checkpoint` | 多数据源与独立producer lane、有界按键消费、组内多owner、安全确认、同集群消费/输出/位点事务、LSO 冻结回放、持久 checkpoint、单目标原文转发和有限DLT回投/原文隔离；可选单主 MySQL 跨语言共享进度，以及 Confluent envelope、批准 ID 映射与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；事务通过 `transact` 固定部署身份与白名单；受管 Registry 用 `schema_registries.<name>`，独立 client 与 MySQL checkpoint 显式构造 |
 | [nafka-macro](nafka-macro/README.md) | `kafka` | `#[kafka_consumer]` 静态收集 | 由 Kafka 运行时读取 |

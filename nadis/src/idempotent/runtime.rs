@@ -1,7 +1,7 @@
 //! 幂等计数运行时：一次 Lua 完成判重、计数与凭证登记；布局在首次使用时惰性解析并冻结。
 //!
-//! 只用基础命令的应用不会触达本模块：运行时经 `OnceCell` 惰性初始化，未调用任何 `*_idempotent`
-//! 方法的 client 不做布局解析、不做能力探测、不建立额外状态。
+//! 基础命令本身不触发账本准备；运行时经 `OnceCell` 惰性初始化，显式准备、幂等直发或
+//! 幂等 Pipeline 入口负责解析共享布局和探测能力。
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -30,10 +30,15 @@ type IdempotentInvocation<'a> = (Vec<Vec<u8>>, Vec<Vec<u8>>, &'static str, &'a s
 /// 首次请求实际执行的计数操作；`family` 不含方向，使同一 nonce 在增减漂移时仍命中首次结果。
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Operation {
+    /// 字符串整数计数按给定步长增加。
     StringIncrement,
+    /// 字符串整数计数按给定步长减少。
     StringDecrement,
+    /// Hash 整数字段按给定步长增加。
     HashIncrement,
+    /// Hash 整数字段按给定步长减少。
     HashDecrement,
+    /// 有序集合成员按给定浮点步长增加分数。
     ZSetIncrement,
 }
 
@@ -42,7 +47,7 @@ impl Operation {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：`FAMILY_STRING`/`FAMILY_HASH`/`FAMILY_ZSET`。
+    /// 返回：字符串、Hash 或有序集合的固定类别字节，增减方向共用同一类别。
     fn family(self) -> u8 {
         match self {
             Self::StringIncrement | Self::StringDecrement => wire::FAMILY_STRING,
@@ -69,17 +74,25 @@ impl Operation {
 
 /// 幂等计数运行时；持有已校验布局、指标与惰性解析的运行模式。
 pub(crate) struct IdempotentCounterRuntime {
+    /// 客户端构造时验证并冻结的本地账本配置。
     layout: IdempotentLayoutSnapshot,
+    /// 布局选择、结算和回收异常的本地观测事实。
     metrics: Arc<IdempotentCounterMetrics>,
+    /// 与共享标记确认一致后缓存的过期模式；准备失败不写入。
     resolved: OnceCell<IdempotentTtlMode>,
+    /// 字段过期布局的脚本缓存摘要，用于优先尝试 EVALSHA。
     hfe_sha: String,
+    /// 环形桶布局的脚本缓存摘要，用于优先尝试 EVALSHA。
     bucket_sha: String,
 }
 
 /// Cluster 全量响应的能力结论；“不支持”与“无法完整证明”必须分开，后者不能永久建成降级 marker。
 enum ClusterProbeCoverage {
+    /// 拓扑与响应覆盖一致，全部节点确认支持所需命令。
     Supported,
+    /// 节点响应覆盖完整，至少一个节点未报告支持命令。
     Unsupported,
+    /// 拓扑或响应集合不能形成完整覆盖证据。
     Incomplete,
 }
 
@@ -113,7 +126,11 @@ impl IdempotentCounterRuntime {
     ///
     /// 参数说明：
     /// - `client`: 承载命令连接的 RedisClient。
-    /// - `op`/`key`/`member`/`delta`/`nonce`: 操作、目标键、field/member 字节、十进制增量与业务 nonce。
+    /// - `op`：整数计数的结构类别和增减方向。
+    /// - `key`：目标计数键，决定计数与账本共同使用的槽位。
+    /// - `member`：Hash 字段原始字节；字符串计数使用空字节。
+    /// - `delta`：待编码为十进制文本的有符号步长，按操作方向解释。
+    /// - `nonce`：稳定业务事件标识，窗口内重复请求复用首次结果。
     ///
     /// 返回：首次请求执行后的精确 int64；重复 nonce 返回首次值；拒绝或非 int64 返回错误。
     pub(crate) async fn execute_long(
@@ -143,7 +160,11 @@ impl IdempotentCounterRuntime {
     /// 业务作用：执行 ZSET 幂等计数，保留 Redis 浮点语义（含 ±inf）。
     ///
     /// 参数说明：
-    /// - `client`/`key`/`member`/`delta`/`nonce`: RedisClient、目标键、成员字节、浮点增量与业务 nonce。
+    /// - `client`：承载账本准备和脚本调用的 Redis 客户端。
+    /// - `key`：目标有序集合键，决定账本槽位。
+    /// - `member`：成员的原始命令字节，与判重摘要使用同一编码。
+    /// - `delta`：首次结算使用的浮点分数增量。
+    /// - `nonce`：稳定业务事件标识，窗口内重复请求复用首次结果。
     ///
     /// 返回：首次请求执行后的精确 double；重复 nonce 返回首次值；拒绝或非数值返回错误。
     pub(crate) async fn execute_double(
@@ -172,7 +193,12 @@ impl IdempotentCounterRuntime {
     /// 业务作用：派生同 slot 账本键并执行原子判重协议；成功返回首次值文本，拒绝返回结构化错误。
     ///
     /// 参数说明：
-    /// - `client`/`op`/`key`/`member`/`delta`/`nonce`: 见上层入口。
+    /// - `client`：承载共享布局准备和脚本执行的 Redis 客户端。
+    /// - `op`：计数结构与增减方向，方向不进入判重身份。
+    /// - `key`：目标计数键，决定计数与账本的共同槽位。
+    /// - `member`：字段或成员的原始命令字节；字符串计数使用空字节。
+    /// - `delta`：已编码为 Redis 数值文本的步长字节。
+    /// - `nonce`：稳定业务事件标识，不能为空或全空白。
     ///
     /// 返回：脚本首次结果字符串；跨 slot 派生、协议异常或拒绝码返回错误。
     async fn execute(
@@ -195,7 +221,12 @@ impl IdempotentCounterRuntime {
     /// 业务作用：为已解析布局构造完整 Lua 调用，直发与 Pipeline 共用同一键、摘要和参数顺序。
     ///
     /// 参数说明：
-    /// - `mode`/`op`/`key`/`member`/`delta`/`nonce`: 固定布局、计数操作及其业务参数。
+    /// - `mode`：已确认的字段过期或环形桶布局，不接受尚未解析的自动模式。
+    /// - `op`：脚本需要执行的计数结构与增减方向。
+    /// - `key`：目标计数键，决定账本键派生和共同槽位。
+    /// - `member`：字段或成员的原始命令字节，参与账本身份。
+    /// - `delta`：供脚本数值命令使用的步长文本字节。
+    /// - `nonce`：非空业务事件标识，与目标和成员共同确定判重范围。
     ///
     /// 返回：二进制 KEYS/ARGV、脚本文本与 SHA；空 nonce、跨 slot 或未解析模式返回错误且不发命令。
     fn invocation(
@@ -260,7 +291,11 @@ impl IdempotentCounterRuntime {
     /// 业务作用：构造可放入显式 Pipeline 的完整 EVAL 命令；每条命令仍独立完成原子判重与结算。
     ///
     /// 参数说明：
-    /// - `op`/`key`/`member`/`delta`/`nonce`: 计数操作及其业务参数。
+    /// - `op`：计数结构与增减方向，决定脚本分支。
+    /// - `key`：目标计数键，决定账本键和槽位派生。
+    /// - `member`：字段或成员的原始命令字节；字符串计数使用空字节。
+    /// - `delta`：已编码的整数或浮点步长文本字节。
+    /// - `nonce`：稳定业务事件标识，窗口内重复请求复用首次结果。
     ///
     /// 返回：布局已准备时返回单条 EVAL 命令；未准备、空 nonce 或同槽派生失败时返回错误。
     pub(crate) fn pipeline_command(
@@ -318,7 +353,8 @@ impl IdempotentCounterRuntime {
 
     /// 业务作用：并发安全地取得当前客户端已经共享 marker 固定的幂等账本模式。
     ///
-    /// 参数说明：`client` 承载首次解析所需的 marker 与能力探测连接。
+    /// 参数说明：
+    /// - `client`：承载首次解析所需的共享布局标记读取及能力探测连接。
     ///
     /// 返回：已解析的 `HASH_FIELD`/`HASH_BUCKET`；探测不完整或配置冲突时返回错误并 fail-closed。
     async fn resolved_mode(&self, client: &RedisClient) -> Result<IdempotentTtlMode> {
@@ -464,8 +500,12 @@ impl IdempotentCounterRuntime {
                 .arg("HPEXPIRE")
                 .query_async::<Value>(&mut conn)
                 .await
-                .map(|value| supports_hpexpire_response(&value))
-                .map_err(NasaRedisError::Redis),
+                .map_err(NasaRedisError::Redis)
+                .and_then(|value| {
+                    // 只有明确的命令缺失才允许选择桶布局，畸形响应保留为可重新准备的错误。
+                    supports_hpexpire_response(&value)
+                        .ok_or_else(|| cfg("HPEXPIRE 能力探测返回了无效的命令定义"))
+                }),
             Conn::Cluster(mut conn) => {
                 const RETRY_DELAYS_MS: [u64; 5] = [0, 100, 250, 500, 1_000];
                 // 拓扑变更与暂时缺失按有界时间退避重新取样；只有前后 master 集合稳定且响应地址完全覆盖才接受结论。
@@ -558,7 +598,7 @@ async fn cluster_primary_addresses(
 /// - `value`: AllMasters 聚合响应。
 /// - `expected`: 探测前后稳定的 primary 地址集合。
 ///
-/// 返回：地址完全覆盖后给出支持或不支持；重复、缺失、额外节点及 wildcard 无法唯一匹配时返回不完整。
+/// 返回：地址和有效命令响应完全覆盖后给出支持或不支持；节点重复、缺失、额外、地址歧义或畸形定义均返回不完整。
 fn cluster_response_coverage(value: &Value, expected: &BTreeSet<String>) -> ClusterProbeCoverage {
     let Value::Map(entries) = value else {
         return ClusterProbeCoverage::Incomplete;
@@ -572,7 +612,11 @@ fn cluster_response_coverage(value: &Value, expected: &BTreeSet<String>) -> Clus
         if !answered.insert(address) {
             return ClusterProbeCoverage::Incomplete;
         }
-        supported &= supports_hpexpire_response(response);
+        // 任一节点能力未知都不能固定共享布局，即使其它节点明确不支持也要先取得完整证据。
+        let Some(node_supported) = supports_hpexpire_response(response) else {
+            return ClusterProbeCoverage::Incomplete;
+        };
+        supported &= node_supported;
     }
     if !addresses_cover(expected, &answered) {
         return ClusterProbeCoverage::Incomplete;
@@ -586,7 +630,9 @@ fn cluster_response_coverage(value: &Value, expected: &BTreeSet<String>) -> Clus
 
 /// 业务作用：把 CLUSTER SLOTS 的 wildcard 主机按端口与 AllMasters 实际地址唯一匹配，复验两边节点集合等价。
 ///
-/// 参数说明：`expected` 为拓扑宣告地址，`answered` 为逐 master 路由返回地址。
+/// 参数说明：
+/// - `expected`：拓扑宣告的主节点地址集合，未知主机以端口通配形式表示。
+/// - `answered`：逐主节点路由返回的实际地址集合，不允许多余或缺少节点。
 ///
 /// 返回：每个宣告节点都能一对一匹配且没有额外响应时为 `true`；端口歧义或集合差异为 `false`。
 fn addresses_cover(expected: &BTreeSet<String>, answered: &BTreeSet<String>) -> bool {
@@ -616,7 +662,8 @@ fn addresses_cover(expected: &BTreeSet<String>, answered: &BTreeSet<String>) -> 
 
 /// 业务作用：从 AllMasters 节点地址提取端口文本，兼容 IPv4、主机名与带方括号 IPv6。
 ///
-/// 参数说明：`address` 为 redis-rs 路由响应中的节点地址。
+/// 参数说明：
+/// - `address`：redis-rs 路由响应中的节点地址，用于按末段端口匹配未知主机。
 ///
 /// 返回：存在非空末段端口时返回文本，否则返回 `None`。
 fn address_port(address: &str) -> Option<&str> {
@@ -624,14 +671,38 @@ fn address_port(address: &str) -> Option<&str> {
     (!port.is_empty()).then_some(port)
 }
 
-/// 业务作用：判断单节点 `COMMAND INFO HPEXPIRE` 返回是否包含命令定义。
+/// 业务作用：区分单节点 HPEXPIRE 能力证据、明确命令缺失与无效响应，防止未知状态固定账本布局。
 ///
 /// 参数说明：
 /// - `value`: 节点原始响应。
 ///
-/// 返回：首元素存在且非 nil 时为 `true`；未知命令、服务端错误或畸形响应为 `false`。
-fn supports_hpexpire_response(value: &Value) -> bool {
-    matches!(value, Value::Array(items) if items.first().is_some_and(|item| !matches!(item, Value::Nil | Value::ServerError(_))))
+/// 返回：有效命令定义为 `Some(true)`，唯一 nil 项为 `Some(false)`；错误、名称不符或结构异常为 `None`。
+fn supports_hpexpire_response(value: &Value) -> Option<bool> {
+    let Value::Array(items) = value else {
+        return None;
+    };
+    // 单命令探测只能有一个对应结果；额外结果不能作为当前命令的能力证据。
+    let [command] = items.as_slice() else {
+        return None;
+    };
+    match command {
+        Value::Nil => Some(false),
+        Value::Array(fields) if fields.len() >= 6 => {
+            let name = redis_text(&fields[0])?;
+            if !name.eq_ignore_ascii_case("hpexpire")
+                || !matches!(fields[1], Value::Int(arity) if arity != 0)
+                || !matches!(&fields[2], Value::Array(flags) if flags.iter().all(|flag| matches!(flag, Value::BulkString(_) | Value::SimpleString(_))))
+                || !fields[3..6]
+                    .iter()
+                    .all(|field| matches!(field, Value::Int(position) if *position >= 0))
+            {
+                // 无效定义意味着能力未知，不能据此建成任何永久布局标记。
+                return None;
+            }
+            Some(true)
+        }
+        _ => None,
+    }
 }
 
 /// 业务作用：读取 Redis 文本值而不进行有损替换，节点地址不合法时拒绝覆盖判定。
@@ -704,8 +775,10 @@ pub(crate) fn interpret_result(
 ///
 /// 参数说明：
 /// - `conn`: 目标命令连接。
-/// - `script`/`sha`: 脚本文本与其 SHA1。
-/// - `keys`/`args`: 已序列化的二进制键与参数，保留 field/member 原始字节。
+/// - `script`：目标节点缺少脚本缓存时使用的完整 Lua 文本。
+/// - `sha`：与脚本文本对应的 SHA1，供首次 EVALSHA 请求使用。
+/// - `keys`：按脚本约定排列的二进制键，必须处于同一槽位。
+/// - `args`：已序列化的业务参数，保留字段、成员和数值文本的原始字节。
 ///
 /// 返回：脚本返回的原始 `Value` 数组；网络或协议错误透传，NOSCRIPT 不视为业务错误。
 async fn eval_binary(
@@ -746,7 +819,11 @@ fn script_execution_error(error: redis::RedisError) -> NasaRedisError {
 /// 业务作用：组装并执行一次 EVAL/EVALSHA，保持二进制键与参数不经 UTF-8 转换。
 ///
 /// 参数说明：
-/// - `conn`/`verb`/`body`/`keys`/`args`: 连接、命令动词、脚本文本或 SHA、二进制键与参数。
+/// - `conn`：承载脚本命令的受管连接。
+/// - `verb`：调用方选择的 EVAL 或 EVALSHA 命令名。
+/// - `body`：与命令名对应的脚本文本或缓存摘要字节。
+/// - `keys`：按脚本顺序传入的二进制键，同时确定命令路由。
+/// - `args`：按脚本顺序传入的非键参数字节。
 ///
 /// 返回：类型化为 `Vec<Value>` 的脚本返回；底层错误透传由调用方分类。
 async fn run_eval(
@@ -833,16 +910,35 @@ fn parse_redis_double(value: &str) -> Result<f64> {
 }
 
 /// 业务作用：构造幂等配置类错误。
+///
+/// 参数说明：
+/// - `message`：账本配置或能力准备失败的原因摘要。
+///
+/// 返回：保留摘要的配置错误，由调用方停止本次账本准备或命令构造。
 fn cfg(message: &str) -> NasaRedisError {
     NasaRedisError::Config(message.to_owned())
 }
 
 /// 业务作用：构造幂等协议类错误（结果结构或类型不符合脚本合同）。
+///
+/// 参数说明：
+/// - `message`：不符合账本或脚本协议的原因摘要。
+///
+/// 返回：独立的幂等协议错误，不能解释为计数已确定未执行。
 fn protocol(message: &str) -> NasaRedisError {
     NasaRedisError::IdempotentProtocol(message.to_owned())
 }
 
 /// 业务作用：把结构化拒绝封装为统一错误类型，业务分支基于 `IdempotentRejection`。
+///
+/// 参数说明：
+/// - `code`：已经解析的封闭拒绝类别。
+/// - `detail`：脚本返回的诊断文本，对外展示前须检查是否需要脱敏。
+///
+/// 返回：包含类别及诊断详情的幂等拒绝错误，不在此处重试命令。
 fn reject(code: IdempotentRejection, detail: String) -> NasaRedisError {
-    NasaRedisError::Idempotent(IdempotentCounterError { code, detail })
+    NasaRedisError::Idempotent(IdempotentCounterError {
+        code,
+        detail,
+    })
 }

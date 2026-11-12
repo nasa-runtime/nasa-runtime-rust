@@ -162,7 +162,10 @@ fn aggregate_snapshots(snapshots: &[SchemaRegistrySnapshot]) -> SchemaRegistrySn
     SchemaRegistrySnapshot {
         lookups: lookups
             .into_iter()
-            .map(|(outcome, lookups)| SchemaLookupCount { outcome, lookups })
+            .map(|(outcome, lookups)| SchemaLookupCount {
+                outcome,
+                lookups,
+            })
             .collect(),
         cached_entries,
         cache_capacity,

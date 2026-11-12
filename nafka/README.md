@@ -157,14 +157,19 @@ struct OrderCreated {
     group = "order-worker",
     client = "order-service"
 )]
-/// 业务作用：展示订单消费入口并输出订单标识。参数说明：message 为解码订单。返回：成功允许 Auto 确认，此例未持久化业务数据。
+/// 业务作用：展示订单消费入口并输出订单标识。
+/// 参数说明：
+/// - `message`：解码订单。
+/// 返回：成功允许 Auto 确认，此例未持久化业务数据。
 async fn consume_order(message: OrderCreated) -> Result<()> {
     println!("order={}", message.id);
     Ok(())
 }
 
 #[tokio::main]
-/// 业务作用：建立订单事件源，等待消费就绪后发布一条消息并关闭资源。参数说明：无。返回：各步骤成功后退出，否则向调用方返回错误。
+/// 业务作用：建立订单事件源，等待消费就绪后发布一条消息并关闭资源。
+/// 参数说明: 无。
+/// 返回：各步骤成功后退出，否则向调用方返回错误。
 async fn main() -> Result<()> {
     let kafka = KafkaProxy::connect(KafkaConfig {
         client_name: "order-service".into(),
@@ -247,7 +252,10 @@ nasa = { version = "2.0.3", features = ["application", "kafka", "web"] }
 
 ```rust
 #[nasa::application("kafka", "web")]
-/// 业务作用：在启动窗口追加订单消费者。参数说明：app 为受管应用。返回：登记成功；实际 Ready 与关闭由容器负责。
+/// 业务作用：在启动窗口追加订单消费者。
+/// 参数说明：
+/// - `app`：受管应用。
+/// 返回：登记成功；实际 Ready 与关闭由容器负责。
 async fn main(app: nasa::Application) -> anyhow::Result<()> {
     app.configure_kafka("order-service", |registry| {
         registry.register(OrderConsumer::new())
@@ -347,7 +355,10 @@ use nasa::kafka::prelude::*;
     group = "order-worker",
     client = "order-service"
 )]
-/// 业务作用：保存订单后允许来源确认。参数说明：message 为解码订单。返回：保存成功后返回成功，失败交由消费策略处理。
+/// 业务作用：保存订单后允许来源确认。
+/// 参数说明：
+/// - `message`：解码订单。
+/// 返回：保存成功后返回成功，失败交由消费策略处理。
 async fn consume_order(message: OrderCreated) -> Result<()> {
     save_order(&message).await?;
     Ok(())
@@ -370,7 +381,10 @@ message codec、event 和处理函数，实际来源通过 `KafkaRecord.ctx.topi
     group = "audit",
     client = "order-service"
 )]
-/// 业务作用：连同来源坐标保存订单审计。参数说明：record 为订单及消费上下文。返回：审计成功才允许 Auto 确认。
+/// 业务作用：连同来源坐标保存订单审计。
+/// 参数说明：
+/// - `record`：订单及消费上下文。
+/// 返回：审计成功才允许 Auto 确认。
 async fn audit_order(record: KafkaRecord<OrderCreated>) -> Result<()> {
     let traceparent = record
         .ctx
@@ -407,7 +421,10 @@ async fn audit_order(record: KafkaRecord<OrderCreated>) -> Result<()> {
     group = "order-index",
     client = "order-service"
 )]
-/// 业务作用：批量写入订单索引。参数说明：messages 为连续输入的解码值。返回：整批写入成功才允许 Auto 确认。
+/// 业务作用：批量写入订单索引。
+/// 参数说明：
+/// - `messages`：连续输入的解码值。
+/// 返回：整批写入成功才允许 Auto 确认。
 async fn payload_batch(messages: Vec<OrderCreated>) -> Result<()> {
     write_index_batch(&messages).await?;
     Ok(())
@@ -419,7 +436,10 @@ async fn payload_batch(messages: Vec<OrderCreated>) -> Result<()> {
     group = "order-audit",
     client = "order-service"
 )]
-/// 业务作用：连同来源坐标批量保存订单审计。参数说明：records 为连续输入记录。返回：整批审计成功才允许 Auto 确认。
+/// 业务作用：连同来源坐标批量保存订单审计。
+/// 参数说明：
+/// - `records`：连续输入记录。
+/// 返回：整批审计成功才允许 Auto 确认。
 async fn record_batch(records: Vec<KafkaRecord<OrderCreated>>) -> Result<()> {
     for record in &records {
         println!("partition={} offset={}", record.ctx.partition, record.ctx.offset);
@@ -578,25 +598,37 @@ use nasa::kafka::prelude::*;
 // 假设 OrderCreated、PaymentCreated 已实现 serde 解码，persist 是业务持久化函数。
 
 #[kafka_consumer(topics = ["orders"], event = "created")]
-/// 业务作用：展示消费参数或组声明。参数说明：message 为解码输入。返回：示例直接成功并允许 Auto 确认，实际业务须在成功前完成处理。
+/// 业务作用：展示消费参数或组声明。
+/// 参数说明：
+/// - `message`：解码输入。
+/// 返回：示例直接成功并允许 Auto 确认，实际业务须在成功前完成处理。
 async fn payload_single(message: OrderCreated) -> Result<()> {
     Ok(())
 }
 
 #[kafka_consumer(topics = ["orders"], event = "created")]
-/// 业务作用：展示消费参数或组声明。参数说明：record 为含来源上下文的输入。返回：示例直接成功并允许 Auto 确认，实际业务须在成功前完成处理。
+/// 业务作用：展示消费参数或组声明。
+/// 参数说明：
+/// - `record`：含来源上下文的输入。
+/// 返回：示例直接成功并允许 Auto 确认，实际业务须在成功前完成处理。
 async fn record_single(record: KafkaRecord<OrderCreated>) -> Result<()> {
     Ok(())
 }
 
 #[kafka_consumer(topics = ["orders"], event = "created", group = "indexer")]
-/// 业务作用：展示批量 payload 签名。参数说明：messages 为连续输入的解码值。返回：示例直接允许整批 Auto 确认，实际业务须先完成处理。
+/// 业务作用：展示批量 payload 签名。
+/// 参数说明：
+/// - `messages`：连续输入的解码值。
+/// 返回：示例直接允许整批 Auto 确认，实际业务须先完成处理。
 async fn payload_batch(messages: Vec<OrderCreated>) -> Result<()> {
     Ok(())
 }
 
 #[kafka_consumer(topics = ["payments"], event = "created", ack = "manual")]
-/// 业务作用：逐条持久化付款并记录本次临时确认。参数说明：records 为含确认权威的批记录。返回：整次调用成功才保留连续确认前缀，错误使本次确认失效。
+/// 业务作用：逐条持久化付款并记录本次临时确认。
+/// 参数说明：
+/// - `records`：含确认权威的批记录。
+/// 返回：整次调用成功才保留连续确认前缀，错误使本次确认失效。
 async fn record_batch(records: Vec<KafkaRecord<PaymentCreated>>) -> Result<()> {
     for record in &records {
         persist(&record.value).await?;
@@ -642,21 +674,30 @@ let audit_runtime = audit_cluster
 ```rust
 // 未写 group/broadcast：使用 KafkaConfig.group_id。
 #[kafka_consumer(topics = ["orders"], event = "created")]
-/// 业务作用：展示消费参数或组声明。参数说明：message 为解码输入。返回：示例直接成功并允许 Auto 确认，实际业务须在成功前完成处理。
+/// 业务作用：展示消费参数或组声明。
+/// 参数说明：
+/// - `message`：解码输入。
+/// 返回：示例直接成功并允许 Auto 确认，实际业务须在成功前完成处理。
 async fn default_group(message: OrderCreated) -> Result<()> {
     Ok(())
 }
 
 // 所有实例竞争同一个稳定 group，消息由 Kafka 分摊。
 #[kafka_consumer(topics = ["orders"], event = "created", group = "order-worker")]
-/// 业务作用：展示消费参数或组声明。参数说明：message 为解码输入。返回：示例直接成功并允许 Auto 确认，实际业务须在成功前完成处理。
+/// 业务作用：展示消费参数或组声明。
+/// 参数说明：
+/// - `message`：解码输入。
+/// 返回：示例直接成功并允许 Auto 确认，实际业务须在成功前完成处理。
 async fn named_group(message: OrderCreated) -> Result<()> {
     Ok(())
 }
 
 // 每个进程实例派生独占 group，因此每个实例都会收到完整消息流。
 #[kafka_consumer(topics = ["sys-config"], event = "reload", broadcast = "config-cache")]
-/// 业务作用：为本广播实例应用配置事件。参数说明：message 为配置变更。返回：应用成功才允许 Auto 确认。
+/// 业务作用：为本广播实例应用配置事件。
+/// 参数说明：
+/// - `message`：配置变更。
+/// 返回：应用成功才允许 Auto 确认。
 async fn broadcast_group(message: ConfigChanged) -> Result<()> {
     reload_config(message).await?;
     Ok(())
@@ -720,14 +761,23 @@ struct OrderConsumer {
 impl SingleConsumer for OrderConsumer {
     type Message = OrderCreated;
 
-    /// 业务作用：声明该消费者订阅的业务 topic。参数说明：无。返回：注册时冻结的 topic 集合。
+    /// 业务作用：声明该消费者订阅的业务 topic。
+    /// 参数说明: 无。
+    /// 返回：注册时冻结的 topic 集合。
     fn topics(&self) -> Vec<String> { vec!["orders".into()] }
-    /// 业务作用：限定该路由接收的事件。参数说明：无。返回：与发布端精确匹配的事件原文。
+    /// 业务作用：限定该路由接收的事件。
+    /// 参数说明: 无。
+    /// 返回：与发布端精确匹配的事件原文。
     fn event(&self) -> String { "created".into() }
-    /// 业务作用：确定该处理器的消费与提交身份。参数说明：无。返回：明确的命名组规则。
+    /// 业务作用：确定该处理器的消费与提交身份。
+    /// 参数说明: 无。
+    /// 返回：明确的命名组规则。
     fn group(&self) -> GroupSpec { GroupSpec::Named("order-worker".into()) }
 
-    /// 业务作用：使用注入的数据库保存订单。参数说明：record 为当前订单记录。返回：保存结果决定是否允许 Auto 确认，外部写入须可幂等重试。
+    /// 业务作用：使用注入的数据库保存订单。
+    /// 参数说明：
+    /// - `record`：当前订单记录。
+    /// 返回：保存结果决定是否允许 Auto 确认，外部写入须可幂等重试。
     async fn consume(&self, record: KafkaRecord<Self::Message>) -> Result<()> {
         self.db.save(&record.value).await
     }
@@ -757,16 +807,27 @@ struct PaymentConsumer {
 impl SingleConsumer for PaymentConsumer {
     type Message = PaymentCreated;
 
-    /// 业务作用：声明该消费者订阅的业务 topic。参数说明：无。返回：注册时冻结的 topic 集合。
+    /// 业务作用：声明该消费者订阅的业务 topic。
+    /// 参数说明: 无。
+    /// 返回：注册时冻结的 topic 集合。
     fn topics(&self) -> Vec<String> { vec!["payments".into()] }
-    /// 业务作用：限定该路由接收的事件。参数说明：无。返回：与发布端精确匹配的事件原文。
+    /// 业务作用：限定该路由接收的事件。
+    /// 参数说明: 无。
+    /// 返回：与发布端精确匹配的事件原文。
     fn event(&self) -> String { "created".into() }
-    /// 业务作用：确定该处理器的消费与提交身份。参数说明：无。返回：明确的命名组规则。
+    /// 业务作用：确定该处理器的消费与提交身份。
+    /// 参数说明: 无。
+    /// 返回：明确的命名组规则。
     fn group(&self) -> GroupSpec { GroupSpec::Named("settlement".into()) }
-    /// 业务作用：要求业务持久化后显式确认。参数说明：无。返回：Manual，回调最终成功才保留有效确认。
+    /// 业务作用：要求业务持久化后显式确认。
+    /// 参数说明: 无。
+    /// 返回：Manual，回调最终成功才保留有效确认。
     fn ack_mode(&self) -> AckMode { AckMode::Manual }
 
-    /// 业务作用：保存付款并手动确认来源。参数说明：record 为付款记录。返回：保存与确认均成功才完成，错误使本次临时确认失效。
+    /// 业务作用：保存付款并手动确认来源。
+    /// 参数说明：
+    /// - `record`：付款记录。
+    /// 返回：保存与确认均成功才完成，错误使本次临时确认失效。
     async fn consume(&self, record: KafkaRecord<Self::Message>) -> Result<()> {
         self.db.save(&record.value).await?;
         record.ack()?;
@@ -787,14 +848,23 @@ struct RebuildConsumer {
 impl BatchConsumer for RebuildConsumer {
     type Message = OrderCreated;
 
-    /// 业务作用：声明该消费者订阅的业务 topic。参数说明：无。返回：注册时冻结的 topic 集合。
+    /// 业务作用：声明该消费者订阅的业务 topic。
+    /// 参数说明: 无。
+    /// 返回：注册时冻结的 topic 集合。
     fn topics(&self) -> Vec<String> { vec!["orders".into()] }
-    /// 业务作用：限定该路由接收的事件。参数说明：无。返回：与发布端精确匹配的事件原文。
+    /// 业务作用：限定该路由接收的事件。
+    /// 参数说明: 无。
+    /// 返回：与发布端精确匹配的事件原文。
     fn event(&self) -> String { "created".into() }
-    /// 业务作用：确定该处理器的消费与提交身份。参数说明：无。返回：明确的命名组规则。
+    /// 业务作用：确定该处理器的消费与提交身份。
+    /// 参数说明: 无。
+    /// 返回：明确的命名组规则。
     fn group(&self) -> GroupSpec { GroupSpec::Named("search-index".into()) }
 
-    /// 业务作用：以当前批订单更新搜索索引。参数说明：records 为连续输入记录。返回：整批更新成功才允许确认，重复调用需由索引写入语义处理。
+    /// 业务作用：以当前批订单更新搜索索引。
+    /// 参数说明：
+    /// - `records`：连续输入记录。
+    /// 返回：整批更新成功才允许确认，重复调用需由索引写入语义处理。
     async fn consume_batch(
         &self,
         records: Vec<KafkaRecord<Self::Message>>,
@@ -835,7 +905,10 @@ Manual Ack 推荐写法：先完成具有业务意义的持久化，再同步调
     group = "settlement",
     ack = "manual"
 )]
-/// 业务作用：付款持久化后确认当前输入。参数说明：record 为带确认权威的付款。返回：持久化与确认成功后完成。
+/// 业务作用：付款持久化后确认当前输入。
+/// 参数说明：
+/// - `record`：带确认权威的付款。
+/// 返回：持久化与确认成功后完成。
 async fn settle(record: KafkaRecord<PaymentCreated>) -> Result<()> {
     persist(&record.value).await?;
     record.ack()?;
@@ -847,7 +920,10 @@ async fn settle(record: KafkaRecord<PaymentCreated>) -> Result<()> {
 invocation 内有效：
 
 ```rust
-/// 业务作用：拆出付款与来源信息完成持久化，再使用当前回调的 token 确认。参数说明：record 为手动确认记录。返回：持久化和确认均成功才完成。
+/// 业务作用：拆出付款与来源信息完成持久化，再使用当前回调的 token 确认。
+/// 参数说明：
+/// - `record`：手动确认记录。
+/// 返回：持久化和确认均成功才完成。
 async fn settle_owned(record: KafkaRecord<PaymentCreated>) -> Result<()> {
     let (payment, ctx, ack) = record.into_manual_parts()?;
     persist_with_source(&payment, &ctx).await?;
@@ -869,14 +945,23 @@ use nasa::kafka::{AckBatchExt, AckMode, BatchConsumer, KafkaRecord, Result};
 impl BatchConsumer for SettlementBatchConsumer {
     type Message = PaymentCreated;
 
-    /// 业务作用：声明该消费者订阅的业务 topic。参数说明：无。返回：注册时冻结的 topic 集合。
+    /// 业务作用：声明该消费者订阅的业务 topic。
+    /// 参数说明: 无。
+    /// 返回：注册时冻结的 topic 集合。
     fn topics(&self) -> Vec<String> { vec!["payments".into()] }
-    /// 业务作用：限定该路由接收的事件。参数说明：无。返回：与发布端精确匹配的事件原文。
+    /// 业务作用：限定该路由接收的事件。
+    /// 参数说明: 无。
+    /// 返回：与发布端精确匹配的事件原文。
     fn event(&self) -> String { "created".into() }
-    /// 业务作用：要求业务持久化后显式确认。参数说明：无。返回：Manual，回调最终成功才保留有效确认。
+    /// 业务作用：要求业务持久化后显式确认。
+    /// 参数说明: 无。
+    /// 返回：Manual，回调最终成功才保留有效确认。
     fn ack_mode(&self) -> AckMode { AckMode::Manual }
 
-    /// 业务作用：批量持久化付款后确认全部输入。参数说明：records 为当前连续批记录。返回：持久化与全部确认成功才完成，任一错误使本次临时确认失效。
+    /// 业务作用：批量持久化付款后确认全部输入。
+    /// 参数说明：
+    /// - `records`：当前连续批记录。
+    /// 返回：持久化与全部确认成功才完成，任一错误使本次临时确认失效。
     async fn consume_batch(
         &self,
         records: Vec<KafkaRecord<Self::Message>>,
@@ -903,12 +988,19 @@ use nasa::ws::{Mode, WireCodec};
 struct BitpackOrder(OrderWire);
 
 impl WireCodec for BitpackOrder {
-    /// 业务作用：按指定线路模式编码订单。参数说明：mode 为调用方选择的模式。返回：原 codec 的字节或编码错误。
+    /// 业务作用：按指定线路模式编码订单。
+    /// 参数说明：
+    /// - `mode`：调用方选择的模式。
+    /// 返回：原 codec 的字节或编码错误。
     fn encode(&self, mode: Mode) -> nasa::ws::proto::Result<Vec<u8>> {
         self.0.encode(mode)
     }
 
-    /// 业务作用：按线路声明恢复订单类型。参数说明：mode 为线路模式，bytes 为正文。返回：订单包装值或解码错误。
+    /// 业务作用：按线路声明恢复订单类型。
+    /// 参数说明：
+    /// - `mode`：线路模式。
+    /// - `bytes`：正文。
+    /// 返回：订单包装值或解码错误。
     fn decode(mode: Mode, bytes: &[u8]) -> nasa::ws::proto::Result<Self> {
         OrderWire::decode(mode, bytes).map(Self)
     }
@@ -923,7 +1015,10 @@ impl ProtoMode for BitpackOrder {
     event = "created",
     group = "binary-worker"
 )]
-/// 业务作用：处理按已声明模式解码的二进制订单。参数说明：record 为 Proto 包装的业务记录。返回：业务处理成功才允许确认。
+/// 业务作用：处理按已声明模式解码的二进制订单。
+/// 参数说明：
+/// - `record`：Proto 包装的业务记录。
+/// 返回：业务处理成功才允许确认。
 async fn consume_binary(record: KafkaRecord<Proto<BitpackOrder>>) -> Result<()> {
     handle_wire_order(&record.value.0.0).await?;
     Ok(())
@@ -948,14 +1043,23 @@ struct RawOutboxAdapter {
 }
 
 impl PassthroughConsumer for RawOutboxAdapter {
-    /// 业务作用：声明该消费者订阅的业务 topic。参数说明：无。返回：注册时冻结的 topic 集合。
+    /// 业务作用：声明该消费者订阅的业务 topic。
+    /// 参数说明: 无。
+    /// 返回：注册时冻结的 topic 集合。
     fn topics(&self) -> Vec<String> { vec!["socket-data".into()] }
-    /// 业务作用：限定该路由接收的事件。参数说明：无。返回：与发布端精确匹配的事件原文。
+    /// 业务作用：限定该路由接收的事件。
+    /// 参数说明: 无。
+    /// 返回：与发布端精确匹配的事件原文。
     fn event(&self) -> String { "NAWS_PUSH".into() }
-    /// 业务作用：确定该处理器的消费与提交身份。参数说明：无。返回：明确的命名组规则。
+    /// 业务作用：确定该处理器的消费与提交身份。
+    /// 参数说明: 无。
+    /// 返回：明确的命名组规则。
     fn group(&self) -> GroupSpec { GroupSpec::Named("socket-node-a.data".into()) }
 
-    /// 业务作用：将借用正文同步送入本地 outbox。参数说明：record 为当前 poll 有效的消息借用。返回：本地准入结果，不代表 socket 远端已接收；无正文拒绝，队列故障请求重试。
+    /// 业务作用：将借用正文同步送入本地 outbox。
+    /// 参数说明：
+    /// - `record`：当前 poll 有效的消息借用。
+    /// 返回：本地准入结果，不代表 socket 远端已接收；无正文拒绝，队列故障请求重试。
     fn consume_borrowed(
         &self,
         record: BorrowedKafkaRecord<'_>,
@@ -1181,14 +1285,23 @@ struct OrderPipeline {
 impl SingleConsumer for OrderPipeline {
     type Message = OrderCreated;
 
-    /// 业务作用：声明该消费者订阅的业务 topic。参数说明：无。返回：注册时冻结的 topic 集合。
+    /// 业务作用：声明该消费者订阅的业务 topic。
+    /// 参数说明: 无。
+    /// 返回：注册时冻结的 topic 集合。
     fn topics(&self) -> Vec<String> { vec!["orders".into()] }
-    /// 业务作用：限定该路由接收的事件。参数说明：无。返回：与发布端精确匹配的事件原文。
+    /// 业务作用：限定该路由接收的事件。
+    /// 参数说明: 无。
+    /// 返回：与发布端精确匹配的事件原文。
     fn event(&self) -> String { "created".into() }
-    /// 业务作用：确定该处理器的消费与提交身份。参数说明：无。返回：明确的命名组规则。
+    /// 业务作用：确定该处理器的消费与提交身份。
+    /// 参数说明: 无。
+    /// 返回：明确的命名组规则。
     fn group(&self) -> GroupSpec { GroupSpec::Named("order-pipeline".into()) }
 
-    /// 业务作用：转换订单并等待下游交付后完成来源处理。参数说明：record 为订单和透传上下文。返回：下游确认才成功；发布与来源提交分离，重投可能重复。
+    /// 业务作用：转换订单并等待下游交付后完成来源处理。
+    /// 参数说明：
+    /// - `record`：订单和透传上下文。
+    /// 返回：下游确认才成功；发布与来源提交分离，重投可能重复。
     async fn consume(&self, record: KafkaRecord<Self::Message>) -> Result<()> {
         let indexed = build_index_event(&record.value)?;
         self.kafka
@@ -1687,6 +1800,16 @@ kafka:
 Degraded；其它分区提交成功或用户 resume 不能将其清除。交付确认并完成来源安全提交后解除，
 失权的旧交付也不能向新 assignment 写入该原因。停止不启动新的重试轮次，未确认来源保留原提交位置；后续能否重投仍取决于日志保留和资源身份。
 
+## 异步共享原文
+
+`SingleConsumer` 或 `BatchConsumer` 将 `Message` 声明为 `RawPayload` 时，可在异步处理期间共享原始正文，无需反序列化业务对象。`RawPayload::as_ref()` 借用字节，`clone()` 只增加引用；框架原生输入物化后，`DecodePayload::decode_owned` 将同一正文 owner 交给消费者。普通 JSON 和 ProtocolBytes 类型继续使用既有解码实现。
+
+同一来源输入凭证在重取时复用已计费的正文，保留旧引用也不会随重试累积正文副本；同一凭证下正文或 null 身份变化会停止消费，不替换已有内容。原文引用同时保留来源输入容量，直到最后一个引用释放；回调返回、失去 assignment 或关闭账本都不能提前归还仍在使用的原文额度。正文所有权不包含 ACK 权限，成功消费仍须通过实际调用、assignment 和连续提交门禁。保留过久会耗尽配置容量并产生背压。`RawPayload::copy_from_slice` 为调用方主动构造原文复制一次，不带来源预算或提交权。
+
+Raw 消费要求 `X-Nasa-Payload-Codec` 缺失，`X-Nasa-Payload-Mode` 缺失或精确为 `raw`；其它编码声明拒绝。显式 null 正文仍是 tombstone，不能被当成空字节。发布类型声明 `PayloadCodec::Raw` 时，框架写入 mode `raw`；该声明不验证业务内容，也不执行跨编码转换。该能力只负责原文字节、容量和消费寿命，不定义业务路由或授权协议。
+
+`SingleConsumer` and `BatchConsumer` can use `RawPayload` as their message type to retain immutable raw bytes across asynchronous work. Clones share the body materialized from native input and keep its input permit alive until the last reference is dropped. Retries under the same input permit reuse the materialized body; a payload or null-identity change stops consumption rather than replacing retained bytes. They carry no acknowledgement authority. Assignment and contiguous commit checks still apply, and retained bodies can exert backpressure. Existing JSON and ProtocolBytes decoding remains unchanged. Raw input requires no codec header and either no mode header or exactly `raw`; tombstones remain distinct from empty bodies. `copy_from_slice` makes an explicit independent copy. This API defines byte ownership and consumer lifetime, without application routing or authorization rules.
+
 ## 少拷贝 passthrough
 
 `PassthroughConsumer` 面向 Kafka payload 已经是最终 socket 业务字节的场景。回调接收
@@ -1780,6 +1903,57 @@ broker 不支持该操作时为 `UnsupportedCapability`，不降级为整组配�
 共同运行范围为 Kafka 4.1.0 KRaft、rdkafka 0.39/librdkafka 2.12.1 与 Java client 3.8.1/JDK 21，
 classic group 协议；本机平台为 macOS arm64，broker 为 Linux arm64。其它平台、broker 或新 group 协议
 需要各自的运行证据，本地 GSSAPI 实现存在不能证明 Kerberos 登录成功。
+
+## 单分区事务主备
+
+`KafkaProxy::transact_on_assignment(plan, processor)` 使用与 `transact` 相同的 `TransactionPlan`，但只接受一个输入 topic，并要求该 topic 始终只有分区 0。多个进程使用同一消费组和稳定 `TransactionIdentity` 时，空分配的备用实例持续参与组协调，不创建事务 producer；取得分区的实例才初始化稳定事务身份。
+
+新分配按以下顺序处理：取得实际分区 → 核对物理集群与单分区拓扑 → `init_transactions` 完成旧 producer fencing → 重新查询组已提交位点并定位 → 开放批次。重新查询不能省略：分配阶段取得的位置可能早于旧事务的最终提交。无提交位点时使用明确配置的 `consumer.auto_offset_reset`；需要完整处理输入的任务应选择 `earliest` 或要求已有位点的 `none`。
+
+分配变化立即撤销旧批次的新副作用权限；已经开始的 commit 仍等待真实结果。回调、初始化、原生析构和事务 I/O 都继续承担实际资源责任，取消等待不提前释放稳定身份。未知 commit/abort、真实 producer fencing 或授权拒绝使任务失败；调用方应在确认旧任务 drained 后按原稳定身份恢复。初始化前后都检查分配，但不能消除任意线程暂停造成的晚到 fencing；这种情况下当前 producer 可能失败，已提交状态仍只能从 broker 恢复，不能使用本地候选宣告成功。
+
+`TransactionContext::assignment_epoch()` 只用于识别本任务内的分配变化并丢弃旧观测，不是跨进程围栏。普通 `transact` 保留按部署槽独占 producer 的启动行为，适合由部署系统保证槽位互斥的任务。同一进程不能同时占用相同物理集群与稳定事务身份；数据库、HTTP 和普通 producer lane 的副作用都不属于 Kafka 原子事务。
+
+## 已提交原文分页
+
+`KafkaAdmin::read_committed_page(CommittedRead)` 在不加入消费组、不提交 offset 的前提下读取一个分区。首次可用 `end_offset: None` 固定本轮 LSO，后续分页必须保存返回的 `end_offset` 和 `next_offset`。只有两者相等才表示冻结范围已读完；空记录页可能跨过中止事务、事务标记或压缩缺口，不能用空 poll 判断完成。
+
+```rust,ignore
+let page = admin.read_committed_page(nasa::kafka::CommittedRead {
+    cluster_id: approved_cluster_id,
+    partition: nasa::kafka::Tp::new("state-projection", 0),
+    partition_count: 1,
+    start_offset: Some(saved_offset),
+    end_offset: frozen_end,
+    max_records: 128,
+    max_bytes: 8 * 1024 * 1024,
+    timeout: std::time::Duration::from_secs(5),
+}).await?;
+```
+
+`start_offset: None` 明确选择仍保留的最早位置，不能证明更早历史不存在。精确起点早于保留范围、结束位置回退、物理身份或分区数变化均拒绝。每页最多 4096 条、64 MiB，读取共用一个最长五分钟的截止时间；超限单条记录不会被截断。每个调用使用独立只读 consumer，全进程最多同时承担 16 个实际读取任务；取消 Future 后，任务仍计费并持有 Admin 关闭责任至原生资源退出。此入口适合有界恢复和管理读取，持续高频消费使用受管 consumer。
+
+物理 cluster ID、topic 名和分区数量不能识别同名删除重建。调用方必须限制资源删除权限，并通过外部资源代次或新的受信作用域区分重建；分页位置也不替代持久 checkpoint。
+
+## 严格配置中的原生属性
+
+`properties` 在公共 Rust 类型中仍为 `BTreeMap<String, String>`。反序列化同时接受原有字符串映射和显式 `name/value` 列表；共用、producer、consumer、admin 与命名 lane 的属性采用同一规则。两种形式都拒绝同名重复，列表也拒绝缺失、多余字段或非字符串值，不做属性名归一化。
+
+naml 严格模式禁止把点号放在字段名中，因此受管 YAML 使用列表，把原生名称放入 `name` 的字符串值：
+
+```yaml
+kafka:
+  bootstrap_servers: kafka:9092
+  consumer:
+    auto_offset_reset: earliest
+    properties:
+      - name: session.timeout.ms
+        value: "10000"
+  producer:
+    properties:
+      - name: message.max.bytes
+        value: "8388608"
+```
 
 ## 有限回放计划
 

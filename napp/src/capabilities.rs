@@ -41,16 +41,16 @@ use crate::ApplicationState;
 ))]
 use crate::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
 
-/// 组件能力相对于统一应用状态机的只读生命周期状态。
+/// 组件能力相对于统一应用状态机的只读生命周期状态，不代替组件自己的资源关闭或动态健康证据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComponentLifecycleState {
     /// 应用仍在启动，组件的底层对象可能尚未发布。
     Starting,
-    /// 全部就绪动作已经完成，组件可以承接正常业务访问。
+    /// 应用初始就绪动作已经完成；具体操作仍需检查自身动态健康与准入条件。
     Ready,
     /// 应用正在摘流并按逆序释放组件资源。
     Draining,
-    /// 正常清理已经完成，底层对象不再可用。
+    /// 应用已进入 Stopped；需要证明底层资源退出的能力应另行复验关闭结果。
     Closed,
     /// 启动、运行或清理发生主故障且生命周期已经收敛。
     Failed,
@@ -59,9 +59,9 @@ pub enum ComponentLifecycleState {
 impl ComponentLifecycleState {
     /// 业务作用：返回适合管理端和指标标签使用的稳定名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回值不包含故障详情或业务输入。
+    /// 返回：当前枚举值的静态名称，不包含故障详情或业务输入，也不重新读取应用状态。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Starting => "starting",
@@ -72,11 +72,11 @@ impl ComponentLifecycleState {
         }
     }
 
-    /// 业务作用：判断组件是否处于统一应用定义的正常可用阶段。
+    /// 业务作用：判断已取得的生命周期读数是否为应用就绪阶段。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；只有 `Ready` 返回 `true`。
+    /// 返回：只有 `Ready` 为真；不会探测底层连接，也不为后续操作预留准入。
     pub const fn is_ready(self) -> bool {
         matches!(self, Self::Ready)
     }
@@ -85,9 +85,12 @@ impl ComponentLifecycleState {
 impl From<ApplicationState> for ComponentLifecycleState {
     /// 业务作用：把应用状态机读数映射为组件能力生命周期状态。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `state`：从 Application 共享状态单元读取的当前状态。
+    ///
+    /// 返回：对应的组件生命周期枚举；Stopping 映射为 Draining，Stopped 映射为 Closed，
+    /// 不额外核实资源是否已经释放，具体能力需要时应再检查自身关闭结果。
     fn from(state: ApplicationState) -> Self {
         match state {
             ApplicationState::Starting => Self::Starting,
@@ -101,11 +104,14 @@ impl From<ApplicationState> for ComponentLifecycleState {
 
 /// 业务作用：创建能力尚未发布或已经关闭时使用的统一组件错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `component`：能力所属的组件身份。
 /// - `state`：用于选择错误阶段的统一应用状态。
 /// - `message`：不包含配置秘密或业务负载的稳定说明。
+///
+/// 返回：带组件身份和失败阶段的错误；Starting 归入 Ready 阶段，终态归入 Stopped 阶段。
+/// 不改变应用状态，也不自动脱敏传入的说明。
 #[cfg(any(
     feature = "kafka",
     feature = "nacos-config",
@@ -133,7 +139,7 @@ fn unavailable_error(
 pub struct KafkaReadinessSnapshot {
     /// 配置确定的稳定 client name；不包含 broker 地址或安全配置。
     pub client_name: String,
-    /// 当前 client 的全部 ReadyRule 是否同时满足。
+    /// 采样时 client 的全部 ReadyRule 是否同时满足，不是下一次操作的准入凭证。
     pub ready: bool,
     /// 按 resolved group id 稳定排序的健康快照；producer-only client 为空。
     pub groups: Vec<nafka::GroupHealth>,
@@ -157,6 +163,7 @@ pub(crate) struct KafkaClientCapability {
     /// Start 注入 proxy、UserHook 安装真实 sink 的内部时序桥。
     metrics: Arc<crate::kafka::KafkaMetricsBridge>,
     #[cfg(feature = "ws-kafka")]
+    /// 冻结的 WS 消费归属标记；允许协议运行时接管消费时不能同时开放普通 collected consumers。
     ws_consumer_owner: bool,
 }
 
@@ -164,7 +171,7 @@ pub(crate) struct KafkaClientCapability {
 impl KafkaClientCapability {
     /// 业务作用：创建初始未就绪的 Kafka client 能力根。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `client_name`：通过 KafkaConfig 校验的稳定 client name。
     /// - `proxy`：Start 已完成本地构造、尚未启动 consumer 的原始运行时。
@@ -174,9 +181,8 @@ impl KafkaClientCapability {
     /// - `admin_write`：是否允许业务显式取得管理写视图，仍需 broker ACL 授权。
     /// - `_ws_consumer_owner`：WS 子能力是否可独占本 client 的消费登记。
     ///
-    /// # 返回
-    ///
-    /// 返回只能由 KafkaRuntimeState 和生命周期 action 持有的共享能力根。
+    /// 返回：初始 ready 为假且组列表为空的能力根；不探测 broker，也不启动 consumer。
+    /// 调用方负责把该值放入共享所有权并登记生命周期清理动作。
     pub(crate) fn new(
         client_name: Arc<str>,
         proxy: nafka::KafkaProxy,
@@ -205,23 +211,22 @@ impl KafkaClientCapability {
 
     /// 业务作用：返回稳定 client name。
     ///
-    /// # 返回
+    /// 参数说明: 无。
     ///
-    /// 借用与 capability 共同存活，不创建新字符串。
+    /// 返回：借用与 capability 共同存活，不创建新字符串。
     pub(crate) fn client_name(&self) -> &str {
         &self.client_name
     }
 
-    /// 业务作用：原子发布 client 最新动态就绪结论和 group 快照。
+    /// 业务作用：先替换 client 的健康快照，再更新应用的动态就绪贡献。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `ready`：全部受管 group 当前是否满足各自 ReadyRule。
     /// - `groups`：按 resolved group id 稳定排序的最新健康快照。
     ///
-    /// # 返回
-    ///
-    /// 本方法无返回值；快照先写入，随后 contributor 以 Release 语义发布聚合结论。
+    /// 返回：组列表按名称排序后在写锁内替换，锁中毒时仍取回状态继续写入；随后发布 contributor 结论。
+    /// 两个对象不是一次原子更新，独立读取快照和聚合就绪时可能跨越两次发布。
     pub(crate) fn publish_readiness(&self, ready: bool, mut groups: Vec<nafka::GroupHealth>) {
         groups.sort_by(|left, right| left.group.cmp(&right.group));
         *self
@@ -232,14 +237,16 @@ impl KafkaClientCapability {
             ready,
             groups,
         };
+        // 先保存对应的健康证据，再改变对外就绪贡献，避免先开放就绪却只留下上一轮快照。
         self.contributor.set_ready(ready);
     }
 
     /// 业务作用：返回最近一次完整发布的脱敏就绪快照。
     ///
-    /// # 返回
+    /// 参数说明: 无。
     ///
-    /// 返回拥有型副本，调用方不能借此修改组件内部状态。
+    /// 返回：读锁内克隆的最近快照；锁中毒时仍读取保留内容，不重新探测 broker，
+    /// 与随后读取的 contributor 结论不构成跨对象原子快照。
     pub(crate) fn readiness(&self) -> KafkaReadinessSnapshot {
         self.readiness
             .read()
@@ -249,23 +256,22 @@ impl KafkaClientCapability {
 
     /// 业务作用：尝试在 UserHook 为本 client 安装真实指标 sink。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `sink`：业务提供的无阻塞共享指标出口。
     ///
-    /// # 返回
-    ///
-    /// 首次安装且 bridge 尚未封口时返回 true；重复安装或 Ready 已封口返回 false。
+    /// 返回：首次安装且 bridge 尚未封口时返回 true；重复安装或 Ready 已封口返回 false。
     pub(crate) fn install_metrics(&self, sink: Arc<dyn nafka::MetricsSink>) -> bool {
         self.metrics.install(sink)
     }
 
     /// 业务作用：在 Ready 取走全部 UserHook 定制后封口指标安装入口。
     ///
-    /// # 返回
+    /// 参数说明: 无。
     ///
-    /// 本方法无返回值；封口后既有 sink 保持有效，后续安装稳定失败。
+    /// 返回：本方法无返回值；封口后既有 sink 保持有效，后续安装稳定失败。
     pub(crate) fn seal_metrics(&self) {
+        // Ready 前收束指标定制，防止运行期间替换出口改变已发布的观测含义。
         self.metrics.seal();
     }
 }
@@ -286,11 +292,14 @@ pub struct KafkaHandle {
 #[cfg(feature = "kafka")]
 impl KafkaHandle {
     /// 业务作用：把关闭权移交给同宿主的 WS 协议 owner，拒绝争用普通消费注册表。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：client 显式关闭 collected consumers 时提供内部 proxy；其它配置拒绝。
     #[cfg(feature = "ws-kafka")]
     pub(crate) fn ws_runtime_proxy(&self) -> ApplicationResult<nafka::KafkaProxy> {
         self.ensure_operation_open("ws cluster assembly", true)?;
+        // 原始 proxy 带有运行控制能力，只有冻结配置明确交给 WS 的来源才能绕过普通消费登记入口。
         if !self.capability.ws_consumer_owner {
             return Err(ApplicationError::new(
                 ComponentId::Kafka,
@@ -302,14 +311,12 @@ impl KafkaHandle {
     }
     /// 业务作用：从组件私有能力根创建业务句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `capability`：Start 已发布的目标 client 能力根。
     /// - `application_state`：与所属 Application 同源的状态单元。
     ///
-    /// # 返回
-    ///
-    /// 返回不拥有任何 shutdown action 的轻量共享句柄。
+    /// 返回：不拥有任何 shutdown action 的轻量共享句柄。
     pub(crate) fn new(
         capability: Arc<KafkaClientCapability>,
         application_state: Arc<StateCell>,
@@ -322,15 +329,18 @@ impl KafkaHandle {
 
     /// 业务作用：返回本句柄绑定的稳定 client name。
     ///
-    /// # 返回
+    /// 参数说明: 无。
     ///
-    /// 借用与句柄共同存活，不包含 broker 或安全配置。
+    /// 返回：借用与句柄共同存活，不包含 broker 或安全配置。
     pub fn client_name(&self) -> &str {
         self.capability.client_name()
     }
 
     /// 业务作用：在受管应用中分别观察Kafka构建支持、配置启用和真实组就绪，不授予管理写权限。
-    /// 参数说明：无。返回：不含凭据的只读快照；停止后仍可诊断，空组表不表示Ready。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不含凭据的只读快照；停止后仍可诊断，空组表不表示Ready。
     pub fn capabilities(&self) -> ApplicationResult<nafka::KafkaCapabilities> {
         self.capability
             .proxy
@@ -365,7 +375,7 @@ impl KafkaHandle {
 
     /// 业务作用：返回 Kafka 能力相对于统一 Application 的当前生命周期。
     ///
-    /// 参数说明：无。
+    /// 参数说明: 无。
     ///
     /// 返回：Starting/Ready/Draining/Closed/Failed 之一；宿主已停但资源尚未退出时为 Failed，不能据宿主退出声称 Closed。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
@@ -379,7 +389,10 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在宿主已结束最终清理后继续等待未退出的 Kafka 责任，不能用于停止活跃源。
-    /// 参数说明：deadline 为本次等待和资源收尾共用的绝对截止时刻。
+    ///
+    /// 参数说明：
+    /// - `deadline`：本次等待和资源收尾共用的绝对截止时刻。
+    ///
     /// 返回：实际资源全部退出后成功；宿主尚未交还最终清理权时拒绝，超时保留责任且不重开业务准入。
     pub async fn await_closed(&self, deadline: std::time::Instant) -> ApplicationResult<()> {
         // 只接续已经授权且结束的宿主清理；业务持有句柄不能提前关闭仍在运行的整个源。
@@ -405,9 +418,9 @@ impl KafkaHandle {
 
     /// 业务作用：返回最近一次 Ready 门禁或运行期 monitor 发布的健康快照。
     ///
-    /// # 返回
+    /// 参数说明: 无。
     ///
-    /// 返回拥有型脱敏副本；producer-only client 的 groups 为空，退出阶段强制撤销 ready，不把历史采样当作流量许可。
+    /// 返回：拥有型脱敏副本；producer-only client 的 groups 为空，退出阶段强制撤销 ready，不把历史采样当作流量许可。
     pub fn readiness(&self) -> KafkaReadinessSnapshot {
         let mut snapshot = self.capability.readiness();
         // monitor 或 consumer 清理 action 可能已停止采样；宿主退出事实优先于最后一次健康结论。
@@ -422,13 +435,11 @@ impl KafkaHandle {
 
     /// 业务作用：获取一个无关闭权的 producer lane。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`：配置中冻结的 lane 名；默认 lane 使用 `default`。
     ///
-    /// # 返回
-    ///
-    /// Starting 或 Ready 阶段返回共享 lane；克隆不会新建底层 producer。
+    /// 返回：Starting 或 Ready 阶段返回共享 lane；克隆不会新建底层 producer。
     ///
     /// # 错误
     ///
@@ -443,7 +454,9 @@ impl KafkaHandle {
     }
 
     /// 业务作用：获取受管 client 的只读管理视图，供 metadata、位点观测和 topic 合同核验。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：Starting/Ready 时提供无管理写权、无关闭权的视图；克隆保持限制，已取得视图可用于 graceful shutdown 尾部查询，最终清理后永久拒绝。
     pub fn admin(&self) -> ApplicationResult<nafka::KafkaAdmin> {
         self.ensure_operation_open("admin access", true)?;
@@ -456,7 +469,10 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在宿主显式授权的 client 上取得管理写视图，不授予整源关闭权。
-    /// 参数说明：无；权限来自冻结的 container.admin_write 配置。
+    ///
+    /// 参数说明: 无。
+    /// 权限来自冻结的 container.admin_write 配置。
+    ///
     /// 返回：Starting/Ready 且显式授权时返回同源管理视图，未授权为 Authorization；实际操作仍受 broker ACL 和最终清理门约束。
     pub fn administration(&self) -> ApplicationResult<nafka::KafkaAdmin> {
         self.ensure_operation_open("administration access", true)?;
@@ -474,7 +490,13 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在容器来源上登记独立回放任务，关闭责任仍归 Application 所有。
-    /// 参数说明：plan 为冻结合同，store 为持久后端，identity 为当前资源证明，processor 为同步成功合同。
+    ///
+    /// 参数说明：
+    /// - `plan`：冻结合同。
+    /// - `store`：持久后端。
+    /// - `identity`：当前资源证明。
+    /// - `processor`：同步成功合同。
+    ///
     /// 返回：Starting/Ready 时允许登记；Draining 后拒绝新任务，已登记任务由两段停机真实排干。
     pub fn replay(
         &self,
@@ -491,7 +513,15 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在两个受管 Kafka 来源间登记有限转发，由双方停机共同排干实际交付。
-    /// 参数说明：plan 为固定合同，destination 为目标能力，store 为独占持久后端，source_identity/destination_identity 为当前目录，registries 为可选明确绑定。
+    ///
+    /// 参数说明：
+    /// - `plan`：冻结来源范围、目标物理身份、分区映射和负载策略的转发计划。
+    /// - `destination`：提供目标 producer 的受管 Kafka 句柄，需独立通过宿主准入检查。
+    /// - `store`：保存任务进度并提供独占 checkpoint 租约的持久后端。
+    /// - `source_identity`：按来源集群身份提供 topic 当前代次，用于复验计划中的来源资源。
+    /// - `destination_identity`：按目标集群身份提供 topic 当前代次，用于复验计划中的目标资源。
+    /// - `registries`：使用 Confluent 负载策略时绑定的来源与目标 schema registry 客户端。
+    ///
     /// 返回：双方 Starting/Ready 才接受新任务；进入 Draining 后拒绝，已登记责任继续收尾。
     pub fn transfer(
         &self,
@@ -518,7 +548,15 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在两个受管 Kafka 来源间登记有限DLT回投，由双方停机共同排干实际交付。
-    /// 参数说明：plan 为固定来源过滤、回投与隔离合同，destination 为目标能力，store 为独占持久后端，source_identity/destination_identity 为当前目录，registries 为可选明确绑定。
+    ///
+    /// 参数说明：
+    /// - `plan`：固定来源过滤、回投与隔离合同。
+    /// - `destination`：提供回投目标 producer 的受管句柄，需独立通过宿主准入检查。
+    /// - `store`：持久保存 DLT 回投进度并提供任务租约的 checkpoint 后端。
+    /// - `source_identity`：按 DLT 来源集群身份查询 topic 当前代次，防止恢复时沿用已重建来源。
+    /// - `destination_identity`：按回投目标集群身份查询 topic 当前代次，复验计划指定的接收资源。
+    /// - `registries`：Confluent 负载转换所需的来源、目标 schema registry 名称与客户端绑定。
+    ///
     /// 返回：双方 Starting/Ready 才接受新任务；进入 Draining 后拒绝，已登记责任继续收尾。
     pub fn replay_dlt(
         &self,
@@ -545,7 +583,11 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在受管来源启动专属同集群消费、输出与位点原子事务。
-    /// 参数说明：plan 为稳定部署身份和完整白名单，processor 为同步有界整批处理。
+    ///
+    /// 参数说明：
+    /// - `plan`：稳定部署身份和完整白名单。
+    /// - `processor`：同步有界整批处理。
+    ///
     /// 返回：Starting/Ready 才接受新任务，事务回调和原生提交全部纳入两段停机。
     pub async fn transact(
         &self,
@@ -560,15 +602,33 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("transaction execution", error))
     }
 
+    /// 业务作用：为单分区事务任务装配由组分配决定的主备启动，不让空分配备用实例触发 fencing。
+    ///
+    /// 参数说明：
+    /// - `plan`：单输入 topic、稳定事务身份和完整输出白名单。
+    /// - `processor`：同步有界批次入口。
+    ///
+    /// 返回：纳入两段停机的句柄；输入 topic 不是单分区、来源关闭或身份已占用时拒绝。
+    pub async fn transact_on_assignment(
+        &self,
+        plan: nafka::TransactionPlan,
+        processor: Arc<dyn nafka::TransactionProcessor>,
+    ) -> ApplicationResult<nafka::TransactionHandle> {
+        self.ensure_operation_open("assignment transaction execution", true)?;
+        self.capability
+            .proxy
+            .transact_on_assignment(plan, processor)
+            .await
+            .map_err(|error| self.operation_error("assignment transaction execution", error))
+    }
+
     /// 业务作用：查询一个 resolved group 的当前健康快照。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：Ready 阶段解析出的最终 group id。
     ///
-    /// # 返回
-    ///
-    /// 返回 nafka 自有的脱敏 GroupHealth 副本。
+    /// 返回： nafka 自有的脱敏 GroupHealth 副本。
     ///
     /// # 错误
     ///
@@ -583,7 +643,11 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在容器准入边界内解释当前组的接流量条件。
-    /// 参数说明：group 为当前源组名，requirement 为分配要求。
+    ///
+    /// 参数说明：
+    /// - `group`：当前源组名。
+    /// - `requirement`：分配要求。
+    ///
     /// 返回：同次观测的要求、原因和健康；容器未 Ready、已停止、未知组或非法条件拒绝。
     pub async fn group_readiness(
         &self,
@@ -600,7 +664,10 @@ impl KafkaHandle {
     }
 
     /// 业务作用：查询受管消费组各 owner 槽的独立健康，定位被组聚合状态覆盖的容量与归属差异。
-    /// 参数说明：group 为 Ready 阶段解析出的最终 group id。
+    ///
+    /// 参数说明：
+    /// - `group`：Ready 阶段解析出的最终 group id。
+    ///
     /// 返回：按稳定槽号排序的快照；容器未 Ready、停机或组不存在时拒绝。
     pub async fn group_slots_health(
         &self,
@@ -616,7 +683,9 @@ impl KafkaHandle {
     }
 
     /// 业务作用：观察受管 Kafka 指标出口的丢弃、失败和实际活动责任。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：当前源的进程内快照；容器未 Ready 或已进入 Draining 时拒绝，不绕过受管准入。
     pub fn metrics_export_stats(&self) -> ApplicationResult<nafka::MetricsExportStats> {
         // 观测句柄仍服从容器权威，不能借诊断入口重新开放关闭中的资源。
@@ -625,26 +694,29 @@ impl KafkaHandle {
     }
 
     /// 业务作用：开放停机期间及之后的只读责任诊断，不授予活跃宿主整源关闭权。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：源实际资源与未确认输入的独立快照；查询不重建原生资源，也不经过业务准入。
     pub fn close_report(&self) -> nafka::CloseReport {
         self.capability.proxy.close_report()
     }
     /// 业务作用：让宿主采样该源的剩余责任；已停止的业务句柄仍可取得关闭证据。
-    /// 参数说明：无。返回：关闭快照；异步指标可能丢弃，不授予停止或管理写权限。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：关闭快照；异步指标可能丢弃，不授予停止或管理写权限。
     pub fn sample_metrics(&self) -> nafka::CloseReport {
         self.capability.proxy.sample_metrics()
     }
 
     /// 业务作用：查询一个 resolved group 的当前 assignment。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：Ready 阶段解析出的最终 group id。
     ///
-    /// # 返回
-    ///
-    /// 返回排序语义由 nafka 控制面的分区列表副本。
+    /// 返回：排序语义由 nafka 控制面的分区列表副本。
     ///
     /// # 错误
     ///
@@ -660,14 +732,12 @@ impl KafkaHandle {
 
     /// 业务作用：查询指定分区的当前消费位置。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     /// - `partitions`：待查询的 topic-partition 集合；所有权交给控制命令。
     ///
-    /// # 返回
-    ///
-    /// 返回每个分区到可选下一消费 offset 的有序映射。
+    /// 返回：每个分区到可选下一消费 offset 的有序映射。
     ///
     /// # 错误
     ///
@@ -687,15 +757,13 @@ impl KafkaHandle {
 
     /// 业务作用：把一个分区定位到显式非负 offset。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     /// - `partition`：需要重新定位的 topic-partition。
     /// - `offset`：新的非负消费位置。
     ///
-    /// # 返回
-    ///
-    /// owner 确认 seek 已完成时返回 `Ok(())`。
+    /// 返回：owner 确认 seek 已完成时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -716,14 +784,12 @@ impl KafkaHandle {
 
     /// 业务作用：把给定分区定位到最早可用 offset。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     /// - `partitions`：需要重新定位的 topic-partition 集合。
     ///
-    /// # 返回
-    ///
-    /// 全部分区完成定位时返回 `Ok(())`。
+    /// 返回：全部分区完成定位时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -743,14 +809,12 @@ impl KafkaHandle {
 
     /// 业务作用：把给定分区定位到当前末尾 offset。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     /// - `partitions`：需要重新定位的 topic-partition 集合。
     ///
-    /// # 返回
-    ///
-    /// 全部分区完成定位时返回 `Ok(())`。
+    /// 返回：全部分区完成定位时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -770,14 +834,12 @@ impl KafkaHandle {
 
     /// 业务作用：按 Unix epoch 毫秒时间戳重新定位多个分区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     /// - `timestamps`：分区到目标毫秒时间戳的有序映射。
     ///
-    /// # 返回
-    ///
-    /// 全部查询和定位完成时返回 `Ok(())`。
+    /// 返回：全部查询和定位完成时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -797,14 +859,12 @@ impl KafkaHandle {
 
     /// 业务作用：把给定分区恢复到 group 已提交位点。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     /// - `partitions`：需要恢复的 topic-partition 集合。
     ///
-    /// # 返回
-    ///
-    /// 全部分区恢复完成时返回 `Ok(())`。
+    /// 返回：全部分区恢复完成时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -824,14 +884,12 @@ impl KafkaHandle {
 
     /// 业务作用：为给定分区增加业务暂停原因。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     /// - `partitions`：需要暂停的 topic-partition 集合。
     ///
-    /// # 返回
-    ///
-    /// owner 确认全部暂停时返回 `Ok(())`。
+    /// 返回：owner 确认全部暂停时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -846,7 +904,11 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在受管 Ready 门禁内提交逐分区控制，并保留部分执行证据。
-    /// 参数说明：group 为本源最终组名；actions 为非空显式目标与操作。
+    ///
+    /// 参数说明：
+    /// - `group`：本源最终组名。
+    /// - `actions`：非空显式目标与操作。
+    ///
     /// 返回：独立报告；容器未开放、声明非法或组缺席时返回受管错误，不绕过生命周期。
     pub async fn control_partitions(
         &self,
@@ -863,14 +925,12 @@ impl KafkaHandle {
 
     /// 业务作用：移除给定分区的业务暂停原因。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     /// - `partitions`：需要恢复的 topic-partition 集合。
     ///
-    /// # 返回
-    ///
-    /// owner 确认全部恢复时返回 `Ok(())`。
+    /// 返回：owner 确认全部恢复时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -886,13 +946,11 @@ impl KafkaHandle {
 
     /// 业务作用：暂停 group 当前 assignment 的全部分区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     ///
-    /// # 返回
-    ///
-    /// owner 确认全量暂停时返回 `Ok(())`。
+    /// 返回：owner 确认全量暂停时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -908,13 +966,11 @@ impl KafkaHandle {
 
     /// 业务作用：恢复 group 当前 assignment 的全部分区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：已经由本 client 启动的 resolved group id。
     ///
-    /// # 返回
-    ///
-    /// owner 确认全量恢复时返回 `Ok(())`。
+    /// 返回：owner 确认全量恢复时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -930,14 +986,12 @@ impl KafkaHandle {
 
     /// 业务作用：替换 subscribe group 的动态 topic 集合。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：启动时声明为 subscribe 模式的 resolved group id。
     /// - `topics`：新的非空、无空值且不重复 topic 集合。
     ///
-    /// # 返回
-    ///
-    /// owner 确认新订阅生效时返回 `Ok(())`。
+    /// 返回：owner 确认新订阅生效时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -953,13 +1007,11 @@ impl KafkaHandle {
 
     /// 业务作用：取消 subscribe group 的当前订阅但保留 owner。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：启动时声明为 subscribe 模式的 resolved group id。
     ///
-    /// # 返回
-    ///
-    /// owner 确认取消订阅时返回 `Ok(())`。
+    /// 返回：owner 确认取消订阅时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -975,9 +1027,9 @@ impl KafkaHandle {
 
     /// 业务作用：查询 broker 当前可见的全部 topic 名称。
     ///
-    /// # 返回
+    /// 参数说明: 无。
     ///
-    /// Starting 或 Ready 阶段返回排序后的 topic 名称副本。
+    /// 返回：Starting 或 Ready 阶段返回排序后的 topic 名称副本。
     ///
     /// # 错误
     ///
@@ -994,13 +1046,11 @@ impl KafkaHandle {
 
     /// 业务作用：查询指定 topic 的可见分区编号。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`：需要读取 metadata 的非空业务 topic 名称。
     ///
-    /// # 返回
-    ///
-    /// Starting 或 Ready 阶段返回排序后的分区编号副本。
+    /// 返回：Starting 或 Ready 阶段返回排序后的分区编号副本。
     ///
     /// # 错误
     ///
@@ -1016,7 +1066,14 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在受管源上读取明确隔离级别的位置证据，不扩大写入或关闭权限。
-    /// 参数说明：group 为可选组，tps 为明确分区，isolation 为读取隔离，timestamp_millis 为可选时间，timeout 为全部步骤共享预算。
+    ///
+    /// 参数说明：
+    /// - `group`：可选组。
+    /// - `tps`：明确分区。
+    /// - `isolation`：读取隔离。
+    /// - `timestamp_millis`：可选时间。
+    /// - `timeout`：全部步骤共享预算。
+    ///
     /// 返回：Starting/Ready 时提供逐字段观测；进入排空后拒绝新查询，已经接纳的实际查询仍受源关闭追踪。
     pub async fn observe_offsets(
         &self,
@@ -1036,7 +1093,11 @@ impl KafkaHandle {
     }
 
     /// 业务作用：在应用初始化或就绪阶段只读核对 topic 声明，不自动更改 broker 资源。
-    /// 参数说明：spec 为分区、副本和配置子集，timeout 为整轮查询预算。
+    ///
+    /// 参数说明：
+    /// - `spec`：分区、副本和配置子集。
+    /// - `timeout`：整轮查询预算。
+    ///
     /// 返回：匹配时提供实际描述；漂移或查询失败保留原因，应用排空后拒绝新核验。
     pub async fn verify_topic(
         &self,
@@ -1054,13 +1115,11 @@ impl KafkaHandle {
 
     /// 业务作用：显式重建一个允许人工恢复的 consumer group。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`：处于可恢复故障状态的 resolved group id。
     ///
-    /// # 返回
-    ///
-    /// owner 接受并完成重建命令时返回 `Ok(())`。
+    /// 返回：owner 接受并完成重建命令时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -1076,14 +1135,12 @@ impl KafkaHandle {
 
     /// 业务作用：校验当前 Application 阶段是否允许创建本次操作。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `operation`：不含业务输入的稳定操作名称，用于错误归因。
     /// - `allow_starting`：producer 装配传 true；只有 consumer 已 Ready 才合法的控制面传 false。
     ///
-    /// # 返回
-    ///
-    /// 当前阶段允许操作时返回 `Ok(())`。
+    /// 返回：当前阶段允许操作时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -1108,14 +1165,12 @@ impl KafkaHandle {
 
     /// 业务作用：把 nafka 数据面或控制面错误包装进统一 Application 错误域。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `operation`：不含 client/group/topic 输入的稳定操作名称。
     /// - `error`：nafka 返回的原始类型化错误；公开摘要不复制其可能包含的细节。
     ///
-    /// # 返回
-    ///
-    /// 返回 component=kafka 且阶段随 Application 状态变化的错误，source 链保留原始分类。
+    /// 返回： component=kafka 且阶段随 Application 状态变化的错误，source 链保留原始分类。
     fn operation_error(
         &self,
         operation: &'static str,
@@ -1144,7 +1199,9 @@ impl KafkaHandle {
 #[cfg(feature = "log")]
 #[derive(Clone)]
 pub struct LogHandle {
+    /// 日志组件发布的初始化事实，不拥有订阅器或文件关闭权。
     runtime: Arc<LogRuntimeState>,
+    /// 应用生命周期的共享来源，与日志初始化标记独立读取。
     application_state: Arc<StateCell>,
 }
 
@@ -1152,10 +1209,12 @@ pub struct LogHandle {
 impl LogHandle {
     /// 业务作用：从容器共享状态创建日志能力句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：日志组件独占写入、句柄只读的发布状态。
     /// - `application_state`：与 Application 共用的生命周期状态来源。
+    ///
+    /// 返回：共享观察句柄；不初始化日志订阅器，也不取得文件输出的关闭权。
     pub(crate) fn new(runtime: Arc<LogRuntimeState>, application_state: Arc<StateCell>) -> Self {
         Self {
             runtime,
@@ -1165,18 +1224,19 @@ impl LogHandle {
 
     /// 业务作用：判断容器管理的日志订阅器是否已经完成早期初始化。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；进入清理终态后返回 `false`。
+    /// 返回：读取日志组件发布的初始化标记；关闭动作撤销标记后为假。
+    /// 不查询应用生命周期，也不确认待写日志已经刷盘。
     pub fn is_initialized(&self) -> bool {
         self.runtime.initialized.load(Ordering::Acquire)
     }
 
     /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；句柄不会维护第二份就绪标志。
+    /// 返回：当前应用状态的映射；不读取日志初始化标记或文件输出队列。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
         self.application_state.load().into()
     }
@@ -1185,6 +1245,7 @@ impl LogHandle {
 /// 日志组件发布初始化和关闭结果的内部状态。
 #[cfg(feature = "log")]
 pub(crate) struct LogRuntimeState {
+    /// Bootstrap 发布、正常关闭确认后撤销的初始化标记；不记录每条日志的落盘结果。
     initialized: AtomicBool,
 }
 
@@ -1192,9 +1253,9 @@ pub(crate) struct LogRuntimeState {
 impl LogRuntimeState {
     /// 业务作用：创建尚未初始化的日志运行时状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本函数无参数；Bootstrap 成功后由日志组件置位。
+    /// 返回：初始化标记为假的本地状态；不安装订阅器，Bootstrap 成功后由组件另行发布。
     pub(crate) const fn new() -> Self {
         Self {
             initialized: AtomicBool::new(false),
@@ -1203,18 +1264,18 @@ impl LogRuntimeState {
 
     /// 业务作用：发布日志订阅器已经初始化。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；重复发布保持幂等。
+    /// 返回：以 Release 写入真，重复写入不改变结果；调用方必须先完成实际初始化。
     pub(crate) fn publish_initialized(&self) {
         self.initialized.store(true, Ordering::Release);
     }
 
-    /// 业务作用：在日志清理动作完成后撤销运行时可用标志。
+    /// 业务作用：由日志清理动作撤销已发布的初始化标记。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；它不负责实际刷盘，只反映清理结果。
+    /// 返回：以 Release 写入假，不执行刷盘或关闭文件；此标记不能证明阻塞清理已经完成。
     pub(crate) fn close(&self) {
         self.initialized.store(false, Ordering::Release);
     }
@@ -1226,7 +1287,9 @@ impl LogRuntimeState {
 #[cfg(feature = "nacos-config")]
 #[derive(Clone)]
 pub struct NacosConfigHandle {
+    /// 只保存配置客户端的启用决定和弱引用，不延长底层连接的所有权。
     runtime: Arc<NacosConfigRuntimeState>,
+    /// 生命周期观察与不可用错误的阶段来源，不是远端健康探测。
     application_state: Arc<StateCell>,
 }
 
@@ -1234,10 +1297,12 @@ pub struct NacosConfigHandle {
 impl NacosConfigHandle {
     /// 业务作用：从容器共享状态创建配置中心能力句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：保存底层客户端弱引用和启用状态的共享单元。
     /// - `application_state`：与 Application 共用的生命周期状态来源。
+    ///
+    /// 返回：不持有底层客户端强引用的只读能力句柄；构造时不连接 Nacos，也不发布配置。
     pub(crate) fn new(
         runtime: Arc<NacosConfigRuntimeState>,
         application_state: Arc<StateCell>,
@@ -1250,19 +1315,23 @@ impl NacosConfigHandle {
 
     /// 业务作用：返回配置中心是否已确定启用。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；Bootstrap 尚未读取配置时返回 `None`。
+    /// 返回：尚未发布决定时为 None，禁用为 Some(false)，发布过客户端为 Some(true)。
+    /// 不升级弱引用；即使客户端已释放，历史启用结果仍为真。
     pub fn is_enabled(&self) -> Option<bool> {
         self.runtime.client.get().map(|client| client.is_some())
     }
 
     /// 业务作用：使用容器已建立的底层连接拉取一份远端配置原文。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `data_id`：远端配置文档标识。
     /// - `group`：远端配置分组。
+    ///
+    /// 返回：底层客户端取得的配置原文；禁用、未发布或弱引用失效时拒绝，拉取失败保留来源错误。
+    /// 不合并配置树，不触发组件热应用；请求期间暂时持有客户端强引用。
     pub async fn fetch(&self, data_id: &str, group: &str) -> ApplicationResult<String> {
         let client = self.client()?;
         client.fetch(data_id, group).await.map_err(|error| {
@@ -1277,9 +1346,11 @@ impl NacosConfigHandle {
 
     /// 业务作用：使用连接时配置的默认分组拉取一份远端配置原文。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `data_id`：远端配置文档标识。
+    ///
+    /// 返回：客户端默认分组中的配置原文，不发布新的应用配置视图；客户端不可用或拉取失败时返回错误。
     pub async fn fetch_default_group(&self, data_id: &str) -> ApplicationResult<String> {
         let client = self.client()?;
         client.fetch_default_group(data_id).await.map_err(|error| {
@@ -1294,20 +1365,22 @@ impl NacosConfigHandle {
 
     /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；句柄不会延长底层配置客户端生命周期。
+    /// 返回：当前应用状态的映射；不升级客户端弱引用，也不探测 Nacos 或配置监听任务。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
         self.application_state.load().into()
     }
 
     /// 业务作用：升级容器发布的底层客户端弱引用。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；禁用、未发布或清理完成分别返回明确错误。
+    /// 返回：存在有效强引用时取得客户端 Arc；未发布、禁用或最后一个强引用已释放时拒绝。
+    /// 应用状态仅决定错误阶段，此处不据它拒绝仍存活的客户端，也不承诺远端可用。
     fn client(&self) -> ApplicationResult<Arc<nanacos::NacosConfigClient>> {
         let state = self.application_state.load();
+        // 尚未发布与明确禁用是不同结果，均不能临时创建旁路客户端绕过容器装配决定。
         let Some(client) = self.runtime.client.get() else {
             return Err(unavailable_error(
                 ComponentId::NacosConfig,
@@ -1335,6 +1408,7 @@ impl NacosConfigHandle {
 /// 配置中心组件发布客户端但不转移关闭所有权的内部状态。
 #[cfg(feature = "nacos-config")]
 pub(crate) struct NacosConfigRuntimeState {
+    /// 未写入表示尚未决定，None 表示禁用，Some 表示发布过客户端弱引用；只能写入一次。
     client: OnceLock<Option<Weak<nanacos::NacosConfigClient>>>,
 }
 
@@ -1342,9 +1416,9 @@ pub(crate) struct NacosConfigRuntimeState {
 impl NacosConfigRuntimeState {
     /// 业务作用：创建尚未读取启用开关的配置中心状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本函数无参数；Bootstrap 只允许发布一次最终结果。
+    /// 返回：尚无决定的 OnceLock；此后禁用与客户端发布共享同一个只能成功写入一次的槽位。
     pub(crate) const fn new() -> Self {
         Self {
             client: OnceLock::new(),
@@ -1353,18 +1427,20 @@ impl NacosConfigRuntimeState {
 
     /// 业务作用：发布配置中心已禁用，不创建底层连接。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回 `false` 表示组件重复发布。
+    /// 返回：首次发布禁用决定为真；已有任何决定时为假并保留原值，不关闭已发布的客户端。
     pub(crate) fn publish_disabled(&self) -> bool {
         self.client.set(None).is_ok()
     }
 
     /// 业务作用：发布底层配置客户端的弱引用。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `client`：由组件和关闭动作持有强引用的底层客户端。
+    ///
+    /// 返回：首次写入弱引用为真；禁用或客户端已经发布则为假并保留原决定，不重连也不替换客户端。
     pub(crate) fn publish_client(&self, client: &Arc<nanacos::NacosConfigClient>) -> bool {
         self.client.set(Some(Arc::downgrade(client))).is_ok()
     }
@@ -1374,7 +1450,9 @@ impl NacosConfigRuntimeState {
 #[cfg(feature = "ws")]
 #[derive(Clone)]
 pub struct WsHandle {
+    /// 发送器弱引用与历史监听地址的共享发布状态，不包含服务关闭权。
     runtime: Arc<WsRuntimeState>,
+    /// 宿主生命周期来源，不能据此推断发送器强引用或会话是否已经释放。
     application_state: Arc<StateCell>,
 }
 
@@ -1382,10 +1460,12 @@ pub struct WsHandle {
 impl WsHandle {
     /// 业务作用：从容器共享状态创建长连接能力句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：组件发布发送器弱引用和真实监听地址的共享状态。
     /// - `application_state`：与 Application 共用的生命周期状态来源。
+    ///
+    /// 返回：不持有监听器或发送器强引用的观察句柄；构造时不绑定端口，也不建立会话。
     pub(crate) fn new(runtime: Arc<WsRuntimeState>, application_state: Arc<StateCell>) -> Self {
         Self {
             runtime,
@@ -1395,29 +1475,32 @@ impl WsHandle {
 
     /// 业务作用：返回实际绑定的 TCP 地址。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；绑定完成前返回 `None`。
+    /// 返回：地址尚未发布时为 None，发布后为记录的绑定地址；停机不清空该记录，不证明端口仍在监听。
     pub fn local_addr(&self) -> Option<SocketAddr> {
         self.runtime.addrs.get().map(|addrs| addrs.0)
     }
 
     /// 业务作用：返回实际绑定的独立 WebSocket 地址。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；未配置独立端口或绑定未完成时返回 `None`。
+    /// 返回：地址未发布或没有独立 WebSocket 监听器时为 None；发布后保留历史绑定地址，
+    /// 不随关闭清空，也不表示共享 TCP 端口缺少 WebSocket 能力。
     pub fn websocket_addr(&self) -> Option<SocketAddr> {
         self.runtime.addrs.get().and_then(|addrs| addrs.1)
     }
 
     /// 业务作用：获取底层长连接库的共享广播发送器。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；发送器尚未发布或服务已经清理时返回明确阶段错误。
+    /// 返回：弱引用仍可升级时取得发送器 Arc；未发布或所有强引用已释放时返回阶段错误。
+    /// 此入口不检查应用准入或活跃会话，外部持有 Arc 时可在宿主停机后继续取得同一发送器。
     pub fn sender(&self) -> ApplicationResult<Arc<naws::Sender>> {
         let state = self.application_state.load();
+        // 只能使用宿主已经发布且仍存活的发送器，缺失时不能另建实例绕过原会话目录。
         self.runtime
             .sender
             .get()
@@ -1433,9 +1516,9 @@ impl WsHandle {
 
     /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；状态不依赖发送器是否被外部暂时克隆。
+    /// 返回：当前应用状态的映射；不读取发送器的强引用数、会话数或监听器状态。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
         self.application_state.load().into()
     }
@@ -1444,7 +1527,9 @@ impl WsHandle {
 /// 长连接组件一次发布、能力句柄只读访问的内部运行时状态。
 #[cfg(feature = "ws")]
 pub(crate) struct WsRuntimeState {
+    /// 服务绑定时发布的发送器弱引用；该槽位不因旧对象释放而允许替换。
     sender: OnceLock<Weak<naws::Sender>>,
+    /// 首次发布的 TCP 与可选独立 WebSocket 地址，关闭后仍保留历史记录。
     addrs: OnceLock<(SocketAddr, Option<SocketAddr>)>,
 }
 
@@ -1452,9 +1537,9 @@ pub(crate) struct WsRuntimeState {
 impl WsRuntimeState {
     /// 业务作用：创建尚未发布发送器和监听地址的长连接状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本函数无参数；两个字段由 Ready 阶段依次发布。
+    /// 返回：两个独立的空发布槽位；不创建服务。发送器和地址分别发布，读取它们不构成原子快照。
     pub(crate) const fn new() -> Self {
         Self {
             sender: OnceLock::new(),
@@ -1464,19 +1549,23 @@ impl WsRuntimeState {
 
     /// 业务作用：发布底层发送器弱引用，不把服务资源所有权转给 Application。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `sender`：服务对象持有的共享广播发送器。
+    ///
+    /// 返回：首次记录弱引用为真；已发布时为假并保留原发送器，即使原弱引用已经失效也不替换。
     pub(crate) fn publish_sender(&self, sender: &Arc<naws::Sender>) -> bool {
         self.sender.set(Arc::downgrade(sender)).is_ok()
     }
 
     /// 业务作用：发布绑定完成后的真实监听地址。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `addr`：TCP 数据面真实地址。
     /// - `websocket`：可选的独立 WebSocket 数据面真实地址。
+    ///
+    /// 返回：首次记录地址对为真；重复发布为假并保留原值，不绑定端口、不核验监听器是否存活。
     pub(crate) fn publish_addrs(&self, addr: SocketAddr, websocket: Option<SocketAddr>) -> bool {
         self.addrs.set((addr, websocket)).is_ok()
     }
@@ -1486,7 +1575,9 @@ impl WsRuntimeState {
 #[cfg(feature = "nacos-discovery")]
 #[derive(Clone)]
 pub struct NacosDiscoveryHandle {
+    /// 发现会话的弱引用发布状态，不持有注册守卫或出站运行时。
     runtime: Arc<NacosDiscoveryRuntimeState>,
+    /// 应用生命周期来源；独立于注册中心当前可见性。
     application_state: Arc<StateCell>,
 }
 
@@ -1494,9 +1585,13 @@ pub struct NacosDiscoveryHandle {
 #[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrpcDiscoveredEndpoint {
+    /// 从健康实例记录取得的拨号主机或 IP，不复用 metadata 中的 TLS 身份作为网络地址。
     host: String,
+    /// metadata 明确声明的非零 gRPC 监听端口。
     port: u16,
+    /// 实例声明的传输安全模式；客户端仍需装配相应信任根与身份。
     tls_mode: GrpcDiscoveredTlsMode,
+    /// 用于 SNI 和证书校验的身份，合法 metadata 缺省时采用实例 IP。
     authority: String,
 }
 
@@ -1574,10 +1669,12 @@ impl GrpcDiscoveredEndpoint {
 impl NacosDiscoveryHandle {
     /// 业务作用：从容器共享状态创建服务发现能力句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：保存发现会话弱引用的共享状态。
     /// - `application_state`：与 Application 共用的生命周期状态来源。
+    ///
+    /// 返回：只引用发布状态的能力句柄；不建立发现会话，不注册实例，也不取得关闭权。
     pub(crate) fn new(
         runtime: Arc<NacosDiscoveryRuntimeState>,
         application_state: Arc<StateCell>,
@@ -1590,9 +1687,10 @@ impl NacosDiscoveryHandle {
 
     /// 业务作用：获取底层带负载均衡能力的共享 HTTP 客户端。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；Start 尚未完成或发现运行时已经关闭时返回错误。
+    /// 返回：在会话锁内克隆已安装的 HTTP 客户端；会话未发布、弱引用失效或出站运行时已移除时拒绝。
+    /// 返回成功不保证下一次请求仍有可用实例，客户端 Arc 也不转移宿主的关闭责任。
     pub async fn client(
         &self,
     ) -> ApplicationResult<Arc<rest_discovery_nacos::RestDiscoveryClient>> {
@@ -1607,11 +1705,12 @@ impl NacosDiscoveryHandle {
         })
     }
 
-    /// 业务作用：查询当前实例是否已经向注册中心发布。
+    /// 业务作用：读取发现会话是否仍持有本实例的注册守卫。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；纯消费者模式稳定返回 `false`。
+    /// 返回：会话锁内的本地登记状态；纯消费者或已注销为假，会话不可用时失败。
+    /// 不向注册中心复查可见性、租约或健康状态，不能作为远端当前在线证明。
     pub async fn is_registered(&self) -> ApplicationResult<bool> {
         let session = self.session()?;
         let registered = session.lock().await.is_registered();
@@ -1620,9 +1719,10 @@ impl NacosDiscoveryHandle {
 
     /// 业务作用：查询当前配置是否要求注册本实例。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；该值来自组件实际使用的冻结配置。
+    /// 返回：会话冻结配置中发现与注册两个开关同时开启时为真；会话不可用时失败。
+    /// 查询不执行注册，真值也不代表已经向远端发布成功。
     pub async fn wants_registration(&self) -> ApplicationResult<bool> {
         let session = self.session()?;
         let wants_registration = session.lock().await.wants_registration();
@@ -1630,7 +1730,10 @@ impl NacosDiscoveryHandle {
     }
 
     /// 业务作用：向受管协议适配器提供同一次发现查询中的完整实例记录，保持端点和元数据绑定。
-    /// 参数说明：`service` 是受信配置指定的注册服务名。
+    ///
+    /// 参数说明：
+    /// - `service`：受信配置指定的注册服务名。
+    ///
     /// 返回：发现中心的健康实例集合；会话已关闭或查询失败时返回错误，不回退到历史地址。
     #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     pub(crate) async fn saga_instances(
@@ -1691,21 +1794,23 @@ impl NacosDiscoveryHandle {
 
     /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；它不根据注册中心网络状态推测应用就绪性。
+    /// 返回：当前应用状态的映射；不探测注册中心，不读取本地注册守卫，也不延长会话生命周期。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
         self.application_state.load().into()
     }
 
     /// 业务作用：升级组件发布的发现会话弱引用。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；句柄自身不会延长会话和后台任务生命周期。
+    /// 返回：存在强引用时取得共享会话；未发布或已释放时拒绝，并按应用状态归类错误。
+    /// 此处不验证会话内部客户端是否关闭；调用期间的 Arc 会暂时延长会话对象存活时间。
     fn session(
         &self,
     ) -> ApplicationResult<Arc<tokio::sync::Mutex<rest_discovery_nacos::DiscoverySession>>> {
+        // 升级失败表示此入口已经没有可用会话，不自动重建发现运行时或重新注册实例。
         self.runtime
             .session
             .get()
@@ -1781,6 +1886,7 @@ fn valid_grpc_authority(value: &str) -> bool {
 /// 服务发现组件发布会话但不转移关闭所有权的内部状态。
 #[cfg(feature = "nacos-discovery")]
 pub(crate) struct NacosDiscoveryRuntimeState {
+    /// 一次发布的会话弱引用；关闭动作持有强引用并负责注销和释放出站运行时。
     session: OnceLock<Weak<tokio::sync::Mutex<rest_discovery_nacos::DiscoverySession>>>,
 }
 
@@ -1788,9 +1894,9 @@ pub(crate) struct NacosDiscoveryRuntimeState {
 impl NacosDiscoveryRuntimeState {
     /// 业务作用：创建尚未连接发现 provider 的运行时状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本函数无参数；Start 成功后只发布一次。
+    /// 返回：空的会话发布槽位；不建立网络连接，后续只能成功登记一个会话弱引用。
     pub(crate) const fn new() -> Self {
         Self {
             session: OnceLock::new(),
@@ -1799,9 +1905,11 @@ impl NacosDiscoveryRuntimeState {
 
     /// 业务作用：发布组件持有的发现会话弱引用。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `session`：由组件清理动作持有强引用的发现会话。
+    ///
+    /// 返回：首次保存弱引用为真；重复发布为假并保留原会话。只公开本地访问入口，不执行远端注册。
     pub(crate) fn publish_session(
         &self,
         session: &Arc<tokio::sync::Mutex<rest_discovery_nacos::DiscoverySession>>,
@@ -1814,7 +1922,9 @@ impl NacosDiscoveryRuntimeState {
 #[cfg(feature = "scheduling")]
 #[derive(Clone)]
 pub struct SchedulingHandle {
+    /// 调度运行标记与可选选主对象的发布状态，不包含停止调度器的权限。
     runtime: Arc<SchedulingRuntimeState>,
+    /// 宿主生命周期来源；与底层运行标记和选主状态分别读取。
     application_state: Arc<StateCell>,
 }
 
@@ -1822,10 +1932,12 @@ pub struct SchedulingHandle {
 impl SchedulingHandle {
     /// 业务作用：从容器共享状态创建调度能力句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`：记录组件是否完成底层调度器启动的共享状态。
     /// - `application_state`：与 Application 共用的生命周期状态来源。
+    ///
+    /// 返回：共享观察句柄；不启动调度器、不参加选主，也不转移停机责任。
     pub(crate) fn new(
         runtime: Arc<SchedulingRuntimeState>,
         application_state: Arc<StateCell>,
@@ -1838,10 +1950,12 @@ impl SchedulingHandle {
 
     /// 业务作用：获取底层调度库的只读运行时句柄。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；组件未启动或已经关闭时返回阶段错误。
+    /// 返回：组件发布的 running 标记为真时取得调度句柄，否则返回阶段错误。
+    /// 仅检查本次读取的标记，不预留后续操作资格，也不代表所有调度任务健康。
     pub fn runtime(&self) -> ApplicationResult<nasched::SchedulerHandle> {
+        // 未确认底层启动或已经撤销运行标记时拒绝导出句柄，避免观察入口变成隐式启动入口。
         if self.runtime.running.load(Ordering::Acquire) {
             return Ok(nasched::scheduler_handle());
         }
@@ -1854,9 +1968,10 @@ impl SchedulingHandle {
 
     /// 业务作用：查询集群调度模式下当前节点是否持有 leader 身份。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；本地模式、尚未选举或已关闭时返回 `None`。
+    /// 返回：选主弱引用尚未发布或已失效时为 None；对象仍存活则返回其当前本地领导权判断，
+    /// 尚未取得领导权通常为 Some(false)。此查询不续租，也不授予后续任务执行权。
     #[cfg(feature = "scheduling-cluster")]
     pub fn is_leader(&self) -> Option<bool> {
         self.runtime
@@ -1868,9 +1983,9 @@ impl SchedulingHandle {
 
     /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；底层运行标志只决定 `runtime()` 能否取得，不另造生命周期。
+    /// 返回：当前应用状态的映射；不读取 running 标记或领导权，不据此证明调度器已完成排干。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
         self.application_state.load().into()
     }
@@ -1879,8 +1994,10 @@ impl SchedulingHandle {
 /// 调度组件发布启动结果和可选选主句柄的内部状态。
 #[cfg(feature = "scheduling")]
 pub(crate) struct SchedulingRuntimeState {
+    /// 底层启动成功后置位，清理收尾时撤销；假值不证明调度任务已全部退出。
     running: AtomicBool,
     #[cfg(feature = "scheduling-cluster")]
+    /// 集群选主对象的弱引用，供观察领导权使用，不延长租约持有者存活时间。
     leader: OnceLock<Weak<nadis::leader::Leader>>,
 }
 
@@ -1888,9 +2005,9 @@ pub(crate) struct SchedulingRuntimeState {
 impl SchedulingRuntimeState {
     /// 业务作用：创建尚未启动底层调度器的状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本函数无参数；Ready 成功后才发布运行标志。
+    /// 返回：运行标记为假的本地状态；集群能力开启时选主槽位为空，不启动调度或续租任务。
     pub(crate) const fn new() -> Self {
         Self {
             running: AtomicBool::new(false),
@@ -1901,27 +2018,31 @@ impl SchedulingRuntimeState {
 
     /// 业务作用：发布底层调度器已经完整启动。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；调用必须发生在底层启动函数成功之后。
+    /// 返回：以 Release 将运行标记置真，使运行时句柄可被取得；调用方须先完成底层启动。
+    /// 不代替整个应用的 Ready 发布，也不表示已经取得集群领导权。
     pub(crate) fn publish_running(&self) {
         self.running.store(true, Ordering::Release);
     }
 
-    /// 业务作用：在调度清理动作完成后撤销运行标志。
+    /// 业务作用：在调度清理收尾时撤销后续获取运行时句柄的资格。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；它不直接调用底层关闭函数。
+    /// 返回：以 Release 将运行标记置假；不调用底层关闭函数，也不撤销已取得的句柄。
+    /// 调度清理失败时也会撤销该标记，不能用假值代替资源已排干的证明。
     pub(crate) fn close(&self) {
         self.running.store(false, Ordering::Release);
     }
 
     /// 业务作用：发布集群模式使用的只读选主弱引用。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `leader`：由调度清理动作持有并负责退位的选主对象。
+    ///
+    /// 返回：首次保存弱引用为真；重复发布为假并保留原值，不发起选举，也不延长选主对象的存活时间。
     #[cfg(feature = "scheduling-cluster")]
     pub(crate) fn publish_leader(&self, leader: &Arc<nadis::leader::Leader>) -> bool {
         self.leader.set(Arc::downgrade(leader)).is_ok()

@@ -59,9 +59,13 @@ pub(super) fn validate_routes(groups: &[PreparedGroup]) -> Result<()> {
 
 /// 未提交的激活票据拥有全部 dormant 任务；取消启动 Future 也不能让它们开始消费。
 pub(super) struct PlanActivation {
+    /// 所有组共同等待的开放信号；取消令牌在这里表示允许开始消费。
     gate: CancellationToken,
+    /// 已创建且由票据承担关闭责任的组，提交后转由运行句柄管理。
     groups: Vec<Arc<GroupRuntime>>,
+    /// 是否已移交生命周期责任；仅提交后允许析构跳过清理。
     committed: bool,
+    /// 尚未移交或由回滚取走的共享执行域。
     core: Option<Arc<super::runtime::engine::RedisPartitionRuntime>>,
 }
 
@@ -101,7 +105,8 @@ impl PlanActivation {
 
     /// 业务作用：在路由与远端合同就绪后转移全部组的生命周期责任，按宿主屏障决定是否立即放行。
     ///
-    /// 参数说明：`activate` 为 true 时立即开放消费，为 false 时继续等待宿主调用 activate。
+    /// 参数说明：
+    /// - `activate`：为 true 时立即开放消费，为 false 时继续等待宿主调用 activate。
     ///
     /// 返回：RunningPartition 接管后续责任；延迟激活时所有消费任务仍受关闭的屏障约束。
     pub(super) fn commit(mut self, activate: bool) {
@@ -114,11 +119,13 @@ impl PlanActivation {
 
     /// 业务作用：关闭未激活组并等待其监督任务结束，原始启动错误由调用方保留。
     ///
-    /// 参数说明：`cause` 为激活失败的原始原因。
+    /// 参数说明：
+    /// - `cause`：激活失败的原始原因，收敛成功后原样返回，未收敛时保留在结构化错误中。
     ///
     /// 返回：资源收口后返回原始错误；等待超时返回结构化剩余责任，清理操作继续受监督。
     pub(super) async fn rollback(&mut self, cause: NasaRedisError) -> NasaRedisError {
         let Some(core) = self.core.take() else {
+            // 尚未移交执行域时无需等待 Runner；票据仍保留其它已跟踪组的析构清理责任。
             return cause;
         };
         let timeout_ms = self
@@ -126,6 +133,7 @@ impl PlanActivation {
             .first()
             .map_or(35_000, |group| group.cfg.drain_timeout_ms);
         let publisher = super::publisher::PublisherCoordinator::new(core.limits.clone());
+        // 清理操作接管全部组；调用方取消等待不会撤销已开始的关闭过程。
         let cleanup = super::shutdown::ShutdownOperation::new(
             core,
             publisher,
@@ -145,7 +153,10 @@ impl PlanActivation {
     }
 
     /// 业务作用：在启动的可取消等待前接管全部执行域的 Runner 回滚责任。
-    /// 参数说明：`core` 为已建立的共享运行时。
+    ///
+    /// 参数说明：
+    /// - `core`：已建立的共享运行时，必须在首次可取消等待前移交给票据。
+    ///
     /// 返回：未提交退出时该执行域随激活事务关闭。
     pub(super) fn track_core(&mut self, core: Arc<super::runtime::engine::RedisPartitionRuntime>) {
         self.core = Some(core);
@@ -161,6 +172,7 @@ impl Drop for PlanActivation {
     fn drop(&mut self) {
         if !self.committed {
             if let Some(core) = self.core.take() {
+                // 先同步关闭根准入，异步清理未被调度时也不能让后续业务进入执行域。
                 core.close_roots();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {

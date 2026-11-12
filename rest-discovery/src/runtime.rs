@@ -16,7 +16,13 @@ pub struct RemoteRuntime {
 }
 
 impl RemoteRuntime {
-    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：共同持有 REST 客户端及可选发现后端的生命周期。
+    ///
+    /// 参数说明：
+    /// - `rest`：已由调用方构造好的共享 REST 客户端。
+    /// - `discovery`：需与该客户端共同存活的可选发现后端。
+    ///
+    /// 返回：返回持有两者的运行时，不检查关联身份或执行网络初始化；释放运行时时会请求停止客户端后台任务。
     pub fn new(
         rest: Arc<RestDiscoveryClient>,
         discovery: Option<Arc<dyn DiscoveryClient>>,
@@ -27,17 +33,23 @@ impl RemoteRuntime {
         }
     }
 
-    /// 业务作用：取共享的 HTTP LB client。
+    /// 业务作用：取得当前运行时持有的共享 REST 客户端。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回客户端 Arc 的克隆，不新建连接池或复制运行状态。
     pub fn rest(&self) -> Arc<RestDiscoveryClient> {
         self.rest.clone()
     }
 }
 
 impl std::fmt::Debug for RemoteRuntime {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示运行时是否持有发现后端而不输出其内部对象。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收调试表示的格式化目标。
+    ///
+    /// 返回：写入类型及 has_discovery 布尔值，格式化失败传播，不输出端点或认证配置。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteRuntime")
             .field("has_discovery", &self._discovery.is_some())
@@ -46,7 +58,11 @@ impl std::fmt::Debug for RemoteRuntime {
 }
 
 impl Drop for RemoteRuntime {
-    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：在运行时释放时关闭 REST 客户端的后台观察责任。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：请求停止关联后台任务，不等待异步完成，也不直接调用发现后端的注销或关闭接口。
     fn drop(&mut self) {
         // 停掉所有后台 watch pump(reset/热重启不泄漏任务)。
         self.rest.shutdown_background();

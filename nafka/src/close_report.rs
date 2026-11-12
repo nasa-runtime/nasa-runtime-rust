@@ -47,7 +47,10 @@ pub struct CloseConsumers {
 }
 impl CloseConsumers {
     /// 业务作用：合并不同 owner 的关闭责任，长期累计饱和而不回绕。
-    /// 参数说明：other 为一个独立槽或已封存消费集合。
+    ///
+    /// 参数说明：
+    /// - `other`：other 为一个独立槽或已封存消费集合。
+    ///
     /// 返回：原地累加，不保留 owner、客户端或原文引用。
     pub(crate) fn add(&mut self, other: &Self) {
         self.active_owners = self.active_owners.saturating_add(other.active_owners);
@@ -125,7 +128,9 @@ pub struct CloseReport {
 
 impl KafkaProxy {
     /// 业务作用：读取实际关闭责任，不触发 broker 查询、停止或用户回调。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：独立采样；有限任务业务结局仍由原句柄保留，资源全部关闭不抹去未确认输入或未知交付。
     pub fn close_report(&self) -> CloseReport {
         let resources_closed = self.inner.lifecycle() == Lifecycle::Stopped;
@@ -217,7 +222,10 @@ impl KafkaProxy {
     }
 
     /// 业务作用：按既有全源关闭协议推进资源退出，以结构化结果保留未完成责任。
-    /// 参数说明：deadline 为消费、交付、管理与观测共用的绝对期限。
+    ///
+    /// 参数说明：
+    /// - `deadline`：deadline 为消费、交付、管理与观测共用的绝对期限。
+    ///
     /// 返回：成功为 Completed，关闭错误为 Incomplete；停止意图不可撤销，可再次调用续等。取消本 future 不伪造已退出报告。
     pub async fn shutdown_report_until(&self, deadline: Instant) -> CloseReport {
         let outcome = if self.shutdown_until(deadline).await.is_ok() {

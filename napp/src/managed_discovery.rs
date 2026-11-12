@@ -22,14 +22,19 @@ use tokio::sync::watch;
 /// 应用多注册中心的只读能力。目录不延长 owner 生命周期，也不授予关闭权限。
 #[derive(Clone)]
 pub struct DiscoveryDirectory {
+    /// 发现 owner 的弱引用；目录本身不延长其生命周期。
     owner: Weak<DiscoveryOwner>,
+    /// 各具名连接共用的 REST 客户端；空名称仅表示纯外部 URL 默认入口。
     #[cfg(feature = "rest")]
     rest: Arc<Mutex<BTreeMap<String, Arc<rest_discovery::RestDiscoveryClient>>>>,
 }
 
 impl DiscoveryDirectory {
     /// 业务作用：按 qualifier 选择独立发现环境，省略时采用 primary 或兼容配置的显式默认引用。
-    /// 参数说明：`qualifier` 是冻结连接目录中的精确名称。
+    ///
+    /// 参数说明：
+    /// - `qualifier`：`qualifier` 是冻结连接目录中的精确名称。
+    ///
     /// 返回：受管发现句柄；未知连接或 owner 已关闭时失败。
     pub fn client(&self, qualifier: Option<&str>) -> ApplicationResult<DiscoveryHandle> {
         self.owner
@@ -45,7 +50,9 @@ impl DiscoveryDirectory {
     }
 
     /// 业务作用：查询注册事实供业务运维展示，不输出凭据和 metadata。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：资源仍存在时的状态集合，否则返回错误。
     pub fn registrations(&self) -> ApplicationResult<Vec<RegistrationStatus>> {
         Ok(self
@@ -56,7 +63,12 @@ impl DiscoveryDirectory {
     }
 
     /// 业务作用：建立直接注入 generated client 的动态 gRPC Service，连接与正文归同一 owner。
-    /// 参数说明：`qualifier` 选择连接，`service` 选择绑定服务，`options` 冻结容量与 TLS 身份政策。
+    ///
+    /// 参数说明：
+    /// - `qualifier`：`qualifier` 选择连接。
+    /// - `service`：`service` 选择绑定服务。
+    /// - `options`：`options` 冻结容量与 TLS 身份政策。
+    ///
     /// 返回：无独立注册后台的调用器；clone 共享其连接池。
     #[cfg(feature = "grpc-discovery")]
     pub fn grpc(
@@ -75,7 +87,10 @@ impl DiscoveryDirectory {
     }
 
     /// 业务作用：取得同一具名连接共享的 REST 调用器，避免每个业务对象重复创建后台资源。
-    /// 参数说明：`qualifier` 选择连接，不跨环境自动回退。
+    ///
+    /// 参数说明：
+    /// - `qualifier`：`qualifier` 选择连接。
+    ///
     /// 返回：由 Application 停机阶段关闭的 REST 客户端；响应正文应使用 send_managed 接口。
     #[cfg(feature = "rest")]
     pub fn rest(
@@ -108,7 +123,9 @@ impl DiscoveryDirectory {
     }
 
     /// 业务作用：为声明式 REST 宏提供以 qualifier 选择的共享客户端集合。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前连接的调用能力及配置默认项；owner 已释放、已关闭或目录非法时拒绝，不新建连接池和监督任务。
     #[cfg(feature = "rest")]
     pub fn rest_clients(&self) -> ApplicationResult<Arc<rest_discovery::RestClientSet>> {
@@ -153,21 +170,30 @@ impl DiscoveryDirectory {
 }
 
 struct Endpoints {
+    /// Ready 开始解析注册计划后永久封存，禁止再改变地址与资格对应关系。
     sealed: bool,
+    /// 自定义和内置入口的地址目录，供 listener_ref 解析。
     listeners: BTreeMap<String, ListenerEndpoint>,
+    /// 对应入口的本地资格来源，独立于远端注册确认。
     eligibility: BTreeMap<String, Eligibility>,
 }
 
 pub(crate) struct RuntimeState {
+    /// Start 阶段一次性安装的只读目录。
     directory: OnceLock<DiscoveryDirectory>,
+    /// 在同一锁内登记和封存的入口及资格映射。
     endpoints: Mutex<Endpoints>,
+    /// 必需注册的启动确认状态；禁用发现时保持 true。
     pub(crate) startup: watch::Sender<bool>,
+    /// 注册名称对应的本地资格，供独立探针查询，不读取远端注册状态。
     qualification: Mutex<BTreeMap<String, Eligibility>>,
 }
 
 impl RuntimeState {
     /// 业务作用：建立无网络活动的资源槽，默认不增加启动确认门禁。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：Start 才安装 owner，Ready 封存端点目录。
     pub(crate) fn new() -> Self {
         Self {
@@ -183,7 +209,9 @@ impl RuntimeState {
     }
 
     /// 业务作用：读取已经安装的受管目录。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：尚未安装时拒绝，不隐式构造另一个 owner。
     pub(crate) fn directory(&self) -> ApplicationResult<DiscoveryDirectory> {
         self.directory.get().cloned().ok_or_else(|| {
@@ -195,8 +223,14 @@ impl RuntimeState {
     }
 
     /// 业务作用：登记自定义入站端点，确保最终注册地址有本地资格来源。
-    /// 参数说明：`name` 是唯一引用，`endpoint`、`eligibility` 属于同一个业务入口。
-    /// 返回：目录未封存且名称合法唯一时成功。
+    ///
+    /// 参数说明：
+    /// - `name`：最多 64 字节的唯一引用，仅含 ASCII 字母、数字、下划线或连字符，不能使用内置名称。
+    /// - `endpoint`：该入口的监听地址和非零端口，供注册计划解析；此处不绑定端口或验证地址可达性。
+    /// - `eligibility`：同一入口的本地接流资格，供后续注册监督判断是否可以发布实例。
+    ///
+    /// 返回：发现目录已安装且尚未封存、名称及端口符合约束时同步登记两项；否则不修改目录。
+    /// 登记成功不等于远端注册成功，也不会直接开放监听器。
     pub(crate) fn endpoint(
         &self,
         name: &str,
@@ -229,7 +263,10 @@ impl RuntimeState {
     }
 
     /// 业务作用：为独立资格探针读取注册目标绑定的本地事实。
-    /// 参数说明：`registration` 是已经冻结的目标名称。
+    ///
+    /// 参数说明：
+    /// - `registration`：`registration` 是已经冻结的目标名称。
+    ///
     /// 返回：目标存在且本地业务可接流才返回 true，不读取远端注册状态。
     #[cfg(feature = "web")]
     pub(crate) fn qualified(&self, registration: &str) -> bool {
@@ -244,16 +281,23 @@ impl RuntimeState {
 mod metrics;
 
 pub(crate) struct DiscoveryComponent {
+    /// 本次应用装配的发现 owner，清理动作另持有关闭责任。
     owner: Option<Arc<DiscoveryOwner>>,
+    /// Start 读取并准备、Ready 消费以冻结注册计划的配置。
     config: Option<DiscoveryConfig>,
+    /// 必需注册完成启动确认前阻止整体就绪的贡献项。
     startup: Option<ReadinessContributor>,
+    /// 各注册目标的就绪贡献项，影响范围由 readiness_critical 决定。
     contributors: BTreeMap<String, ReadinessContributor>,
+    /// Ready 创建并向 Runner 一次性移交的持续监督任务。
     task: Option<ApplicationFuture<'static>>,
 }
 
 impl DiscoveryComponent {
     /// 业务作用：建立尚未连接的中性装配组件。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：连接、注册和关闭权均在生命周期阶段内取得。
     pub(crate) fn new() -> Self {
         Self {
@@ -268,14 +312,19 @@ impl DiscoveryComponent {
 
 impl ApplicationComponent for DiscoveryComponent {
     /// 业务作用：标识中性服务发现组件。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定组件身份。
     fn id(&self) -> ComponentId {
         ComponentId::Discovery
     }
 
     /// 业务作用：先登记资源清理权，再在共享启动期限内准备出站发现连接。
-    /// 参数说明：`context` 提供最终配置、启动预算和反向清理栈。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供最终配置、启动预算和反向清理栈。
+    ///
     /// 返回：所有启动必需连接准备完成；不发布入站实例。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -434,7 +483,10 @@ impl ApplicationComponent for DiscoveryComponent {
     }
 
     /// 业务作用：以已绑定 listener 和独立本地资格冻结所有计划，外部注册等待统一放行。
-    /// 参数说明：`context` 提供实际监听地址和原启动截止点。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供实际监听地址和原启动截止点。
+    ///
     /// 返回：计划和摘流所有权一次性登记；任一非法计划阻止所有注册。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -502,6 +554,7 @@ impl ApplicationComponent for DiscoveryComponent {
                     }),
                 );
             }
+            // 先封存再解析，避免后续登记改变已经验证的地址与资格；解析失败由启动失败流程清理。
             endpoints.sealed = true;
             let mut plans = config
                 .resolve(&endpoints.listeners, &endpoints.eligibility)
@@ -687,7 +740,9 @@ impl ApplicationComponent for DiscoveryComponent {
     }
 
     /// 业务作用：移交持续监督任务，使异常进入 Runner 的统一停机流程。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只移交一次的任务，未装配时为空。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.task.take().map(|task| ("discovery-supervision", task))
@@ -695,18 +750,25 @@ impl ApplicationComponent for DiscoveryComponent {
 }
 
 struct RegistrationShutdown {
+    /// 负责撤销注册许可及远端摘流的 owner，保留出站发现用于业务排空。
     owner: Arc<DiscoveryOwner>,
+    /// 结束宿主注册监督任务的信号，不代替远端注销确认。
     cancel: tokio_util::sync::CancellationToken,
 }
 impl ShutdownAction for RegistrationShutdown {
     /// 业务作用：提供固定的注册摘流动作名称。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不含实例地址的标识。
     fn label(&self) -> &'static str {
         "discovery-registration"
     }
     /// 业务作用：先撤销注册许可并摘流，出站发现保留供业务排空。
-    /// 参数说明：`context` 是全局停机预算。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 是全局停机预算。
+    ///
     /// 返回：所有目标明确移除才成功，残留或未知结果进入停机摘要。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         self.cancel.cancel();
@@ -733,21 +795,29 @@ impl ShutdownAction for RegistrationShutdown {
 }
 
 struct RuntimeShutdown {
+    /// 业务排空后关闭发现连接与残留注册的 owner。
     owner: Arc<DiscoveryOwner>,
+    /// 同步关闭准入后按共享截止点等待的 REST 客户端集合。
     #[cfg(feature = "rest")]
     rest: Arc<Mutex<BTreeMap<String, Arc<rest_discovery::RestDiscoveryClient>>>>,
+    /// 本次安装的默认门面实例，清理时按实例身份匹配，避免关闭其他 owner 的门面。
     #[cfg(feature = "rest")]
     global: Arc<Mutex<Option<Arc<rest_discovery::RemoteRuntime>>>>,
 }
 impl ShutdownAction for RuntimeShutdown {
     /// 业务作用：提供固定的出站资源清理动作名称。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不含配置的标识。
     fn label(&self) -> &'static str {
         "discovery-runtime"
     }
     /// 业务作用：业务排空后关闭全部出站发送和共享观察，并等待有限清理。
-    /// 参数说明：`context` 延续摘流阶段的同一停机截止点。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 延续摘流阶段的同一停机截止点。
+    ///
     /// 返回：注销和 provider 均关闭才成功，超时与残留保留为错误。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         let deadline = tokio::time::Instant::from_std(context.deadline());
@@ -811,7 +881,9 @@ impl ShutdownAction for RuntimeShutdown {
 
 impl Drop for RegistrationShutdown {
     /// 业务作用：宿主提前释放清理动作时同步关闭注册监督许可。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：触发有限摘流；已存在的停机期限不会延长。
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -822,7 +894,9 @@ impl Drop for RegistrationShutdown {
 
 impl Drop for RuntimeShutdown {
     /// 业务作用：宿主被丢弃时清除本次安装的默认槽位，并关闭受管出站资源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：旧 action 不会关闭另一个 owner 的默认门面，清理任务由 owner 保留。
     fn drop(&mut self) {
         #[cfg(feature = "rest")]
@@ -850,8 +924,12 @@ impl Drop for RuntimeShutdown {
 }
 
 /// 业务作用：判断普通 listener 的本地业务资格，排除远端注册结果以避免健康检查循环。
-/// 参数说明：`application` 提供本地生命周期和已登记业务依赖。
-/// 返回：已放行且所有本地关键依赖可用时为 true。
+///
+/// 参数说明：
+/// - `application`：`application` 提供本地生命周期和已登记业务依赖。
+///
+/// 返回：应用处于 Ready 且所有影响就绪的非 discovery 依赖为 Ready 或 Degraded 时为 true。
+/// 本地资格不等待远端注册确认；它是当前快照判断，不能作为后续调用持续有效的授权。
 #[cfg(any(feature = "web", feature = "grpc"))]
 fn local_ready(application: &Application) -> bool {
     application.state() == ApplicationState::Ready
@@ -869,7 +947,11 @@ fn local_ready(application: &Application) -> bool {
 }
 
 /// 业务作用：在候选配置发布前校验中性发现配置和引用。
-/// 参数说明：`tree` 是最终配置树，`phase` 是当前校验阶段。
+///
+/// 参数说明：
+/// - `tree`：`tree` 是最终配置树。
+/// - `phase`：`phase` 是当前校验阶段。
+///
 /// 返回：配置有效时成功；不产生网络副作用。
 pub(crate) fn validate_section(
     tree: &serde_json::Value,
@@ -882,7 +964,10 @@ pub(crate) fn validate_section(
 }
 
 /// 业务作用：从完整配置中读取发现投影，不把敏感值带入错误链。
-/// 参数说明：`tree` 已完成占位符与导入处理。
+///
+/// 参数说明：
+/// - `tree`：`tree` 已完成占位符与导入处理。
+///
 /// 返回：缺省时禁用，未知字段或非法结构返回稳定错误。
 fn read_config(tree: &serde_json::Value) -> ApplicationResult<DiscoveryConfig> {
     tree.get("discovery").map_or_else(
@@ -895,14 +980,21 @@ fn read_config(tree: &serde_json::Value) -> ApplicationResult<DiscoveryConfig> {
 }
 
 /// 业务作用：创建不携带 provider 内容的生命周期错误。
-/// 参数说明：`phase` 是失败阶段，`message` 是静态安全说明。
+///
+/// 参数说明：
+/// - `phase`：`phase` 是失败阶段。
+/// - `message`：`message` 是静态安全说明。
+///
 /// 返回：归属于中性发现组件的错误。
 fn error(phase: ApplicationPhase, message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Discovery, phase, message)
 }
 
 /// 业务作用：仅在显式启用时为 HTTP listener 保留本地资格探针。
-/// 参数说明：`application` 提供启动阶段冻结配置。
+///
+/// 参数说明：
+/// - `application`：`application` 提供启动阶段冻结配置。
+///
 /// 返回：禁用 discovery 或未声明探针时为 false。
 #[cfg(feature = "web")]
 pub(crate) fn probe_enabled(application: &Application) -> bool {
@@ -911,7 +1003,10 @@ pub(crate) fn probe_enabled(application: &Application) -> bool {
 }
 
 /// 业务作用：将当前连接的 HTTP 策略投影到独立客户端，发现缓存与资格继续由共同 owner 裁决。
-/// 参数说明：`policy` 已由公共配置校验，省略时使用有限默认值。
+///
+/// 参数说明：
+/// - `policy`：`policy` 已由公共配置校验。
+///
 /// 返回：没有全量服务扫描或额外发现缓存宽限的调用选项。
 #[cfg(feature = "rest")]
 fn rest_options(

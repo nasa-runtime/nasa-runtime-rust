@@ -7,7 +7,10 @@ type DashboardPanels<'a> = (&'a str, bool, Vec<(String, String)>);
 const INSTANCE_LABELS: &str = "deployment_environment,cluster,service_name,service_instance_id";
 
 /// 业务作用：选择覆盖心跳判定阈值的有限读取窗口，避免低频推送早于阈值退出瞬时 lookback。
-/// 参数说明：`config` 提供采样周期与规则求值周期。
+///
+/// 参数说明：
+/// - `config`：`config` 提供采样周期与规则求值周期。
+///
 /// 返回：至少五分钟，且严格覆盖三个采样周期的毫秒窗口；窗口本身不承担期望实例库存职责。
 fn heartbeat_window(config: &ObservabilityConfig) -> u64 {
     (config.prometheus.remote_write.interval_ms * 3
@@ -20,7 +23,11 @@ fn heartbeat_window(config: &ObservabilityConfig) -> u64 {
 }
 
 /// 业务作用：读取外部平台持续提供的期望实例事实，框架不登记或生成此指标。
-/// 参数说明：`config` 只提供指标名引用，`selector` 限定环境、集群与服务。
+///
+/// 参数说明：
+/// - `config`：`config` 只提供指标名引用。
+/// - `selector`：`selector` 限定环境、集群与服务。
+///
 /// 返回：值为一且实例身份合法的期望库存，额外平台 label 与重复来源按业务主键归并；缺失保持空向量。
 fn expected_instances(config: &ObservabilityConfig, selector: &str) -> String {
     let metric = &config
@@ -33,7 +40,11 @@ fn expected_instances(config: &ObservabilityConfig, selector: &str) -> String {
 }
 
 /// 业务作用：只为外部平台认定应在线的实例读取最新心跳，旧进程来源不能覆盖新来源的在线证据。
-/// 参数说明：`config` 提供外部指标引用与读取窗口，`selector` 限定环境、集群与服务。
+///
+/// 参数说明：
+/// - `config`：`config` 提供外部指标引用与读取窗口。
+/// - `selector`：`selector` 限定环境、集群与服务。
+///
 /// 返回：保留业务实例主键的最后心跳；外部库存或历史心跳缺失时保持空向量，不推断健康。
 pub(super) fn availability_heartbeat(config: &ObservabilityConfig, selector: &str) -> String {
     let expected = expected_instances(config, selector);
@@ -42,7 +53,11 @@ pub(super) fn availability_heartbeat(config: &ObservabilityConfig, selector: &st
 }
 
 /// 业务作用：同时识别陈旧心跳与期望实例完全缺失，长期停写不会自动解释为恢复。
-/// 参数说明：`config` 引用外部平台期望实例指标，`selector` 限定环境、集群与服务。
+///
+/// 参数说明：
+/// - `config`：`config` 引用外部平台期望实例指标。
+/// - `selector`：`selector` 限定环境、集群与服务。
+///
 /// 返回：陈旧样本保留年龄，期望库存仍存在但无历史心跳时返回一；库存失效时不伪造实例或健康状态。
 fn remote_write_availability(config: &ObservabilityConfig, selector: &str) -> String {
     let heartbeat = availability_heartbeat(config, selector);
@@ -53,21 +68,32 @@ fn remote_write_availability(config: &ObservabilityConfig, selector: &str) -> St
 }
 
 /// 业务作用：使所有业务聚合使用同一组唯一且抓取认证成功的实例。
-/// 参数说明：`selector` 限定当前环境、集群与业务筛选范围。
+///
+/// 参数说明：
+/// - `selector`：`selector` 限定当前环境、集群与业务筛选范围。
+///
 /// 返回：同身份多 target 或最近抓取失败的实例均被排除；remote write 不要求存在 up。
 pub(super) fn eligible_instances(selector: &str) -> String {
     format!("((count by ({INSTANCE_LABELS}) (napp_instance_info{{{selector}}}) == 1) unless on ({INSTANCE_LABELS}) count by ({INSTANCE_LABELS}) (napp_instance_info{{{selector}}} and on (job,instance) (up == 0)))")
 }
 
 /// 业务作用：在聚合之前隔离不可信或重复实例，保留原指标的维度与数值。
-/// 参数说明：`expression` 为单实例瞬时向量，`eligible` 为统一身份门禁。
+///
+/// 参数说明：
+/// - `expression`：待聚合的单实例 PromQL 瞬时向量，必须保留用于身份匹配的四个实例标签。
+/// - `eligible`：按同一部署范围计算的合格实例向量，通过四个实例标签限制 expression，不提供缺失数据的零值。
+///
 /// 返回：只有身份门禁通过的原始向量，不以零填充缺失数据。
 pub(super) fn scoped(expression: String, eligible: &str) -> String {
     format!("(({expression}) and on ({INSTANCE_LABELS}) {eligible})")
 }
 
 /// 业务作用：丢弃与平台授权部署范围不一致的样本，避免 honor_labels 接受伪装的身份。
-/// 参数说明：`identity` 为 controller 的可信部署身份，`operator` 选择 Operator 字段命名。
+///
+/// 参数说明：
+/// - `identity`：平台已验证的部署身份；环境、集群、服务用于构造 keep 规则，避免抓取目标覆盖授权范围。
+/// - `operator`：`operator` 选择 Operator 字段命名。
+///
 /// 返回：逐字段 keep 规则；丢弃数量由 scrape 样本差值规则告警，不改写业务声明。
 fn identity_relabelings(identity: &Identity, operator: bool) -> Vec<Value> {
     identity
@@ -85,7 +111,10 @@ fn identity_relabelings(identity: &Identity, operator: bool) -> Vec<Value> {
                     }
                 })
                 .collect::<String>();
-            let mut rule = json!({"action":"keep","regex":regex});
+            let mut rule = json!({
+                "action": "keep",
+                "regex": regex
+            });
             rule[if operator {
                 "sourceLabels"
             } else {
@@ -94,15 +123,27 @@ fn identity_relabelings(identity: &Identity, operator: bool) -> Vec<Value> {
             rule
         })
         .chain(std::iter::once(if operator {
-            json!({"action":"keep","sourceLabels":["service_instance_id"],"regex":".+"})
+            json!({
+                "action": "keep",
+                "sourceLabels": ["service_instance_id"],
+                "regex": ".+"
+            })
         } else {
-            json!({"action":"keep","source_labels":["service_instance_id"],"regex":".+"})
+            json!({
+                "action": "keep",
+                "source_labels": ["service_instance_id"],
+                "regex": ".+"
+            })
         }))
         .collect()
 }
 
 /// 业务作用：以服务、环境、集群和资源种类派生稳定归属标识。
-/// 参数说明：`identity` 为冻结部署身份，`kind` 为模板种类。
+///
+/// 参数说明：
+/// - `identity`：冻结的服务、环境和集群标签；不把实例 ID 纳入资源标识，保持滚动部署时归属稳定。
+/// - `kind`：资源类别或规则名，用于将同一部署的 folder、datasource、规则等 UID 相互隔离。
+///
 /// 返回：不含副本身份的稳定 UID，滚动发布不会新建重复资源。
 pub fn owner_id(identity: &Identity, kind: &str) -> String {
     let mut hash = Sha256::new();
@@ -121,7 +162,11 @@ pub fn owner_id(identity: &Identity, kind: &str) -> String {
 }
 
 /// 业务作用：生成默认单环境、单集群并可逐实例下钻的内建 Dashboard。
-/// 参数说明：`config` 控制模板开关，`identity` 约束部署范围。
+///
+/// 参数说明：
+/// - `config`：`config` 控制模板开关。
+/// - `identity`：`identity` 约束部署范围。
+///
 /// 返回：按 UID 引用 datasource 的完整 Dashboard，不把无数据转换成零。
 pub fn dashboards(config: &ObservabilityConfig, identity: &Identity) -> Vec<Value> {
     let ds = datasource_uid(config, identity);
@@ -357,26 +402,139 @@ pub fn dashboards(config: &ObservabilityConfig, identity: &Identity) -> Vec<Valu
             ),
         ],
     ));
-    groups.push(("interfaces",config.provisioning.grafana.dashboards.interfaces,vec![
-        ("实例库存与部署版本".into(),format!("napp_instance_info{{{selector}}}")),
-        ("抓取目标可用性".into(),"up{deployment_environment=~\"$environment\",cluster=~\"$cluster\",service_name=~\"$service\"}".into()),
-        ("远程指标心跳年龄".into(),format!("time() - napp_observability_heartbeat_unixtime_seconds{{{selector}}}")),
-        ("接口调用速率".into(),format!("sum by (command,group) ({})",rates("nafana_requests_total",selector))),
-    ]));
-    groups.into_iter().filter(|(_,enabled,_)| *enabled).map(|(name,_,panels)| {
-        let variables = [("environment","deployment_environment"),("cluster","cluster"),("service","service_name"),("version","service_version"),("driver","driver"),("datasource","datasource"),("operation","operation"),("method","method"),("instance","service_instance_id")].into_iter().map(|(name,label)| {
-            let filter = match name { "environment" => String::new(), "cluster" => "deployment_environment=~\"$environment\"".into(), _ => "deployment_environment=~\"$environment\",cluster=~\"$cluster\"".into() };
-            let source = if ["driver","datasource","operation","method"].contains(&name) { "namapper_method_calls_total" } else { "napp_instance_info" };
-            let value = match name { "environment" => identity.labels.get("deployment_environment").cloned().unwrap_or_default(), "cluster" => identity.labels.get("cluster").cloned().unwrap_or_default(), _ => "$__all".into() };
-            json!({"name":name,"type":"query","datasource":{"type":"prometheus","uid":ds},"query":format!("label_values({source}{{{filter}}}, {label})"),"refresh":1,"multi":!["environment","cluster"].contains(&name),"includeAll":!["environment","cluster"].contains(&name),"allValue":".*","current":{"text":value,"value":value}})
-        }).collect::<Vec<_>>();
-        let panels = panels.into_iter().enumerate().map(|(index,(title,expr))| json!({"id":index+1,"title":title,"type":"timeseries","datasource":{"type":"prometheus","uid":ds},"gridPos":{"x":(index%2)*12,"y":(index/2)*8,"w":12,"h":8},"targets":[{"refId":"A","expr":expr}],"fieldConfig":{"defaults":{"noValue":"无数据"}}})).collect::<Vec<_>>();
-        json!({"uid":owner_id(identity,name),"title":format!("NASA {name}"),"tags":[format!("nasa-owner:{}",owner_id(identity,"owner"))],"schemaVersion":39,"version":0,"editable":false,"timezone":"browser","refresh":"30s","time":{"from":"now-1h","to":"now"},"templating":{"list":variables},"panels":panels})
-    }).collect()
+    groups.push((
+        "interfaces",
+        config.provisioning.grafana.dashboards.interfaces,
+        vec![
+            ("实例库存与部署版本".into(), format!("napp_instance_info{{{selector}}}")),
+            (
+                "抓取目标可用性".into(),
+                "up{deployment_environment=~\"$environment\",cluster=~\"$cluster\",service_name=~\"$service\"}".into(),
+            ),
+            (
+                "远程指标心跳年龄".into(),
+                format!("time() - napp_observability_heartbeat_unixtime_seconds{{{selector}}}"),
+            ),
+            (
+                "接口调用速率".into(),
+                format!("sum by (command,group) ({})", rates("nafana_requests_total", selector)),
+            ),
+        ],
+    ));
+    groups
+        .into_iter()
+        .filter(|(_, enabled, _)| *enabled)
+        .map(|(name, _, panels)| {
+            let variables = [
+                ("environment", "deployment_environment"),
+                ("cluster", "cluster"),
+                ("service", "service_name"),
+                ("version", "service_version"),
+                ("driver", "driver"),
+                ("datasource", "datasource"),
+                ("operation", "operation"),
+                ("method", "method"),
+                ("instance", "service_instance_id"),
+            ]
+            .into_iter()
+            .map(|(name, label)| {
+                let filter = match name {
+                    "environment" => "",
+                    "cluster" => "deployment_environment=~\"$environment\"",
+                    _ => "deployment_environment=~\"$environment\",cluster=~\"$cluster\"",
+                };
+                let source = if ["driver", "datasource", "operation", "method"].contains(&name) {
+                    "namapper_method_calls_total"
+                } else {
+                    "napp_instance_info"
+                };
+                let value = match name {
+                    "environment" => identity
+                        .labels
+                        .get("deployment_environment")
+                        .cloned()
+                        .unwrap_or_default(),
+                    "cluster" => identity.labels.get("cluster").cloned().unwrap_or_default(),
+                    _ => "$__all".into(),
+                };
+                let multiple = !["environment", "cluster"].contains(&name);
+                json!({
+                    "name": name,
+                    "type": "query",
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": ds
+                    },
+                    "query": format!("label_values({source}{{{filter}}}, {label})"),
+                    "refresh": 1,
+                    "multi": multiple,
+                    "includeAll": multiple,
+                    "allValue": ".*",
+                    "current": {
+                        "text": value,
+                        "value": value
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+            let panels = panels
+                .into_iter()
+                .enumerate()
+                .map(|(index, (title, expression))| {
+                    json!({
+                        "id": index + 1,
+                        "title": title,
+                        "type": "timeseries",
+                        "datasource": {
+                            "type": "prometheus",
+                            "uid": ds
+                        },
+                        "gridPos": {
+                            "x": (index % 2) * 12,
+                            "y": (index / 2) * 8,
+                            "w": 12,
+                            "h": 8
+                        },
+                        "targets": [{
+                            "refId": "A",
+                            "expr": expression
+                        }],
+                        "fieldConfig": {
+                            "defaults": {
+                                "noValue": "无数据"
+                            }
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "uid": owner_id(identity, name),
+                "title": format!("NASA {name}"),
+                "tags": [format!("nasa-owner:{}", owner_id(identity, "owner"))],
+                "schemaVersion": 39,
+                "version": 0,
+                "editable": false,
+                "timezone": "browser",
+                "refresh": "30s",
+                "time": {
+                    "from": "now-1h",
+                    "to": "now"
+                },
+                "templating": {
+                    "list": variables
+                },
+                "panels": panels
+            })
+        })
+        .collect()
 }
 
 /// 业务作用：生成保持环境与集群维度的聚合告警，避免按实例均值稀释异常。
-/// 参数说明：`config` 为规则阈值，`identity` 限定当前部署。
+///
+/// 参数说明：
+/// - `config`：告警启用项、阈值、求值及持续窗口，以及 remote write 的心跳与期望库存引用。
+/// - `identity`：`identity` 限定当前部署。
+///
 /// 返回：Prometheus 规则组模型，供 Grafana 或 Operator 适配。
 pub fn prometheus_rules(config: &ObservabilityConfig, identity: &Identity) -> Value {
     let a = &config.provisioning.grafana.alert_rules;
@@ -419,7 +577,19 @@ pub fn prometheus_rules(config: &ObservabilityConfig, identity: &Identity) -> Va
     let mut rules = Vec::new();
     let mut push = |name: &str, enabled: bool, expr: String, hold: u64| {
         if a.enabled && enabled {
-            rules.push(json!({"alert":name,"expr":expr,"for":format!("{hold}ms"),"labels":{"severity":"warning","nasa_owner":owner_id(identity,"owner"),"notification_policy_ref":a.notification_policy_ref},"annotations":{"summary":name}}));
+            rules.push(json!({
+                "alert": name,
+                "expr": expr,
+                "for": format!("{hold}ms"),
+                "labels": {
+                    "severity": "warning",
+                    "nasa_owner": owner_id(identity, "owner"),
+                    "notification_policy_ref": a.notification_policy_ref
+                },
+                "annotations": {
+                    "summary": name
+                }
+            }));
         }
     };
     push(
@@ -453,7 +623,16 @@ pub fn prometheus_rules(config: &ObservabilityConfig, identity: &Identity) -> Va
     );
     let pool = vector("natx_pool_connections", ",state=\"in_use\"");
     let capacity = vector("natx_pool_max_connections", "");
-    push("DatasourcePoolSaturation",a.pool_saturation.enabled,format!("(sum by ({pool_group}) ({pool}) / clamp_min(sum by ({pool_group}) ({capacity}),1) > {}) or (max by ({pool_group}) ({pool} / ignoring(state) clamp_min({capacity},1)) > {})",a.pool_saturation.threshold_ratio,a.pool_saturation.threshold_ratio),a.pool_saturation.for_ms);
+    push(
+        "DatasourcePoolSaturation",
+        a.pool_saturation.enabled,
+        format!(
+            "(sum by ({pool_group}) ({pool}) / clamp_min(sum by ({pool_group}) ({capacity}),1) > {}) or (max by ({pool_group}) ({pool} / ignoring(state) clamp_min({capacity},1)) > {})",
+            a.pool_saturation.threshold_ratio,
+            a.pool_saturation.threshold_ratio
+        ),
+        a.pool_saturation.for_ms,
+    );
     push(
         "DatasourceAcquireTimeout",
         a.acquire_timeout.enabled,
@@ -541,13 +720,32 @@ pub fn prometheus_rules(config: &ObservabilityConfig, identity: &Identity) -> Va
         availability,
         a.instance_down.for_ms,
     );
-    push("ObservabilityIdentityCollision",a.identity_collision.enabled,format!("(count by ({INSTANCE_LABELS}) (napp_instance_info{{{select}}}) > 1) or ((scrape_samples_scraped{{{select}}} - scrape_samples_post_metric_relabeling{{{select}}}) > 0)"),a.identity_collision.for_ms);
-    json!({"groups":[{"name":owner_id(identity,"rules"),"interval":format!("{}ms",a.evaluation_interval_ms),"rules":rules}]})
+    push(
+        "ObservabilityIdentityCollision",
+        a.identity_collision.enabled,
+        format!(
+            "(count by ({INSTANCE_LABELS}) (napp_instance_info{{{select}}}) > 1) or ((scrape_samples_scraped{{{select}}} - scrape_samples_post_metric_relabeling{{{select}}}) > 0)"
+        ),
+        a.identity_collision.for_ms,
+    );
+    json!({
+        "groups": [{
+            "name": owner_id(identity, "rules"),
+            "interval": format!("{}ms", a.evaluation_interval_ms),
+            "rules": rules
+        }]
+    })
 }
 
 /// 业务作用：为逐容器 DNS 发现或既有平台生成确定的 Prometheus job。
-/// 参数说明：`config/identity` 为同一 YAML，`dns_name` 为平台注入的容器服务 DNS，`token_file` 为平台可读凭据文件。
-/// 返回：抓取每个 DNS A/AAAA 地址的配置，永不使用负载均衡 HTTP URL。
+///
+/// 参数说明：
+/// - `config`：采集协议、端口、路径、周期、job 名及认证方式，决定 Prometheus job 的连接与时间预算。
+/// - `identity`：controller 已验证的部署身份，用于 job 归属和样本 keep 规则；不允许目标标签扩大环境、集群或服务范围。
+/// - `dns_name`：平台服务的 DNS 名称，供 Prometheus 解析每个容器的 A 记录，不能替换为负载均衡 HTTP 地址。
+/// - `token_file`：Prometheus 容器可读的 bearer 凭据文件路径；启用 Bearer 时必填，其它认证方式忽略。
+///
+/// 返回：抓取每个 DNS A 记录地址的配置，永不使用负载均衡 HTTP URL。
 pub fn discovery_config(
     config: &ObservabilityConfig,
     identity: &Identity,
@@ -570,16 +768,58 @@ pub fn discovery_config(
         .map_err(|_| "invalid scrape address")?
         .port();
     let p = &config.provisioning.prometheus;
-    let mut job = json!({"job_name":if p.job_name.is_empty(){owner_id(identity,"job")}else{p.job_name.clone()},"honor_labels":true,"scheme":if p.scheme==Scheme::Http{"http"}else{"https"},"metrics_path":config.prometheus.scrape.path,"scrape_interval":format!("{}ms",p.scrape_interval_ms),"scrape_timeout":format!("{}ms",p.scrape_timeout_ms),"dns_sd_configs":[{"names":[dns_name],"type":"A","port":port}],"relabel_configs":identity.labels.iter().filter(|(key,_)| ["deployment_environment","cluster","service_name"].contains(key)).map(|(key,value)| json!({"target_label":key,"replacement":value})).collect::<Vec<_>>()});
+    let job_name = if p.job_name.is_empty() {
+        owner_id(identity, "job")
+    } else {
+        p.job_name.clone()
+    };
+    let scheme = match p.scheme {
+        Scheme::Http => "http",
+        Scheme::Https => "https",
+    };
+    let relabel_configs = identity
+        .labels
+        .iter()
+        .filter(|(key, _)| ["deployment_environment", "cluster", "service_name"].contains(key))
+        .map(|(key, value)| {
+            json!({
+                "target_label": key,
+                "replacement": value
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut job = json!({
+        "job_name": job_name,
+        "honor_labels": true,
+        "scheme": scheme,
+        "metrics_path": config.prometheus.scrape.path,
+        "scrape_interval": format!("{}ms", p.scrape_interval_ms),
+        "scrape_timeout": format!("{}ms", p.scrape_timeout_ms),
+        "dns_sd_configs": [{
+            "names": [dns_name],
+            "type": "A",
+            "port": port
+        }],
+        "relabel_configs": relabel_configs
+    });
     job["metric_relabel_configs"] = json!(identity_relabelings(identity, false));
     if config.prometheus.scrape.auth.mode == super::AuthMode::Bearer {
-        job["authorization"] = json!({"type":"Bearer","credentials_file":token_file.ok_or("platform scrape token file binding is required")?});
+        job["authorization"] = json!({
+            "type": "Bearer",
+            "credentials_file": token_file.ok_or("platform scrape token file binding is required")?
+        });
     }
     Ok(json!({"scrape_configs":[job]}))
 }
 
 /// 业务作用：生成只匹配业务 Pod 的 PodMonitor，避免抓取 Service VIP。
-/// 参数说明：`namespace` 限定平台授权范围，`token_secret` 为监控命名空间中的凭据 Secret 名。
+///
+/// 参数说明：
+/// - `config`：监控抓取与平台资源的完整配置。
+/// - `identity`：生成资源归属标签的实例身份。
+/// - `namespace`：`namespace` 限定平台授权范围。
+/// - `token_secret`：监控命名空间内的 Secret 名；Bearer 模式必填并读取 token 键，其它模式不生成认证引用。
+///
 /// 返回：带确定归属标签的 Operator 资源。
 pub fn pod_monitor(
     config: &ObservabilityConfig,
@@ -588,18 +828,70 @@ pub fn pod_monitor(
     token_secret: Option<&str>,
 ) -> Result<Value, String> {
     let p = &config.provisioning.prometheus;
-    let mut endpoint = json!({"port":"metrics","path":config.prometheus.scrape.path,"scheme":if p.scheme==Scheme::Http{"http"}else{"https"},"honorLabels":true,"interval":format!("{}ms",p.scrape_interval_ms),"scrapeTimeout":format!("{}ms",p.scrape_timeout_ms),"relabelings":identity.labels.iter().filter(|(key,_)| ["deployment_environment","cluster","service_name"].contains(key)).map(|(key,value)| json!({"targetLabel":key,"replacement":value})).collect::<Vec<_>>()});
+    let scheme = match p.scheme {
+        Scheme::Http => "http",
+        Scheme::Https => "https",
+    };
+    let relabelings = identity
+        .labels
+        .iter()
+        .filter(|(key, _)| ["deployment_environment", "cluster", "service_name"].contains(key))
+        .map(|(key, value)| {
+            json!({
+                "targetLabel": key,
+                "replacement": value
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut endpoint = json!({
+        "port": "metrics",
+        "path": config.prometheus.scrape.path,
+        "scheme": scheme,
+        "honorLabels": true,
+        "interval": format!("{}ms", p.scrape_interval_ms),
+        "scrapeTimeout": format!("{}ms", p.scrape_timeout_ms),
+        "relabelings": relabelings
+    });
     endpoint["metricRelabelings"] = json!(identity_relabelings(identity, true));
     if config.prometheus.scrape.auth.mode == super::AuthMode::Bearer {
-        endpoint["authorization"] = json!({"type":"Bearer","credentials":{"name":token_secret.ok_or("platform scrape Secret binding is required")?,"key":"token"}});
+        endpoint["authorization"] = json!({
+            "type": "Bearer",
+            "credentials": {
+                "name": token_secret.ok_or("platform scrape Secret binding is required")?,
+                "key": "token"
+            }
+        });
     }
-    Ok(
-        json!({"apiVersion":"monitoring.coreos.com/v1","kind":"PodMonitor","metadata":{"name":owner_id(identity,"podmonitor"),"namespace":namespace,"labels":{"nasa-runtime-owner":owner_id(identity,"owner")}},"spec":{"namespaceSelector":{"matchNames":[namespace]},"selector":{"matchLabels":{"app.kubernetes.io/name":identity.labels.get("service_name")}},"podMetricsEndpoints":[endpoint]}}),
-    )
+    Ok(json!({
+        "apiVersion": "monitoring.coreos.com/v1",
+        "kind": "PodMonitor",
+        "metadata": {
+            "name": owner_id(identity, "podmonitor"),
+            "namespace": namespace,
+            "labels": {
+                "nasa-runtime-owner": owner_id(identity, "owner")
+            }
+        },
+        "spec": {
+            "namespaceSelector": {
+                "matchNames": [namespace]
+            },
+            "selector": {
+                "matchLabels": {
+                    "app.kubernetes.io/name": identity.labels.get("service_name")
+                }
+            },
+            "podMetricsEndpoints": [endpoint]
+        }
+    }))
 }
 
 /// 业务作用：确定 Dashboard 与规则共同引用的 datasource UID。
-/// 参数说明：`config` 为显式 UID，`identity` 用于缺省派生。
+///
+/// 参数说明：
+/// - `config`：数据源管理方式及显式 UID；managed 未指定 UID 时才从部署身份派生。
+/// - `identity`：`identity` 用于缺省派生。
+///
 /// 返回：managed 与 existing 模式使用同一确定引用。
 pub(crate) fn datasource_uid(config: &ObservabilityConfig, identity: &Identity) -> String {
     let ds = &config.provisioning.grafana.datasource;

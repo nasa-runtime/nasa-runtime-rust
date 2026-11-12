@@ -142,7 +142,9 @@ impl AuthzMetricsSource {
     ///
     /// 返回：固定四个指标族的只读兼容源。
     pub(crate) fn new(registry: Option<SharedPolicyRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+        }
     }
 }
 
@@ -228,15 +230,13 @@ impl AuthorizationLayerState {
     /// 业务作用：构造 route + object 授权统一边界；未命中缺省按兼容语义放行，
     /// 由 [`Self::with_unmatched_policy`] 分级收紧。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `registry`：route 策略注册表；`None` 表示不启用 route 授权。
     /// - `object_authorizer`：对象级授权 provider；`None` 表示不启用对象授权。
     /// - `object_timeout`：对象授权调用预算，超出生命周期上限时被收敛到上限。
     ///
-    /// # 返回
-    ///
-    /// 未命中缺省为 `Permit` 的授权层状态。
+    /// 返回：未命中缺省为 `Permit` 的授权层状态。
     pub fn new(
         registry: Option<SharedPolicyRegistry>,
         object_authorizer: Option<SharedObjectAuthorizer>,

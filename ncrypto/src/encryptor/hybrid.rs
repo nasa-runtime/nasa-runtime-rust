@@ -17,22 +17,14 @@ use super::rng::random_ascii;
 use super::rsa::{decrypt_rsa_public, encrypt_rsa_private};
 use crate::Result;
 
-/// 业务作用: RSA+AES 混合**封装**(服务端加密响应方向)。
+/// 业务作用：为既有私钥运算协议封装 AES 密钥和响应密文。
 ///
-/// # 参数
-/// - `plaintext`: 待加密的 UTF-8 响应明文。
-/// - `rsa_private_key_b64`: 服务端 RSA 私钥(Base64 PKCS8 DER);用于加密 AES key。
-/// - `aes_key`: `Some(k)` 使用指定 AES key,`None` 生成随机 16B ASCII key。
+/// 参数说明：
+/// - `plaintext`：需要按 AES-ECB 加密的 UTF-8 内容。
+/// - `rsa_private_key_b64`：用于包装 AES 密钥的 Base64 PKCS8 RSA 私钥。
+/// - `aes_key`：显式 AES 密钥文本；None 生成 16 字节随机 ASCII 密钥。
 ///
-/// 返回 `(aes, data)`:`aes` = `encryptRSAPrivate(key)` base64,`data` = `encryptAES(plaintext, key)` base64。
-/// 此历史私钥运算要求显式启用 `legacy-rsa-private` feature。
-///
-/// ```no_run
-/// # use ncrypto::{rsa_aes_seal, rsa_aes_open, generate_rsa_key_pair};
-/// let (prik, pubk) = generate_rsa_key_pair(2048).unwrap();
-/// let (aes, data) = rsa_aes_seal("hello", &prik, None).unwrap();
-/// assert_eq!(rsa_aes_open(&aes, &data, &pubk).unwrap(), "hello");
-/// ```
+/// 返回：返回 AES 密钥包装字段及 AES 数据字段，两者均为 Base64；密钥解析、私钥运算或 AES 失败传播。默认未启用 legacy-rsa-private 时拒绝；公钥可恢复 AES 密钥，此封装不对公钥持有者保密。
 pub fn rsa_aes_seal(
     plaintext: &str,
     rsa_private_key_b64: &str,
@@ -48,14 +40,14 @@ pub fn rsa_aes_seal(
     Ok((aes, data))
 }
 
-/// 业务作用: RSA+AES 混合**解封**(客户端解密响应方向;[`rsa_aes_seal`] 的逆)。
+/// 业务作用：按既有协议用 RSA 公钥恢复 AES 密钥并解开响应内容。
 ///
-/// 用 RSA **公钥**解出 AES key(`decryptRSAPublic(aes)`),再 AES 解 `data` 得明文。
+/// 参数说明：
+/// - `aes`：私钥 type-1 运算包装的 AES 密钥 Base64 字段。
+/// - `data`：AES-ECB 密文 Base64 字段。
+/// - `rsa_public_key_b64`：Base64 SPKI RSA 公钥。
 ///
-/// # 参数
-/// - `aes`: 响应里的 AES key 包装字段,即私钥加密后的 Base64 RSA 密文。
-/// - `data`: 响应里的业务数据字段,即 AES 加密后的 Base64 密文。
-/// - `rsa_public_key_b64`: 客户端持有的 RSA 公钥(Base64 SPKI DER),用于恢复 AES key。
+/// 返回：成功返回 UTF-8 明文；RSA、Base64、AES 填充或 UTF-8 失败传播，不提供独立的 AEAD 认证。
 pub fn rsa_aes_open(aes: &str, data: &str, rsa_public_key_b64: &str) -> Result<String> {
     let key = decrypt_rsa_public(aes, rsa_public_key_b64)?;
     decrypt_aes(data, &key)

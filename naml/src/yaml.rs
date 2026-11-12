@@ -32,7 +32,9 @@ pub struct Limits {
 
 impl Default for Limits {
     /// 业务作用：为外部文档提供与配置解析一致的有限默认范围。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：输入四 MiB、累计文本及输出三十二 MiB、深度 64、节点 100000、单文本一 MiB。
     fn default() -> Self {
         Self {
@@ -46,14 +48,21 @@ impl Default for Limits {
 }
 
 /// 业务作用：用默认预算读取一份外部 YAML 文档，不加载配置来源或执行表达式。
-/// 参数说明：`bytes` 是完整 UTF-8 文档。
+///
+/// 参数说明：
+/// - `bytes`：是完整 UTF-8 文档。
+///
 /// 返回：保留原始键的完整值；格式、编码、重复键及预算失败均返回脱敏错误。
 pub fn from_slice(bytes: &[u8]) -> Result<Value> {
     from_slice_with_limits(bytes, &Limits::default())
 }
 
 /// 业务作用：按调用方预算解析外部 YAML，复用配置组件的事件解析和别名计费。
-/// 参数说明：`bytes` 为完整正文；`limits` 固定本次解析的资源边界。
+///
+/// 参数说明：
+/// - `bytes`：为完整正文
+/// - `limits`：固定本次解析的资源边界。
+///
 /// 返回：唯一文档的完整值；失败不返回部分树，也不回显正文。
 pub fn from_slice_with_limits(bytes: &[u8], limits: &Limits) -> Result<Value> {
     let policy = LoadPolicy {
@@ -71,14 +80,21 @@ pub fn from_slice_with_limits(bytes: &[u8], limits: &Limits) -> Result<Value> {
 }
 
 /// 业务作用：把已构造的协议值编码为 YAML，保持字符串与数值的类型区别。
-/// 参数说明：`value` 是完整值，不解释其中的表达式或来源声明。
+///
+/// 参数说明：
+/// - `value`：是完整值，不解释其中的表达式或来源声明。
+///
 /// 返回：默认预算内的完整 YAML 文本；结构或输出超限时不返回部分正文。
 pub fn to_string(value: &Value) -> Result<String> {
     to_string_with_limits(value, &Limits::default())
 }
 
 /// 业务作用：在结构检查及受限输出缓冲内编码 YAML，供调用方完成权限复验后发布。
-/// 参数说明：`value` 是待编码树；`limits` 限定深度、节点、文本及最终输出字节。
+///
+/// 参数说明：
+/// - `value`：是待编码树
+/// - `limits`：限定深度、节点、文本及最终输出字节。
+///
 /// 返回：多行文本采用引号转义的完整正文；超限、数值精度无法保留或无法编码时返回脱敏错误。
 pub fn to_string_with_limits(value: &Value, limits: &Limits) -> Result<String> {
     let mut budget = EncodeBudget {
@@ -100,7 +116,11 @@ enum ScalarNumber {
 }
 
 /// 业务作用：把数字固定为中性标量，拒绝超出整数范围或会丢失十进制精度的浮点转换。
-/// 参数说明：`number` 为调用方的数字；`limit` 为剩余累计文本预算。
+///
+/// 参数说明：
+/// - `number`：为调用方的数字
+/// - `limit`：为剩余累计文本预算。
+///
 /// 返回：原生数值和表示字节数；表示超限或不能保留数值时返回脱敏错误。
 fn scalar_number(number: &Number, limit: usize) -> Result<(ScalarNumber, usize)> {
     let mut source = BoundedWriter::new(limit);
@@ -129,8 +149,12 @@ fn scalar_number(number: &Number, limit: usize) -> Result<(ScalarNumber, usize)>
 }
 
 /// 业务作用：比较十进制数值而非拼写，允许等价的小数尾零和指数形式。
-/// 参数说明：`left` 与 `right` 为已由 Number 提供的有限数字表示。
-/// 返回：符号、有效数字和十进制阶数一致时为 true，无法规范化时拒绝。
+///
+/// 参数说明：
+/// - `left`：左侧由 Number 提供的有限十进制表示。
+/// - `right`：右侧由 Number 提供的有限十进制表示。
+///
+/// 返回：双方能分解且符号、十进制阶数、有效数字相同则 true，任一无法分解或不相等则 false；不在本方法解析浮点或进行有损数值转换。
 fn same_decimal(left: &str, right: &str) -> bool {
     match (decimal_parts(left), decimal_parts(right)) {
         (Some((ls, ld, le)), Some((rs, rd, re))) => {
@@ -146,7 +170,10 @@ fn same_decimal(left: &str, right: &str) -> bool {
 }
 
 /// 业务作用：在不展开指数或复制有效数字的条件下提取十进制比较信息。
-/// 参数说明：`text` 为数字的十进制表示。
+///
+/// 参数说明：
+/// - `text`：为数字的十进制表示。
+///
 /// 返回：符号、借用的有效数字区间和阶数；指数或长度无法表示时返回 None。
 fn decimal_parts(text: &str) -> Option<(bool, &str, i64)> {
     let negative = text.starts_with('-');
@@ -183,7 +210,10 @@ struct EncodeBudget<'a> {
 
 impl EncodeBudget<'_> {
     /// 业务作用：编码前同时限制单值和累计文本规模。
-    /// 参数说明：`text` 是映射键或字符串值。
+    ///
+    /// 参数说明：
+    /// - `text`：是映射键或字符串值。
+    ///
     /// 返回：预算允许时成功，否则拒绝继续编码。
     fn text(&mut self, text: &str) -> Result<()> {
         self.text_bytes = self.text_bytes.saturating_add(text.len());
@@ -194,7 +224,11 @@ impl EncodeBudget<'_> {
     }
 
     /// 业务作用：编码前复验完整树的结构和文本限额，避免在编码器中递归处理超深或超大输入。
-    /// 参数说明：`value` 是当前子树；`depth` 是从根开始的层级。
+    ///
+    /// 参数说明：
+    /// - `value`：是当前子树
+    /// - `depth`：是从根开始的层级。
+    ///
     /// 返回：完整子树满足预算时成功；超限时终止整份文档编码。
     fn value(&mut self, value: &Value, depth: usize) -> Result<()> {
         self.nodes = self.nodes.saturating_add(1);
@@ -237,7 +271,10 @@ struct BoundedWriter {
 
 impl BoundedWriter {
     /// 业务作用：为一份正文或单个键建立有限输出缓冲。
-    /// 参数说明：`limit` 是本缓冲最多允许占用的正文长度。
+    ///
+    /// 参数说明：
+    /// - `limit`：是本缓冲最多允许占用的正文长度。
+    ///
     /// 返回：空缓冲，容量在每次追加前复验。
     fn new(limit: usize) -> Self {
         Self {
@@ -248,7 +285,10 @@ impl BoundedWriter {
     }
 
     /// 业务作用：以统一限额追加 YAML 的结构符号和缩进。
-    /// 参数说明：`text` 是固定结构文本或已编码的键。
+    ///
+    /// 参数说明：
+    /// - `text`：是固定结构文本或已编码的键。
+    ///
     /// 返回：追加成功；超限时返回 Limit，不向调用方交付部分文档。
     fn push(&mut self, text: &str) -> Result<()> {
         self.write_str(text)
@@ -256,7 +296,10 @@ impl BoundedWriter {
     }
 
     /// 业务作用：按容器深度输出固定空格缩进，避免混入文本中的 Tab。
-    /// 参数说明：`depth` 为已通过结构预算的深度。
+    ///
+    /// 参数说明：
+    /// - `depth`：为已通过结构预算的深度。
+    ///
     /// 返回：完整缩进已写入，或容量不足而拒绝。
     fn indent(&mut self, depth: usize) -> Result<()> {
         for _ in 0..depth {
@@ -266,11 +309,18 @@ impl BoundedWriter {
     }
 
     /// 业务作用：只把原生标量交给编码器，保持字符串转义且禁止自动块标量。
-    /// 参数说明：`value` 为原生标量；`quote` 表示键需要强制引号保护。
+    ///
+    /// 参数说明：
+    /// - `value`：为原生标量
+    /// - `quote`：表示键需要强制引号保护。
+    ///
     /// 返回：标量及终止换行写入；编码或实际字节超限时返回脱敏错误。
     fn scalar<T: Serialize>(&mut self, value: &T, quote: bool) -> Result<()> {
         // 多行内容必须作为转义文本输出，避免首个内容行的 Tab 被消费方解释为缩进。
-        let options = serde_saphyr::ser_options! { prefer_block_scalars: false, quote_all: quote };
+        let options = serde_saphyr::ser_options! {
+            prefer_block_scalars: false,
+            quote_all: quote
+        };
         serde_saphyr::to_fmt_writer_with_options(self, value, options).map_err(|_| {
             ConfigError::new(if self.exceeded {
                 ErrorKind::Limit
@@ -281,7 +331,11 @@ impl BoundedWriter {
     }
 
     /// 业务作用：将容器放到下一层，将标量保留在键或序列标记后，保持结构与预算一致。
-    /// 参数说明：`value` 为当前子值；`depth` 为其父容器深度。
+    ///
+    /// 参数说明：
+    /// - `value`：为当前子值
+    /// - `depth`：为其父容器深度。
+    ///
     /// 返回：子值已完整写入；失败终止整份文档。
     fn child(&mut self, value: &Value, depth: usize) -> Result<()> {
         if matches!(value, Value::Object(values) if !values.is_empty())
@@ -295,7 +349,11 @@ impl BoundedWriter {
     }
 
     /// 业务作用：按已检查的 JSON 树写出 YAML，使用显式长键兼容按字节限制隐式键的读取方。
-    /// 参数说明：`value` 为当前节点；`depth` 是其结构深度。
+    ///
+    /// 参数说明：
+    /// - `value`：为当前节点
+    /// - `depth`：是其结构深度。
+    ///
     /// 返回：保持节点类型和字符串内容的完整子树；数值不可表示或输出超限时拒绝。
     fn value(&mut self, value: &Value, depth: usize) -> Result<()> {
         match value {
@@ -345,7 +403,10 @@ impl BoundedWriter {
 
 impl Write for BoundedWriter {
     /// 业务作用：限制转义与排版后的真实正文大小，避免字符串转义放大绕过容量限制。
-    /// 参数说明：`text` 为编码器本次追加的文本片段。
+    ///
+    /// 参数说明：
+    /// - `text`：为编码器本次追加的文本片段。
+    ///
     /// 返回：追加后仍在预算内时成功；否则保留内部缓冲但拒绝向调用方返回正文。
     fn write_str(&mut self, text: &str) -> fmt::Result {
         if text.len() > self.limit.saturating_sub(self.text.len()) {

@@ -187,7 +187,8 @@ pub async fn verify_outbox_event_schema() -> Result<(), OutboxStoreError> {
 
 /// 业务作用：在指定 datasource 上校验 Outbox 通用事件表合同。
 ///
-/// 参数说明：`datasource` 是受管 Outbox 计划绑定的数据源。
+/// 参数说明：
+/// - `datasource`：是受管 Outbox 计划绑定的数据源。
 ///
 /// 返回：租户列存在且宽度达标时成功；名称、连接或结构不满足时返回脱敏错误。
 pub async fn verify_outbox_event_schema_for(
@@ -246,7 +247,8 @@ pub async fn verify_outbox_tenant_quota_schema() -> Result<(), OutboxStoreError>
 
 /// 业务作用：在指定 datasource 上复验 Outbox 租户配额账本与通用事件表。
 ///
-/// 参数说明：`datasource` 是受管 Outbox 计划绑定的数据源。
+/// 参数说明：
+/// - `datasource`：是受管 Outbox 计划绑定的数据源。
 ///
 /// 返回：未启用配额或结构齐备时成功；名称、连接或账本合同缺失时失败。
 pub async fn verify_outbox_tenant_quota_schema_for(
@@ -501,7 +503,8 @@ impl MySqlOutbox {
 
     /// 业务作用：创建绑定命名 datasource 的 Outbox 入口。
     ///
-    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：为启动期已注册的数据源名称。
     ///
     /// 返回：写入、查询与投递操作固定使用该 datasource；名称非法时在 I/O 前失败。
     pub fn with_datasource(datasource: impl AsRef<str>) -> Result<Self, OutboxStoreError> {
@@ -537,7 +540,9 @@ impl MySqlOutbox {
 
     /// 业务作用：为受控自举环境创建 Outbox 表，并把历史演示表补齐稳定身份、死信字段和投递索引。
     ///
-    /// 参数说明: 无；连接来自已经初始化的 `natx` 默认池。
+    /// 参数说明: 无。
+    ///
+    /// 连接来自已经初始化的 `natx` 默认池。
     ///
     /// 返回：表结构达到当前运行合同后成功；建表、历史回填或强制约束失败时返回脱敏存储错误。
     pub async fn ensure_schema() -> Result<(), OutboxStoreError> {
@@ -546,7 +551,8 @@ impl MySqlOutbox {
 
     /// 业务作用：在指定 datasource 上建立受控自举所需的 Outbox 结构。
     ///
-    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：是启动期已注册的数据源名称。
     ///
     /// 返回：结构完整时成功；名称、连接或 DDL 失败时返回脱敏错误。
     pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), OutboxStoreError> {
@@ -558,7 +564,8 @@ impl MySqlOutbox {
     /// 业务作用：复用调用方已持有的 MySQL 连接建立当前 Outbox 结构，使外层 schema
     /// 互斥权覆盖历史收敛与索引建立。
     ///
-    /// 参数说明：`conn` 是调用方已取得 schema 互斥权的连接。
+    /// 参数说明：
+    /// - `conn`：是调用方已取得 schema 互斥权的连接。
     ///
     /// 返回：表、列和索引达到运行合同时成功；DDL 或历史收敛失败时返回脱敏错误。
     pub async fn ensure_schema_on_connection(
@@ -840,7 +847,8 @@ impl MySqlOutbox {
 
     /// 业务作用：订阅当前进程 Outbox 提交代际，使受管 dispatcher 在新事实提交后立即尝试投递。
     ///
-    /// 参数说明：`channel` 指定 lane 时只订阅该 lane；未指定时订阅当前 datasource 的全局代际。
+    /// 参数说明：
+    /// - `channel`：指定 lane 时只订阅该 lane；未指定时订阅当前 datasource 的全局代际。
     ///
     /// 返回：初值为当前代际的接收端；通知只优化本进程延迟，调用方仍须保留数据库轮询兜底。
     pub fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {
@@ -1188,7 +1196,10 @@ impl MySqlOutbox {
                 // 不得从 payload 或自报 header 推导。
                 tenant: row.try_get("tenant").map_err(map_err)?,
             };
-            pending.push(PendingRow { id, event });
+            pending.push(PendingRow {
+                id,
+                event,
+            });
         }
         Ok(pending)
     }
@@ -1463,7 +1474,8 @@ impl DurableOutboxAppend for MySqlOutbox {
 impl DurableOutboxDispatch for MySqlOutbox {
     /// 业务作用：从本数据源已提交事件计算指定合同的最老排队时间。
     ///
-    /// 参数说明：`event_type` 是待观测的固定事件合同名。
+    /// 参数说明：
+    /// - `event_type`：是待观测的固定事件合同名。
     ///
     /// 返回：非负毫秒数；无待确认事件时为零，数据库失败时返回错误。
     async fn oldest_pending_age_ms(&self, event_type: &str) -> Result<u64, OutboxStoreError> {
@@ -1617,7 +1629,8 @@ impl DurableOutboxRetention for MySqlOutbox {
 impl DurableOutboxWakeup for MySqlOutbox {
     /// 业务作用：通过后端中立唤醒合同订阅 MySQL 已确认提交代际。
     ///
-    /// 参数说明：`channel` 指定 lane 时隔离唤醒；未指定时订阅当前 datasource 的全局代际。
+    /// 参数说明：
+    /// - `channel`：指定 lane 时隔离唤醒；未指定时订阅当前 datasource 的全局代际。
     ///
     /// 返回：当前进程共享的 watch 接收端；数据库轮询仍承担最终收敛。
     fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {

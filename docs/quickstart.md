@@ -41,7 +41,8 @@ async fn hello() -> &'static str {
 }
 
 /// 业务作用：完成服务启动登记，由 Application 继续管理监听与停机。
-/// 参数说明：_app 是当前应用的受管上下文。
+/// 参数说明：
+/// - `_app`：当前应用的受管上下文，本例不额外使用。
 /// 返回：登记成功，不表示服务已完成接流准备。
 #[nasa::application("web")]
 async fn main(_app: nasa::Application) -> anyhow::Result<()> {
@@ -49,7 +50,7 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 }
 ```
 
-创建 `zcf/application.yml`：
+创建默认主配置 `zcf/application.yml`；也可用非空环境变量 `APP_CONFIG_FILE` 指定其它路径，未设置或为空时使用默认值。相对路径按进程工作目录解析：
 
 ```yaml
 application:
@@ -259,7 +260,7 @@ Catalog、收据和恢复语义相同。HTTP、gRPC、Kafka 与 Redis Streams �
 HTTP 或 gRPC，`saga_orchestrator.proto` 随 runtime core 发布，供非 Rust 客户端从同一协议源生成代码。
 ## 配置
 
-在业务进程工作目录提供 `zcf/application.yml`：
+提供 `APP_CONFIG_FILE` 指定的主配置，或在未设置、为空时使用工作目录下的 `zcf/application.yml`：
 
 ```yaml
 application:

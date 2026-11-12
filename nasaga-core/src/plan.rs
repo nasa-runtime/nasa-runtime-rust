@@ -337,5 +337,8 @@ pub fn freeze_compensation_plan(
         .map(|byte| format!("{byte:02x}"))
         .collect();
 
-    Ok(CompensationPlan { version, entries })
+    Ok(CompensationPlan {
+        version,
+        entries,
+    })
 }

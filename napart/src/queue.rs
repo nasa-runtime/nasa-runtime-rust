@@ -68,11 +68,17 @@ impl DrainSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DrainError {
     /// 仍有 producer 位于接纳复验或序号预留临界区。
-    ProducersActive { count: usize },
+    ProducersActive {
+        count: usize,
+    },
     /// 已取得序号的 reservation 尚未发布载荷或 poison。
-    HeadReserved { sequence: u64 },
+    HeadReserved {
+        sequence: u64,
+    },
     /// 槽位内容与单 consumer 游标不一致。
-    Failed { sequence: u64 },
+    Failed {
+        sequence: u64,
+    },
 }
 
 /// producer 边界：`exclusive` 之前的序号都已经被某个 producer 取得。
@@ -151,11 +157,18 @@ pub(crate) enum ConsumerPoll<T> {
     /// 当前没有已预留序号；队列仍可能接收后续任务。
     Empty,
     /// 队头序号已经预留但尚未发布，consumer 不得越过。
-    Reserved { sequence: u64 },
+    Reserved {
+        sequence: u64,
+    },
     /// 取得按序发布的业务载荷。
-    Item { sequence: u64, value: T },
+    Item {
+        sequence: u64,
+        value: T,
+    },
     /// producer 在发布前离场，poison 使 consumer 可以安全跨过该序号。
-    Poisoned { sequence: u64 },
+    Poisoned {
+        sequence: u64,
+    },
     /// 队列关闭且全部已预留序号均已处理。
     Closed,
     /// 内部状态冲突，所属故障域必须关闭并转入失败收口。
@@ -201,7 +214,10 @@ impl<T> Segment<T> {
             .map(|_| Slot::new())
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { base, slots }
+        Self {
+            base,
+            slots,
+        }
     }
 
     /// 业务作用：按全局序号定位本分段中的唯一物理槽位。
@@ -296,7 +312,9 @@ impl<T> QueueCore<T> {
             self.producer_inflight.fetch_sub(1, Ordering::SeqCst);
             return Err(ReserveError::Closed);
         }
-        Ok(ProducerSection { core: self })
+        Ok(ProducerSection {
+            core: self,
+        })
     }
 
     /// 业务作用：序号槽位进入 RESERVED 后登记跨调用 reservation 责任；关门方必须同时
@@ -510,7 +528,12 @@ impl<T> SequencedSender<T> {
     pub(crate) fn offer(&self, value: T) -> Result<u64, OfferError<T>> {
         let reservation = match self.reserve() {
             Ok(reservation) => reservation,
-            Err(reason) => return Err(OfferError { reason, value }),
+            Err(reason) => {
+                return Err(OfferError {
+                    reason,
+                    value,
+                })
+            }
         };
         reservation.publish(value).map_err(|failure| OfferError {
             reason: ReserveError::Failed,
@@ -647,7 +670,9 @@ impl<T> Reservation<T> {
             self.active = false;
             self.core.finish_reservation();
             self.core.fail();
-            return Err(PublishError { value });
+            return Err(PublishError {
+                value,
+            });
         }
         // 本 reservation 是该槽位唯一写者，WRITING 阻止 consumer 读取；每槽位互斥锁
         // 只保护载荷移动，不参与队列全局排序，因此并发 producer 不共享热锁。
@@ -727,7 +752,9 @@ impl<T> SequencedReceiver<T> {
         let sequence = self.next_sequence;
         let slot = segment.slot(sequence);
         match slot.state.load(Ordering::Acquire) {
-            SLOT_EMPTY | SLOT_RESERVED | SLOT_WRITING => ConsumerPoll::Reserved { sequence },
+            SLOT_EMPTY | SLOT_RESERVED | SLOT_WRITING => ConsumerPoll::Reserved {
+                sequence,
+            },
             SLOT_PUBLISHED => {
                 // PUBLISHED 的 Acquire 已观察 producer 对载荷的初始化。唯一 consumer 从
                 // 对应槽位移出载荷，再推进为 TAKEN，分段析构不会重复释放。
@@ -738,12 +765,17 @@ impl<T> SequencedReceiver<T> {
                 };
                 slot.state.store(SLOT_TAKEN, Ordering::Release);
                 self.next_sequence += 1;
-                ConsumerPoll::Item { sequence, value }
+                ConsumerPoll::Item {
+                    sequence,
+                    value,
+                }
             }
             SLOT_POISONED => {
                 slot.state.store(SLOT_TAKEN, Ordering::Release);
                 self.next_sequence += 1;
-                ConsumerPoll::Poisoned { sequence }
+                ConsumerPoll::Poisoned {
+                    sequence,
+                }
             }
             _ => {
                 self.core.fail();
@@ -812,7 +844,9 @@ impl<T> SequencedReceiver<T> {
         self.core.accepting.store(false, Ordering::SeqCst);
         let producers = self.core.producer_inflight.load(Ordering::SeqCst);
         if producers != 0 {
-            return Err(DrainError::ProducersActive { count: producers });
+            return Err(DrainError::ProducersActive {
+                count: producers,
+            });
         }
         let boundary = self.core.next_sequence.load(Ordering::Acquire);
         let mut summary = DrainSummary {
@@ -823,7 +857,9 @@ impl<T> SequencedReceiver<T> {
             self.core.reclaim_before(self.next_sequence);
             let sequence = self.next_sequence;
             let Some(segment) = self.core.segment_for_consumer(sequence) else {
-                return Err(DrainError::HeadReserved { sequence });
+                return Err(DrainError::HeadReserved {
+                    sequence,
+                });
             };
             let slot = segment.slot(sequence);
             match slot.state.load(Ordering::Acquire) {
@@ -831,7 +867,9 @@ impl<T> SequencedReceiver<T> {
                     let Some(value) = slot.value.lock().unwrap_or_else(|e| e.into_inner()).take()
                     else {
                         self.core.fail();
-                        return Err(DrainError::Failed { sequence });
+                        return Err(DrainError::Failed {
+                            sequence,
+                        });
                     };
                     slot.state.store(SLOT_TAKEN, Ordering::Release);
                     self.next_sequence += 1;
@@ -844,11 +882,15 @@ impl<T> SequencedReceiver<T> {
                     summary.poisoned += 1;
                 }
                 SLOT_EMPTY | SLOT_RESERVED | SLOT_WRITING => {
-                    return Err(DrainError::HeadReserved { sequence });
+                    return Err(DrainError::HeadReserved {
+                        sequence,
+                    });
                 }
                 _ => {
                     self.core.fail();
-                    return Err(DrainError::Failed { sequence });
+                    return Err(DrainError::Failed {
+                        sequence,
+                    });
                 }
             }
         }
@@ -898,7 +940,9 @@ impl<T> Drop for SequencedReceiver<T> {
 pub(crate) fn channel<T>() -> (SequencedSender<T>, SequencedReceiver<T>) {
     let core = Arc::new(QueueCore::new());
     (
-        SequencedSender { core: core.clone() },
+        SequencedSender {
+            core: core.clone(),
+        },
         SequencedReceiver {
             core,
             next_sequence: 0,

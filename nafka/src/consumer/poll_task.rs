@@ -1,4 +1,4 @@
-//! 每 group 单 owner 线程、借用路由、严格确认与同步安全提交。
+//! 消费组各 owner 槽的独立线程、借用路由、严格确认与同步安全提交。
 
 mod handler;
 mod key_ordered;
@@ -94,7 +94,12 @@ struct RetryAttemptState {
 }
 
 /// 业务作用：整批登记尚未保存次数的失败记录，保证多 owner 共用上限且批次无部分准入。
-/// 参数说明：runtime 为共享组容量；attempts 为本槽状态；identities 为本次失败的完整坐标。
+///
+/// 参数说明：
+/// - `runtime`：为共享组容量
+/// - `attempts`：为本槽状态
+/// - `identities`：为本次失败的完整坐标。
+///
 /// 返回：全部坐标都有凭证时为 true；容量不足不改变状态。
 fn admit_retry_entries(
     runtime: &Arc<OwnerRuntime>,
@@ -122,7 +127,11 @@ fn admit_retry_entries(
 }
 
 /// 业务作用：读取逐记录投递历史，防止重试批次合并把旧失败次数转移给新输入。
-/// 参数说明：attempts 为失败账本；identity 为来源坐标。
+///
+/// 参数说明：
+/// - `attempts`：为失败账本
+/// - `identity`：为来源坐标。
+///
 /// 返回：已失败投递数与毒消息预算消耗；未失败记录均为零。
 fn retry_counts(
     attempts: &BTreeMap<(Tp, i64), RetryAttemptState>,
@@ -141,7 +150,7 @@ struct ActionContext<'a> {
     consumer: &'a ConsumerClient,
     /// group 健康快照。
     health: &'a Arc<RwLock<GroupHealth>>,
-    /// resolved group id。
+    /// 已完成命名解析的消费组标识，供失败治理与指标归属使用。
     group: &'a str,
     /// owner 控制命令接收端。
     commands: &'a std::sync::mpsc::Receiver<OwnerCommand>,
@@ -171,65 +180,125 @@ struct ActionContext<'a> {
 
 /// 可被 DLT 构造器读取的原始消息视图。
 trait DeadLetterSource {
-    /// 业务作用：返回来源 topic。
+    /// 业务作用：为 DLT 来源标识提供原始 topic，避免与目标投递 topic 混淆。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用来源名称，使用期限不超过当前消息视图。
     fn source_topic(&self) -> &str;
 
-    /// 业务作用：返回来源分区。
+    /// 业务作用：保留失败消息的来源分区，供 DLT 信封与原始消费位置关联。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：来源分区编号；不重新选择目标分区。
     fn source_partition(&self) -> i32;
 
-    /// 业务作用：返回来源 offset。
+    /// 业务作用：为 DLT 保留失败记录的精确来源位置。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：记录自身的 offset，不是下一条位置，也不表示该位置已经提交。
     fn source_offset(&self) -> i64;
 
-    /// 业务作用：返回来源时间戳。
+    /// 业务作用：让 DLT 保留原记录的 broker 时间信息。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：来源时间戳原值；缺失标记不以当前处理时间替代。
     fn source_timestamp(&self) -> i64;
 
-    /// 业务作用：返回原始 key。
+    /// 业务作用：为 DLT 保留来源 key 的字节身份与空值语义。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：原始字节借用；None 与零长度 key 保持区别，不进行文本重编码。
     fn source_key(&self) -> Option<&[u8]>;
 
-    /// 业务作用：返回原始 payload。
+    /// 业务作用：让 DLT 携带失败时的原始正文，避免再次编码改变数据。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：可空正文的字节借用，保留 tombstone 与空正文的区别。
     fn source_payload(&self) -> Option<&[u8]>;
 
-    /// 业务作用：复制原始有序 headers。
+    /// 业务作用：提供 DLT 可独立持有的来源头部，保留顺序、重复项与可空值。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：拥有型头部视图；实现可共享已持有的存储或从底层借用数据复制。
     fn source_headers(&self) -> KafkaHeaders;
 
-    /// 业务作用：返回进入 DLT 前已经发生的可信业务投递次数。
+    /// 业务作用：为尚无 handler 投递上下文的来源提供默认 DLT 投递序号。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：默认值 1；不读取外部 headers，也不代表 handler 已经成功执行一次。
     fn delivery_attempts(&self) -> u32 {
         1
     }
 }
 
 impl DeadLetterSource for RdMessage<'_> {
-    /// 业务作用：返回底层借用消息 topic。
+    /// 业务作用：在底层消息存活期间为 DLT 提供来源 topic，避免提前复制名称。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：受底层消息生命周期约束的 topic 借用。
     fn source_topic(&self) -> &str {
         self.topic()
     }
 
-    /// 业务作用：返回底层借用消息分区。
+    /// 业务作用：将底层消息的来源分区传递给 DLT 定位信息。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：broker 消息携带的分区编号，不改变消费 assignment。
     fn source_partition(&self) -> i32 {
         self.partition()
     }
 
-    /// 业务作用：返回底层借用消息 offset。
+    /// 业务作用：为借用消息的失败投递保留原始 offset。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：当前消息位置，不推进本地安全水位或 broker 提交位置。
     fn source_offset(&self) -> i64 {
         self.offset()
     }
 
-    /// 业务作用：返回底层借用消息时间戳。
+    /// 业务作用：为 DLT 保留 broker 提供的创建或日志追加时间。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：Unix 毫秒时间戳；broker 未提供时为 -1，不使用本机时间补齐。
     fn source_timestamp(&self) -> i64 {
         self.timestamp()
     }
 
-    /// 业务作用：返回底层借用消息 key。
+    /// 业务作用：从底层消息借用原始 key，供 DLT 按原字节保留消息身份。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：可空字节切片，不分配副本，不把非 UTF-8 key 转成文本。
     fn source_key(&self) -> Option<&[u8]> {
         self.key()
     }
 
-    /// 业务作用：返回底层借用消息 payload。
+    /// 业务作用：在底层借用期内提供 DLT 的原文输入，避免额外中间副本。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：原始可空正文切片；None 表示无正文，零长度切片仍是存在的正文。
     fn source_payload(&self) -> Option<&[u8]> {
         self.payload()
     }
 
-    /// 业务作用：仅在 DLT 路径复制底层 headers。
+    /// 业务作用：在 DLT 需要独立保留消息时复制底层有序头部。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：解析成功时复制名称与值并保留重复项；头名称解析失败时返回空头部。
     fn source_headers(&self) -> KafkaHeaders {
         self.headers()
             .map(|headers| owned_headers(&headers))
@@ -255,30 +324,35 @@ struct OwnedTypedMessage {
     headers: KafkaHeaders,
     /// 底层 header 名不是 UTF-8；记录必须走无效消息策略，不能进入 route handler。
     malformed_headers: bool,
-    /// 原始可空 payload。
-    payload: Option<Vec<u8>>,
+    /// 输入凭证只物化一次的原始可空正文，跨重试共享底层分配。
+    payload: Option<Arc<Vec<u8>>>,
 }
 
 impl OwnedTypedMessage {
-    /// 业务作用：在底层借用消息仍有效时立即物化有界 typed 记录。
+    /// 业务作用：在底层借用消息仍有效时取得有界 typed 记录，重取共享原有输入正文。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `message`: 已通过单记录字节上限检查的借用消息。
     /// - `parsed`: 在借用期解析的只读头描述符。
     /// - `input_permit`: 原文物化前取得且必须随数据持续保留的责任。
     ///
-    /// 返回：独立原文与其额度；额度不会因外层逻辑批结束而提前归还。
+    /// 返回：共享原文与其额度；同一凭证下正文变化为不可自动恢复的输入身份错误。
     fn copy_from(
         message: &RdMessage<'_>,
         parsed: &Result<Vec<crate::rd::consumer::RdHeaderRef<'_>>>,
         input_permit: Arc<super::capacity::RecordPermit>,
-    ) -> Self {
+    ) -> std::result::Result<Self, RdPollError> {
+        // 先复验已计费正文，再复制当前上下文；不能让重试持有任意多份正文却只占一份输入预算。
+        let payload = input_permit
+            .payload
+            .materialize(message.payload())
+            .map_err(|reason| RdPollError::Fatal(reason.into()))?;
         let (headers, malformed_headers) = match parsed {
             Ok(headers) => (owned_headers(headers), false),
             Err(_) => (KafkaHeaders::default(), true),
         };
-        Self {
+        Ok(Self {
             input_permit,
             topic: message.topic().to_owned(),
             partition: message.partition(),
@@ -287,70 +361,118 @@ impl OwnedTypedMessage {
             key: message.key().map(<[u8]>::to_vec),
             headers,
             malformed_headers,
-            payload: message.payload().map(<[u8]>::to_vec),
-        }
+            payload,
+        })
     }
 
-    /// 业务作用：返回当前消息的 topic-partition。
+    /// 业务作用：为拥有型消息建立可独立用于分区状态查询的坐标。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：复制 topic 名称并保留来源分区，不转移消息正文或其容量凭证。
     fn tp(&self) -> Tp {
         Tp::new(self.topic.clone(), self.partition)
     }
 }
 
 impl DeadLetterSource for OwnedTypedMessage {
-    /// 业务作用：返回拥有型来源 topic。
+    /// 业务作用：从有界拥有型记录提供 DLT 来源名称。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用记录持有的 topic，不再分配名称副本。
     fn source_topic(&self) -> &str {
         &self.topic
     }
 
-    /// 业务作用：返回拥有型来源分区。
+    /// 业务作用：为跨 poll 保留的消息维持原始分区身份。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：物化记录时保存的来源分区，不随当前 assignment 变化而重写。
     fn source_partition(&self) -> i32 {
         self.partition
     }
 
-    /// 业务作用：返回拥有型来源 offset。
+    /// 业务作用：让延后处理的拥有型消息仍能定位原始失败记录。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：物化时保存的真实 offset；读取不确认消费或推进提交位置。
     fn source_offset(&self) -> i64 {
         self.offset
     }
 
-    /// 业务作用：返回拥有型来源时间戳。
+    /// 业务作用：为延后构造的 DLT 保留消息接收时取得的 broker 时间戳。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：保存的 Unix 毫秒值或缺失标记 -1，不随重试更新。
     fn source_timestamp(&self) -> i64 {
         self.timestamp
     }
 
-    /// 业务作用：返回拥有型来源 key。
+    /// 业务作用：为 DLT 借用已物化的原始 key，避免重复复制。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：记录持有的可空 key 切片；保留无 key、空 key 和任意字节内容的区别。
     fn source_key(&self) -> Option<&[u8]> {
         self.key.as_deref()
     }
 
-    /// 业务作用：返回拥有型来源 payload。
+    /// 业务作用：让 DLT 读取输入额度所保护的共享正文，不生成中间副本。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：共享存储中的可空字节切片；借用结束不会提前释放记录持有的输入额度。
     fn source_payload(&self) -> Option<&[u8]> {
-        self.payload.as_deref()
+        self.payload.as_deref().map(Vec::as_slice)
     }
 
-    /// 业务作用：克隆拥有型来源 headers 供 DLT 独立持有。
+    /// 业务作用：让 DLT 独立持有已物化的有序头部，延续原始重复项与空值语义。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：共享底层存储的 KafkaHeaders 克隆，不再次复制头部字节。
     fn source_headers(&self) -> KafkaHeaders {
         self.headers.clone()
     }
 }
 
 impl DeadLetterSource for RawRecord {
-    /// 业务作用：返回已解析 typed 原始记录的 topic。
+    /// 业务作用：在 typed 处理失败后从上下文取回 DLT 来源 topic。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用原始消费上下文中的名称，不采用业务 route 名称替代。
     fn source_topic(&self) -> &str {
         &self.ctx.topic
     }
 
-    /// 业务作用：返回已解析 typed 原始记录的分区。
+    /// 业务作用：让 typed 失败记录的 DLT 来源与消费上下文保持同一分区身份。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：原始来源分区；不会根据 handler 当前状态重新分区。
     fn source_partition(&self) -> i32 {
         self.ctx.partition
     }
 
-    /// 业务作用：返回已解析 typed 原始记录的 offset。
+    /// 业务作用：在解码或业务处理失败后保留 DLT 所需的原始记录位置。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：上下文保存的真实 offset，不因重试次数或确认状态变化而改变。
     fn source_offset(&self) -> i64 {
         self.ctx.offset
     }
 
-    /// 业务作用：返回已解析 typed 原始记录的时间戳。
+    /// 业务作用：让 typed 记录的 DLT 沿用来源时间，区分消息时间与失败处理时间。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：原始 broker Unix 毫秒值或缺失标记 -1，读取不更新上下文。
     fn source_timestamp(&self) -> i64 {
         self.ctx.timestamp
     }
@@ -358,22 +480,35 @@ impl DeadLetterSource for RawRecord {
     /// 业务作用：让 DLT 保留来源 key 的完整字节身份。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：原始可空字节，不通过 UTF-8 便利视图重编码。
     fn source_key(&self) -> Option<&[u8]> {
         self.ctx.raw_key.as_deref()
     }
 
-    /// 业务作用：返回已解析 typed 原始记录的 payload。
+    /// 业务作用：为 DLT 取得 typed 解码之前的共享原文，避免重新序列化业务对象。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：原始可空正文的借用切片，不复制底层分配且保留 tombstone 语义。
     fn source_payload(&self) -> Option<&[u8]> {
-        self.payload.as_deref()
+        self.payload.as_deref().map(Vec::as_slice)
     }
 
-    /// 业务作用：克隆已解析 typed 原始记录的 headers 供 DLT 独立持有。
+    /// 业务作用：将 typed 上下文保留的原始头部交给 DLT 独立持有。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：共享已有存储的头部视图，保留原顺序、重复名称及可空值。
     fn source_headers(&self) -> KafkaHeaders {
         self.ctx.headers.clone()
     }
 
     /// 业务作用：返回 owner 在本次 handler 调用前写入的可信投递序号。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：上下文中的投递序号，不读取生产者可控制的 header，也不自行递增。
     fn delivery_attempts(&self) -> u32 {
         self.ctx.delivery_attempt
     }
@@ -395,19 +530,33 @@ enum TypedBatchItem {
 }
 
 impl TypedBatchItem {
-    /// 业务作用：返回当前项的 topic-partition。
+    /// 业务作用：统一普通记录与超限记录的分区定位，供暂停和批次回退使用。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：拥有型分区坐标；只复制名称，不为超限记录物化业务字节。
     fn tp(&self) -> Tp {
         match self {
             Self::Owned(message) => message.tp(),
-            Self::Oversize { tp, .. } => tp.clone(),
+            Self::Oversize {
+                tp,
+                ..
+            } => tp.clone(),
         }
     }
 
-    /// 业务作用：返回当前项的真实 offset。
+    /// 业务作用：在普通记录与超限记录之间统一提取回退所需的精确位置。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：来源消息自身的 offset，不假定同批记录在数值上连续。
     fn offset(&self) -> i64 {
         match self {
             Self::Owned(message) => message.offset,
-            Self::Oversize { offset, .. } => *offset,
+            Self::Oversize {
+                offset,
+                ..
+            } => *offset,
         }
     }
 }
@@ -504,13 +653,29 @@ enum PreparedTypedItem {
 
 impl PreparedTypedItem {
     /// 业务作用：返回尚未派发项的 topic-partition 与真实 offset，用于批次提前退出时回退 fetch position。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：拥有型来源坐标与该项 offset；不发起 seek，也不把尚未执行的项视为已处理。
     fn location(&self) -> (Tp, i64) {
         match self {
-            Self::ImmediateOwned { source, .. } => (source.tp(), source.offset),
-            Self::DecodeFailure { source, .. } | Self::Routed { source, .. } => {
-                (source.ctx.topic_partition(), source.ctx.offset)
+            Self::ImmediateOwned {
+                source,
+                ..
+            } => (source.tp(), source.offset),
+            Self::DecodeFailure {
+                source,
+                ..
             }
-            Self::Oversize { tp, offset, .. } => (tp.clone(), *offset),
+            | Self::Routed {
+                source,
+                ..
+            } => (source.ctx.topic_partition(), source.ctx.offset),
+            Self::Oversize {
+                tp,
+                offset,
+                ..
+            } => (tp.clone(), *offset),
         }
     }
 }
@@ -537,11 +702,13 @@ enum RestartBackoffOutcome {
 
 /// 业务作用：计算带确定性抖动的 consumer 指数重建退避。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `runtime`: 提供初始值与封顶值。
 /// - `attempt`: 当前滑动窗口内第几次自动重建，从一开始。
 /// - `seed`: resolved group 派生的稳定种子。
+///
+/// 返回：从冻结配置计算的毫秒退避；封顶作用于抖动前基值，最终时长可略高于配置最大值。
 fn restart_delay(runtime: &Arc<OwnerRuntime>, attempt: u32, seed: u64) -> Duration {
     restart_delay_values(
         runtime.config.behavior.consume_restart_delay_ms,
@@ -553,12 +720,14 @@ fn restart_delay(runtime: &Arc<OwnerRuntime>, attempt: u32, seed: u64) -> Durati
 
 /// 业务作用：用显式数值计算 consumer 指数退避，使边界计算不依赖 broker 状态。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `base`: 初始退避毫秒。
 /// - `max`: 最大退避毫秒。
 /// - `attempt`: 当前窗口内第几次重建。
 /// - `seed`: 稳定抖动种子。
+///
+/// 返回：先封顶指数基值，再施加约正负 10% 的确定性抖动；同一输入得到相同时长，最终值可超过 max。
 fn restart_delay_values(base: u64, max: u64, attempt: u32, seed: u64) -> Duration {
     let exponential = capped_exponential_delay(base, max, attempt);
     let spread = exponential / 5;
@@ -578,25 +747,29 @@ fn restart_delay_values(base: u64, max: u64, attempt: u32, seed: u64) -> Duratio
 ///
 /// `checked_shl` 只校验 shift 位数，不校验有效位被移出；必须先构造 2^shift，再用 `saturating_mul` 吸收数值溢出。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `base`: 首次退避毫秒。
 /// - `max`: 封顶毫秒。
 /// - `attempt`: 从一开始的尝试次数。
+///
+/// 返回：不超过 max 的毫秒基值；attempt 为 0 时按首次处理，乘法溢出先饱和再封顶。
 fn capped_exponential_delay(base: u64, max: u64, attempt: u32) -> u64 {
     let shift = attempt.saturating_sub(1).min(63);
     let factor = 1_u64.checked_shl(shift).unwrap_or(u64::MAX);
     base.saturating_mul(factor).min(max)
 }
 
-/// 业务作用：在滑动窗口内登记一次自动重建；先淘汰过期样本，再原子判定预算。
+/// 业务作用：由单一 owner 在滑动窗口内登记自动重建，避免持续故障导致无限重建。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `history`: 已发生自动重建的单调时钟序列。
 /// - `now`: 当前单调时钟。
 /// - `window`: 滑动窗口长度。
 /// - `budget`: 窗口内允许的自动重建次数。
+///
+/// 返回：淘汰到期样本后，有额度则追加当前时刻并返回 true；预算已满返回 false，保留未到期历史。
 fn register_restart(
     history: &mut VecDeque<Instant>,
     now: Instant,
@@ -617,11 +790,13 @@ fn register_restart(
     }
 }
 
-/// 业务作用：从非敏感稳定文本生成 FNV-1a 种子。
+/// 业务作用：按 group 身份分散自动重建退避，避免所有 group 使用相同等待时长。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `value`: resolved group id。
+/// - `value`: 完成解析后的 group 标识。
+///
+/// 返回：对 UTF-8 字节计算的稳定 FNV-1a 种子；仅用于抖动，不承担认证或保密职责。
 fn stable_text_seed(value: &str) -> u64 {
     value
         .as_bytes()
@@ -633,11 +808,13 @@ fn stable_text_seed(value: &str) -> u64 {
 
 /// 业务作用：自动重建退避期间维持 Stop/Restart 控制响应，不持有底层 consumer。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `commands`: 跨会话 owner 控制邮箱。
 /// - `health`: group 健康快照。
 /// - `delay`: 本次退避时长。
+///
+/// 返回：等待到期、已认领的显式重建、停止或邮箱关闭对应的结果；拒绝其它已认领命令，已取消命令不产生副作用。
 fn wait_restart_backoff(
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
     health: &Arc<RwLock<GroupHealth>>,
@@ -651,7 +828,7 @@ fn wait_restart_backoff(
         }
         match commands.recv_timeout(remaining.min(Duration::from_millis(100))) {
             Ok(command) if matches!(command.kind, OwnerCommandKind::Stop) => {
-                // 同上：被取消的 Stop 不得产生"停止 owner"这个副作用。
+                // 必须先取得命令执行权；排队期间已取消的 Stop 不能关闭 owner。
                 if !OwnerHandle::begin_command(&command) {
                     continue;
                 }
@@ -683,7 +860,7 @@ fn wait_restart_backoff(
 
 /// 业务作用：owner 线程主循环。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `runtime`: 所属运行时。
 /// - `plan`: 冻结 group 计划。
@@ -692,6 +869,8 @@ fn wait_restart_backoff(
 /// - `startup_gate`: 同一启动批次的统一放行门。
 /// - `startup_reply`: owner 本地 consumer 构造结果。
 /// - `global_error`: 与 supervisor 共享的 broker 级错误单槽,跨会话重建复用。
+///
+/// 返回：本地构造失败、启动取消、停止或控制端断开时退出；临时失败按预算重建，崩溃或预算耗尽时等待显式恢复，重建前撤销 Ready 并等待旧业务实际退出。
 pub(crate) fn run_owner(
     runtime: Arc<OwnerRuntime>,
     mut plan: GroupPlan,
@@ -787,13 +966,8 @@ pub(crate) fn run_owner(
         let exit = match session {
             Ok(exit) => exit,
             Err(payload) => {
-                let detail = if let Some(value) = payload.downcast_ref::<&str>() {
-                    (*value).to_owned()
-                } else if let Some(value) = payload.downcast_ref::<String>() {
-                    value.clone()
-                } else {
-                    "非字符串 panic payload".into()
-                };
+                // 会话异常原因会进入公开健康状态，不保留可能含业务原文的 panic payload。
+                let detail = crate::consumer::erased::panic_message(payload);
                 update_state(
                     &health,
                     GroupState::Crashed,
@@ -867,15 +1041,13 @@ pub(crate) fn run_owner(
 
 /// 业务作用：在 registry/assign 原子登记 owner 前等待统一放行，并保持 Stop 命令可响应。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `commands`: owner 控制命令接收端。
 /// - `health`: 共享健康快照。
 /// - `startup_gate`: 同一启动批次的共享门。
 ///
-/// # 返回
-///
-/// 门已打开时返回 true；启动取消、Stop 或发送端断开时返回 false。
+/// 返回：门已打开时返回 true；启动取消、Stop 或发送端断开时返回 false。
 fn wait_startup_gate(
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
     health: &Arc<RwLock<GroupHealth>>,
@@ -911,21 +1083,21 @@ fn wait_startup_gate(
 }
 
 /// 业务作用：构造并运行一次底层 consumer 会话，退出后把 owner 控制邮箱留给后续会话。
+/// DLT 交付或准入仍待完成时按维护节奏复验；空闲取消息仍使用配置的等待预算。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `runtime`: 所属运行时与冻结配置。
+/// - `runtime_ref`: 所属运行时与冻结配置，派发及资源额度在会话间共享。
 /// - `plan`: group 路由计划；动态订阅会更新其中的 mode。
 /// - `commands`: 跨会话保留的有界控制命令接收端。
-/// - `health`: 跨会话保留的健康快照。
+/// - `health_ref`: 跨会话保留的健康快照。
+/// - `attempts`: 跨会话保留的分区记录重试责任，由失权或显式恢复路径清理。
 /// - `initial_consumer`: 首次会话由 startup handshake 预先构造的 consumer；后续重建为 None。
 /// - `epoch_base`: 跨会话递增的消费世代基线。
 /// - `global_error`: 跨会话共享的最近错误单槽。
 /// - `fixed_offsets`: 固定分配已经解析、定位或确认提交的跨会话恢复坐标。
 ///
-/// # 返回
-///
-/// 返回本次会话的退出原因，由 owner 决定停止、重建或保持故障状态。
+/// 返回：本次会话的退出原因，由 owner 决定停止、重建或保持故障状态。
 #[allow(clippy::too_many_arguments)] // 启动握手、控制邮箱、故障证据和恢复坐标分别承担跨会话责任。
 fn run_owner_session(
     runtime_ref: &Arc<OwnerRuntime>,
@@ -962,7 +1134,11 @@ fn run_owner_session(
         return OwnerSessionExit::Stopped;
     }
     // 固定分配先取得完整组范围，不能在原生 assign 后才发现超限并留下可派发窗口。
-    if let OwnerMode::Assign { partitions, .. } = &plan.mode {
+    if let OwnerMode::Assign {
+        partitions,
+        ..
+    } = &plan.mode
+    {
         if let Err(actual) = runtime.metadata.assign(runtime.slot, partitions) {
             return classify_session_error(
                 &health,
@@ -986,8 +1162,13 @@ fn run_owner_session(
     update_state(&health, GroupState::Joining, None);
 
     let mut assignment = match &plan.mode {
-        OwnerMode::Assign { partitions, .. } => partitions.clone(),
-        OwnerMode::Subscribe { .. } => Vec::new(),
+        OwnerMode::Assign {
+            partitions,
+            ..
+        } => partitions.clone(),
+        OwnerMode::Subscribe {
+            ..
+        } => Vec::new(),
     };
     let mut assignment_epoch = if assignment.is_empty() {
         0
@@ -1210,7 +1391,9 @@ fn run_owner_session(
                 OwnerCommandKind::Subscribe { .. } | OwnerCommandKind::Unsubscribe
             ) {
                 match &plan.mode {
-                    OwnerMode::Subscribe { topics } => Some(topics.clone()),
+                    OwnerMode::Subscribe {
+                        topics,
+                    } => Some(topics.clone()),
                     _ => None,
                 }
             } else {
@@ -1318,7 +1501,7 @@ fn run_owner_session(
             } else {
                 // 容量没释放时保持门禁可见：上面那些路径可能已经把 state 改回 Running。
                 if !progress.has_pending_gap() {
-                    // 规则 5：满、无可提交前沿、也没有任何已知空洞 → 框架不变量破坏。
+                    // 进度已满却没有安全前沿或待完成空洞，说明本地责任状态不一致。
                     // 这里不能静默空转，必须变成运维可见且可 restart_group 的状态。
                     update_state(
                         &health,
@@ -1344,13 +1527,20 @@ fn run_owner_session(
                 continue;
             }
         }
+        // DLT 交付和额度恢复在原生消息队列外完成；以维护节奏复验未完成责任，
+        // 避免已暂停分区的取消息等待延后安全提交和分区恢复。
+        let input_wait = if dlt_pending.is_empty() && dlt_admission.is_empty() {
+            poll_timeout
+        } else {
+            poll_cadence
+        };
         if !plan.typed.is_empty() {
             let local_work = key_completions.has_active() || !queued_typed.is_empty();
             // 本地已有输入或调用时只做非阻塞 native 维护，完成票据唤醒后及时收割，不给每条业务附加网络等待。
             let wait = if local_work {
                 Duration::ZERO
             } else {
-                poll_timeout
+                input_wait
             };
             // 连续完成独立推进；网络维护按有界周期进行，让已接纳输入在下一次拉取前获得释放额度的机会。
             let polled = !local_work || last_typed_poll.elapsed() >= poll_cadence;
@@ -1537,7 +1727,7 @@ fn run_owner_session(
             }
             continue;
         }
-        let message = match consumer.poll(poll_timeout) {
+        let message = match consumer.poll(input_wait) {
             Ok(message) => message,
             Err(RdPollError::Transient(error)) => {
                 update_state(&health, GroupState::Recovering, Some(error.clone()));
@@ -1682,7 +1872,10 @@ fn run_owner_session(
             ActionFlow::StopOwner => stopping = true,
             // 单消息(passthrough)路径同样要回退触发记录：它没有进入 progress，
             // 若不 seek 回去，门禁解除后就从下一条继续，安全前沿会把它提交越过。
-            ActionFlow::StopBatch { tp, offset } => {
+            ActionFlow::StopBatch {
+                tp,
+                offset,
+            } => {
                 let _ = consumer.seek_offsets(&BTreeMap::from([(tp.clone(), offset)]));
                 progress_gate_trigger = Some(tp);
             }
@@ -1754,14 +1947,12 @@ fn run_owner_session(
 
 /// 业务作用：在 Crashed 状态只接受 Restart 或 Stop，避免其他控制操作获得虚假成功。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `commands`: 保留下来的 owner 控制邮箱。
 /// - `health`: 当前 Crashed 健康快照。
 ///
-/// # 返回
-///
-/// 收到有效 Restart 时返回 true；Stop 或发送端断开时返回 false。
+/// 返回：收到有效 Restart 时返回 true；Stop 或发送端断开时返回 false。
 fn wait_for_crashed_command(
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
     health: &Arc<RwLock<GroupHealth>>,
@@ -1795,27 +1986,32 @@ fn wait_for_crashed_command(
 
 /// 业务作用：初始化 subscribe 或固定 assign。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `consumer`: owner 唯一 consumer。
 /// - `mode`: 冻结订阅方式。
 /// - `auto_offset_reset`: fixed Committed 无历史位点时的回退策略。
 ///
-/// # 错误
-///
-/// 底层订阅或 assign 失败时返回错误。
+/// 返回：空订阅执行取消订阅，其余按模式初始化；分区与起始表不一致或底层操作失败时返回错误。成功只表示初始化操作完成，不发布 Ready。
 fn initialize_owner(
     consumer: &ConsumerClient,
     mode: &OwnerMode,
     auto_offset_reset: &str,
 ) -> Result<()> {
     match mode {
-        OwnerMode::Subscribe { topics } if topics.is_empty() => {
+        OwnerMode::Subscribe {
+            topics,
+        } if topics.is_empty() => {
             consumer.unsubscribe();
             Ok(())
         }
-        OwnerMode::Subscribe { topics } => consumer.subscribe(topics),
-        OwnerMode::Assign { partitions, starts } => {
+        OwnerMode::Subscribe {
+            topics,
+        } => consumer.subscribe(topics),
+        OwnerMode::Assign {
+            partitions,
+            starts,
+        } => {
             if partitions.len() != starts.len()
                 || partitions.iter().any(|tp| !starts.contains_key(tp))
             {
@@ -1830,11 +2026,13 @@ fn initialize_owner(
 
 /// 业务作用：把 consumer 构造/初始化错误集中映射为会话退出分类。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `health`: group 健康快照。
-/// - `group`: resolved group id。
+/// - `group`: 完成解析的消费组标识，用于补充非 broker 错误的归属。
 /// - `error`: 公共错误域中的底层初始化错误。
+///
+/// 返回：Broker 错误发布 Recovering 并允许外层预算控制的重建；其它错误发布 Crashed 并等待显式恢复。
 fn classify_session_error(
     health: &Arc<RwLock<GroupHealth>>,
     group: &str,
@@ -1845,7 +2043,10 @@ fn classify_session_error(
             update_state(health, GroupState::Recovering, Some(message.clone()));
             OwnerSessionExit::Transient(message)
         }
-        NafkaError::GroupFatal { message, .. } => {
+        NafkaError::GroupFatal {
+            message,
+            ..
+        } => {
             update_state(health, GroupState::Crashed, Some(message));
             OwnerSessionExit::Crashed
         }
@@ -1857,18 +2058,16 @@ fn classify_session_error(
     }
 }
 
-/// 业务作用：启动延迟期间维持命令响应和 consumer 心跳。
+/// 业务作用：订阅或分配之前执行启动延迟，期间维护 consumer 并允许停止请求打断等待。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
+/// - `consumer`: 尚未初始化订阅或分配的 owner 消费者。
 /// - `commands`: 命令队列。
 /// - `health`: 健康快照。
 /// - `delay`: 延迟时长。
 ///
-/// # 返回
-///
-/// 收到 Stop 时返回 false。
+/// 返回：认领 Stop 后回复并返回 false，到期返回 true；其它命令拒绝，poll 错误不在此阶段传播，最近 poll 时刻不证明 broker 健康。
 fn delay_with_commands(
     consumer: &ConsumerClient,
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
@@ -1901,23 +2100,22 @@ fn delay_with_commands(
     true
 }
 
-/// 业务作用：拉取一次有界 typed 逻辑批：首条等待，后续使用零等待 drain。
+/// 业务作用：收集受输入额度约束的 typed 逻辑批；已有入批项时用零等待继续拉取。
 ///
 /// 达到字节上限时，已经被底层返回但尚未复制的边界记录会立即 seek 回原 offset，留给下一批；
 /// 因而 owner 不需要持有一个额外的超上限 lookahead。
 ///
-/// # 参数说明
+/// 参数说明：
 ///
 /// - `consumer`: owner 唯一 consumer。
 /// - `runtime`: 提供记录数、字节数与单记录上限。
 /// - `health`: 最近 poll 时间的健康快照。
 /// - `first_timeout`: 首条消息最长等待时间。
 /// - `queued`: 已跨 poll 保留的输入；确实取到新记录后才建立身份索引，维护回退后不重复物化原文。
-/// - `progress`、`assignment_epoch`: 当前处理证据及其派发权威，用于排除已经安全处理的重复 fetch。
+/// - `progress`: 当前分区的安全处理证据，用于排除维护回退带来的已处理记录。
+/// - `assignment_epoch`: 本会话当前派发代次，防止复用失权后的处理证据。
 ///
-/// # 返回
-///
-/// 返回受记录数和字节数约束的输入批；poll、边界 seek 或字节计量失败时返回错误。
+/// 返回：有界输入批，首条合法记录可超过批字节软上限；超限记录仅保留坐标。poll、边界 seek、字节溢出或原文身份复验失败时返回错误。
 fn collect_typed_batch(
     consumer: &ConsumerClient,
     runtime: &Arc<OwnerRuntime>,
@@ -2031,7 +2229,7 @@ fn collect_typed_batch(
                 .items
                 .push(TypedBatchItem::Owned(OwnedTypedMessage::copy_from(
                     &message, &headers, permit,
-                )));
+                )?));
             // 此处尚未跨过下一条原生记录：额度趋满时先处理当前批，避免仅因预取过快而回退并重复解压。
             // 这只是批次收口提示，周期性 poll 仍继续，其它 key/分区的实际准入始终重新检查各层额度。
             if !runtime.records.may_accept_similar(
@@ -2053,18 +2251,16 @@ fn collect_typed_batch(
 
 /// 业务作用：执行一个通过 fencing 的 owner 控制命令。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
+/// - `consumer`: 本 owner 独占的底层消费者，执行副作用前再次复验分区权威。
 /// - `mode`: 当前订阅方式，动态 subscribe 会替换它。
 /// - `attempts`: owner 本地失败尝试表，seek/restart 时清理。
 /// - `health`: 健康快照。
 /// - `auto_offset_reset`: fixed Committed 重启时的无位点回退策略。
 /// - `command`: 命令信封。
 ///
-/// # 返回
-///
-/// Stop 命令返回 true。
+/// 返回：已执行 Stop 返回 true，其余返回 false；操作结果通过命令回执交付，权威变化时拒绝，不自动改投其它 owner。
 fn execute_command(
     consumer: &ConsumerClient,
     mode: &mut OwnerMode,
@@ -2085,44 +2281,52 @@ fn execute_command(
             update_state(health, GroupState::Stopping, None);
             Ok(CommandReply::Unit)
         }
-        OwnerCommandKind::Seek { offsets } => consumer.seek_control_offsets(offsets).map(|()| {
+        OwnerCommandKind::Seek {
+            offsets,
+        } => consumer.seek_control_offsets(offsets).map(|()| {
             clear_attempts(attempts, offsets.keys());
             clear_operator_pauses(consumer, health, offsets.keys());
             CommandReply::Unit
         }),
-        OwnerCommandKind::SeekBeginning { tps } => {
-            consumer.seek_special(tps, StartOffset::Earliest).map(|()| {
-                clear_attempts(attempts, tps.iter());
-                clear_operator_pauses(consumer, health, tps.iter());
-                CommandReply::Unit
-            })
-        }
-        OwnerCommandKind::SeekEnd { tps } => {
-            consumer.seek_special(tps, StartOffset::Latest).map(|()| {
-                clear_attempts(attempts, tps.iter());
-                clear_operator_pauses(consumer, health, tps.iter());
-                CommandReply::Unit
-            })
-        }
+        OwnerCommandKind::SeekBeginning {
+            tps,
+        } => consumer.seek_special(tps, StartOffset::Earliest).map(|()| {
+            clear_attempts(attempts, tps.iter());
+            clear_operator_pauses(consumer, health, tps.iter());
+            CommandReply::Unit
+        }),
+        OwnerCommandKind::SeekEnd {
+            tps,
+        } => consumer.seek_special(tps, StartOffset::Latest).map(|()| {
+            clear_attempts(attempts, tps.iter());
+            clear_operator_pauses(consumer, health, tps.iter());
+            CommandReply::Unit
+        }),
         // Committed 必须先查 broker 再 seek 绝对 offset：框架强制关闭本地 offset store
         //，底层 Offset::Stored 在本框架下恒为空。
-        OwnerCommandKind::SeekCommitted { tps } => {
-            consumer.seek_to_committed(tps, "none").map(|()| {
-                clear_attempts(attempts, tps.iter());
-                clear_operator_pauses(consumer, health, tps.iter());
-                CommandReply::Unit
-            })
-        }
-        OwnerCommandKind::SeekTimestamp { times } => consumer.seek_times(times).map(|()| {
+        OwnerCommandKind::SeekCommitted {
+            tps,
+        } => consumer.seek_to_committed(tps, "none").map(|()| {
+            clear_attempts(attempts, tps.iter());
+            clear_operator_pauses(consumer, health, tps.iter());
+            CommandReply::Unit
+        }),
+        OwnerCommandKind::SeekTimestamp {
+            times,
+        } => consumer.seek_times(times).map(|()| {
             clear_attempts(attempts, times.keys());
             clear_operator_pauses(consumer, health, times.keys());
             CommandReply::Unit
         }),
-        OwnerCommandKind::Pause { tps } => consumer.pause(tps).map(|targets| {
+        OwnerCommandKind::Pause {
+            tps,
+        } => consumer.pause(tps).map(|targets| {
             set_user_paused(health, &targets, true);
             CommandReply::Unit
         }),
-        OwnerCommandKind::Resume { tps } => {
+        OwnerCommandKind::Resume {
+            tps,
+        } => {
             let requested = if tps.is_empty() {
                 consumer.assignment()
             } else {
@@ -2137,10 +2341,17 @@ fn execute_command(
                 })
             })
         }
-        OwnerCommandKind::Position { tps } => consumer.position(tps).map(CommandReply::Positions),
+        OwnerCommandKind::Position {
+            tps,
+        } => consumer.position(tps).map(CommandReply::Positions),
         OwnerCommandKind::Assignment => consumer.assignment().map(CommandReply::Assignment),
-        OwnerCommandKind::Subscribe { topics, change } => match mode {
-            OwnerMode::Subscribe { topics: current } => {
+        OwnerCommandKind::Subscribe {
+            topics,
+            change,
+        } => match mode {
+            OwnerMode::Subscribe {
+                topics: current,
+            } => {
                 use super::supervisor::SubscriptionChange;
                 let mut desired: BTreeSet<String> = current.iter().cloned().collect();
                 match change {
@@ -2168,19 +2379,25 @@ fn execute_command(
                     })
                 }
             }
-            OwnerMode::Assign { .. } => Err(NafkaError::Lifecycle(
+            OwnerMode::Assign {
+                ..
+            } => Err(NafkaError::Lifecycle(
                 "固定 assign group 不支持 subscribe_group".into(),
             )),
         },
         OwnerCommandKind::Unsubscribe => match mode {
-            OwnerMode::Subscribe { topics } => {
+            OwnerMode::Subscribe {
+                topics,
+            } => {
                 consumer.unsubscribe();
                 topics.clear();
                 attempts.clear();
                 invalidate_subscription_health(health, true);
                 Ok(CommandReply::Unit)
             }
-            OwnerMode::Assign { .. } => Err(NafkaError::Lifecycle(
+            OwnerMode::Assign {
+                ..
+            } => Err(NafkaError::Lifecycle(
                 "固定 assign group 不支持 unsubscribe_group".into(),
             )),
         },
@@ -2212,7 +2429,11 @@ fn execute_command(
 }
 
 /// 业务作用：订阅控制成功后先撤销旧 Ready，再交付控制回执。
-/// 参数说明：health 为共享快照，empty 表示已退订全部 topic。
+///
+/// 参数说明：
+/// - `health`：为共享快照
+/// - `empty`：表示已退订全部 topic。
+///
 /// 返回：旧分配不再满足接流量条件；后续原生分配事件才能重新开放。
 fn invalidate_subscription_health(health: &Arc<RwLock<GroupHealth>>, empty: bool) {
     // native 接受订阅意图不等于完成 join；旧快照不能在控制成功后继续授权接流量。
@@ -2232,7 +2453,7 @@ fn invalidate_subscription_health(health: &Arc<RwLock<GroupHealth>>, empty: bool
 /// 全部拒绝理由必须集中在这里： 的契约是"返回错误即未执行"，因此裁决必须早于
 /// commit、cancel_retry_states、cancel_dlt_states 和 progress.clear() 这些破坏性动作。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `kind`: 待执行命令。
 /// - `mode`: 当前订阅方式；固定 assign 不接受动态订阅命令。
@@ -2240,9 +2461,7 @@ fn invalidate_subscription_health(health: &Arc<RwLock<GroupHealth>>, empty: bool
 /// - `pending`: 已准入的每分区 DLT worker。
 /// - `admission`: 各分区的 DLT 准入等待。
 ///
-/// # 返回
-///
-/// 可以执行时返回 `None`；否则返回应原样回给调用方的错误。
+/// 返回：可以执行时返回 `None`；否则返回应原样回给调用方的错误。
 fn command_admission_error(
     kind: &OwnerCommandKind,
     mode: &OwnerMode,
@@ -2256,9 +2475,11 @@ fn command_admission_error(
         ));
     }
     match kind {
-        OwnerCommandKind::Subscribe { .. } if matches!(mode, OwnerMode::Assign { .. }) => Some(
-            NafkaError::Lifecycle("固定 assign group 不支持 subscribe_group".into()),
-        ),
+        OwnerCommandKind::Subscribe {
+            ..
+        } if matches!(mode, OwnerMode::Assign { .. }) => Some(NafkaError::Lifecycle(
+            "固定 assign group 不支持 subscribe_group".into(),
+        )),
         OwnerCommandKind::Unsubscribe if matches!(mode, OwnerMode::Assign { .. }) => Some(
             NafkaError::Lifecycle("固定 assign group 不支持 unsubscribe_group".into()),
         ),
@@ -2279,7 +2500,12 @@ fn command_admission_error(
 }
 
 /// 业务作用：阻止组级路由后的命令作用于已经转移的分区或后来的 assignment。
-/// 参数说明：consumer 为唯一 native owner；health 为本槽观测；command 为带入队代次的命令。
+///
+/// 参数说明：
+/// - `consumer`：为唯一 native owner
+/// - `health`：为本槽观测
+/// - `command`：为带入队代次的命令。
+///
 /// 返回：权威和归属都匹配时 None，否则返回确定未执行，不向其它槽自动重试。
 fn command_epoch_error(
     consumer: &ConsumerClient,
@@ -2306,20 +2532,33 @@ fn command_epoch_error(
 
 /// 业务作用：判断 seek 是否会覆盖尚未得到 durability-first 终态的 DLT 分区。
 ///
+/// 参数说明：
 /// - `kind`: 待执行控制命令；只检查五种 seek。
 /// - `pending`: 已准入并由 worker 投递的 DLT。
 /// - `admission`: 尚在等待源级 permit 的各分区 DLT。
+///
+/// 返回：目标与在途或等待准入的 DLT 重叠时为 true；空目标按全部分区判断，非 seek 命令为 false。
 fn seek_conflicts_with_dlt(
     kind: &OwnerCommandKind,
     pending: &BTreeMap<Tp, PendingDlt>,
     admission: &BTreeMap<Tp, PendingDltAdmission>,
 ) -> bool {
     let targets = match kind {
-        OwnerCommandKind::Seek { offsets } => Some(offsets.keys().collect::<BTreeSet<_>>()),
-        OwnerCommandKind::SeekBeginning { tps }
-        | OwnerCommandKind::SeekEnd { tps }
-        | OwnerCommandKind::SeekCommitted { tps } => Some(tps.iter().collect::<BTreeSet<_>>()),
-        OwnerCommandKind::SeekTimestamp { times } => Some(times.keys().collect::<BTreeSet<_>>()),
+        OwnerCommandKind::Seek {
+            offsets,
+        } => Some(offsets.keys().collect::<BTreeSet<_>>()),
+        OwnerCommandKind::SeekBeginning {
+            tps,
+        }
+        | OwnerCommandKind::SeekEnd {
+            tps,
+        }
+        | OwnerCommandKind::SeekCommitted {
+            tps,
+        } => Some(tps.iter().collect::<BTreeSet<_>>()),
+        OwnerCommandKind::SeekTimestamp {
+            times,
+        } => Some(times.keys().collect::<BTreeSet<_>>()),
         _ => return false,
     };
     let targets = targets.expect("seek 分支必须提供目标集合");
@@ -2330,10 +2569,12 @@ fn seek_conflicts_with_dlt(
 
 /// 业务作用：清理指定分区的本地失败尝试状态。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `attempts`: owner 尝试表。
 /// - `tps`: 已被 operator 改变位置的分区。
+///
+/// 返回：移除指定分区全部 offset 的尝试记录，其它分区保留；空目标不清理任何条目。
 fn clear_attempts<'a>(
     attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     tps: impl IntoIterator<Item = &'a Tp>,
@@ -2342,13 +2583,15 @@ fn clear_attempts<'a>(
     attempts.retain(|(tp, _), _| !targets.contains(tp));
 }
 
-/// 业务作用：operator seek 后移除框架安全暂停，并在没有 User 原因时恢复底层分区。
+/// 业务作用：显式定位成功后清除目标分区的框架暂停原因，保留用户暂停意图。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
+/// - `consumer`: 执行底层恢复请求的 owner 消费者。
 /// - `health`: 健康快照。
 /// - `tps`: 已显式改变位置的分区。
+///
+/// 返回：先更新暂停快照，再对无剩余原因的目标请求 resume；底层错误不传播，本地原因清除不证明恢复成功。
 fn clear_operator_pauses<'a>(
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
@@ -2371,13 +2614,15 @@ fn clear_operator_pauses<'a>(
     let _ = consumer.resume(&resumable);
 }
 
-/// 业务作用：只返回移除 User 原因后没有任何框架暂停原因的分区。
+/// 业务作用：筛选用户恢复请求可作用的分区，避免绕过框架保护暂停。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
+/// - `consumer`: 用于空目标时查询当前 assignment 的消费者。
 /// - `health`: 健康快照。
 /// - `requested`: 调用方目标；空列表表示当前 assignment。
+///
+/// 返回：不存在 User 之外暂停原因的候选列表；assignment 查询失败时为空。只筛选，不清除原因或执行 resume。
 fn resumable_user_targets(
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
@@ -2407,10 +2652,12 @@ fn resumable_user_targets(
 /// 内部 epoch 只用于同一底层会话内的 fencing，随 consumer 重建从 0 起；
 /// 对外快照必须单调，否则调用方无法区分"同一 assignment"与"重建后的新 generation"。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `base`: 本 owner 线程累积的基线。
 /// - `session_epoch`: 当前会话内 epoch。
+///
+/// 返回：累积基线与会话代次的饱和值，并立即更新基线以避免异常退出后的倒退；达到 u64 上限后不再保证严格递增。
 fn external_epoch(base: &std::sync::atomic::AtomicU64, session_epoch: u64) -> u64 {
     let value = base
         .load(std::sync::atomic::Ordering::Acquire)
@@ -2424,13 +2671,17 @@ fn external_epoch(base: &std::sync::atomic::AtomicU64, session_epoch: u64) -> u6
 /// group 仪表重采样间隔，限制标签快照与指标队列准入的频率。
 const GAUGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// 业务作用：发布一次真实 assign 后的健康与 ready 快照。
+/// 业务作用：在调用方完成分配初始化与后续 poll 后发布本槽 Ready 权威。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `health`: group 健康快照。
+/// - `runtime`: 负责聚合与导出健康仪表的运行时。
+/// - `group`: 本槽所属消费组标识。
+/// - `health`: 本槽共享健康快照。
 /// - `assignment`: callback 或固定 assign 给出的分区。
 /// - `epoch`: 本次 assignment epoch。
+///
+/// 返回：锁内写入分配、Ready 代次与 Running 状态，解锁后发布指标；本函数不另行访问 broker 验证在线状态。
 fn publish_assignment_health(
     runtime: &Arc<OwnerRuntime>,
     group: &str,
@@ -2465,7 +2716,7 @@ fn publish_assignment_health(
 /// - `paused_partitions` 数的是**分区数**不是暂停行数：同一分区可同时挂
 ///   `User` 与 `Halt` 两行，按行数会翻倍。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `runtime`: 指标出口。
 /// - `group`: group.id 标签。
@@ -2492,7 +2743,7 @@ fn publish_health_gauges(
 /// - `group`: 失去会话权威的消费组。
 /// - `health`: 跨会话共享的 group 健康状态。
 ///
-/// 返回：无；只在实际调用已排空后清除旧 assignment 与容量观测。
+/// 返回：清除旧 assignment、Ready 代次及调用容量观测，再发布仪表；不等待实际调用退出，会话结束路径必须另行排空资源。
 fn invalidate_ready_snapshot(
     runtime: &Arc<OwnerRuntime>,
     group: &str,
@@ -2515,9 +2766,12 @@ fn invalidate_ready_snapshot(
 
 /// 业务作用：把跨 rebalance/会话保留的 User/Halt 事实重新下发到底层 consumer。
 ///
+/// 参数说明：
 /// - `consumer`: 当前新建或刚完成 assignment 的 owner consumer。
 /// - `health`: 保存 operator 暂停事实的共享快照。
 /// - `assignment`: 当前实际拥有的分区；不向已 revoke 分区下发 pause。
+///
+/// 返回：对当前分配中仍有 User/Halt 原因的分区请求 pause；空目标不调用底层，失败不传播且不删除本地暂停事实。
 fn reapply_persistent_pauses(
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
@@ -2543,10 +2797,10 @@ fn reapply_persistent_pauses(
 
 /// 业务作用：应用 owner mailbox 中的一次实际 rebalance 结果。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
-/// - `group`: resolved group id。
+/// - `consumer`: 执行分配位置初始化、暂停和恢复的底层消费者。
+/// - `group`: 完成解析的消费组标识，用于诊断与指标归属。
 /// - `runtime`: 冻结配置来源。
 /// - `health`: group 健康快照。
 /// - `assignment`: owner 当前 assignment。
@@ -2559,9 +2813,7 @@ fn reapply_persistent_pauses(
 /// - `pending_ready_epoch`: assignment 后等待一次 position 初始化 poll 的 epoch。
 /// - `event`: callback 合并事件。
 ///
-/// # 返回
-///
-/// assignment 超限等致命错误时返回 false。
+/// 返回：分配容量、起点解析或恢复基线失败时发布 Crashed 并返回 false；其余更新权威与责任后返回 true，新 Ready 留待后续 poll，协调错误则进入 Degraded。
 #[allow(clippy::too_many_arguments)]
 fn apply_rebalance(
     consumer: &ConsumerClient,
@@ -2800,9 +3052,11 @@ fn apply_rebalance(
 
 /// 业务作用：判断控制命令是否会让当前本地 progress 失效。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `kind`: 待执行命令。
+///
+/// 返回：停止、定位、订阅变更或重建返回 true，要求调用方先处理安全提交与旧责任；查询、暂停和恢复返回 false。
 fn command_invalidates_progress(kind: &OwnerCommandKind) -> bool {
     matches!(
         kind,
@@ -2820,11 +3074,14 @@ fn command_invalidates_progress(kind: &OwnerCommandKind) -> bool {
 
 /// 业务作用：控制命令改变 position/assignment 前清理其覆盖范围内的退避状态。
 ///
-/// # 参数
+/// 参数说明：
 ///
+/// - `consumer`: 对解除全部暂停原因的分区请求底层恢复。
 /// - `health`: group 健康快照。
 /// - `retries`: owner 每分区退避表。
 /// - `kind`: 即将执行的控制命令。
+///
+/// 返回：定位命令只清理所列目标，停止或订阅重建清理全部，其它命令不变；清除 RetryBackoff 后尽力恢复底层，保留其它暂停原因。
 fn cancel_retry_states(
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
@@ -2832,24 +3089,36 @@ fn cancel_retry_states(
     kind: &OwnerCommandKind,
 ) {
     let targets = match kind {
-        OwnerCommandKind::Seek { offsets } => {
-            Some(offsets.keys().cloned().collect::<BTreeSet<_>>())
+        OwnerCommandKind::Seek {
+            offsets,
+        } => Some(offsets.keys().cloned().collect::<BTreeSet<_>>()),
+        OwnerCommandKind::SeekBeginning {
+            tps,
         }
-        OwnerCommandKind::SeekBeginning { tps }
-        | OwnerCommandKind::SeekEnd { tps }
-        | OwnerCommandKind::SeekCommitted { tps } => {
-            Some(tps.iter().cloned().collect::<BTreeSet<_>>())
+        | OwnerCommandKind::SeekEnd {
+            tps,
         }
-        OwnerCommandKind::SeekTimestamp { times } => {
-            Some(times.keys().cloned().collect::<BTreeSet<_>>())
-        }
+        | OwnerCommandKind::SeekCommitted {
+            tps,
+        } => Some(tps.iter().cloned().collect::<BTreeSet<_>>()),
+        OwnerCommandKind::SeekTimestamp {
+            times,
+        } => Some(times.keys().cloned().collect::<BTreeSet<_>>()),
         OwnerCommandKind::Stop
-        | OwnerCommandKind::Subscribe { .. }
+        | OwnerCommandKind::Subscribe {
+            ..
+        }
         | OwnerCommandKind::Unsubscribe
         | OwnerCommandKind::Restart => None,
-        OwnerCommandKind::Pause { .. }
-        | OwnerCommandKind::Resume { .. }
-        | OwnerCommandKind::Position { .. }
+        OwnerCommandKind::Pause {
+            ..
+        }
+        | OwnerCommandKind::Resume {
+            ..
+        }
+        | OwnerCommandKind::Position {
+            ..
+        }
         | OwnerCommandKind::Assignment => return,
     };
     let cancelled = match &targets {
@@ -2879,12 +3148,16 @@ fn cancel_retry_states(
 
 /// 业务作用：position/assignment 控制命令覆盖旧处理事实前取消对应 DLT worker 与 local pending。
 ///
-/// # 参数
+/// 参数说明：
 ///
+/// - `_runtime`: 所属运行时的借用；当前清理不读写其资源或额度。
+/// - `consumer`: 对解除全部暂停原因的分区请求底层恢复。
 /// - `health`: group 健康快照。
 /// - `pending`: 已准入的每分区 DLT worker。
 /// - `admission`: owner-local 准入任务。
 /// - `kind`: 即将执行的控制命令。
+///
+/// 返回：撤销目标任务的新发送资格并移除本地等待，尽力解除对应底层暂停；已发送请求仍持有额度到真实终态，Stop 不在此处取消 DLT。
 fn cancel_dlt_states(
     _runtime: &OwnerRuntime,
     consumer: &ConsumerClient,
@@ -2894,24 +3167,36 @@ fn cancel_dlt_states(
     kind: &OwnerCommandKind,
 ) {
     let targets = match kind {
-        OwnerCommandKind::Seek { offsets } => {
-            Some(offsets.keys().cloned().collect::<BTreeSet<_>>())
+        OwnerCommandKind::Seek {
+            offsets,
+        } => Some(offsets.keys().cloned().collect::<BTreeSet<_>>()),
+        OwnerCommandKind::SeekBeginning {
+            tps,
         }
-        OwnerCommandKind::SeekBeginning { tps }
-        | OwnerCommandKind::SeekEnd { tps }
-        | OwnerCommandKind::SeekCommitted { tps } => {
-            Some(tps.iter().cloned().collect::<BTreeSet<_>>())
+        | OwnerCommandKind::SeekEnd {
+            tps,
         }
-        OwnerCommandKind::SeekTimestamp { times } => {
-            Some(times.keys().cloned().collect::<BTreeSet<_>>())
+        | OwnerCommandKind::SeekCommitted {
+            tps,
+        } => Some(tps.iter().cloned().collect::<BTreeSet<_>>()),
+        OwnerCommandKind::SeekTimestamp {
+            times,
+        } => Some(times.keys().cloned().collect::<BTreeSet<_>>()),
+        OwnerCommandKind::Subscribe {
+            ..
         }
-        OwnerCommandKind::Subscribe { .. }
         | OwnerCommandKind::Unsubscribe
         | OwnerCommandKind::Restart => None,
         OwnerCommandKind::Stop
-        | OwnerCommandKind::Pause { .. }
-        | OwnerCommandKind::Resume { .. }
-        | OwnerCommandKind::Position { .. }
+        | OwnerCommandKind::Pause {
+            ..
+        }
+        | OwnerCommandKind::Resume {
+            ..
+        }
+        | OwnerCommandKind::Position {
+            ..
+        }
         | OwnerCommandKind::Assignment => return,
     };
     let cancelled = pending
@@ -2959,7 +3244,10 @@ fn cancel_dlt_states(
 }
 
 /// 业务作用：记录安全处理或提交进展，保留仍生效的分区保护和会话关闭状态。
-/// 参数说明：health 为 group 健康快照。
+///
+/// 参数说明：
+/// - `health`：为 group 健康快照。
+///
 /// 返回：更新最近成功时间；其它分区成功或旧安全前缀提交不能解除硬暂停、失权或停止。
 fn note_success(health: &Arc<RwLock<GroupHealth>>) {
     let mut snapshot = health
@@ -3010,11 +3298,13 @@ fn note_success(health: &Arc<RwLock<GroupHealth>>) {
         };
 }
 
-/// 业务作用：累计一次底层 consumer 会话创建；首次之后的尝试同时计入重建次数。
+/// 业务作用：在进入底层 consumer 会话前记录启动尝试，区分首次运行与后续重建。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `health`: group 健康快照。
+///
+/// 返回：饱和递增启动次数，首次之后同时递增重建次数；计数不证明 consumer 构造、分配或 Ready 已成功。
 fn note_owner_session_start(health: &Arc<RwLock<GroupHealth>>) {
     let mut snapshot = health
         .write()
@@ -3025,12 +3315,14 @@ fn note_owner_session_start(health: &Arc<RwLock<GroupHealth>>) {
     }
 }
 
-/// 业务作用：累计一次真实 broker commit 结果，供长稳与吞吐门禁计算 commits/record。
+/// 业务作用：按 broker commit 的实际结果更新消费组提交统计，支持观测提交频率和失败比例。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `health`: group 健康快照。
 /// - `succeeded`: broker 是否确认本次 commit 成功。
+///
+/// 返回：饱和递增总次数及对应成功或失败次数；不推进安全水位，失败计数不证明 broker 未接受请求。
 fn note_commit_result(health: &Arc<RwLock<GroupHealth>>, succeeded: bool) {
     let mut snapshot = health
         .write()
@@ -3045,10 +3337,12 @@ fn note_commit_result(health: &Arc<RwLock<GroupHealth>>, succeeded: bool) {
 
 /// 业务作用：把 owner 当前安全前沿发布给 pre-rebalance callback。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
+/// - `consumer`: 保存协调回调提交快照的底层消费者。
 /// - `progress`: 当前连续水位状态。
+///
+/// 返回：成功计算时替换回调快照，包括空快照；计算失败时保留原快照。本函数不向 broker 提交。
 fn publish_commit_snapshot(consumer: &ConsumerClient, progress: &GroupOffsetState) {
     if let Ok(offsets) = progress.committable_offsets() {
         consumer.set_rebalance_offsets(&offsets);
@@ -3057,11 +3351,13 @@ fn publish_commit_snapshot(consumer: &ConsumerClient, progress: &GroupOffsetStat
 
 /// 业务作用：记录维护性 poll 的会话级错误，并保留自动重建或显式恢复所需分类。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `health`: group 健康快照。
 /// - `transient_exit`: 当前会话待上报的临时退出原因。
 /// - `error`: 底层集中分类后的 poll 错误。
+///
+/// 返回：临时错误写入退出原因并发布 Recovering；致命错误发布 Crashed，不改写已有临时原因。退出与重建由调用方裁决。
 fn record_maintenance_poll_error(
     health: &Arc<RwLock<GroupHealth>>,
     transient_exit: &mut Option<String>,
@@ -3080,21 +3376,21 @@ fn record_maintenance_poll_error(
 
 /// 业务作用：同步提交当前全部安全前沿；失败期间停止业务派发并维护心跳。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
+/// - `consumer`: 执行提交、维护性 poll 与位置回退的唯一消费者。
 /// - `progress`: 待提交且提交成功前不可裁剪的状态。
 /// - `health`: group 健康快照。
 /// - `commands`: 控制命令队列。
-/// - `mode`: 当前订阅方式。
-/// - `attempts`: 失败尝试表。
+/// - `mode`: 当前订阅方式的借用，提交等待中不执行订阅变更。
+/// - `attempts`: 失败尝试表的借用，提交等待中不改变重试计数。
 /// - `last_commit`: 最近一次成功提交时间。
 /// - `backoff_ms`: commit 失败重试退避。
 /// - `transient_exit`: 维护性 poll 捕获的临时会话错误。
+/// - `dlt_outstanding`: 是否仍有 DLT 责任，决定 Stop 回执是否推迟。
+/// - `deferred_stop`: 已认领但等待 DLT 收尾的停止命令槽。
 ///
-/// # 返回
-///
-/// CommitBlocked 期间收到 Stop 时返回 true。
+/// 返回：停止或会话错误需要结束 owner 时为 true，其余为 false；所有出口回退维护性 poll 取走的位置，仍持有分区的回退失败进入硬暂停。
 #[allow(clippy::too_many_arguments)]
 fn commit_until_resolved(
     consumer: &ConsumerClient,
@@ -3133,7 +3429,23 @@ fn commit_until_resolved(
     stopping
 }
 
-/// 业务作用：[`commit_until_resolved`] 的实际循环体；维护性 poll 取出的记录记入 `discarded`。
+/// 业务作用：维持安全前沿的提交责任，确认前保留本地记录，失败期间只处理停止及底层维护。
+///
+/// 参数说明：
+/// - `consumer`: 执行同步提交与维护性 poll 的底层消费者。
+/// - `progress`: 尚未确认的处理证据，broker 确认后才能裁剪。
+/// - `health`: 发布提交阻塞、失权、停止与致命状态的快照。
+/// - `commands`: 等待期间可认领 Stop 的命令邮箱，其它命令拒绝。
+/// - `mode`: 当前订阅方式的借用，此循环不修改它。
+/// - `attempts`: 当前失败尝试表的借用，此循环不修改它。
+/// - `last_commit`: 仅在提交及本地确认成功后更新的单调时刻。
+/// - `backoff_ms`: 失败后的维护 poll 等待，实际限制在 1..=100 毫秒。
+/// - `transient_exit`: 保存维护性 poll 的临时错误，供会话退出分类。
+/// - `dlt_outstanding`: 是否需要把 Stop 延后到 DLT 责任结束。
+/// - `deferred_stop`: 等待 DLT 结束的已认领停止命令。
+/// - `discarded`: 按分区累计尚未处理的最早位置，交外层统一回退。
+///
+/// 返回：停止、处理证据错误或 poll 失败时为 true；提交完成、无前沿、失权或延后 Stop 时为 false，不以失败响应推断 broker 未提交。
 #[allow(clippy::too_many_arguments)]
 fn commit_until_resolved_inner(
     consumer: &ConsumerClient,
@@ -3162,6 +3474,7 @@ fn commit_until_resolved_inner(
             return false;
         }
         if consumer.assignment_lost() {
+            // 旧处理证据不能越过失权边界提交；清空回调快照后交外层等待新分配。
             progress.clear();
             publish_commit_snapshot(consumer, progress);
             update_state(
@@ -3240,9 +3553,8 @@ fn commit_until_resolved_inner(
                 }
                 update_state(health, GroupState::Stopping, None);
                 if dlt_outstanding && deferred_stop.is_none() {
-                    // 步骤 4/5：停机不能成为跳过 DLT 的理由。这里若直接回 Ok 并退出会话，
-                    // 会话收尾会 abort 掉全部 in-flight DLT worker，shutdown 却报成功——死信被丢弃。
-                    // 推迟该 Stop，让 owner 主循环继续收割 DltCompletion，收尾后再了结它。
+                    // DLT 尚未完成时不能确认停止，避免控制回执先于持久化责任结束。
+                    // 推迟 Stop，让主循环继续接收完成结果，收尾后再交付回执。
                     *deferred_stop = Some(command);
                     return false;
                 }
@@ -3291,10 +3603,13 @@ fn commit_until_resolved_inner(
 
 /// 业务作用：接纳单条 outcome；容量不足时先提交安全前沿，仍不足则进入可自动恢复的 group 门禁。
 ///
+/// 参数说明：
 /// - `context`: owner 本轮共享状态。
 /// - `tp`: 记录分区。
 /// - `offset`: 当前真实 offset，也是门禁回退点。
 /// - `outcome`: 待写入的轻量处理结果。
+///
+/// 返回：记录证据接纳成功为 Ok；持续容量不足要求停止本批并回退，证据不一致硬暂停分区，提交阶段需要退出则停止 owner。
 fn observe_one_with_recovery(
     context: &mut ActionContext<'_>,
     tp: &Tp,
@@ -3360,9 +3675,12 @@ fn observe_one_with_recovery(
 
 /// 业务作用：原子接纳同分区 run，并复用单条路径的 commit-first 容量恢复语义。
 ///
+/// 参数说明：
 /// - `context`: owner 本轮共享状态。
 /// - `tp`: run 所属分区。
 /// - `outcomes`: 非空、按 offset 递增的处理结果。
+///
+/// 返回：全段证据接纳成功为 Ok；提交后仍无容量则以段首为回退点停止本批，不一致则硬暂停分区，提交要求退出则停止 owner。
 fn observe_run_with_recovery(
     context: &mut ActionContext<'_>,
     tp: &Tp,
@@ -3431,13 +3749,15 @@ fn observe_run_with_recovery(
 /// 这是把「回退没生效」从**静默丢失**变成**可见停摆**的通用防线：
 /// 回退表里既有已 revoke（失败无害）也有仍持有的分区，后者一旦回退失败，
 /// 那些已 poll 未派发的记录就再也不会被交付，而后续安全前沿会把它们提交越过。
-/// 与其逐个审计回退点，不如在这里统一兜底。
+/// 存在待处理的分配变更时先交协调流程恢复，不能把尚未完成的分配窗口误判为位置损坏。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `consumer`: owner consumer；用于确认分区是否仍在 assignment 内。
 /// - `health`: group 健康快照。
 /// - `failed`: 回退未生效的分区集合。
+///
+/// 返回：无待处理 rebalance 时，对查询到仍归本 owner 的失败目标发布硬暂停；空目标、待协调或查询不到归属时不新增暂停。
 fn halt_failed_rewinds(
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
@@ -3479,12 +3799,14 @@ fn halt_failed_rewinds(
     }
 }
 
-/// 业务作用：判断 progress 反压门禁是否仍然竖着。
+/// 业务作用：以专属暂停原因判断进度容量保护是否生效，避免其它状态更新误开放派发。
 ///
-/// 判据是 health 里的 `ProgressBackpressure` 暂停行——它与底层 pause 一一对应，
-/// 且不会被 `note_success`/`update_state` 这类状态写入覆盖。
+/// 判据是 health 中的 `ProgressBackpressure` 暂停行，不是可被其它操作覆盖的总体 state。
 ///
+/// 参数说明：
 /// - `health`: 共享健康快照。
+///
+/// 返回：任一分区存在该原因时为 true；只读取本地门禁，不证明底层 pause 请求已经成功。
 fn progress_gate_engaged(health: &Arc<RwLock<GroupHealth>>) -> bool {
     health
         .read()
@@ -3494,11 +3816,14 @@ fn progress_gate_engaged(health: &Arc<RwLock<GroupHealth>>) -> bool {
         .any(|(_, reason)| *reason == PauseReason::ProgressBackpressure)
 }
 
-/// 业务作用：暂停当前 assignment 并进入容量门禁，等待 commit/DLT 收尾释放 permit。
+/// 业务作用：为当前分配登记进度容量保护并请求暂停，等待提交或 DLT 收尾释放额度。
 ///
-/// - `consumer`: owner consumer。
+/// 参数说明：
+/// - `consumer`: 用于查询分配与请求底层暂停的消费者。
 /// - `health`: group 健康快照。
 /// - `error`: 稳定容量分类，不包含 payload。
+///
+/// 返回：登记查询到的分区暂停原因并发布 ProgressBackpressure；底层暂停失败不传播，位置回退由调用方统一完成。
 fn enter_progress_backpressure(
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
@@ -3518,11 +3843,13 @@ fn enter_progress_backpressure(
 
 /// 业务作用：将单条框架动作接入连续水位、重试、DLT 与健康状态机。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `source`: 保留原始 DLT 数据的消息视图。
 /// - `action`: handler 或路由前处理产生的动作。
+///
+/// 返回：按证据接纳、提交及失败策略返回继续、停止分区、本批或 owner；安全结果进入水位后才清理尝试记录，致命结果发布 Crashed。
 fn apply_process_action<S: DeadLetterSource + ?Sized>(
     context: &mut ActionContext<'_>,
     source: &S,
@@ -3694,13 +4021,15 @@ fn apply_retry_action<S: DeadLetterSource + ?Sized>(
 
 /// 业务作用：应用确定坏消息的直接 DLT 动作，不消耗 handler 尝试次数。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `source`: 原始消息视图。
 /// - `tp`: 来源 topic-partition。
 /// - `offset`: 来源 offset。
 /// - `reason`: 已脱敏原因。
+///
+/// 返回：DLT 关闭或持久化优先模式下无法准入时硬暂停分区；准入后等待完成，可用性优先模式允许显式跳过；提交或证据错误按相应停止动作返回。
 fn apply_direct_dlt_action<S: DeadLetterSource + ?Sized>(
     context: &mut ActionContext<'_>,
     source: &S,
@@ -3782,13 +4111,15 @@ fn apply_direct_dlt_action<S: DeadLetterSource + ?Sized>(
     }
 }
 
-/// 业务作用：在显式 availability-first 模式下记录安全跳过并提交该边界。
+/// 业务作用：在调用方已选择 availability-first 后记录允许跳过的结果，并尝试提交连续安全边界。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `tp`: 来源 topic-partition。
 /// - `offset`: 来源 offset。
+///
+/// 返回：证据接纳失败时返回对应停止动作，提交需要退出时停止 owner，其余继续；不证明业务成功或 DLT 已投递，也不在此复验模式开关。
 fn apply_availability_skip(context: &mut ActionContext<'_>, tp: &Tp, offset: i64) -> ActionFlow {
     if let Err(flow) = observe_one_with_recovery(
         context,
@@ -3820,11 +4151,13 @@ fn apply_availability_skip(context: &mut ActionContext<'_>, tp: &Tp, offset: i64
 
 /// 业务作用：原子记录一个成功 handler run 的安全前缀。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `sources`: 同分区、同 route 且按交付顺序排列的安全记录。
 /// - `source`: 自动成功或手动确认来源。
+///
+/// 返回：空输入直接继续；整段接纳后清除对应重试计数、发布安全快照，达到阈值时尝试提交。接纳或提交需要停止时返回对应流程动作。
 fn observe_safe_run(
     context: &mut ActionContext<'_>,
     sources: &[RawRecord],
@@ -3884,7 +4217,9 @@ fn apply_invocation_outcome(
     outcome: InvocationOutcome,
 ) -> ActionFlow {
     match outcome {
-        InvocationOutcome::DecodeFailed { .. } => {
+        InvocationOutcome::DecodeFailed {
+            ..
+        } => {
             // 解码结局必须先拆回输入策略，不能伪装成已执行的 handler 或越过对应 offset。
             update_state(
                 context.health,
@@ -4186,7 +4521,13 @@ fn apply_retry_run(
 }
 
 /// 业务作用：为保留原文的按键失败设置独立退避，避免回退 native 后再次交付已经完成的输入。
-/// 参数说明：context 为当前责任表；tp/offset 为失败前缀；in_place 指示原文由有界本地队列持续保留。
+///
+/// 参数说明：
+/// - `context`：为当前责任表
+/// - `tp`：失败前缀所在的分区。
+/// - `offset`：需要重新交付的首个失败位置。
+/// - `in_place`：原文是否仍由有界本地队列保留，决定本地退避还是 broker 回退。
+///
 /// 返回：已登记退避后停止裁决本前缀；非按键输入复用分区回退语义。
 fn schedule_typed_retry(
     context: &mut ActionContext<'_>,
@@ -4218,15 +4559,13 @@ fn schedule_typed_retry(
 
 /// 业务作用：把单条消息构造成 DLT job 并接入非阻塞准入/worker 流程。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `source`: 原始消息视图。
 /// - `reason`: 已脱敏失败原因。
 ///
-/// # 错误
-///
-/// 递归 DLT、job 构造、pause/seek 或 dispatcher 准入失败时返回错误。
+/// 返回：已调度 worker 或已登记有界准入等待时成功，不代表 DLT 已确认；递归、原输入责任失效、计量、暂停、定位或信封构造失败时返回错误，已执行的暂停可能保留。
 fn schedule_single_dlt<S: DeadLetterSource + ?Sized>(
     context: &mut ActionContext<'_>,
     source: &S,
@@ -4311,7 +4650,12 @@ fn schedule_single_dlt<S: DeadLetterSource + ?Sized>(
 }
 
 /// 业务作用：冻结整个失败批的逐记录死信意图，按来源顺序在有界信封池中逐条推进。
-/// 参数说明：context 为当前控制权威；sources 为同分区失败输入；reason 为失败原因。
+///
+/// 参数说明：
+/// - `context`：为当前控制权威
+/// - `sources`：为同分区失败输入
+/// - `reason`：为失败原因。
+///
 /// 返回：仅首条开始交付或等待；后继重读直接执行原死信意图，不重复执行业务。
 fn schedule_dlt_run(
     context: &mut ActionContext<'_>,
@@ -4326,7 +4670,12 @@ fn schedule_dlt_run(
 }
 
 /// 业务作用：把一批已失败业务的意图逐条绑定到原输入凭证，允许小信封池分段交付。
-/// 参数说明：context 为会话账本；sources 为已准入的同分区记录；reason 为有界失败说明。
+///
+/// 参数说明：
+/// - `context`：为会话账本
+/// - `sources`：为已准入的同分区记录
+/// - `reason`：为有界失败说明。
+///
 /// 返回：全部原坐标仍属于本会话时登记成功；缺失责任时拒绝交付，不能静默丢弃后继。
 fn remember_dlt_run(
     context: &ActionContext<'_>,
@@ -4348,13 +4697,15 @@ fn remember_dlt_run(
 
 /// 业务作用：启动一个已经取得全局 permit 的 DLT worker，并登记分区取消身份。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `dispatcher`: 全运行时共享 dispatcher。
 /// - `envelope`: 已取得记录数与字节 permit 的任务信封。
 /// - `tp`: 来源分区。
 /// - `offsets`: 失败单元真实 offsets。
+///
+/// 返回：任务已提交到运行时并登记代次及取消标记；信封持有额度到实际交付结束，结果经有界完成通道交回 owner，取消标记不证明请求未发出。
 fn spawn_dlt_worker(
     context: &mut ActionContext<'_>,
     dispatcher: DltDispatcher,
@@ -4452,6 +4803,12 @@ fn spawn_dlt_worker(
 }
 
 /// 业务作用：发布全运行时 DLT 有界队列的瞬时占用。
+///
+/// 参数说明：
+/// - `runtime`: 提供有界指标出口的运行时。
+/// - `dispatcher`: 保存当前 DLT 信封与字节占用的共享派发器。
+///
+/// 返回：分别提交任务数与字节数仪表，超出 i64 范围时饱和；这是瞬时观测，不预留容量或保证导出完成。
 fn emit_dlt_queue_usage(runtime: &KafkaProxyInner, dispatcher: &DltDispatcher) {
     let (jobs, bytes) = dispatcher.queue_usage();
     runtime.gauge(
@@ -4468,16 +4825,18 @@ fn emit_dlt_queue_usage(runtime: &KafkaProxyInner, dispatcher: &DltDispatcher) {
 
 /// 业务作用：执行可靠 DLT 交付与退避，停止或失权后只收口已发送请求。
 ///
-/// # 参数说明
+/// 参数说明：
 ///
 /// - `dispatcher`：源级共享交付资源。
 /// - `envelope`：已取得记录和字节额度的任务信封。
 /// - `required`：是否必须取得 DLT 确认才允许来源推进。
-/// - `initial_ms`、`max_ms`：指数退避初始值与上限。
+/// - `initial_ms`：指数退避初始值。
+/// - `max_ms`：指数退避的最大间隔。
 /// - `degraded_after`：连续失败进入 Degraded 的次数。
 /// - `seed`：稳定抖动种子。
 /// - `health`：组健康快照。
-/// - `tp`、`ready_epoch`：来源分区与分配代次，失权后不能写入旧降级原因。
+/// - `tp`：来源分区。
+/// - `ready_epoch`：来源分配代次，失权后不能写入旧降级原因。
 /// - `stop_requested`：源停止与任务失权的准入门，不代表已发请求退出。
 /// - `failed_attempt`：非停止失败的观测回调，不决定来源提交。
 ///
@@ -4537,7 +4896,13 @@ async fn deliver_dlt_envelope(
 }
 
 /// 业务作用：将持续 DLT 失败绑定到仍有效的分区交付责任，防止其它成功覆盖其降级状态。
-/// 参数说明：health 为槽快照；tp/ready_epoch 为启动交付时的分区和代次；detail 为脱敏失败诊断。
+///
+/// 参数说明：
+/// - `health`：为槽快照
+/// - `tp`：启动交付时的来源分区。
+/// - `ready_epoch`：启动交付时的分配代次。
+/// - `detail`：为脱敏失败诊断。
+///
 /// 返回：仅当前分配仍拥有 DltPending 时增加降级原因；失权、关闭和终结后的迟到失败不改变新状态。
 fn mark_dlt_degraded(
     health: &Arc<RwLock<GroupHealth>>,
@@ -4580,14 +4945,12 @@ fn mark_dlt_degraded(
 
 /// 业务作用：优先收割异步 DLT completion，并在 delivery 成功后生成终态 outcome 与同步提交。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `receiver`: 本 owner 的有界 completion 接收端。
 ///
-/// # 返回
-///
-/// commit 收尾期间收到 Stop 或框架不变量失败时返回 true。
+/// 返回：commit 收尾期间收到 Stop 或框架不变量失败时返回 true。
 fn drain_dlt_completions(
     context: &mut ActionContext<'_>,
     receiver: &mut tokio::sync::mpsc::Receiver<DltCompletion>,
@@ -4767,7 +5130,10 @@ fn drain_dlt_completions(
 }
 
 /// 业务作用：非阻塞复验各失败分区的 DLT 准入条件，健康分区继续由主循环处理。
-/// 参数说明：context 为当前 owner 的分配权威、等待表和暂停事实。
+///
+/// 参数说明：
+/// - `context`：为当前 owner 的分配权威、等待表和暂停事实。
+///
 /// 返回：仅开放容量已恢复的原坐标；停止或失权释放未发出的等待，不宣称来源已完成。
 fn service_dlt_admission(context: &mut ActionContext<'_>) {
     if context.consumer.has_rebalance() || context.consumer.assignment_lost() {
@@ -4827,12 +5193,14 @@ fn service_dlt_admission(context: &mut ActionContext<'_>) {
     }
 }
 
-/// 业务作用：availability-first 地把整个失败 run 标为安全跳过并提交末尾边界。
+/// 业务作用：在调用方已选择 availability-first 后将失败段标为允许跳过，尝试推进连续安全边界。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `sources`: 同分区、按交付顺序排列的失败 run。
+///
+/// 返回：空输入继续；整段结果接纳后尝试提交，随后移除段首尝试状态。证据或提交需要停止时返回对应动作，不证明业务或 DLT 已完成。
 fn apply_availability_skip_run(
     context: &mut ActionContext<'_>,
     sources: &[RawRecord],
@@ -4878,11 +5246,13 @@ fn apply_availability_skip_run(
 
 /// 业务作用：为目标分区添加一个不重复的框架暂停原因。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `health`: group 健康快照。
 /// - `targets`: 目标分区。
 /// - `reason`: 暂停原因。
+///
+/// 返回：在同一写锁内按分区与原因去重追加本地事实，保留其它暂停原因；不执行底层 pause 或验证分区归属。
 fn add_pause_reason(health: &Arc<RwLock<GroupHealth>>, targets: &[Tp], reason: PauseReason) {
     let mut snapshot = health
         .write()
@@ -4898,12 +5268,14 @@ fn add_pause_reason(health: &Arc<RwLock<GroupHealth>>, targets: &[Tp], reason: P
     }
 }
 
-/// 业务作用：移除 CommitBlocked 原因并恢复没有其他暂停原因的分区。
+/// 业务作用：提交确认后移除 CommitBlocked 原因，按健康快照选取可恢复分区。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
+/// - `consumer`: 接收底层恢复请求的 owner 消费者。
 /// - `health`: group 健康快照。
+///
+/// 返回：先清理提交暂停原因，再对快照分配中无其它原因的分区请求 resume；底层错误不传播，保留其它保护暂停。
 fn clear_commit_blocked(consumer: &ConsumerClient, health: &Arc<RwLock<GroupHealth>>) {
     let resumable = {
         let mut snapshot = health
@@ -4923,7 +5295,13 @@ fn clear_commit_blocked(consumer: &ConsumerClient, health: &Arc<RwLock<GroupHeal
 }
 
 /// 业务作用：为拥有型输入解析事件路由、校验 codec 声明并构造来源上下文。
-/// 参数说明：runtime 提供无匹配及无效记录策略；plan 为冻结组路由；assignment_epoch 为本批权威；message 为已受条数和字节预算约束的输入。
+///
+/// 参数说明：
+/// - `runtime`：提供无匹配及无效记录策略
+/// - `plan`：为冻结组路由
+/// - `assignment_epoch`：为本批权威
+/// - `message`：为已受条数和字节预算约束的输入。
+///
 /// 返回：可派发原始记录或消息策略；此处不执行自定义 codec，不改变解码失败计数或保护状态。
 fn prepare_typed_message(
     runtime: &Arc<OwnerRuntime>,
@@ -5096,7 +5474,10 @@ fn prepare_typed_message(
     if route.meta().execution_mode == ExecutionMode::KeyOrdered {
         raw.input_permit().mark_keyed();
     }
-    PreparedTypedItem::Routed { source: raw, route }
+    PreparedTypedItem::Routed {
+        source: raw,
+        route,
+    }
 }
 
 /// 业务作用：在每次调用业务 handler 前，同步可信总投递序号与独立的普通失败预算序号。
@@ -5127,7 +5508,7 @@ fn annotate_delivery_attempt(sources: &mut [RawRecord], delivery_attempt: u32, r
 
 /// 业务作用：驱动一次类型擦除 single/batch handler future，并应用统一超时边界。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `runtime`: 提供 owner 外部异步运行时与 handler 超时。
 /// - `route`: 本次调用的冻结 route。
@@ -5186,7 +5567,9 @@ fn invoke_typed_handler(
 /// - `commands`: owner 控制命令接收端。
 /// - `attempts`: 本进程失败尝试表。
 /// - `retries`: 按分区保留的退避和重新交付责任。
-/// - `dlt_pending`、`dlt_sender`、`dlt_admission`: 已准入 DLT、完成邮箱与待准入门禁。
+/// - `dlt_pending`: 当前分区已准入的 DLT 任务与取消身份。
+/// - `dlt_sender`: 任务完成后向 owner 交付结果的有界邮箱发送端。
+/// - `dlt_admission`: 尚未取得信封额度的分区等待责任。
 /// - `progress`: 连续安全水位。
 /// - `last_commit`: 最近一次成功提交时间。
 /// - `assignment_epoch`: 当前 assignment epoch。
@@ -5327,7 +5710,10 @@ fn process_logical_typed_batch(
             }
             let item = prepared.pop_front().expect("前置检查保证有记录");
             let flow = match item {
-                PreparedTypedItem::ImmediateOwned { source, action } => {
+                PreparedTypedItem::ImmediateOwned {
+                    source,
+                    action,
+                } => {
                     let mut context = ActionContext {
                         runtime,
                         consumer,
@@ -5406,7 +5792,10 @@ fn process_logical_typed_batch(
                     );
                     ActionFlow::StopPartition
                 }
-                PreparedTypedItem::Routed { source, route } => {
+                PreparedTypedItem::Routed {
+                    source,
+                    route,
+                } => {
                     let mut sources = vec![source];
                     let mut source_bytes = sources[0].retained_bytes();
                     let batch_retry_counts =
@@ -5416,10 +5805,23 @@ fn process_logical_typed_batch(
                     if route.meta().shape == ConsumerShape::Batch {
                         while sources.len()
                             < completed_count.unwrap_or(runtime.config.behavior.max_batch_records)
-                            && matches!(prepared.front(), Some(PreparedTypedItem::Routed { source: next_source, route: next }) if Arc::ptr_eq(&route, next) && (completed_count.is_some() || (source_bytes.saturating_add(next_source.retained_bytes()) <= runtime.config.behavior.max_batch_bytes && retry_counts(attempts, &(tp.clone(), next_source.ctx.offset)) == batch_retry_counts)))
+                            && matches!(
+                                prepared.front(),
+                                Some(PreparedTypedItem::Routed {
+                                    source: next_source,
+                                    route: next
+                                }) if Arc::ptr_eq(&route, next)
+                                    && (completed_count.is_some()
+                                        || (source_bytes.saturating_add(next_source.retained_bytes())
+                                                <= runtime.config.behavior.max_batch_bytes
+                                            && retry_counts(attempts, &(tp.clone(), next_source.ctx.offset))
+                                                == batch_retry_counts))
+                            )
                         {
-                            let Some(PreparedTypedItem::Routed { source, .. }) =
-                                prepared.pop_front()
+                            let Some(PreparedTypedItem::Routed {
+                                source,
+                                ..
+                            }) = prepared.pop_front()
                             else {
                                 unreachable!("前置形态检查已确认 routed item");
                             };
@@ -5456,7 +5858,10 @@ fn process_logical_typed_batch(
                             Err(outcome) => outcome,
                         }
                     };
-                    if let InvocationOutcome::DecodeFailed { failures } = outcome {
+                    if let InvocationOutcome::DecodeFailed {
+                        failures,
+                    } = outcome
+                    {
                         // 解码失败不算一次业务调用：按原 offset 拆回消息策略，正常前后缀保留再次准入资格。
                         // 只有主循环真正接管失败项时才更新连续失败计数，预备尾部不能提前重置保护。
                         let mut failures = failures.into_iter().collect::<BTreeMap<_, _>>();
@@ -5556,7 +5961,10 @@ fn process_logical_typed_batch(
                     prepared.clear();
                     break;
                 }
-                ActionFlow::StopBatch { tp, offset } => {
+                ActionFlow::StopBatch {
+                    tp,
+                    offset,
+                } => {
                     // 触发记录本身没有进入 progress，必须与本批未派发记录一起回退；
                     // 取 min 保证不会被"下一条记录"的回退把它跳过去。
                     let mut rewind = unprocessed_offsets(&prepared, &partitions);
@@ -5593,8 +6001,11 @@ fn process_logical_typed_batch(
 
 /// 业务作用：汇总逻辑批中尚未派发的每分区最小 offset。
 ///
+/// 参数说明：
 /// - `prepared`: 当前分区剩余记录。
 /// - `partitions`: 尚未轮转到的分区记录。
+///
+/// 返回：每分区最早的未处理坐标，空输入得到空表；只计算回退目标，不执行 seek，也不包含调用方另行保留的队列。
 fn unprocessed_offsets(
     prepared: &VecDeque<PreparedTypedItem>,
     partitions: &BTreeMap<Tp, Vec<TypedBatchItem>>,
@@ -5618,12 +6029,14 @@ fn unprocessed_offsets(
 
 /// 业务作用：路由并处理单条借用消息。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `runtime`: 所属运行时。
 /// - `plan`: group 路由计划。
 /// - `assignment_epoch`: 当前 owner epoch。
 /// - `message`: poll 借用消息。
+///
+/// 返回：超限产生硬暂停动作，已有 DLT 意图直接延续，合法匹配在借用期执行 passthrough；头部异常或未匹配按冻结策略裁决，不直接提交 offset。
 fn process_message(
     runtime: &Arc<OwnerRuntime>,
     plan: &GroupPlan,
@@ -5712,13 +6125,16 @@ fn process_message(
 
 /// 业务作用：在 owner callback 栈内执行同步少拷贝 route。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `runtime`: 所属运行时及无效记录策略。
+/// - `group`: 消费组标识，用于消费跨度及指标归属。
 /// - `route`: 匹配 passthrough route。
 /// - `assignment_epoch`: 当前 epoch。
 /// - `message`: 借用消息。
 /// - `headers`: 底层借用 headers。
+///
+/// 返回：合并回调结论与确认模式得到 owner 动作；回调错误按其显式策略裁决，panic 转为固定重试原因。同步回调在当前线程执行，期间阻塞会延后 poll。
 fn process_passthrough(
     runtime: &Arc<OwnerRuntime>,
     group: &str,
@@ -5834,26 +6250,34 @@ fn process_passthrough(
 
 /// 业务作用：把 passthrough 成功返回值与 route 确认模式合并成唯一 owner 动作。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `disposition`: 同步 adapter 返回的类型化成功结果。
 /// - `ack_mode`: 注册时冻结的 route 确认模式。
 /// - `ack_set`: 手动模式的回调期确认槽；自动模式为 `None`。
+///
+/// 返回：类型化跳过直接形成跳过证据；处理成功或尽力丢弃在自动模式、或手动已确认时形成确认结果，缺少手动确认则重试；存在的确认槽在裁决时封口。
 fn finish_passthrough_success(
     disposition: PassthroughDisposition,
     ack_mode: AckMode,
     ack_set: Option<&ManualAckSet>,
 ) -> ProcessAction {
     match disposition {
-        PassthroughDisposition::Skipped { reason } => {
+        PassthroughDisposition::Skipped {
+            reason,
+        } => {
             // 安全跳过由框架分类事实确认，不要求业务再用 Manual token 重复确认。
             if let Some(set) = ack_set {
                 let _ = set.finish(false);
             }
             ProcessAction::Safe(RecordOutcome::Skipped(SkipReason::Passthrough(reason)))
         }
-        PassthroughDisposition::Handled { .. }
-        | PassthroughDisposition::BestEffortDropped { .. } => {
+        PassthroughDisposition::Handled {
+            ..
+        }
+        | PassthroughDisposition::BestEffortDropped {
+            ..
+        } => {
             if ack_set.is_none_or(|set| set.finish(true).prefix == 1) {
                 ProcessAction::Safe(RecordOutcome::Acknowledged(match ack_mode {
                     AckMode::Auto => AckSource::AutoOnSuccess,
@@ -5867,7 +6291,11 @@ fn finish_passthrough_success(
 }
 
 /// 业务作用：按显式无效输入策略选择跳过、可靠死信或保留位点暂停。
-/// 参数说明：runtime 为所属运行时，reason 为脱敏原因。
+///
+/// 参数说明：
+/// - `runtime`：为所属运行时
+/// - `reason`：为脱敏原因。
+///
 /// 返回：只在显式 Skip 下放弃输入；默认 DLT 仍须完成交付后才产生安全水位。
 fn invalid_or_dlt(runtime: &Arc<OwnerRuntime>, reason: String) -> ProcessAction {
     match runtime.config.behavior.invalid_record_policy {
@@ -5884,7 +6312,13 @@ fn invalid_or_dlt(runtime: &Arc<OwnerRuntime>, reason: String) -> ProcessAction 
 }
 
 /// 业务作用：在应用单条无效输入策略前检查本分区连续解码保护，防止系统性解码失败持续排干来源。
-/// 参数说明：runtime提供冻结阈值；streaks为本owner按分区隔离的连续失败计数；tp为失败分区；reason为脱敏原因。
+///
+/// 参数说明：
+/// - `runtime`：提供冻结阈值
+/// - `streaks`：为本owner按分区隔离的连续失败计数
+/// - `tp`：为失败分区
+/// - `reason`：为脱敏原因。
+///
 /// 返回：正阈值耗尽时关闭该分区准入；未配置或阈值为零时只应用invalid_record_policy，不影响其它分区计数。
 fn decode_failure_action(
     runtime: &Arc<OwnerRuntime>,
@@ -5912,10 +6346,13 @@ fn decode_failure_action(
 
 /// 业务作用：记录本分区一次解码失败并返回累计的连续失败次数。
 ///
-/// 纯函数（不触碰 runtime），集中维护"分区之间互不影响"这条关键隔离语义。
+/// 只修改传入的分区计数表，不读取运行时或改变其它分区的失败历史。
 ///
+/// 参数说明：
 /// - `streaks`: owner 会话局部的按分区连续解码失败表。
 /// - `tp`: 触发失败的分区。
+///
+/// 返回：本分区饱和递增后的连续失败次数；尚无记录时从 1 开始，是否进入保护由调用方按阈值裁决。
 fn record_decode_failure(streaks: &mut BTreeMap<Tp, u64>, tp: &Tp) -> u64 {
     let entry = streaks.entry(tp.clone()).or_insert(0);
     *entry = entry.saturating_add(1);
@@ -5924,18 +6361,24 @@ fn record_decode_failure(streaks: &mut BTreeMap<Tp, u64>, tp: &Tp) -> u64 {
 
 /// 业务作用：记录本分区一次解码成功，清零该分区的连续失败计数。
 ///
-/// 工作正常的分区解码成功后立即从表中移除，因此该表只保留"正在连续失败"的分区，
-/// 规模受当前 assignment 约束（远小于分区总数）。
+/// 成功后移除本分区条目，避免恢复后的新失败沿用旧的连续失败次数。
 ///
+/// 参数说明：
 /// - `streaks`: owner 会话局部的按分区连续解码失败表。
 /// - `tp`: 解码成功的分区。
+///
+/// 返回：本分区下次失败重新从 1 计数；无记录时不改变状态，不解除已有硬暂停。
 fn note_decode_success(streaks: &mut BTreeMap<Tp, u64>, tp: &Tp) {
     streaks.remove(tp);
 }
 
 /// 业务作用：构造不依赖消息所有权的无效路由动作。
 ///
-/// 参数说明：runtime 为所属运行时，invalid_reason 为强类型原因，reason 为脱敏文本。
+/// 参数说明：
+/// - `runtime`：为所属运行时
+/// - `invalid_reason`：为强类型原因
+/// - `reason`：为脱敏文本。
+///
 /// 返回：明确的安全跳过、DLT 或硬暂停；普通业务失败预算不改变此策略。
 fn invalid_action(
     runtime: &Arc<OwnerRuntime>,
@@ -5955,7 +6398,14 @@ fn invalid_action(
 }
 
 /// 业务作用：在已取得信封额度后复制原文并写入当前来源证据。
-/// 参数说明：suffix/group 为冻结目标与来源组，message 为原始视图；reason 为有界失败原因，delivery_attempts 为首次失败意图冻结的可信次数。
+///
+/// 参数说明：
+/// - `suffix`：冻结的 DLT 目标后缀。
+/// - `group`：实际来源消费组。
+/// - `message`：为原始视图
+/// - `reason`：为有界失败原因
+/// - `delivery_attempts`：为首次失败意图冻结的可信次数。
+///
 /// 返回：独立拥有的死信原文；真实来源已经是 DLT 时返回递归错误，不接受伪造来源头作为权威。
 fn build_dlt_record<S: DeadLetterSource + ?Sized>(
     suffix: &str,
@@ -5998,12 +6448,14 @@ fn source_delivery_attempts<S: DeadLetterSource + ?Sized>(source: &S) -> u32 {
 
 /// 业务作用：用显式数值计算 DLT 指数退避，使边界计算不依赖运行时状态。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `base`: 初始退避毫秒，必须大于零。
 /// - `max`: 指数增长的封顶毫秒，必须不小于 `base`。
 /// - `attempt`: 已失败的 delivery 次数，从一开始。
 /// - `seed`: 不含业务内容的稳定抖动种子。
+///
+/// 返回：指数基值封顶后加约正负 10% 的确定性抖动，最终时长可略高于 max；负种子取绝对值，配置合法性由调用前的配置校验保证。
 fn dlt_retry_delay_values(base: u64, max: u64, attempt: u32, seed: i64) -> Duration {
     let exponential = capped_exponential_delay(base, max, attempt);
     let spread = exponential / 5;
@@ -6021,11 +6473,13 @@ fn dlt_retry_delay_values(base: u64, max: u64, attempt: u32, seed: i64) -> Durat
 
 /// 业务作用：安排失败分区的非阻塞退避，并把错误映射成 owner 控制流。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `tp`: 失败分区。
 /// - `offset`: 失败单元首 offset。
+///
+/// 返回：始终停止当前分区本轮派发；安排成功进入退避，暂停或定位失败则改为硬暂停，避免从不确定位置继续消费。
 fn schedule_retry_flow(context: &mut ActionContext<'_>, tp: &Tp, offset: i64) -> ActionFlow {
     match schedule_partition_retry(
         context.consumer,
@@ -6051,7 +6505,7 @@ fn schedule_retry_flow(context: &mut ActionContext<'_>, tp: &Tp, offset: i64) ->
 
 /// 业务作用：暂停单个失败分区、回到失败 offset，并登记单调时钟恢复时刻。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `consumer`: owner 唯一 consumer。
 /// - `health`: group 健康快照。
@@ -6060,9 +6514,7 @@ fn schedule_retry_flow(context: &mut ActionContext<'_>, tp: &Tp, offset: i64) ->
 /// - `offset`: 失败单元首 offset。
 /// - `backoff_ms`: 本次退避毫秒。
 ///
-/// # 错误
-///
-/// pause 或 seek 失败时返回错误，调用方必须保持分区不可派发。
+/// 返回：暂停和定位成功后登记退避并发布 Retrying；任一步失败则返回错误。seek 失败会清除本次 RetryBackoff 原因但不恢复底层，调用方必须接续硬暂停。
 fn schedule_partition_retry(
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
@@ -6091,7 +6543,7 @@ fn schedule_partition_retry(
 
 /// 业务作用：恢复退避到期的调用；保留原文的按键责任直接重派，其余分区先恢复 broker 坐标。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `consumer`: owner 唯一 consumer。
 /// - `health`: group 健康快照。
@@ -6156,7 +6608,12 @@ fn activate_due_retries(
 }
 
 /// 业务作用：按键退避只阻止对应顺序域，允许同分区其它 key 继续取入。
-/// 参数说明：consumer/health 为本槽取入权威与暂停原因；retries 为仍在保留原文的退避责任。
+///
+/// 参数说明：
+/// - `consumer`：持有本槽取入权威的原生消费者。
+/// - `health`：记录本槽仍生效的暂停原因。
+/// - `retries`：为仍在保留原文的退避责任。
+///
 /// 返回：只恢复没有 User、容量、DLT 或硬保护原因的分区，保留 RetryBackoff 观测与期限。
 fn resume_key_retry_inputs(
     consumer: &ConsumerClient,
@@ -6182,7 +6639,12 @@ fn resume_key_retry_inputs(
 }
 
 /// 业务作用：新输入无共享额度时只保护触发分区，保留其它分区释放责任的机会。
-/// 参数说明：consumer/health 为当前 owner；tp 为已定位回未取入记录的分区。
+///
+/// 参数说明：
+/// - `consumer`：当前分配的原生消费者。
+/// - `health`：当前 owner 的暂停状态。
+/// - `tp`：为已定位回未取入记录的分区。
+///
 /// 返回：登记输入暂停；暂停失败时保留可见错误，下一次取入仍会再次检查额度。
 fn enter_input_backpressure(consumer: &ConsumerClient, health: &Arc<RwLock<GroupHealth>>, tp: &Tp) {
     // 原文尚未复制，先保持 broker 重投位置，再禁止无额度的新业务进入。
@@ -6199,7 +6661,12 @@ fn enter_input_backpressure(consumer: &ConsumerClient, health: &Arc<RwLock<Group
 }
 
 /// 业务作用：额度可用或已计费输入重新交付时，只解除输入容量门禁。
-/// 参数说明：consumer/health 为当前 owner；offsets 为已获得重新准入资格的分区及原重读坐标。
+///
+/// 参数说明：
+/// - `consumer`：当前分配的原生消费者。
+/// - `health`：当前 owner 的暂停状态。
+/// - `offsets`：为已获得重新准入资格的分区及原重读坐标。
+///
 /// 返回：仅恢复仍属本会话且无其它保护原因的分区；恢复失败转为硬暂停，避免状态与实际路由分离。
 fn resume_input_partitions(
     consumer: &ConsumerClient,
@@ -6245,7 +6712,13 @@ fn resume_input_partitions(
 }
 
 /// 业务作用：未完成输入回退后恢复其原额度的使用权，避免新输入门禁阻断已计费责任。
-/// 参数说明：runtime 提供责任账本；consumer/health 为当前会话；offsets 为应重新交付的最早坐标。
+///
+/// 参数说明：
+/// - `runtime`：提供责任账本
+/// - `consumer`：执行当前会话位点回退的原生消费者。
+/// - `health`：记录回退后仍有效的保护原因。
+/// - `offsets`：为应重新交付的最早坐标。
+///
 /// 返回：实际回退失败的分区；失败目标不解除任何输入保护。
 fn rewind_input_offsets(
     runtime: &OwnerRuntime,
@@ -6266,11 +6739,13 @@ fn rewind_input_offsets(
 
 /// 业务作用：移除一组目标上的指定框架暂停原因，并返回已经没有任何暂停原因的分区。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `health`: group 健康快照。
 /// - `targets`: 本次框架流程曾暂停的分区。
 /// - `reason`: 只移除这一种原因，保留业务暂停和其他安全门禁。
+///
+/// 返回：去重后的目标中已无其它暂停原因的分区列表；只改变本地事实，调用方仍须校验归属并决定是否执行底层 resume。
 fn clear_pause_reason(
     health: &Arc<RwLock<GroupHealth>>,
     targets: &[Tp],
@@ -6291,13 +6766,15 @@ fn clear_pause_reason(
 
 /// 业务作用：暂停单个分区并写入 Halt 原因。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `consumer`: owner consumer。
+/// - `consumer`: 接收底层暂停请求的 owner 消费者。
 /// - `health`: 健康快照。
 /// - `tp`: 目标分区。
 /// - `reason`: 强类型 Halt 原因。
 /// - `detail`: 已脱敏诊断。
+///
+/// 返回：尽力请求 pause 后发布 Degraded 与诊断，以 Halt 替换目标的框架暂停原因并保留 User；底层错误不传播，本地保护事实不证明原生暂停成功。
 fn halt_partition(
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
@@ -6324,11 +6801,13 @@ fn halt_partition(
 
 /// 业务作用：增加或移除一组分区的 User 暂停原因。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `health`: 健康快照。
 /// - `targets`: 目标分区。
 /// - `paused`: true 为增加，false 为移除。
+///
+/// 返回：按去重目标替换 User 原因，保留所有框架保护原因；只记录用户意图，不执行底层暂停或恢复。
 fn set_user_paused(health: &Arc<RwLock<GroupHealth>>, targets: &[Tp], paused: bool) {
     let targets: BTreeSet<Tp> = targets.iter().cloned().collect();
     let mut snapshot = health
@@ -6346,9 +6825,11 @@ fn set_user_paused(health: &Arc<RwLock<GroupHealth>>, targets: &[Tp], paused: bo
 
 /// 业务作用：复制底层 headers 为公共有序拥有型集合。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `headers`: 底层借用 headers。
+///
+/// 返回：复制每个名称和存在的值，按原顺序构成拥有型集合；重复名称、None 与空值保持区别，后续集合克隆可共享存储。
 fn owned_headers(headers: &[crate::rd::consumer::RdHeaderRef<'_>]) -> KafkaHeaders {
     KafkaHeaders::from_vec(
         headers

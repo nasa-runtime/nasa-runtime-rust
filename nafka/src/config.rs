@@ -6,6 +6,8 @@ use std::fmt;
 
 use serde::Deserialize;
 
+mod properties;
+
 use crate::error::{NafkaError, Result};
 
 /// [`KafkaConfig`] 可由上层受管容器传入的数据面字段全集。
@@ -62,10 +64,15 @@ pub struct KafkaConfig {
     pub security: SecurityConfig,
     /// 三端(producer/consumer/admin)共同透传的原生键;不得覆盖框架不变量。
     #[serde(default)]
+    #[serde(deserialize_with = "properties::deserialize")]
     pub properties: BTreeMap<String, String>,
 }
 
 /// 业务作用：为反序列化缺省项提供稳定客户端名。
+///
+/// 参数说明: 无。
+///
+/// 返回：名为 default 的独立字符串，供客户端身份及默认收集项归属使用。
 fn default_client_name() -> String {
     "default".to_string()
 }
@@ -115,12 +122,15 @@ pub struct ProducerConfig {
     /// 命名 lane 覆盖表;键为 lane 名("default" 保留,不得出现在此表)。
     pub lanes: BTreeMap<String, ProducerLaneOverride>,
     /// 只透传给 producer 的原生键。
+    #[serde(deserialize_with = "properties::deserialize")]
     pub properties: BTreeMap<String, String>,
 }
 
 impl Default for ProducerConfig {
     /// 业务作用：返回可靠发送与有界责任的默认lane配置。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：独立配置值，默认10000条与65536KiB；不会建立原生连接。
     fn default() -> Self {
         Self {
@@ -153,7 +163,7 @@ impl Default for ProducerConfig {
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProducerLaneOverride {
-    /// 覆盖 ack 策略;socket control lane 生产环境强制 "all"。
+    /// 覆盖 ack 策略；启用幂等发送时必须与其确认约束一致。
     pub acks: Option<String>,
     /// 覆盖重试次数。
     pub retries: Option<u32>,
@@ -186,6 +196,7 @@ pub struct ProducerLaneOverride {
     /// 覆盖框架完整原文字节与原生队列最大 KiB。
     pub queue_buffering_max_kbytes: Option<usize>,
     /// 只作用于本 lane 的原生键透传。
+    #[serde(deserialize_with = "properties::deserialize")]
     pub properties: BTreeMap<String, String>,
 }
 
@@ -215,12 +226,15 @@ pub struct ConsumerConfig {
     /// 固定范围在创建 owner 前拒绝；订阅分配超限时该 owner 进入 Crashed/AssignmentTooLarge。
     pub max_assignment_partitions: usize,
     /// 只透传给 consumer 的原生键。
+    #[serde(deserialize_with = "properties::deserialize")]
     pub properties: BTreeMap<String, String>,
 }
 
 impl Default for ConsumerConfig {
     /// 业务作用：返回兼容基线的 group 会话、拉取与 assignment 上限配置。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：单槽默认配置；命名组可显式覆盖并发度。
     fn default() -> Self {
         Self {
@@ -248,6 +262,7 @@ pub struct AdminConfig {
     /// admin API 总超时毫秒;None 回退 publish_timeout_ms。
     pub default_api_timeout_ms: Option<u64>,
     /// 只透传给 admin 的原生键。
+    #[serde(deserialize_with = "properties::deserialize")]
     pub properties: BTreeMap<String, String>,
 }
 
@@ -256,6 +271,11 @@ struct MaskedProperties<'a>(&'a BTreeMap<String, String>);
 
 impl fmt::Debug for MaskedProperties<'_> {
     /// 业务作用：只输出属性键和固定掩码。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收原生配置诊断的输出目标；未知属性值也必须遮蔽。
+    ///
+    /// 返回：全部键及掩码写入成功时完成；输出失败时传递格式化错误，不暴露属性值。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut map = formatter.debug_map();
         for key in self.0.keys() {
@@ -267,6 +287,11 @@ impl fmt::Debug for MaskedProperties<'_> {
 
 impl fmt::Debug for KafkaConfig {
     /// 业务作用：输出可排障的顶层配置，同时让每层原生透传值都经过打码。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收客户端、各端配置及行为策略的诊断输出目标。
+    ///
+    /// 返回：输出完整配置视图或传递格式化错误；透传值和安全配置中的口令由各自格式化器遮蔽。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("KafkaConfig")
@@ -286,6 +311,11 @@ impl fmt::Debug for KafkaConfig {
 
 impl fmt::Debug for ProducerConfig {
     /// 业务作用：输出 producer 强类型参数并遮蔽透传值。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收发送时限、容量、幂等约束和命名 lane 配置的输出目标。
+    ///
+    /// 返回：写入诊断视图或传递格式化错误；顶层和各 lane 的原生透传值均以掩码显示。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProducerConfig")
@@ -329,6 +359,11 @@ impl fmt::Debug for ProducerConfig {
 
 impl fmt::Debug for ProducerLaneOverride {
     /// 业务作用：输出 lane 覆盖参数并遮蔽透传值。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收命名 lane 显式覆盖项的输出目标。
+    ///
+    /// 返回：输出覆盖声明或传递格式化错误；未设置项保留 None，不展开继承后的有效配置。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProducerLaneOverride")
@@ -370,6 +405,11 @@ impl fmt::Debug for ProducerLaneOverride {
 
 impl fmt::Debug for ConsumerConfig {
     /// 业务作用：输出 consumer 强类型参数并遮蔽透传值。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收消费组并发度、会话时限和拉取边界的诊断输出目标。
+    ///
+    /// 返回：写入配置视图或传递格式化错误；原生透传表只显示键和掩码，不改变消费配置。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ConsumerConfig")
@@ -390,6 +430,11 @@ impl fmt::Debug for ConsumerConfig {
 
 impl fmt::Debug for AdminConfig {
     /// 业务作用：输出 admin 超时参数并遮蔽透传值。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收管理端显式超时设置的诊断输出目标。
+    ///
+    /// 返回：写入设置或传递格式化错误；None 保留为未设置，原生属性值统一遮蔽。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AdminConfig")
@@ -404,7 +449,7 @@ impl fmt::Debug for AdminConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnmatchedPolicy {
-    /// 跳过并前移（默认）。不前移会让 group 位点永久卡住，因此不保留该缺陷语义。
+    /// 跳过并前移（默认）；无匹配记录不会长期阻塞该分区的连续消费水位。
     Skip,
     /// 转发 DLT 后前移:需要审计"谁在发无主消息"的场景。
     DeadLetter,
@@ -548,7 +593,8 @@ pub struct BehaviorConfig {
 impl Default for BehaviorConfig {
     /// 业务作用：返回批量、提交、重试、DLT 与关闭行为的安全基线。
     ///
-    /// 参数说明：无。
+    /// 参数说明: 无。
+    ///
     /// 返回：独立配置值；默认严格路由头、可靠 DLT 和有界业务责任，不启动后台资源。
     fn default() -> Self {
         Self {
@@ -602,7 +648,7 @@ impl Default for BehaviorConfig {
     }
 }
 
-/// 安全配置;Debug 手写打码,凭据字段永不进日志。
+/// 安全配置；Debug 遮蔽密码和私钥口令，用户名及证书路径仍可见。
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecurityConfig {
@@ -625,14 +671,20 @@ pub struct SecurityConfig {
 }
 
 impl fmt::Debug for SecurityConfig {
-    /// 业务作用：输出可排障但不包含凭据值的配置快照。
+    /// 业务作用：输出安全连接配置，遮蔽密码和私钥口令并保留配置存在性。
     ///
-    /// - `f`: 调用方提供的格式化缓冲区。
+    /// 参数说明：
+    /// - `f`：接收诊断快照的输出目标；协议、用户名和证书路径仍按配置显示。
+    ///
+    /// 返回：写入配置视图或传递格式化错误；不会读取证书、私钥文件或建立连接。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // 打码原则:存在性可见(便于排障"配没配"),值不可见(凭据不进任何日志/panic 消息)。
+        // 格式化只检查口令是否配置，避免诊断输出携带口令原值。
         /// 业务作用：把可选凭据压缩为“存在/不存在”的安全文本。
         ///
-        /// - `v`: 配置中的可选凭据，只读取存在性。
+        /// 参数说明：
+        /// - `v`：可选口令；空字符串也视为已配置，不读取或输出原值。
+        ///
+        /// 返回：Some 对应固定掩码，None 对应未配置标记；不分配或复制凭据。
         fn mask(v: &Option<String>) -> &'static str {
             if v.is_some() {
                 "***"
@@ -673,9 +725,13 @@ const FORBIDDEN_PRODUCER_RAW_KEYS: [&[&str]; 4] = [
 impl KafkaConfig {
     /// 业务作用：供容器和业务入口校验实际消费组的共同输入域，确保组名能原样用于消费、管理查询和 DLT 证据。
     ///
-    /// 参数说明：`group` 为已经解析的实际组名，不接受表示“未指定默认组”的空值。
+    /// 参数说明：
+    /// - `group`：已经解析的实际组名，不接受表示“未指定默认组”的空值。
+    ///
     /// 返回：组名为 1 至 1024 个 UTF-8 字节、非纯空白、不含 NUL 且首尾不含 U+0000–0020 时成功；
+    ///
     /// 否则返回 Config，不裁剪或改写输入，也不创建客户端资源。
+    ///
     /// 纯空白使用与事件相同的固定字符集合，NEL、NBSP、FIGURE SPACE 和 NARROW NBSP 不属于该集合。
     pub fn validate_group_id(group: &str) -> Result<()> {
         crate::wire::validate_group(group)
@@ -684,7 +740,8 @@ impl KafkaConfig {
     /// 业务作用：在建立连接前验证源与全部lane的有效配置，拒绝破坏顺序、身份或容量的声明。
     /// 原生运行环境的额外限制仍会在客户端构造时检查，静态校验成功不证明broker可访问。
     ///
-    /// 参数说明：无。
+    /// 参数说明: 无。
+    ///
     /// 返回：静态配置满足不变量且能力可用时成功；声明非法为Config，缺少构建能力为UnsupportedCapability，不创建连接或后台资源。
     pub fn validate(&self) -> Result<()> {
         if !(1..=64).contains(&self.consumer.concurrency)
@@ -1138,13 +1195,22 @@ impl KafkaConfig {
 
 /// 业务作用：构造配置错误的简写;集中一处保证报错前缀风格一致。
 ///
-/// - `msg`: 已脱敏且能定位字段的配置错误说明。
+/// 参数说明：
+/// - `msg`：调用方已排除口令等敏感值的字段错误说明；本函数不执行脱敏。
+///
+/// 返回：持有说明副本的 Config 错误，不记录日志或修改配置。
 fn cfg_err(msg: &str) -> NafkaError {
     NafkaError::Config(msg.to_string())
 }
 
 /// 业务作用：Kafka 原生配置使用有符号 32 位毫秒值；同一批参数也会进入内部 `Instant` deadline。
 /// 在统一配置边界拒绝更大值，避免底层隐式拒绝或 Rust 运行时加法溢出。
+///
+/// 参数说明：
+/// - `field`：错误定位使用的配置路径。
+/// - `millis`：待验证的毫秒数；是否允许零由字段各自的校验决定。
+///
+/// 返回：不超过 i32::MAX 时成功，否则返回 Config；不裁剪数值或设置实际期限。
 fn validate_millis_upper_bound(field: &str, millis: u64) -> Result<()> {
     if millis > i32::MAX as u64 {
         return Err(cfg_err(&format!(
@@ -1156,12 +1222,11 @@ fn validate_millis_upper_bound(field: &str, millis: u64) -> Result<()> {
 
 /// 业务作用：校验名字类字段的字符集:仅 ASCII 字母/数字/./_/-,且非空(client_name、lane 名共用规则)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `field`: 字段名,用于报错定位。
 /// - `value`: 待校验值。
 ///
-/// # 错误
-/// 值为空或包含允许集合之外的字符时返回配置错误。
+/// 返回：非空且所有字符属于允许集合时成功；否则返回 Config，不裁剪或规范化名字。
 fn validate_name_charset(field: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(cfg_err(&format!("{field} 不能为空")));
@@ -1180,26 +1245,23 @@ fn validate_name_charset(field: &str, value: &str) -> Result<()> {
 /// 业务作用：拒绝透传 map 中的框架不变量键:出现即报错,而非静默剔除——
 /// 静默剔除会让运维以为覆盖生效,埋下"以为开了自动提交"的认知事故。
 ///
-/// # 参数
+/// 参数说明：
 /// - `props`: 待检查的透传键值表。
 /// - `where_`: map 位置描述,用于报错定位。
 ///
-/// # 错误
-/// 透传表包含自动提交或自动位点存储键时返回配置错误。
+/// 返回：未包含保留键时成功；只要出现自动提交或自动位点存储键就返回 Config，与其配置值无关。
 fn forbid_reserved_raw(props: &BTreeMap<String, String>, where_: &str) -> Result<()> {
     forbid_keys(props, where_, &FORBIDDEN_RAW_KEYS)
 }
 
 /// 业务作用：校验 producer 侧透传 map：在通用保留键之外，再拦下会推翻 producer 不变量的键与别名。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `props`: 待校验的原生透传表。
 /// - `where_`: 出错时用于定位的配置路径。
 ///
-/// # 错误
-///
-/// 命中任一保留键或其别名时返回配置错误。
+/// 返回：通用及 producer 保留键均未出现时成功；命中任一键或别名时返回 Config，不移除声明。
 fn forbid_reserved_producer_raw(props: &BTreeMap<String, String>, where_: &str) -> Result<()> {
     forbid_reserved_raw(props, where_)?;
     forbid_keys(props, where_, &FORBIDDEN_PRODUCER_RAW_KEYS)
@@ -1207,15 +1269,13 @@ fn forbid_reserved_producer_raw(props: &BTreeMap<String, String>, where_: &str) 
 
 /// 业务作用：按"canonical 名 + 全部别名"逐组校验透传表。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `props`: 待校验的原生透传表。
 /// - `where_`: 出错时用于定位的配置路径。
-/// - `groups`: 每组的第一个元素是 canonical 名，其余是底层别名。
+/// - `groups`：每组必须非空，第一个元素是 canonical 名，其余是底层别名；仅由内部常量提供。
 ///
-/// # 错误
-///
-/// 命中任一键时返回配置错误，错误文本给出 canonical 名便于定位。
+/// 返回：所有保留键均缺席时成功；命中时返回含 canonical 名的 Config，值不会写入错误文本；空组会 panic。
 fn forbid_keys(props: &BTreeMap<String, String>, where_: &str, groups: &[&[&str]]) -> Result<()> {
     for group in groups {
         let canonical = group[0];

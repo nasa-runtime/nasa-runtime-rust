@@ -86,9 +86,13 @@ static INBOX_RETENTION_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 6] = [
 /// 删除窗口。相同 datasource 内的 `consumer_name` 在一个 Application 中只能登记一次；不同
 /// datasource 的同名消费空间彼此独立。
 pub struct InboxRetentionPlan {
+    /// 去重表绑定的数据源；清理时不回退到其它来源。
     datasource_ref: String,
+    /// 与业务消费路径一致的稳定去重命名空间。
     consumer_name: String,
+    /// 明确约束重投视界、最小年龄与单轮删除容量和预算的策略。
     policy: InboxRetentionPolicy,
+    /// 上一轮完整结束后才开始计时的延迟，不积累补跑轮次。
     interval: Duration,
 }
 
@@ -173,7 +177,9 @@ pub struct InboxRetentionSnapshot {
 /// 业务作用：唯一标识一个 datasource 内的消费命名空间，避免多源同名计划互相排斥。
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 struct InboxRetentionKey {
+    /// 隔离同名消费空间所用的受管数据源名称。
     datasource_ref: String,
+    /// 该数据源内唯一登记的消费命名空间。
     consumer_name: String,
 }
 
@@ -195,11 +201,17 @@ impl InboxRetentionKey {
 
 /// 业务作用：累计所有受管消费命名空间的清理账目，并保留每个计划最近候选年龄供聚合。
 struct InboxRetentionMetrics {
+    /// 后端成功形成报告的轮次累计数，不包含返回错误的轮次。
     rounds: AtomicU64,
+    /// 报告确认删除的标记数累计值。
     deleted: AtomicU64,
+    /// 未取得清理控制权而跳过的轮次累计值。
     claim_contended: AtomicU64,
+    /// 报告因预算用尽而结束的轮次累计值。
     budget_exhausted: AtomicU64,
+    /// 未形成正常报告的存储错误次数。
     failed_rounds: AtomicU64,
+    /// 各计划最近一次报告的候选年龄，失败轮次不覆盖旧观察。
     oldest_by_plan: Mutex<BTreeMap<InboxRetentionKey, u64>>,
 }
 
@@ -220,13 +232,14 @@ impl InboxRetentionMetrics {
         }
     }
 
-    /// 业务作用：把一轮已完成清理的全部账目原子地并入进程累计指标。
+    /// 业务作用：把后端已完成的一轮清理报告逐项累加到进程指标，并更新该计划的候选年龄。
     ///
     /// 参数说明：
     /// - `plan_key`：本轮对应的 datasource 与消费命名空间，仅用于更新内部聚合槽。
     /// - `report`：数据库适配器完成 owner 释放后返回的轮次报告。
     ///
-    /// 返回：无；累计计数单调增加，候选年龄更新为该命名空间最近一次观测。
+    /// 返回：分别更新各原子计数，再在锁内更新候选年龄；缺省、负值或不可表示年龄按零记录。
+    /// 整轮账目不是一个原子事务，并发读取可观察到更新中的组合；计数按 u64 的环绕算术累计。
     fn observe(&self, plan_key: &InboxRetentionKey, report: InboxRetentionRoundReport) {
         self.rounds.fetch_add(1, Ordering::Relaxed);
         self.deleted.fetch_add(report.deleted, Ordering::Relaxed);
@@ -259,7 +272,8 @@ impl InboxRetentionMetrics {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：当前累计计数以及所有已配置命名空间中最大的最近候选年龄。
+    /// 返回：各计数的独立读取值，以及已有轮次报告的计划中最大的最近候选年龄；没有年龄记录时为零。
+    /// 年龄与各计数不保证同一原子时刻，失败轮次不会刷新已有年龄，零值不能证明所有计划均已执行。
     fn snapshot(&self) -> InboxRetentionSnapshot {
         let oldest_candidate_age_ms = self
             .oldest_by_plan
@@ -282,6 +296,7 @@ impl InboxRetentionMetrics {
 
 /// 业务作用：把 Inbox retention 聚合状态桥接到 Application 唯一指标目录。
 struct InboxRetentionMetricsSource {
+    /// 当前应用所有计划共享的低基数累计状态。
     metrics: Arc<InboxRetentionMetrics>,
 }
 
@@ -323,7 +338,8 @@ impl nametrics_core::LegacyMetricsSource for InboxRetentionMetricsSource {
 
     /// 业务作用：保留兼容文本入口；统一 hub 使用结构化快照生成 Prometheus 文本。
     ///
-    /// 参数说明：`_output` 是兼容 trait 的文本缓冲区，本源不直接写入。
+    /// 参数说明：
+    /// - `_output`：`_output` 是兼容 trait 的文本缓冲区。
     ///
     /// 返回：无。
     fn render_prometheus(&self, _output: &mut String) {}
@@ -331,8 +347,11 @@ impl nametrics_core::LegacyMetricsSource for InboxRetentionMetricsSource {
 
 /// 业务作用：保存 Application 内全部 Inbox retention 计划的唯一性与聚合指标所有权。
 pub(crate) struct InboxRetentionRuntimeState {
+    /// 同一应用内已占用的计划身份，任务登记失败时撤销对应项。
     configured_plans: Mutex<BTreeSet<InboxRetentionKey>>,
+    /// 指标源是否已成功登记，锁串行化首次登记过程。
     metrics_registered: Mutex<bool>,
+    /// 所有保留循环共用的指标状态，不公开消费名称为标签。
     metrics: Arc<InboxRetentionMetrics>,
 }
 
@@ -352,7 +371,8 @@ impl InboxRetentionRuntimeState {
 
     /// 业务作用：线性化登记 datasource 内的消费命名空间，禁止同一去重集合重复启动清理循环。
     ///
-    /// 参数说明：`plan_key` 是计划中已经校验的 datasource 与消费命名空间。
+    /// 参数说明：
+    /// - `plan_key`：`plan_key` 是计划中已经校验的 datasource 与消费命名空间。
     ///
     /// 返回：同一 datasource 内首次登记成功；重复登记返回 UserHook 错误。
     fn register_plan(&self, plan_key: &InboxRetentionKey) -> ApplicationResult<()> {
@@ -360,6 +380,7 @@ impl InboxRetentionRuntimeState {
             .configured_plans
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 同一去重集合只允许一个本地循环，避免重复清理任务争抢同一后端控制权。
         if !plans.insert(plan_key.clone()) {
             return Err(inbox_error(
                 ApplicationPhase::UserHook,
@@ -371,7 +392,8 @@ impl InboxRetentionRuntimeState {
 
     /// 业务作用：任务登记未被 Supervisor 接受时撤销计划身份，让调用方可在 UserHook 内重新提交。
     ///
-    /// 参数说明：`plan_key` 是此前已线性化登记、但尚未取得任务所有权的计划身份。
+    /// 参数说明：
+    /// - `plan_key`：`plan_key` 是此前已线性化登记、但尚未取得任务所有权的计划身份。
     ///
     /// 返回：无；只移除完全相同的 datasource 与消费命名空间组合。
     fn unregister_plan(&self, plan_key: &InboxRetentionKey) {
@@ -383,7 +405,8 @@ impl InboxRetentionRuntimeState {
 
     /// 业务作用：在首个计划登记时把唯一指标源并入进程目录，后续计划复用同一聚合源。
     ///
-    /// 参数说明：`application` 提供进程级指标 hub。
+    /// 参数说明：
+    /// - `application`：`application` 提供进程级指标 hub。
     ///
     /// 返回：源已存在或首次登记成功时完成；descriptor 冲突或序列预算不足时拒绝启动。
     fn ensure_metrics_registered(&self, application: &Application) -> ApplicationResult<()> {
@@ -544,12 +567,14 @@ async fn create_managed_inbox(
 /// 参数说明：
 /// - `cancellation`：TaskSupervisor 在停机开始时触发的组级取消令牌。
 /// - `retention`：已经绑定 datasource 的后端清理能力。
+/// - `plan_key`：同时包含数据源与消费命名空间的内部指标键，避免不同数据源的同名计划互相覆盖。
 /// - `consumer_name`：本循环唯一负责的消费命名空间。
 /// - `policy`：每轮复验并执行的保留安全策略。
 /// - `interval`：一轮结束后到下一轮开始前的延迟。
 /// - `metrics`：所有循环共享的无标签聚合指标。
 ///
-/// 返回：收到停机信号且当前轮次已在预算内完成时正常结束；循环本身不会因单轮存储失败退出。
+/// 返回：轮次边界或间隔等待中观察到取消后正常结束；单轮存储失败记录计数与日志，之后仍按固定延迟继续。
+/// 清理轮次不与本令牌竞争取消，必须由后端兑现预算和释放责任；外层强制终止时依赖后端析构保护。
 async fn run_retention_loop(
     cancellation: tokio_util::sync::CancellationToken,
     retention: Arc<dyn DurableInboxRetention>,
@@ -581,21 +606,23 @@ async fn run_retention_loop(
         // 延迟从上一轮完整收口后开始，慢轮次不会与下一轮重叠，也不会积累补跑债务。
         tokio::select! {
             _ = cancellation.cancelled() => return Ok(()),
-            _ = tokio::time::sleep(interval) => {}
+            _ = tokio::time::sleep(interval) => {},
         }
     }
 }
 
 impl Application {
-    /// 业务作用：登记一个或多个由 Application 所有的 Inbox 去重标记保留循环。
+    /// 业务作用：为一个消费命名空间登记由 Application 监督的 Inbox 去重标记保留循环。
     ///
     /// 计划只在 UserHook 接受；数据源存在性在 Ready 之前复验，实际清理在全局 Ready 后才开始。
     /// 相同 datasource 内的消费命名空间不能重复登记；不同去重集合各自串行且共享无标签指标源。
     ///
-    /// 参数说明：`plan` 包含 datasource、消费命名空间、保留安全窗口和 fixed-delay 间隔。
+    /// 参数说明：
+    /// - `plan`：`plan` 包含 datasource、消费命名空间、保留安全窗口和 fixed-delay 间隔。
     ///
     /// 返回：数据源已冻结、指标源已登记且监督器受理任务时成功；阶段、名称、后端或指标合同不满足时
     /// 拒绝启动。成功不代表已经执行首轮删除，首轮只会在 Application 发布 Ready 后开始。
+    /// 任务登记失败会撤销该计划身份，已登记的公共指标源保留；本入口不自动重试或执行删除。
     pub async fn configure_inbox_retention(
         &self,
         plan: InboxRetentionPlan,
@@ -632,6 +659,7 @@ impl Application {
             })
             .await;
         if let Err(error) = registration {
+            // 监督器未取得任务责任，撤销占用的计划身份，允许启动 Hook 按原合同重新登记。
             runtime.unregister_plan(&plan_key);
             return Err(error);
         }

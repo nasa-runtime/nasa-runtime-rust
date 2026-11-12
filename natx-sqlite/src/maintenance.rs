@@ -13,25 +13,34 @@ use crate::{DataSourceConfig, JournalMode, SqliteDataSource, SqliteOptions};
 /// 维护失败的证据归属，目标或发布失败不能据此撤销健康源库的业务权威。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenanceErrorOrigin {
+    /// 已确认属于源数据库，可参与来源健康与隔离判断。
     Source,
+    /// 属于目标文件准备或写入，不代表源数据库失效。
     Target,
+    /// 目标内容持久发布失败，调用方不能认定备份已可用。
     Publication,
+    /// 证据不足以确定归属，不将失败归因于源数据库。
     Unknown,
 }
 
 /// 保留维护阶段、故障归属和原生扩展码；可从 anyhow 错误链中读取。
 #[derive(Debug)]
 pub struct MaintenanceError {
+    /// 失败发生的固定维护阶段，不包含业务数据或文件路径。
     pub operation: &'static str,
+    /// 错误证据归属，决定是否参与源数据库隔离判断。
     pub origin: MaintenanceErrorOrigin,
+    /// 原生扩展结果码；文件系统等外部失败没有原生码。
     pub code: Option<i32>,
     cause: Option<anyhow::Error>,
 }
 
 impl std::fmt::Display for MaintenanceError {
     /// 业务作用：输出固定阶段与原生码，不将源文件路径或业务内容写入错误分类。
+    ///
     /// 参数说明：
     /// - `formatter`：错误文本输出目标。
+    ///
     /// 返回：保留故障归属和原生码的诊断文本。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -48,7 +57,9 @@ impl std::fmt::Display for MaintenanceError {
 
 impl std::error::Error for MaintenanceError {
     /// 业务作用：保留文件发布或权限拒绝的底层原因，供调用方核对持久化事实。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：有外部原因时返回其错误链，纯原生码失败为空。
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.cause.as_ref().map(|cause| cause.as_ref() as _)
@@ -56,10 +67,12 @@ impl std::error::Error for MaintenanceError {
 }
 
 /// 业务作用：在原生句柄状态改变前固定维护失败证据。
+///
 /// 参数说明：
 /// - `operation`：发生失败的固定阶段。
 /// - `origin`：已确认的故障归属。
 /// - `code`：原生扩展结果码。
+///
 /// 返回：可供来源健康链路与调用方分别处理的结构化错误。
 fn native_failure(
     operation: &'static str,
@@ -76,10 +89,12 @@ fn native_failure(
 }
 
 /// 业务作用：将路径与发布失败保留为目标侧证据，避免误触发源库隔离。
+///
 /// 参数说明：
 /// - `operation`：目标准备或发布阶段。
 /// - `origin`：目标或发布归属。
 /// - `cause`：保持原有失败后果的底层错误。
+///
 /// 返回：可从错误链读取原因的维护失败。
 fn external_failure(
     operation: &'static str,
@@ -98,27 +113,38 @@ fn external_failure(
 /// 手动 WAL 维护策略；默认不等待读者让出快照。
 #[derive(Clone, Copy, Debug, Default)]
 pub enum CheckpointMode {
+    /// 请求 PASSIVE checkpoint，不等待活跃读者释放快照。
     #[default]
     Passive,
+    /// 请求 FULL checkpoint，等待仍受操作预算约束。
     Full,
+    /// 请求 RESTART checkpoint，允许日志在满足引擎条件后重新使用。
     Restart,
+    /// 请求 TRUNCATE checkpoint，满足引擎条件后截短 WAL 文件。
     Truncate,
 }
 
 /// 帧数不可用时使用 None，未完成 checkpoint 不撤销已确认的提交。
 #[derive(Clone, Copy, Debug)]
 pub struct CheckpointResult {
+    /// 原生引擎是否因忙碌未完成所请求的 checkpoint。
     pub busy: bool,
+    /// 引擎报告的 WAL 总帧数；未提供时为空。
     pub wal_frames: Option<u32>,
+    /// 引擎报告的已回写帧数；未提供时为空，不等同于新提交消息数。
     pub checkpointed_frames: Option<u32>,
 }
 
 /// 仅在原生复制、校验、关闭和持久发布全部确认后产生。
 #[derive(Clone, Debug)]
 pub struct BackupReport {
+    /// 已完成持久发布的备份文件路径。
     pub path: PathBuf,
+    /// 原生备份复制的数据库页数。
     pub pages: u32,
+    /// 已发布备份文件的实际字节长度。
     pub bytes: u64,
+    /// 已核对的备份文件日志模式。
     pub journal_mode: JournalMode,
 }
 
@@ -130,7 +156,9 @@ pub struct SqliteMaintenance {
 
 impl SqliteDataSource {
     /// 业务作用：为当前来源取得受同一生命周期和串行门保护的维护能力。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只能执行固定维护操作的句柄，停机后不能发起新操作。
     pub fn maintenance(&self) -> SqliteMaintenance {
         SqliteMaintenance {
@@ -141,6 +169,7 @@ impl SqliteDataSource {
 
 /// 固定完整性检查通过后读取的持久 schema 标识，不提供任意 PRAGMA 能力。
 pub struct DatabaseInspection {
+    /// 完整性检查通过后读取的 user_version，用于识别持久 schema 格式。
     pub user_version: u32,
 }
 
@@ -158,8 +187,10 @@ pub(crate) enum ResultValue {
 
 impl SqliteMaintenance {
     /// 业务作用：核对数据库物理结构、外键引用并读取旧存储格式标识，供启动迁移门禁使用。
+    ///
     /// 参数说明：
     /// - `budget`：维护排队、数据库检查和结果交付共同遵守的预算。
+    ///
     /// 返回：完整性检查通过后的 user_version；损坏、外键缺失或来源失效时拒绝。
     pub async fn inspect(
         &self,
@@ -172,9 +203,11 @@ impl SqliteMaintenance {
     }
 
     /// 业务作用：有界执行同文件串行的 WAL checkpoint，不删除活动日志。
+    ///
     /// 参数说明：
     /// - `mode`：读者等待与 WAL 截断策略。
     /// - `budget`：获取维护权、借用连接和原生执行共同遵守的预算。
+    ///
     /// 返回：真实 busy 与帧数；只读来源、环境事务或停机状态拒绝。
     pub async fn checkpoint(
         &self,
@@ -192,9 +225,11 @@ impl SqliteMaintenance {
     }
 
     /// 业务作用：用 SQLite 原生增量备份生成独立、经过校验的 DELETE 数据库。
+    ///
     /// 参数说明：
     /// - `destination`：必须不存在且父目录受保护的新路径。
     /// - `budget`：整个维护与发布过程的剩余预算。
+    ///
     /// 返回：确认发布的备份；取消或完成未确认时不得当作可直接重试的成功。
     pub async fn backup_to(
         &self,
@@ -214,9 +249,11 @@ impl SqliteMaintenance {
     }
 
     /// 业务作用：把维护门与原生执行责任一起交给 worker，取消不会提前放开同文件维护。
+    ///
     /// 参数说明：
     /// - `operation`：固定维护动作。
     /// - `budget`：调用者剩余时间与取消信号。
+    ///
     /// 返回：worker 最终确认的维护结果。
     async fn execute(
         &self,
@@ -242,11 +279,13 @@ impl SqliteMaintenance {
 }
 
 /// 业务作用：独占只读备份源后恢复到新路径，不覆盖活动数据库或保留旧 sidecar。
+///
 /// 参数说明：
 /// - `backup`：已关闭、使用 DELETE 模式的完整备份文件。
 /// - `destination`：尚不存在的新目标。
 /// - `journal_mode`：恢复后目标的明确部署模式。
 /// - `budget`：打开、校验、复制及发布共同遵守的预算。
+///
 /// 返回：新文件已发布且源已关闭；失败保留真实发布事实，不覆盖重试。
 pub async fn restore_to_new(
     backup: impl AsRef<Path>,
@@ -291,12 +330,14 @@ pub async fn restore_to_new(
 }
 
 /// 业务作用：在 actor 阻塞域锁住 SQLx 原生句柄，顺序完成维护与结果确认。
+///
 /// 参数说明：
 /// - `connection`：来源唯一借用的连接。
 /// - `datasource`：持续提供排空截止点和隔离状态的来源。
 /// - `operation`：已通过入口门禁的固定动作。
 /// - `deadline`：绝对截止点。
 /// - `cancel`：等待方取消信号。
+///
 /// 返回：没有原始句柄逃逸的维护结果。
 pub(crate) async fn execute_native(
     connection: &mut sqlx::SqliteConnection,
@@ -403,7 +444,9 @@ struct NativeBudget {
 
 impl NativeBudget {
     /// 业务作用：让复制、锁等待、目标校验及发布共同服从维护预算与来源生命周期。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：未取消、未超期且来源仍可排空时成功；隔离或来源关闭后拒绝后续普通维护步骤。
     fn check(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -424,7 +467,9 @@ struct NativeDatabase(*mut ffi::sqlite3);
 
 impl Drop for NativeDatabase {
     /// 业务作用：失败路径同步关闭目标连接，临时文件清理不得先于原生退出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：该模块未保留 statement 时立即关闭目标。
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -436,11 +481,13 @@ impl Drop for NativeDatabase {
 }
 
 /// 业务作用：增量复制受控源并在 DELETE 目标校验后按明确模式持久发布。
+///
 /// 参数说明：
 /// - `source`：整个调用期间被 SQLx handle lock 独占的有效连接。
 /// - `destination`：不存在的新目标路径。
 /// - `mode`：最终目标模式。
 /// - `budget`：同步调用期间持续有效的取消与时间边界。
+///
 /// 返回：只有 DONE、finish、校验、关闭、同步全部成功才返回报告。
 fn backup_native(
     source: *mut ffi::sqlite3,
@@ -647,11 +694,13 @@ fn backup_native(
 }
 
 /// 业务作用：在私有目标上执行固定校验语句，收集有界首列结果。
+///
 /// 参数说明：
 /// - `database`：目标有效连接。
 /// - `budget`：包含来源排空与隔离边界的维护预算。
 /// - `sql`：框架固定 SQL。
 /// - `rows`：需要验证的首列结果集合。
+///
 /// 返回：执行结束的原生状态；不接受业务 SQL。
 fn execute_target(
     database: *mut ffi::sqlite3,
@@ -684,11 +733,13 @@ fn execute_target(
 }
 
 /// 业务作用：限制目标校验返回的诊断数量，避免损坏文件驱动无界内存增长。
+///
 /// 参数说明：
 /// - `context`：当前 execute_target 调用持有的可选结果集合。
 /// - `count`：本行列数。
 /// - `values`：SQLite 当前行的临时字符串。
 /// - `_names`：SQLite 当前行列名。
+///
 /// 返回：达到上限时中止；只拷贝有界首列，不保留原生指针。
 unsafe extern "C" fn collect_row(
     context: *mut c_void,
@@ -717,8 +768,10 @@ unsafe extern "C" fn collect_row(
 }
 
 /// 业务作用：目标校验 VM 服从维护取消与截止点。
+///
 /// 参数说明：
 /// - `context`：整个原生维护期间有效的预算。
+///
 /// 返回：预算终止时中断 VM。
 unsafe extern "C" fn target_progress(context: *mut c_void) -> c_int {
     i32::from(
@@ -729,9 +782,11 @@ unsafe extern "C" fn target_progress(context: *mut c_void) -> c_int {
 }
 
 /// 业务作用：目标锁竞争只在剩余预算内进行有限退避。
+///
 /// 参数说明：
 /// - `context`：维护预算。
 /// - `_attempts`：SQLite 本次锁等待的调用次数。
+///
 /// 返回：剩余预算存在时继续，否则停止。
 unsafe extern "C" fn target_busy(context: *mut c_void, _attempts: c_int) -> c_int {
     if unsafe { target_progress(context) } != 0 {

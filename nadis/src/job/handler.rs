@@ -39,7 +39,7 @@ pub struct FanoutContext {
     pub assignment_epoch: i64,
 }
 
-/// Handler 执行结果：结果码与业务摘要；摘要过长由提交脚本按上限截断。
+/// Handler 执行结果：结果码与业务摘要；调用方须保证摘要有界且不含敏感载荷。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobOutcome {
     /// 结果码，决定 Run 下一状态（成功、重试或终态）。
@@ -49,28 +49,47 @@ pub struct JobOutcome {
 }
 
 impl JobOutcome {
-    /// 业务作用：构造无摘要的成功结果。参数说明: 无。返回：`SUCCESS` 结果。
+    /// 业务作用：声明业务处理成功且无需保留结果摘要，供派发器随后提交终态。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：摘要为空的 `SUCCESS` 结果；构造本身不提交持久状态。
     pub fn success() -> Self {
         Self {
             code: JobResultCode::Success,
             summary: String::new(),
         }
     }
-    /// 业务作用：构造带摘要的成功结果。参数说明：`summary` 结果摘要。返回：`SUCCESS` 结果。
+    /// 业务作用：声明业务处理成功并携带供持久观测使用的摘要。
+    ///
+    /// 参数说明：
+    /// - `summary`：调用方已控制长度及敏感信息的结果摘要，构造时原样保留。
+    ///
+    /// 返回：带摘要的 `SUCCESS` 结果；持久提交仍由派发器完成。
     pub fn success_with_summary(summary: impl Into<String>) -> Self {
         Self {
             code: JobResultCode::Success,
             summary: summary.into(),
         }
     }
-    /// 业务作用：构造可重试失败结果。参数说明：`summary` 失败摘要。返回：`RETRY` 结果。
+    /// 业务作用：把本次处理失败交给任务定义的重试策略裁决。
+    ///
+    /// 参数说明：
+    /// - `summary`：调用方已控制长度及敏感信息的失败摘要。
+    ///
+    /// 返回：`RETRY` 结果，不保证一定再执行；次数耗尽或持久状态变化仍可使任务终结。
     pub fn retry(summary: impl Into<String>) -> Self {
         Self {
             code: JobResultCode::Retry,
             summary: summary.into(),
         }
     }
-    /// 业务作用：构造永久失败结果。参数说明：`summary` 失败摘要。返回：`FAIL_PERMANENT` 结果。
+    /// 业务作用：声明继续执行同一业务输入没有意义，要求按永久失败收敛当前尝试。
+    ///
+    /// 参数说明：
+    /// - `summary`：解释永久失败的有界摘要，不能包含敏感输入。
+    ///
+    /// 返回：`FAIL_PERMANENT` 结果；只有持久完成 CAS 成功后才成为任务事实。
     pub fn fail_permanent(summary: impl Into<String>) -> Self {
         Self {
             code: JobResultCode::FailPermanent,
@@ -120,39 +139,70 @@ pub type JobResult = JobOutcome;
 /// 当前 attempt 的本地保守权威；续期更新截止点，失权、取消或 future 被停止时永久关闭。
 #[derive(Debug)]
 pub(crate) struct JobExecutionAuthority {
+    /// 本地执行门禁；撤销后不能再由续期重新开启。
     active: AtomicBool,
+    /// 已观察到的持久取消请求，一旦为真不回退。
     cancellation_requested: AtomicBool,
+    /// 普通根是否已把完成责任移交给持久 Fanout 对账流程。
     fanout_transferred: AtomicBool,
+    /// 按服务端租约跨度扣除安全余量后的本地单调截止。
     deadline: Mutex<tokio::time::Instant>,
 }
 
 impl JobExecutionAuthority {
     /// 业务作用：根据 start 脚本返回的服务端时刻建立本地保守持权截止点。
     ///
-    /// 参数说明：`redis_now`/`lease_until` 为同次脚本响应，`safety_ms` 为 RTT 与漂移安全余量。
+    /// 参数说明：
+    /// - `redis_now`：领取脚本返回的服务端毫秒时间。
+    /// - `lease_until`：同一次响应中的租约截止毫秒时间。
+    /// - `safety_ms`：往返延迟和时钟漂移的合计安全余量，单位毫秒。
+    /// - `request_started`：领取请求发出前记录的本地单调起点，不因响应或载荷读取延后而重置。
     ///
-    /// 返回：可随续期推进、失权后不可重新开放的共享门禁。
-    pub(crate) fn new(redis_now: i64, lease_until: i64, safety_ms: u64) -> Arc<Self> {
+    /// 返回：仍有可用窗口时创建可续期门禁；响应到达前已耗尽窗口则直接关闭，失权后不可重新开放。
+    pub(crate) fn new(
+        redis_now: i64,
+        lease_until: i64,
+        safety_ms: u64,
+        request_started: tokio::time::Instant,
+    ) -> Arc<Self> {
+        let deadline = local_deadline(redis_now, lease_until, safety_ms, request_started);
         Arc::new(Self {
-            active: AtomicBool::new(true),
+            active: AtomicBool::new(tokio::time::Instant::now() < deadline),
             cancellation_requested: AtomicBool::new(false),
             fanout_transferred: AtomicBool::new(false),
-            deadline: Mutex::new(local_deadline(redis_now, lease_until, safety_ms)),
+            deadline: Mutex::new(deadline),
         })
     }
 
     /// 业务作用：续期成功后推进本地保守截止点；只允许当前仍有效的 attempt 更新。
     ///
-    /// 参数说明：`redis_now`/`lease_until` 为续期响应，`safety_ms` 为安全余量。
+    /// 参数说明：
+    /// - `redis_now`：续期脚本返回的服务端毫秒时间。
+    /// - `lease_until`：同一续期响应确认的租约截止毫秒时间。
+    /// - `safety_ms`：折算本地期限时扣除的合计安全余量，单位毫秒。
+    /// - `request_started`：本次续期请求发出前记录的本地单调时刻，用于扣除实际等待时间。
     ///
-    /// 返回：仍有效时更新并返回 `true`；已经关闭时返回 `false`，不会复活旧权威。
-    pub(crate) fn renew(&self, redis_now: i64, lease_until: i64, safety_ms: u64) -> bool {
+    /// 返回：旧窗口与新证据均仍有效时更新并返回真；关闭、过期或锁中毒时返回假并保持关闭。
+    pub(crate) fn renew(
+        &self,
+        redis_now: i64,
+        lease_until: i64,
+        safety_ms: u64,
+        request_started: tokio::time::Instant,
+    ) -> bool {
         if !self.active.load(Ordering::Acquire) {
             return false;
         }
         match self.deadline.lock() {
             Ok(mut deadline) => {
-                *deadline = local_deadline(redis_now, lease_until, safety_ms);
+                let now = tokio::time::Instant::now();
+                let next = local_deadline(redis_now, lease_until, safety_ms, request_started);
+                // 旧窗口已经关闭时，迟到的成功响应也不能恢复业务权限；新证据本身过期同样撤权。
+                if !self.active.load(Ordering::Acquire) || now >= *deadline || now >= next {
+                    self.active.store(false, Ordering::Release);
+                    return false;
+                }
+                *deadline = next;
                 true
             }
             Err(_) => {
@@ -164,7 +214,8 @@ impl JobExecutionAuthority {
 
     /// 业务作用：永久关闭当前 attempt 的本地副作用门禁，并可同时记录持久取消请求。
     ///
-    /// 参数说明：`cancelled` 表示关闭原因包含业务取消。
+    /// 参数说明：
+    /// - `cancelled`：为真时同时记录业务取消，为假时只撤销执行权威。
     ///
     /// 返回：无返回值；关闭后任何续期都不能重新开放。
     pub(crate) fn revoke(&self, cancelled: bool) {
@@ -215,7 +266,7 @@ impl JobExecution {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：canonical qualifier。
+    /// 返回：冻结计划使用的规范数据源标识，不从载荷或运行期请求推断。
     pub fn qualifier(&self) -> &str {
         &self.qualifier
     }
@@ -240,9 +291,9 @@ impl JobExecution {
 
     /// 业务作用：按当前 Worker 合同把 JSON 参数解码为业务类型，支持集合、映射和嵌套泛型。
     ///
-    /// 参数说明：无显式参数；类型参数 `T` 由调用方的目标变量或 turbofish 指定。
+    /// 参数说明：无。
     ///
-    /// 返回：JSON 通过重复键、深度和节点预算后返回 `T`；非 JSON 编码或结构不合法时返回 `InvalidPayload`。
+    /// 返回：JSON 通过重复键、深度和节点预算后返回调用方指定的 `T`；非 JSON 编码或结构不合法时返回 `InvalidPayload`。
     pub fn parameter<T: DeserializeOwned>(&self) -> Result<T> {
         if self.wire_codec != JobWireCodec::Json.wire_name() {
             return Err(crate::job::JobError::InvalidPayload(
@@ -265,7 +316,8 @@ impl JobExecution {
 
     /// 业务作用：创建绑定当前根 attempt 的显式 Fanout 构建器，业务只声明 Worker 与分片而不接触 Redis 状态机。
     ///
-    /// 参数说明：`worker_name` 为目标 FANOUT_ONLY 或兼容 Worker 能力名。
+    /// 参数说明：
+    /// - `worker_name`：目标 `FANOUT_ONLY` Worker 能力名，提交时还会核对本地定义和注册表合同。
     ///
     /// 返回：普通且仍持权的根返回一次性 builder；Fanout shard、失权上下文或未装配服务返回错误。
     pub fn fanout(&self, worker_name: impl Into<String>) -> Result<FanoutBuilder> {
@@ -362,7 +414,7 @@ where
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：成功分支保留业务结果；错误分支返回不暴露业务载荷的可重试摘要。
+    /// 返回：成功分支保留业务结果；错误分支将 `Display` 文本原样作为重试摘要，业务错误格式须自行控制长度和敏感信息。
     fn into_job_handler_result(self) -> JobOutcome {
         self.unwrap_or_else(|error| JobOutcome::retry(error.to_string()))
     }
@@ -376,7 +428,7 @@ where
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：`Ok(())` 为成功；错误为带稳定文本的可重试结果。
+    /// 返回：`Ok(())` 为成功；错误的 `Display` 文本原样进入重试摘要，转换不会截断或脱敏。
     fn into_job_handler_result(self) -> JobOutcome {
         match self {
             Ok(()) => JobOutcome::success(),
@@ -400,7 +452,10 @@ pub trait JobHandler: Send + Sync {
 }
 
 /// 闭包 Handler 适配器；上下文按值克隆，使返回 future 不借用调度器内部记录。
-struct ClosureJobHandler<F>(F);
+struct ClosureJobHandler<F>(
+    /// 计划冻结的业务闭包，创建业务 Future 时接收拥有式上下文。
+    F,
+);
 
 impl<F, Fut, R> JobHandler for ClosureJobHandler<F>
 where
@@ -437,16 +492,26 @@ where
 
 /// 业务作用：把服务端租约跨度转换为扣除安全余量后的本地单调截止，墙钟跳变不影响持权判断。
 ///
-/// 参数说明：`redis_now`、`lease_until` 与安全余量毫秒。
+/// 参数说明：
+/// - `redis_now`：同一次领取或续期响应中的服务端毫秒时间。
+/// - `lease_until`：该响应确认的租约截止毫秒时间。
+/// - `safety_ms`：从租约跨度扣除的安全余量，单位毫秒。
+/// - `request_started`：领取或续期请求发出前记录的本地单调时刻，包含网络往返及后续处理耗时。
 ///
-/// 返回：不早于当前单调时刻的保守截止点。
-fn local_deadline(redis_now: i64, lease_until: i64, safety_ms: u64) -> tokio::time::Instant {
+/// 返回：在请求起点上增加可用租约跨度；跨度不足或平台时钟加法溢出时返回请求起点，立即视为无可用窗口。
+fn local_deadline(
+    redis_now: i64,
+    lease_until: i64,
+    safety_ms: u64,
+    request_started: tokio::time::Instant,
+) -> tokio::time::Instant {
     let safety_ms = i64::try_from(safety_ms).unwrap_or(i64::MAX);
     let usable_ms = lease_until
         .saturating_sub(redis_now)
         .saturating_sub(safety_ms)
         .max(0) as u64;
-    tokio::time::Instant::now()
+    // 响应到达之前已经消耗的时间不能再次授予业务，截止必须从请求起点折算。
+    request_started
         .checked_add(Duration::from_millis(usable_ms))
-        .unwrap_or_else(tokio::time::Instant::now)
+        .unwrap_or(request_started)
 }

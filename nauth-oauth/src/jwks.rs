@@ -68,6 +68,11 @@ pub enum JwksError {
 
 impl std::fmt::Display for JwksError {
     /// 业务作用：输出结构化 JWKS 错误；只在安全时携带已校验 kid，不包含 key material。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收错误摘要的格式化器。
+    ///
+    /// 返回：输出分类及该错误保存的解析说明、kid 或数量，写出失败时返回格式化错误；不主动添加 JWKS 正文，也不自动脱敏保存的元数据。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JwksError::Parse(detail) => write!(formatter, "JWKS parse failed: {detail}"),
@@ -76,7 +81,10 @@ impl std::fmt::Display for JwksError {
             JwksError::MissingKty(kid) => write!(formatter, "JWKS key `{kid}` is missing kty"),
             JwksError::EmptyKid => write!(formatter, "JWKS contains an empty kid"),
             JwksError::InvalidKid => write!(formatter, "JWKS contains an invalid kid"),
-            JwksError::TooManyKeys { actual, max } => {
+            JwksError::TooManyKeys {
+                actual,
+                max,
+            } => {
                 write!(formatter, "JWKS has {actual} keys, exceeding limit {max}")
             }
             JwksError::UnsupportedKey(kid) => {
@@ -93,22 +101,40 @@ impl std::error::Error for JwksError {}
 
 impl JwkSet {
     /// 业务作用：从 JWKS JSON 文本解析。
+    ///
+    /// 参数说明：
+    /// - `json`：待解析的 JWKS 文档文本，调用方负责限制输入字节数。
+    ///
+    /// 返回：JSON 可反序列化时返回集合，否则返回带解析说明的错误；不校验非空、重复 kid、数量或 RSA 参数，使用前仍须 validate。
     pub fn parse(json: &str) -> Result<Self, JwksError> {
         serde_json::from_str(json).map_err(|error| JwksError::Parse(error.to_string()))
     }
 
     /// 业务作用：按 `kid` 查找 key。
+    ///
+    /// 参数说明：
+    /// - `kid`：JWT 头中用于选择密钥的原始标识。
+    ///
+    /// 返回：返回首个 kid 精确相等的 JWK 借用，未找到返回 None；不验证集合或筛选密钥用途。
     pub fn find(&self, kid: &str) -> Option<&Jwk> {
         self.keys.iter().find(|key| key.kid == kid)
     }
 
     /// 业务作用：结构校验：使用缺省 key 数上限。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：以 DEFAULT_MAX_KEYS 为数量上限检查集合；全部满足 kid、类型、用途、算法和 RSA 参数约束时成功，否则返回首个错误，不修改集合。
     pub fn validate(&self) -> Result<(), JwksError> {
         self.validate_with_max_keys(DEFAULT_MAX_KEYS)
     }
 
-    /// 业务作用：结构与能力校验：非空、有界、`kid` 非空且唯一，并且每个 key 都是可用的 RSA/RS256
-    /// signing key，含可解码且非空的 `n` / `e`。
+    /// 业务作用：结构与能力校验：非空、有界、`kid` 非空且唯一，并且每个 key 都是可用的 RSA/RS256 signing key，含可解码且非空的 `n` / `e`。
+    ///
+    /// 参数说明：
+    /// - `max_keys`：本次允许的密钥条目上限，零会拒绝任意非空集合。
+    ///
+    /// 返回：非空、不超指定数量，kid 非空白、长度有界无控制字符且唯一，kty 为 RSA、可选 use 为 sig、可选 alg 为 RS256，且 n/e 可解码并通过组件校验时成功；否则返回错误，不验证材料来源可信度。
     pub fn validate_with_max_keys(&self, max_keys: usize) -> Result<(), JwksError> {
         if self.keys.is_empty() {
             return Err(JwksError::Empty);
@@ -173,11 +199,12 @@ pub struct JwksRegistry {
 }
 
 impl JwksRegistry {
-    /// 业务作用：warmup:用初始 key set 建注册表,generation=1;初值必须先通过 [`JwkSet::validate`]。
+    /// 业务作用：warmup:用初始 key set 建注册表,generation=1;初值必须先通过 [`JwkSet::validate`]。 # 错误 初始 key set 结构非法时返回 [`JwksError`],不建注册表。
     ///
-    /// # 错误
+    /// 参数说明：
+    /// - `initial`：准备作为可信初始值的完整 JWKS 集合。
     ///
-    /// 初始 key set 结构非法时返回 [`JwksError`],不建注册表。
+    /// 返回：初始集合通过默认校验后返回当前值为该集合、代次为 1 的缓存；非法集合返回错误，不建立网络刷新任务。
     pub fn warmup(initial: JwkSet) -> Result<Self, JwksError> {
         initial.validate()?;
         Ok(Self {
@@ -186,8 +213,12 @@ impl JwksRegistry {
         })
     }
 
-    /// 业务作用：rotate:**先校验候选**,通过则原子发布并 generation++,返回新 generation;
-    /// 校验失败**保留 last-good**、generation 不变、返回错误(startup 刷新失败即走此路径)。
+    /// 业务作用：rotate:**先校验候选**,通过则原子发布并 generation++,返回新 generation; 校验失败**保留 last-good**、generation 不变、返回错误(startup 刷新失败即走此路径)。
+    ///
+    /// 参数说明：
+    /// - `candidate`：完整候选集合，来源信任由调用方负责。
+    ///
+    /// 返回：候选校验成功后先交换当前集合，再原子增加并返回计数；校验失败保留旧值。集合与计数分两步发布，并发读取或轮换时不能把两者视为同一原子快照。
     pub fn rotate(&self, candidate: JwkSet) -> Result<u64, JwksError> {
         candidate.validate()?; // 失败:直接返回,current/generation 不变
         self.current.store(Arc::new(candidate));
@@ -195,16 +226,29 @@ impl JwksRegistry {
     }
 
     /// 业务作用：当前 key set(原子快照)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：克隆当前集合 Arc，后续轮换不改变该对象；不与单独读取的 generation 作原子绑定。
     pub fn current(&self) -> Arc<JwkSet> {
         self.current.load_full()
     }
 
     /// 业务作用：当前 generation(每次成功 rotate +1)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回独立的轮换计数，不保证与另一次 current 读取对应同一集合。
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
 
     /// 业务作用：便捷:从当前 key set 按 `kid` 取 key 的克隆。
+    ///
+    /// 参数说明：
+    /// - `kid`：需要从当前已发布集合精确查找的标识。
+    ///
+    /// 返回：固定读取一次当前集合后返回首个匹配 JWK 的副本；未知 kid 返回 None，不发网络刷新或重新校验集合。
     pub fn find(&self, kid: &str) -> Option<Jwk> {
         self.current().find(kid).cloned()
     }

@@ -6,7 +6,12 @@ use std::time::Duration;
 use crate::MetricValue;
 
 /// 业务作用：在独立 source 的文本出口复用统一样本编码，避免与 OTLP 快照产生语义分叉。
-/// 参数说明：`descriptors` 为静态指标合同，`samples` 为同一轮快照，`output` 接收文本。
+///
+/// 参数说明：
+/// - `descriptors`：为静态指标合同
+/// - `samples`：为同一轮快照
+/// - `output`：接收文本。
+///
 /// 返回：追加带 HELP/TYPE 的 Prometheus 文本，不执行采集或网络动作。
 pub fn render_snapshot(
     descriptors: &[&crate::MetricDescriptor],
@@ -42,7 +47,10 @@ pub const STREAM_LIFETIME_SECONDS: &[f64] = &[
 
 /// 业务作用：饱和累加长期运行的计数，避免溢出后把累计事实变成小值。
 ///
-/// 参数说明：`counter` 为目标单元，`amount` 为本次增量。
+/// 参数说明：
+/// - `counter`：为目标单元
+/// - `amount`：为本次增量。
+///
 /// 返回：无；达到 u64 上限后保持上限。
 pub fn add(counter: &AtomicU64, amount: u64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -60,7 +68,9 @@ pub struct AtomicHistogram {
 impl AtomicHistogram {
     /// 业务作用：为静态描述符建立无需热路径分配的桶单元。
     ///
-    /// 参数说明：`bounds` 必须为升序秒边界，最多十五个。
+    /// 参数说明：
+    /// - `bounds`：必须为升序秒边界，最多十五个。
+    ///
     /// 返回：全部为零的固定桶分布；非正、非有限、无序边界或超出容量立即拒绝。
     pub const fn new(bounds: &'static [f64]) -> Self {
         assert!(bounds.len() < 16);
@@ -79,7 +89,9 @@ impl AtomicHistogram {
 
     /// 业务作用：把一次客户端观察时长记入唯一非累积桶。
     ///
-    /// 参数说明：`duration` 来自单调时钟，超过最大边界进入无限桶。
+    /// 参数说明：
+    /// - `duration`：来自单调时钟，超过最大边界进入无限桶。
+    ///
     /// 返回：无；不分配、不取锁，不影响被观察操作的结果。
     pub fn observe(&self, duration: Duration) {
         let seconds = duration.as_secs_f64();
@@ -94,6 +106,7 @@ impl AtomicHistogram {
     /// 业务作用：在出口侧读取近似并发快照，保证 count 与同份桶之和一致。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：包含固定边界、非累积桶、秒总和及计数的统一指标值。
     pub fn snapshot(&self) -> MetricValue {
         let buckets: Vec<u64> = self.buckets[..=self.bounds.len()]

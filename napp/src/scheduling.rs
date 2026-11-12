@@ -20,6 +20,7 @@ enum ClusterMode {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct SchedulingConfigRoot {
+    /// 根配置中唯一由调度组件消费的配置段。
     scheduling: SchedulingConfig,
 }
 
@@ -44,9 +45,9 @@ struct SchedulingConfig {
 impl Default for SchedulingConfig {
     /// 业务作用：返回不依赖任何外部组件的本地调度缺省配置。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；缺省即 local 模式，配置段整体缺失时等价该值。
+    /// 返回：local 模式、无选主键、1000ms 检测周期、空节点名和 default Redis 引用；不启动调度或建立连接。
     fn default() -> Self {
         Self {
             cluster: ClusterMode::Local,
@@ -61,7 +62,7 @@ impl Default for SchedulingConfig {
 impl SchedulingConfig {
     /// 业务作用：校验会影响选主时序与启动指纹的取值。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `phase`：配置被校验时所属的生命周期阶段。
     ///
@@ -103,9 +104,9 @@ impl SchedulingConfig {
 
 /// 调度组件：在 Ready 段末尾启动 `#[scheduled]` 任务，并在停机时显式关闭调度器。
 ///
-/// 启动放在 Ready 的最后一步是有意的：此时配置、数据源、Redis 和 Web 监听都已就绪，
-/// 第一次触发不会打到还没准备好的依赖上。
+/// 启动发生在组件的 Ready 动作中；依赖必须按应用声明顺序提前准备，此时不保证全应用 Ready。
 pub(crate) struct SchedulingComponent {
+    /// 已启动选主任务的句柄，待成功启动后交给停机动作持有。
     #[cfg(feature = "scheduling-cluster")]
     leader: Option<std::sync::Arc<nadis::leader::Leader>>,
 }
@@ -113,9 +114,9 @@ pub(crate) struct SchedulingComponent {
 impl SchedulingComponent {
     /// 业务作用：创建尚未启动调度器的组件。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；调度器在 Ready 阶段按最终配置启动。
+    /// 返回：尚未取得选主句柄的组件；实际调度器在 Ready 阶段按最终配置启动。
     pub(crate) fn new() -> Self {
         Self {
             #[cfg(feature = "scheduling-cluster")]
@@ -127,18 +128,20 @@ impl SchedulingComponent {
 impl ApplicationComponent for SchedulingComponent {
     /// 业务作用：返回调度组件稳定身份。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；Runner 用它归类调度相关错误。
+    /// 返回：固定的 Scheduling 身份，用于生命周期顺序和错误归属，不代表调度器已启动。
     fn id(&self) -> ComponentId {
         ComponentId::Scheduling
     }
 
     /// 业务作用：按配置启动调度器，并把关闭动作压入逆序清理栈。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供最终配置、Redis 资源与 active stack 写入口的 Ready 上下文。
+    ///
+    /// 返回：配置通过、调度器启动并发布运行状态且登记停机动作后成功；启动失败时先退出已建立的选主任务，重复能力发布时尝试关闭调度器并退位后报错。不承诺此时整个应用已 Ready。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let config = read_scheduling_config(context.application())?;
@@ -217,12 +220,12 @@ impl SchedulingComponent {
 
     /// 业务作用：构造依赖 Redis 选主的集群调度选项。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `application`：提供已注册 Redis 客户端资源的共享上下文。
     /// - `config`：已校验且 `cluster=leader` 的调度配置。
     ///
-    /// 返回：选主句柄已由组件持有时返回集群选项；Redis 引用缺失或选主建立失败时返回错误。
+    /// 返回：取得 Redis 资源并启动选主任务后保存句柄、返回带门禁的选项；资源不可用时失败。返回成功不代表已经获得领导权，触发许可由 gate 判断。
     #[cfg(feature = "scheduling-cluster")]
     async fn build_clustered_options(
         &mut self,
@@ -262,7 +265,7 @@ impl SchedulingComponent {
 
     /// 业务作用：在未编入集群适配层时拒绝 `cluster=leader`。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `application`：未使用；保持与集群实现相同的调用形态。
     /// - `config`：已校验且 `cluster=leader` 的调度配置。
@@ -285,6 +288,7 @@ impl SchedulingComponent {
 
 /// 停机时关闭调度器并退出 leader 选举的可逆 action。
 struct SchedulingShutdown {
+    /// 退出调度后必须停止续租并退位的选主句柄。
     #[cfg(feature = "scheduling-cluster")]
     leader: Option<std::sync::Arc<nadis::leader::Leader>>,
     /// 与公开调度句柄共享的运行标志；底层关闭完成后才撤销。
@@ -294,18 +298,20 @@ struct SchedulingShutdown {
 impl ShutdownAction for SchedulingShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；名称不含 leader key 等配置值。
+    /// 返回：固定名称 scheduling，用于清理报告，不包含节点、选主键或其它配置值。
     fn label(&self) -> &'static str {
         "scheduling"
     }
 
-    /// 业务作用：先停调度触发，再退出选举，避免退位后仍有任务在跑。
+    /// 业务作用：先调用调度器关闭入口，再退出选主并撤销公开运行标记。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
-    /// - `_context`：共享停机预算；两步都只做取消与 join，不做无界等待。
+    /// - `_context`：Runner 提供的停机上下文；本动作不读取它，由外层控制等待期限。
+    ///
+    /// 返回：调度器关闭失败也继续退出选主、关闭运行标记，最终透传调度器结果；底层 non-cron 仅请求 abort，不保证所有业务任务已释放。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let scheduler_result = nasched::shutdown_scheduled().await.map_err(|error| {
@@ -328,9 +334,11 @@ impl ShutdownAction for SchedulingShutdown {
 
 /// 业务作用：从最终配置读取 `scheduling` 段；段缺失时使用 local 缺省配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：提供当前不可变配置快照的共享上下文。
+///
+/// 返回：当前快照反序列化出的调度配置，缺段使用默认值；结构非法时返回 Ready 阶段错误，取值约束由调用方另行校验。
 fn read_scheduling_config(application: &Application) -> ApplicationResult<SchedulingConfig> {
     let snapshot = application.config();
     let root: SchedulingConfigRoot =
@@ -346,10 +354,12 @@ fn read_scheduling_config(application: &Application) -> ApplicationResult<Schedu
 
 /// 业务作用：在不启动调度器的前提下校验候选配置树中的 `scheduling` 段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：合并、插值完成但尚未发布的候选配置树。
 /// - `phase`：本次无副作用校验所属的生命周期阶段。
+///
+/// 返回：配置段缺失或结构、周期、选主键与 Redis 引用满足本地约束时成功；否则返回指定阶段错误，不访问 Redis 或判断是否已取得领导权。
 pub(crate) fn validate_scheduling_section(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
@@ -365,21 +375,25 @@ pub(crate) fn validate_scheduling_section(
 
 /// 业务作用：创建调度组件的稳定生命周期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含配置值的稳定摘要。
+///
+/// 返回：归属 Scheduling、绑定指定阶段的应用错误，不附加底层错误链。
 fn scheduling_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Scheduling, phase, message)
 }
 
 /// 业务作用：创建带底层错误链的调度错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含配置值的稳定摘要。
 /// - `source`：只供诊断、输出前统一脱敏的底层错误。
+///
+/// 返回：保留底层原因的 Scheduling 阶段错误；构造本身不脱敏原始错误，公开输出须经过统一报告边界。
 fn scheduling_error_src(
     phase: ApplicationPhase,
     message: impl Into<String>,

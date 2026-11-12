@@ -5,8 +5,13 @@ use super::*;
 use std::{collections::HashMap, time::Duration};
 
 /// 业务作用：归约来源取得、失权、让出与停止，不等待或执行业务 handler。
-/// 参数说明：`rt` 为组；`event_rx` 为有界管理事件。
-/// 返回：读取任务与记录责任收口后释放有效锁，取得组退出证明。
+///
+/// 参数说明：
+/// - `rt`: 持有组配置、来源账本、锁及停机信号的运行时。
+/// - `event_rx`: 接收 Claim 取得、份额调整及处置完成线索的有界事件通道。
+///
+/// 返回：组停止且全部 Claim 已退出时结束；有效租约只在读取与记录责任收口后释放。
+/// 释放结果未知或已经失权的来源保留租约对账责任；本循环结束不替代对账收敛证明。
 pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::Receiver<Event>) {
     let mut slots: HashMap<u32, ClaimSlot> = HashMap::new();
     loop {
@@ -14,10 +19,12 @@ pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::
             handle_event(&rt, &mut slots, event).await;
         }
         if rt.cancel.is_cancelled() {
+            // 先禁止各来源开始新业务，再等待已有记录与读取任务收口，保留成功业务的提交窗口。
             for slot in slots.values() {
                 slot.source.quiesce();
             }
         }
+        // 退出来源必须同时没有记录责任和仍运行的读取者，不能只凭停止标记就把锁交给下一 owner。
         let finished: Vec<_> = slots
             .iter()
             .filter_map(|(p, slot)| {
@@ -95,11 +102,21 @@ pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::
 }
 
 /// 业务作用：复验取得与管理通知，把来源读取监督绑定到不可变任期。
-/// 参数说明：`rt` 为组；`slots` 为现役 Claim；`event` 为待归约事件。
+///
+/// 参数说明：
+/// - `rt`: 分区组运行时与当前控制权威。
+/// - `slots`: 持有读取监督与记录排空责任的现役 Claim。
+/// - `event`: 待核对来源身份后归约的管理事件。
+///
 /// 返回：停机事件不会重开来源，fencing/disposition 证据不足时放弃接管。
+/// 处置通知仅触发重新核对，持久冻结仍存在、查询失败或本地隔离修订变化时不直接解除保护。
 async fn handle_event(rt: &Arc<GroupRuntime>, slots: &mut HashMap<u32, ClaimSlot>, event: Event) {
     match event {
-        Event::ClaimAcquired { p, guard } => {
+        Event::ClaimAcquired {
+            p,
+            guard,
+        } => {
+            // 重复 Claim 或已关闭的组不能发布新的来源，未交接的守卫在此释放。
             if slots.contains_key(&p)
                 || rt.cancel.is_cancelled()
                 || rt.core.roots_closed.load(Ordering::Acquire)
@@ -107,6 +124,7 @@ async fn handle_event(rt: &Arc<GroupRuntime>, slots: &mut HashMap<u32, ClaimSlot
                 let _ = guard.unlock().await;
                 return;
             }
+            // 本地身份耗尽时禁止复用任期，避免迟到记录被误认成新 Claim 的责任。
             let Some(identity) = BatchIdentity::new_claim() else {
                 let _ = guard.unlock().await;
                 return;
@@ -124,16 +142,23 @@ async fn handle_event(rt: &Arc<GroupRuntime>, slots: &mut HashMap<u32, ClaimSlot
             };
             let parked = match disposition::takeover_disposition(&rt.client, &rt.layout, p).await {
                 Ok(disposition::TakeoverDisposition::NotParked) => false,
-                Ok(disposition::TakeoverDisposition::Frozen { .. }) => true,
-                Ok(disposition::TakeoverDisposition::AutoResumeDlq { operation_id, .. }) => {
+                Ok(disposition::TakeoverDisposition::Frozen {
+                    ..
+                }) => true,
+                Ok(disposition::TakeoverDisposition::AutoResumeDlq {
+                    park_id,
+                    operation_id,
+                }) => {
                     let fence_key = rt
                         .fence_meta
                         .as_ref()
                         .map(|_| fencing::fence_key(&rt.layout))
                         .unwrap_or_default();
+                    // 自动续作依据来自同一次 marker 快照，等待持有权和 Redis 期间不能改为处置新批次。
                     let lease = disposition::OwnerLease {
                         partition: p,
                         operation_id: &operation_id,
+                        expected_park_id: Some(&park_id),
                         holder: guard.holder(),
                         lock_key: guard.lock_key(),
                         fence_key: &fence_key,
@@ -146,11 +171,13 @@ async fn handle_event(rt: &Arc<GroupRuntime>, slots: &mut HashMap<u32, ClaimSlot
                         .is_err()
                 }
                 _ => {
+                    // 持久冻结证据不一致或读取失败时不猜测为可消费状态，释放尚未发布的 Claim。
                     let _ = guard.unlock().await;
                     return;
                 }
             };
             let source = SourceAuthority::new(rt, p, identity, &guard, stamp.clone());
+            // 先写入冻结状态及 owner 凭据，再登记来源和启动读者，读取者不能看到未经恢复核对的半完成 Claim。
             source.parked.store(parked, Ordering::Release);
             rt.owner_ctx.lock().expect("owner context").insert(
                 p,
@@ -171,7 +198,9 @@ async fn handle_event(rt: &Arc<GroupRuntime>, slots: &mut HashMap<u32, ClaimSlot
             );
             rt.claimed.write().expect("claimed").push(p);
         }
-        Event::RetainShare { target } => {
+        Event::RetainShare {
+            target,
+        } => {
             // 已进入排干的来源仍持锁，但不再占用要保留的 Active 份额。
             // 按当前状态归约绝对目标，使重复通知及延迟到达的通知不会再次让出同一份超额。
             // Park 仍占持有份额，不能把人工冻结当作可自动释放的来源。
@@ -186,10 +215,39 @@ async fn handle_event(rt: &Arc<GroupRuntime>, slots: &mut HashMap<u32, ClaimSlot
                 slot.source.quiesce();
             }
         }
-        Event::ParkResolved { p } => {
-            if let Some(slot) = slots.get(&p) {
-                if slot.source.can_commit() && !rt.core.roots_closed.load(Ordering::Acquire) {
-                    rt.core.resume_source(&slot.source);
+        Event::ParkResolved {
+            p,
+        } => {
+            let Some(source) = slots.get(&p).map(|slot| slot.source.clone()) else {
+                return;
+            };
+            loop {
+                // 通知可能来自早已完成的旧批次，失权、让出或停止中的来源不能因通知重新开放。
+                if !source.active()
+                    || rt.bg_cancel.is_cancelled()
+                    || rt.cancel.is_cancelled()
+                    || rt.core.roots_closed.load(Ordering::Acquire)
+                {
+                    return;
+                }
+                if source.io.load(Ordering::Acquire) == 0 {
+                    let revision = source.park_revision.load(Ordering::Acquire);
+                    // 持久处置仍冻结或证据不完整时保留本地保护，成功通知本身不是解除权限。
+                    if !matches!(
+                        disposition::takeover_disposition(&rt.client, &rt.layout, p).await,
+                        Ok(disposition::TakeoverDisposition::NotParked)
+                    ) {
+                        return;
+                    }
+                    // 查询期间形成了新隔离或开始了 I/O 时不采用旧结果，等待责任收口后重新读取。
+                    if rt.core.resume_source(&source, revision) {
+                        return;
+                    }
+                }
+                tokio::select! {
+                    _ = rt.bg_cancel.cancelled() => return,
+                    _ = rt.cancel.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
                 }
             }
         }

@@ -1,7 +1,7 @@
 //! Job 状态脚本执行：Job 控制面用独立连接以二进制 KEYS/ARGV 执行 Lua，优先 EVALSHA、NOSCRIPT 回退 EVAL。
 //!
-//! 所有状态迁移都在一段 Lua 内原子提交；发命令前复验全部 KEYS 同 slot，避免跨 slot 脚本在 Cluster 上错乱
-//! 分片状态。Job 控制提交走该独立 lane，不进入普通命令或 pipeline 路径。
+//! 每次脚本执行期间不会与其它 Redis 命令交错，但脚本报错不回滚此前写入。发命令前复验全部 KEYS 同 slot，
+//! 避免 Cluster 拒绝跨分片操作；调用方仍须遵守脚本自己的验证与提交顺序。Job 控制提交使用专用连接。
 
 use redis::{ErrorKind, ServerErrorKind, Value};
 
@@ -9,10 +9,11 @@ use crate::client::{Conn, RedisClient};
 use crate::error::{NasaRedisError, Result};
 use crate::keytag::redis_slot;
 
-/// 一段随 crate 归档的 Job 脚本及其编译期名称；SHA1 在首次执行时惰性计算。
+/// 一段随 crate 归档的 Job 脚本；SHA1 在首次执行时惰性计算。
 pub(crate) struct JobScript {
     /// 脚本文本，编译期经 `include_str!` 确认存在。
     pub(crate) text: &'static str,
+    /// 脚本内容的共享惰性摘要，供 EVALSHA 寻址并避免每次调用重复计算。
     sha: std::sync::OnceLock<String>,
 }
 
@@ -104,12 +105,12 @@ pub(crate) async fn eval_retry_safe(
     }
 }
 
-/// 业务作用：区分脚本的确定性服务端拒绝与写出后结果不确定，阻止上层把可能已提交的状态动作透明重放。
+/// 业务作用：保留已收到的服务端错误，并将其它执行失败标为结局未知，阻止无证据重放状态动作。
 ///
 /// 参数说明：
 /// - `error`: EVAL/EVALSHA 返回的底层错误。
 ///
-/// 返回：服务端明确拒绝保留为 Redis 错误；连接、路由、协议和响应解析失败归为 `ExecutionUnknown`。
+/// 返回：服务端错误保留为 Redis 错误，但不证明脚本此前没有写入；其它底层错误归为 `ExecutionUnknown`。
 fn classify_execution_error(error: redis::RedisError) -> NasaRedisError {
     if matches!(error.kind(), ErrorKind::Server(_)) {
         NasaRedisError::Redis(error)
@@ -148,7 +149,11 @@ fn ensure_same_slot(keys: &[Vec<u8>]) -> Result<()> {
 /// 业务作用：组装并执行一次 EVAL/EVALSHA，保持二进制键与参数不经 UTF-8 转换。
 ///
 /// 参数说明：
-/// - `conn`/`verb`/`body`/`keys`/`argv`: 连接、命令动词、脚本文本或 SHA、二进制键与参数。
+/// - `conn`：按操作语义选择的专用控制或心跳连接。
+/// - `verb`：本次使用的 EVALSHA 或 EVAL 命令。
+/// - `body`：与命令匹配的脚本 SHA 或完整文本，保持原始字节。
+/// - `keys`：已通过同 slot 校验的键集合，按脚本合同顺序发送。
+/// - `argv`：脚本参数的原始字节集合，不做文本转码。
 ///
 /// 返回：类型化为 `Vec<Value>` 的脚本返回；底层错误透传由调用方分类。
 async fn run(

@@ -115,16 +115,18 @@ pub enum ApplicationPhase {
     Running,
     /// 停止入口并按预算释放资源的阶段。
     Stopping,
-    /// 所有受管资源均已退出的终态。
+    /// 生命周期结束后的阶段标识，具体资源释放结果由停机报告说明。
     Stopped,
 }
 
 impl fmt::Display for ApplicationPhase {
     /// 业务作用：写出稳定的小写阶段名称。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `f`：接收阶段名称的格式化缓冲区。
+    ///
+    /// 返回：固定阶段名称写入成功时为 Ok，格式化目标错误向上传播；不读取配置或执行生命周期转换。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Bootstrap => "bootstrap",
@@ -143,12 +145,17 @@ impl fmt::Display for ApplicationPhase {
 }
 
 /// 所有框架层失败统一使用该错误形状，避免丢失组件和生命周期阶段。
+/// 构造及 getter 不自动脱敏；Display 不拼接 source，Debug 与错误链仍须经过统一诊断边界处理。
 #[derive(Debug, thiserror::Error)]
 #[error("{component} failed during {phase}: {message}")]
 pub struct ApplicationError {
+    /// 创建错误时冻结的组件归属，不从底层文本重新推断。
     component: ComponentId,
+    /// 故障被观察到的生命周期阶段，不随应用后续转换改变。
     phase: ApplicationPhase,
+    /// 构造方提供的稳定摘要，调用方须保证其中不含秘密值。
     message: String,
+    /// 可选原始底层错误，仅用于受控诊断，释放时隔离单次析构展开。
     #[source]
     source: Option<anyhow::Error>,
     /// 主失败是否已经在组件清理前写入统一诊断通道。
@@ -160,7 +167,8 @@ impl Drop for ApplicationError {
     ///
     /// 参数说明：无。
     ///
-    /// 返回：无返回值；底层错误的单次展开被隔离并输出固定分类，异常正文不进入诊断通道。
+    /// 返回：底层错误正常释放时直接结束，单次析构展开被隔离并输出固定分类，不输出异常正文。
+    /// 不能抢占同步阻塞或 panic=abort；异常对象自身再次展开时由专用释放边界保留第二个对象，避免递归析构。
     fn drop(&mut self) {
         // 先移走所有权再进入独立展开边界，防止外层集合释放时重复析构或因单项异常跳过后续项。
         let source = self.source.take();
@@ -179,11 +187,13 @@ impl Drop for ApplicationError {
 impl ApplicationError {
     /// 业务作用：创建没有底层错误链的框架错误。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `component`：负责归类本次失败的组件。
     /// - `phase`：失败被观察到的生命周期阶段。
     /// - `message`：不包含业务秘密的稳定摘要。
+    ///
+    /// 返回：带组件、阶段与摘要、尚未标记报告的错误；没有底层 source，不自动脱敏、记录日志或改变应用状态。
     pub fn new(
         component: ComponentId,
         phase: ApplicationPhase,
@@ -200,12 +210,15 @@ impl ApplicationError {
 
     /// 业务作用：创建保留底层错误链的框架错误。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `component`：负责归类本次失败的组件。
     /// - `phase`：失败被观察到的生命周期阶段。
     /// - `message`：不包含业务秘密的稳定摘要。
     /// - `source`：只供程序化诊断使用、输出前必须经过统一脱敏的底层错误。
+    ///
+    /// 返回：保留原始错误链且尚未标记报告的错误；Display 只拼接组件、阶段和摘要，Debug 或 source 访问仍可能含底层内容。
+    /// 构造时不输出日志或过滤输入，调用方必须在对外呈现前执行脱敏。
     pub fn with_source(
         component: ComponentId,
         phase: ApplicationPhase,
@@ -223,45 +236,45 @@ impl ApplicationError {
 
     /// 业务作用：返回错误所属组件。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；返回值可用于稳定指标标签。
+    /// 返回：构造时保存的组件身份，可用于稳定归类；不从消息或底层 source 推断其它归属。
     pub fn component(&self) -> ComponentId {
         self.component
     }
 
     /// 业务作用：返回错误所属生命周期阶段。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；返回值不依赖错误文本解析。
+    /// 返回：构造错误时固定的阶段，不解析错误文本，也不读取应用当前可能已经变化的状态。
     pub fn phase(&self) -> ApplicationPhase {
         self.phase
     }
 
     /// 业务作用：返回框架生成的稳定错误摘要。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；底层 source 不会被拼接进该字符串。
+    /// 返回：构造时传入摘要的借用，不附加底层 source、不复制或再次脱敏；摘要本身是否含敏感内容取决于构造方。
     pub fn message(&self) -> &str {
         &self.message
     }
 
     /// 业务作用：标记该主失败已经由 Runner 在反向清理前输出。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；仅生命周期执行器用于避免同步入口重复报告同一个错误。
+    /// 返回：把本错误的已报告标记置为 true，重复调用保持该状态；不执行输出，也不确认诊断存储已持久化。
     pub(crate) fn mark_reported(&mut self) {
         self.reported = true;
     }
 
     /// 业务作用：判断该错误是否已经作为唯一主失败输出。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；同步入口据此只补报未经过常规 Runner 失败出口的内部错误。
+    /// 返回：Runner 是否已标记本错误经过主失败报告入口，用于抑制重复输出；不读取日志后端或确认外部观察者已经收到。
     pub(crate) fn was_reported(&self) -> bool {
         self.reported
     }

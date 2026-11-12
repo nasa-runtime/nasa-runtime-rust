@@ -103,7 +103,8 @@ impl MySqlSagaStore {
 
     /// 业务作用：创建绑定命名 datasource 的 Saga store，阻止 Saga 持久化隐式跨库。
     ///
-    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：为启动期已注册的数据源名称。
     ///
     /// 返回：所有后续 Saga 操作使用该 datasource；名称非法时在 I/O 前失败。
     pub fn with_datasource(datasource: impl AsRef<str>) -> anyhow::Result<Self> {

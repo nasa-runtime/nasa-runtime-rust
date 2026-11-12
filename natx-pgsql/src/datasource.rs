@@ -37,7 +37,8 @@ pub struct DataSourceConfig {
 impl std::fmt::Debug for DataSourceConfig {
     /// 业务作用：输出不包含 PostgreSQL 用户名和口令的配置视图。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：脱敏字段写入成功时返回 `Ok`，否则返回格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,7 +84,8 @@ impl DataSourceConfig {
 impl From<&DataSourceConfig> for DataSourcePoolConfig {
     /// 业务作用：把 PostgreSQL 包装配置投影成 backend 中立的池参数。
     ///
-    /// 参数说明：`config` 是 PostgreSQL datasource 配置。
+    /// 参数说明：
+    /// - `config`：是 PostgreSQL datasource 配置。
     ///
     /// 返回：字段逐一对应的公共池配置；scheme 仍由包装层负责。
     fn from(config: &DataSourceConfig) -> Self {
@@ -100,7 +102,8 @@ impl From<&DataSourceConfig> for DataSourcePoolConfig {
 
 /// 业务作用：用单条连接探测 PostgreSQL 地址、凭据与 database 的真实可用性，并沿用服务端会话默认值。
 ///
-/// 参数说明：`config` 是待探测的配置；入口会再次执行完整校验。
+/// 参数说明：
+/// - `config`：是待探测的配置；入口会再次执行完整校验。
 ///
 /// 返回：配置和握手均成功且探测连接已关闭时返回 `Ok`；连接或关闭失败返回脱敏错误。
 pub async fn probe(config: &DataSourceConfig) -> anyhow::Result<()> {
@@ -161,7 +164,8 @@ pub async fn probe_in_schema(config: &DataSourceConfig, schema: &str) -> anyhow:
 
 /// 业务作用：按 PostgreSQL 配置创建惰性连接池，并保留服务端为新会话选择的默认 `search_path`。
 ///
-/// 参数说明：`config` 是待建池的配置；入口会再次执行完整校验。
+/// 参数说明：
+/// - `config`：是待建池的配置；入口会再次执行完整校验。
 ///
 /// 返回：配置可被 SQLx 解析时返回 PgPool；调用方负责在停机时显式关闭。
 pub fn build_pool(config: &DataSourceConfig) -> anyhow::Result<PgPool> {
@@ -216,7 +220,11 @@ fn configured_options(config: &DataSourceConfig, schema: &str) -> anyhow::Result
 }
 
 /// 业务作用：按统一语句日志策略探测 PostgreSQL，并保留服务端默认 schema。
-/// 参数说明：`config` 是连接配置；`logging` 控制 SQLx 语句事件。
+///
+/// 参数说明：
+/// - `config`：是连接配置
+/// - `logging`：控制 SQLx 语句事件。
+///
 /// 返回：握手和关闭均成功时完成，否则返回不包含凭据的错误。
 pub async fn probe_with_logging(
     config: &DataSourceConfig,
@@ -226,7 +234,12 @@ pub async fn probe_with_logging(
 }
 
 /// 业务作用：在指定业务 schema 下按统一日志策略探测 PostgreSQL。
-/// 参数说明：`config` 为连接配置；`schema` 为目标作用域；`logging` 控制语句日志。
+///
+/// 参数说明：
+/// - `config`：为连接配置
+/// - `schema`：为目标作用域
+/// - `logging`：控制语句日志。
+///
 /// 返回：真实连接与 schema 均可用时成功，否则返回脱敏错误。
 pub async fn probe_in_schema_with_logging(
     config: &DataSourceConfig,
@@ -237,8 +250,13 @@ pub async fn probe_in_schema_with_logging(
 }
 
 /// 业务作用：复用一个关闭路径完成受管探测和可选 schema 验证。
-/// 参数说明：`config`、`schema` 和 `logging` 为启动期固定配置。
-/// 返回：探测连接总会尝试关闭；握手、schema 或关闭失败返回错误。
+///
+/// 参数说明：
+/// - `config`：已解析的数据源配置，仍需经过 validate。
+/// - `schema`：可选需要固定或验证的受管 schema。
+/// - `logging`：启动期冻结的 SQL statement 日志策略。
+///
+/// 返回：选项与握手成功后验证可选 schema，再显式关闭连接；正常分支即使 schema 不符也先关闭，关闭错误可覆盖先前 schema 错误。握手有超时，schema 查询与关闭没有额外超时；取消不保证执行到显式关闭。
 async fn probe_logging(
     config: &DataSourceConfig,
     schema: Option<&str>,
@@ -268,7 +286,11 @@ async fn probe_logging(
 }
 
 /// 业务作用：以受管语句策略创建 PostgreSQL Pool，保留服务端默认 schema。
-/// 参数说明：`config` 是池配置；`logging` 是启动期冻结的语句开关。
+///
+/// 参数说明：
+/// - `config`：是池配置
+/// - `logging`：是启动期冻结的语句开关。
+///
 /// 返回：配置合法时返回惰性池，调用方负责关闭。
 pub fn build_pool_with_logging(
     config: &DataSourceConfig,
@@ -283,7 +305,12 @@ pub fn build_pool_with_logging(
 }
 
 /// 业务作用：同时冻结 PostgreSQL schema 与受管语句日志策略。
-/// 参数说明：`config` 是池配置；`schema` 是业务对象作用域；`logging` 控制语句事件。
+///
+/// 参数说明：
+/// - `config`：是池配置
+/// - `schema`：是业务对象作用域
+/// - `logging`：控制语句事件。
+///
 /// 返回：惰性池在每条连接进入池前确认 schema，不合格连接不会发放。
 pub fn build_pool_in_schema_with_logging(
     config: &DataSourceConfig,
@@ -304,8 +331,13 @@ pub fn build_pool_in_schema_with_logging(
 }
 
 /// 业务作用：将日志策略与可选 schema 合成为受管 PostgreSQL 连接选项。
-/// 参数说明：`config`、`schema`、`logging` 均来自启动期已解析配置。
-/// 返回：完整校验成功的连接选项，关闭独立 SQLx 慢日志升级。
+///
+/// 参数说明：
+/// - `config`：已解析的数据源配置，仍需经过 validate。
+/// - `schema`：可选需要固定或验证的受管 schema。
+/// - `logging`：启动期冻结的 SQL statement 日志策略。
+///
+/// 返回：配置、URL 与可选 schema 通过时返回连接选项，否则报错。Disabled 关闭 SQL 日志，其它选择固定日志级别并把独立慢日志阈值置为 Duration::MAX，不建立连接。
 fn logging_options(
     config: &DataSourceConfig,
     schema: Option<&str>,

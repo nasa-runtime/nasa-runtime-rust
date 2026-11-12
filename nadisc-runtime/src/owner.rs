@@ -52,7 +52,9 @@ pub struct OwnerBuilder {
 
 impl Default for OwnerBuilder {
     /// 业务作用：建立不连接任何后端的空目录。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：显式添加连接后才产生网络活动。
     fn default() -> Self {
         Self {
@@ -65,7 +67,10 @@ impl Default for OwnerBuilder {
 
 impl OwnerBuilder {
     /// 业务作用：设置所有连接共享的有限资源预算。
-    /// 参数说明：`limits` 是实例、任务和并发容量。
+    ///
+    /// 参数说明：
+    /// - `limits`：是实例、任务和并发容量。
+    ///
     /// 返回：构造时统一校验的 builder。
     pub fn limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
@@ -73,7 +78,10 @@ impl OwnerBuilder {
     }
 
     /// 业务作用：兼容使用显式默认引用的宿主；新目录可直接将默认连接命名为 primary。
-    /// 参数说明：`name` 必须引用已登记的连接，不影响显式 qualifier 的匹配。
+    ///
+    /// 参数说明：
+    /// - `name`：必须引用已登记的连接，不影响显式 qualifier 的匹配。
+    ///
     /// 返回：构造时校验引用的 builder；省略此入口时只采用 primary。
     pub fn default_connection(mut self, name: impl Into<String>) -> Self {
         self.default_connection = Some(name.into());
@@ -81,7 +89,10 @@ impl OwnerBuilder {
     }
 
     /// 业务作用：登记一个独立 provider 实例并拒绝重复连接别名。
-    /// 参数说明：`spec` 包含名称、后端和冻结策略。
+    ///
+    /// 参数说明：
+    /// - `spec`：包含名称、后端和冻结策略。
+    ///
     /// 返回：合法连接加入目录；错误不触发网络访问。
     pub fn connection(mut self, spec: ConnectionSpec) -> Result<Self> {
         validate_name(&spec.name)?;
@@ -94,7 +105,9 @@ impl OwnerBuilder {
     }
 
     /// 业务作用：创建唯一控制 owner，使初始化取消后仍有资源清理权。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无网络副作用的 owner；非法显式默认引用拒绝，无 primary 的目录只允许具名选择。
     pub fn build(self) -> Result<DiscoveryOwner> {
         self.limits.validate()?;
@@ -161,7 +174,9 @@ impl OwnerBuilder {
             close: watch::channel(None).0,
             withdrawn: watch::channel(None).0,
         });
-        Ok(DiscoveryOwner { core })
+        Ok(DiscoveryOwner {
+            core,
+        })
     }
 }
 
@@ -172,7 +187,10 @@ pub struct DiscoveryOwner {
 
 impl DiscoveryOwner {
     /// 业务作用：启动独立连接监督并等待必需连接达到所需作用域的访问条件。
-    /// 参数说明：`deadline` 是宿主原启动截止点，取消等待不会丢失后台资源归属。
+    ///
+    /// 参数说明：
+    /// - `deadline`：是宿主原启动截止点，取消等待不会丢失后台资源归属。
+    ///
     /// 返回：必需连接准备成功；关闭或期限耗尽返回错误。
     pub async fn prepare(&self, deadline: Instant) -> Result<()> {
         if Instant::now() >= deadline {
@@ -220,7 +238,10 @@ impl DiscoveryOwner {
     }
 
     /// 业务作用：取得精确连接或默认 primary，不跨环境回退。
-    /// 参数说明：`qualifier` 为空时采用 primary；兼容宿主显式设置的默认引用优先。
+    ///
+    /// 参数说明：
+    /// - `qualifier`：为空时采用 primary；兼容宿主显式设置的默认引用优先。
+    ///
     /// 返回：只有查询权的句柄；不存在或已关闭时失败。
     pub fn client(&self, qualifier: Option<&str>) -> Result<DiscoveryHandle> {
         let gate = lock(&self.core.gate);
@@ -243,7 +264,10 @@ impl DiscoveryOwner {
     }
 
     /// 业务作用：一次性校验并冻结全部最终注册计划，避免部分发布后才发现引用非法。
-    /// 参数说明：`specs` 已解析实际 listener、对外端点和本地资格来源。
+    ///
+    /// 参数说明：
+    /// - `specs`：已解析实际 listener、对外端点和本地资格来源。
+    ///
     /// 返回：全部计划合法时原子登记，任何错误均不发出注册请求。
     pub fn freeze_registrations(&self, specs: Vec<RegistrationSpec>) -> Result<()> {
         let mut gate = lock(&self.core.gate);
@@ -313,7 +337,10 @@ impl DiscoveryOwner {
     }
 
     /// 业务作用：在宿主监听器可接流后启动注册监督，等待启动必需目标的真实确认。
-    /// 参数说明：`deadline` 延续原启动期限，不为注册重新计时。
+    ///
+    /// 参数说明：
+    /// - `deadline`：延续原启动期限，不为注册重新计时。
+    ///
     /// 返回：全部启动必需注册确认后进入 Serving；失败由宿主发起有界清理。
     pub async fn publish(&self, deadline: Instant) -> Result<()> {
         if Instant::now() >= deadline {
@@ -369,28 +396,38 @@ impl DiscoveryOwner {
     }
 
     /// 业务作用：同步撤销所有新注册和健康上报许可，保留出站发现供业务排空。
-    /// 参数说明：`deadline` 是摘流、业务排空与最终关闭共享的停机截止点。
+    ///
+    /// 参数说明：
+    /// - `deadline`：是摘流、业务排空与最终关闭共享的停机截止点。
+    ///
     /// 返回：重复调用等待同一摘流结果；出站资源保留到 begin_close。
     pub fn begin_quiesce(&self, deadline: Instant) -> QuiesceTicket {
         begin_quiesce(self.core.clone(), deadline)
     }
 
     /// 业务作用：发起唯一有界清理并同步撤销后续出站发送，等待取消不终止清理。
-    /// 参数说明：`deadline` 是宿主停机总截止点，首次调用后不能延长。
+    ///
+    /// 参数说明：
+    /// - `deadline`：是宿主停机总截止点，首次调用后不能延长。
+    ///
     /// 返回：可复制的只读关闭等待凭据。
     pub fn begin_close(&self, deadline: Instant) -> CloseTicket {
         begin_close(self.core.clone(), deadline)
     }
 
     /// 业务作用：读取当前 owner 阶段。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：单调推进的生命周期阶段。
     pub fn phase(&self) -> OwnerPhase {
         lock(&self.core.gate).phase
     }
 
     /// 业务作用：读取注册监督事实，供宿主映射就绪贡献和运维状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：按当前连接身份代次及本地资格裁决的状态；已撤权的注册不得继续贡献就绪，不输出凭据或 metadata。
     pub fn registrations(&self) -> Vec<RegistrationStatus> {
         let gate = lock(&self.core.gate);
@@ -401,14 +438,18 @@ impl DiscoveryOwner {
     }
 
     /// 业务作用：提供状态变化通知，允许宿主按同一事实监督而不复制后端轮询。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只读通知流，收到通知后重新读取完整状态。
     pub fn changes(&self) -> watch::Receiver<u64> {
         self.core.changes.subscribe()
     }
 
     /// 业务作用：向监控与运维代码提供没有关闭权的有界状态入口。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：观察器不延长 owner 的生命周期，也不创建后端任务。
     pub fn observer(&self) -> crate::RuntimeObserver {
         crate::RuntimeObserver {
@@ -417,8 +458,12 @@ impl DiscoveryOwner {
     }
 
     /// 业务作用：在冻结发布计划前让宿主比较后端查询作用域，防止别名掩盖协议投影冲突。
-    /// 参数说明：`connection` 和 `service` 必须属于当前 owner 的冻结目录。
-    /// 返回：provider 的安全查询键；未知连接或服务拒绝，不产生网络请求。
+    ///
+    /// 参数说明：
+    /// - `connection`：当前 owner 目录中的连接名。
+    /// - `service`：交给该 provider 校验和投影的服务查询名。
+    ///
+    /// 返回：连接存在时原样返回 provider 的查询键或验证错误，未知连接时报错；本方法不独立检查服务是否在冻结目录中，不产生网络请求。
     pub fn service_key(&self, connection: &str, service: &str) -> Result<String> {
         self.core
             .connections
@@ -431,7 +476,9 @@ impl DiscoveryOwner {
 
 impl Drop for DiscoveryOwner {
     /// 业务作用：控制对象丢弃时立即撤权，并在 Tokio 仍存在时触发有限清理。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：显式关闭以外的兜底不保证 runtime 退出后的网络清理。
     fn drop(&mut self) {
         if !lock(&self.core.gate).close_started {
@@ -472,7 +519,9 @@ pub struct CloseTicket {
 }
 impl CloseTicket {
     /// 业务作用：等待已发起清理的同一结果，取消本次等待不取消注销。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：包括结果不明和残留的关闭摘要。
     pub async fn wait(mut self) -> Result<CloseReport> {
         loop {
@@ -491,7 +540,9 @@ pub struct QuiesceTicket {
 }
 impl QuiesceTicket {
     /// 业务作用：等待注册摘流而不关闭业务排空需要的发现连接。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部目标的注销或残留事实，等待取消不停止摘流。
     pub async fn wait(mut self) -> Result<Vec<RegistrationStatus>> {
         loop {
@@ -504,7 +555,11 @@ impl QuiesceTicket {
 }
 
 /// 业务作用：冻结停机总期限并在撤权后接管注册摘流工作。
-/// 参数说明：`core` 是受管状态，`deadline` 首次调用后不能延长。
+///
+/// 参数说明：
+/// - `core`：是受管状态
+/// - `deadline`：首次调用后不能延长。
+///
 /// 返回：单次摘流的只读凭据。
 fn begin_quiesce(core: Arc<Core>, deadline: Instant) -> QuiesceTicket {
     let mut gate = lock(&core.gate);
@@ -528,7 +583,11 @@ fn begin_quiesce(core: Arc<Core>, deadline: Instant) -> QuiesceTicket {
 }
 
 /// 业务作用：在资源关闭门禁内冻结首次截止点并接管清理工作。
-/// 参数说明：`core` 是共享资源，`deadline` 只在第一次关闭时生效。
+///
+/// 参数说明：
+/// - `core`：是共享资源
+/// - `deadline`：只在第一次关闭时生效。
+///
 /// 返回：所有调用观察同一关闭结果。
 fn begin_close(core: Arc<Core>, deadline: Instant) -> CloseTicket {
     begin_quiesce(core.clone(), deadline);
@@ -581,7 +640,11 @@ fn begin_close(core: Arc<Core>, deadline: Instant) -> CloseTicket {
 }
 
 /// 业务作用：每连接独立准备和退避，不让可选连接阻塞其他环境。
-/// 参数说明：`core` 提供共享预算，`connection` 是单一身份作用域。
+///
+/// 参数说明：
+/// - `core`：提供共享预算
+/// - `connection`：是单一身份作用域。
+///
 /// 返回：准备成功或关闭后退出；后续发现和注册各自更新真实证据。
 async fn prepare_loop(core: Arc<Core>, connection: Arc<Connection>) {
     let mut backoff = connection.policy.initial_backoff_ms;
@@ -626,7 +689,11 @@ async fn prepare_loop(core: Arc<Core>, connection: Arc<Connection>) {
 }
 
 /// 业务作用：先终止本地写任务，再并行尝试各目标清理并报告不能证明删除的记录。
-/// 参数说明：`core` 保留所有已尝试写入事实，`deadline` 覆盖全部等待与后端关闭。
+///
+/// 参数说明：
+/// - `core`：保留所有已尝试写入事实
+/// - `deadline`：覆盖全部等待与后端关闭。
+///
 /// 返回：发布一次最终摘要，不因单个后端失败放弃其他目标。
 async fn cleanup_registrations(core: Arc<Core>, deadline: Instant) {
     use futures_util::{stream, StreamExt};
@@ -654,7 +721,10 @@ async fn cleanup_registrations(core: Arc<Core>, deadline: Instant) {
 }
 
 /// 业务作用：将未完成的摘流记录转换为明确残留，并唤醒全部等待者。
-/// 参数说明：`core` 的注册写任务必须已停止，或正在进入全局失败关闭。
+///
+/// 参数说明：
+/// - `core`：的注册写任务必须已停止，或正在进入全局失败关闭。
+///
 /// 返回：最终摘要不会包含看似仍在正常执行的 Withdrawing 状态。
 fn finish_withdrawal(core: &Core) {
     let gate = lock(&core.gate);
@@ -671,7 +741,11 @@ fn finish_withdrawal(core: &Core) {
 }
 
 /// 业务作用：业务排空后结束出站观察，等待既有摘流并关闭全部 provider。
-/// 参数说明：`core` 保留清理记录，`deadline` 不晚于首次摘流确定的总期限。
+///
+/// 参数说明：
+/// - `core`：保留清理记录
+/// - `deadline`：不晚于首次摘流确定的总期限。
+///
 /// 返回：发布最终资源清理摘要，不抹去注销残留。
 async fn cleanup(core: Arc<Core>, deadline: Instant) {
     use futures_util::{stream, StreamExt};

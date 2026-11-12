@@ -9,14 +9,22 @@ pub struct Capture<'a, T: ?Sized>(pub &'a T);
 /// 自动借用选择可显示类型；泛型或未知类型始终保留无附加 bound 的占位路径。
 pub trait CaptureParameter {
     /// 业务作用：把一个真实 bind 依次追加到受限开发事件，不改变绑定对象。
-    /// 参数说明：`buffer` 为当前语句预算，`name` 为编译期参数路径。
+    ///
+    /// 参数说明：
+    /// - `buffer`：为当前语句预算
+    /// - `name`：为编译期参数路径。
+    ///
     /// 返回：无；关闭、敏感字段或超过数量时不调用值的格式化实现。
     fn capture(self, buffer: &mut ParameterBuffer, name: &str);
 }
 
 impl<T: ?Sized + Debug> CaptureParameter for &Capture<'_, T> {
     /// 业务作用：仅为允许的普通值类型生成有界显示，敏感名字优先脱敏。
-    /// 参数说明：`buffer` 为语句输出预算，`name` 为 bind 名称。
+    ///
+    /// 参数说明：
+    /// - `buffer`：为语句输出预算
+    /// - `name`：为 bind 名称。
+    ///
     /// 返回：追加一个参数；任何格式化展开均退回安全占位。
     fn capture(self, buffer: &mut ParameterBuffer, name: &str) {
         buffer.record(name, std::any::type_name::<T>(), Some(self));
@@ -24,7 +32,11 @@ impl<T: ?Sized + Debug> CaptureParameter for &Capture<'_, T> {
 }
 impl<T: ?Sized> CaptureParameter for &&Capture<'_, T> {
     /// 业务作用：为不满足显示能力的类型保留原有 Mapper 编译合同。
-    /// 参数说明：`buffer` 为语句输出预算，`name` 为 bind 名称。
+    ///
+    /// 参数说明：
+    /// - `buffer`：为语句输出预算
+    /// - `name`：为 bind 名称。
+    ///
     /// 返回：仅写类型占位，不要求 Debug、Serialize 或 Clone。
     fn capture(self, buffer: &mut ParameterBuffer, name: &str) {
         buffer.record(name, std::any::type_name::<T>(), None);
@@ -32,7 +44,10 @@ impl<T: ?Sized> CaptureParameter for &&Capture<'_, T> {
 }
 impl<T: ?Sized + Debug> Debug for Capture<'_, T> {
     /// 业务作用：将白名单值的显示写入已有受限格式化器。
-    /// 参数说明：`formatter` 由有界字符 writer 提供。
+    ///
+    /// 参数说明：
+    /// - `formatter`：由有界字符 writer 提供。
+    ///
     /// 返回：格式化状态，不创建完整中间字符串。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
@@ -49,7 +64,10 @@ pub struct ParameterBuffer {
 }
 impl ParameterBuffer {
     /// 业务作用：在实际构造 SQLx 查询时读取冻结的开发参数开关。
-    /// 参数说明：`meta` 为已验证环境与策略的方法单元。
+    ///
+    /// 参数说明：
+    /// - `meta`：为已验证环境与策略的方法单元。
+    ///
     /// 返回：默认关闭且不分配文本的缓冲。
     pub fn new(meta: &'static MapperMethodMeta) -> Self {
         let policy = &meta.policy().console;
@@ -73,7 +91,12 @@ impl ParameterBuffer {
     }
 
     /// 业务作用：先施加名称、类型与数量门禁，再按字符预算显示允许的参数。
-    /// 参数说明：`name` 为静态 bind 路径，`type_name` 为编译期类型，`value` 只在允许时格式化。
+    ///
+    /// 参数说明：
+    /// - `name`：为静态 bind 路径
+    /// - `type_name`：为编译期类型
+    /// - `value`：只在允许时格式化。
+    ///
     /// 返回：追加受限文本；超限仅记录省略标志。
     fn record(&mut self, name: &str, type_name: &str, value: Option<&dyn Debug>) {
         if !self.enabled {
@@ -114,7 +137,9 @@ impl ParameterBuffer {
     }
 
     /// 业务作用：按语句级别输出 bind 顺序与类型，prepared SQL 仍由 SQLx 统一输出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：消费缓冲，事件包含静态方法身份；日志处理异常不影响 SQL。
     pub fn emit(self) {
         if !self.enabled {
@@ -133,7 +158,10 @@ impl ParameterBuffer {
 }
 
 /// 业务作用：对大小写、分隔符及属性路径保持一致的敏感名称强制脱敏。
-/// 参数说明：`name` 为源码 bind 参数路径。
+///
+/// 参数说明：
+/// - `name`：为源码 bind 参数路径。
+///
 /// 返回：名字包含凭据语义时禁止显示值。
 fn sensitive_name(name: &str) -> bool {
     let normalized: String = name
@@ -162,7 +190,10 @@ fn sensitive_name(name: &str) -> bool {
 }
 
 /// 业务作用：只格式化已知无业务自定义回调的常见标量、字符串和标准容器。
-/// 参数说明：`name` 为 Rust 类型名称。
+///
+/// 参数说明：
+/// - `name`：为 Rust 类型名称。
+///
 /// 返回：允许显示时为真；新类型默认使用占位。
 fn displayable_type(name: &str) -> bool {
     let name = name.trim_start_matches('&').trim_start_matches("mut ");
@@ -205,7 +236,10 @@ struct BoundedText {
 }
 impl Write for BoundedText {
     /// 业务作用：在格式化过程中限制字符量，避免先分配完整大参数。
-    /// 参数说明：`value` 为格式化器当前文本片段。
+    ///
+    /// 参数说明：
+    /// - `value`：为格式化器当前文本片段。
+    ///
     /// 返回：预算耗尽立即停止格式化；控制字符替换为空格。
     fn write_str(&mut self, value: &str) -> fmt::Result {
         for character in value.chars() {

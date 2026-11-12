@@ -68,7 +68,8 @@ pub trait SagaTransactionRunner: Send + Sync {
 pub trait SagaInstanceStore: Send + Sync {
     /// 业务作用：在当前同源事务内幂等创建实例及初始 transition。
     ///
-    /// 参数说明：`spec` 是创建所需的稳定身份、摘要、期限和触发事实。
+    /// 参数说明：
+    /// - `spec`：是创建所需的稳定身份、摘要、期限和触发事实。
     ///
     /// 返回：区分首次创建与既有实例；事务或持久化失败返回封闭错误。
     async fn create_instance(
@@ -78,7 +79,8 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：按实例身份读取 CAS 裁决所需的已提交快照。
     ///
-    /// 参数说明：`saga_id` 是实例身份。
+    /// 参数说明：
+    /// - `saga_id`：是实例身份。
     ///
     /// 返回：存在时返回快照，不存在返回 `None`，读取失败返回封闭错误。
     async fn load_instance(
@@ -88,7 +90,8 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：从首行开始有界扫描非终态实例。
     ///
-    /// 参数说明：`limit` 是单页上限。
+    /// 参数说明：
+    /// - `limit`：是单页上限。
     ///
     /// 返回：按稳定实例身份排序的快照集合；参数或读取失败返回封闭错误。
     async fn list_non_terminal(&self, limit: u32)
@@ -96,7 +99,8 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：执行租户受限、无 payload 的实例检索。
     ///
-    /// 参数说明：`query` 是租户、状态、时间窗和 keyset 页条件。
+    /// 参数说明：
+    /// - `query`：是租户、状态、时间窗和 keyset 页条件。
     ///
     /// 返回：满足条件的实例摘要；参数或读取失败返回封闭错误。
     async fn list_instances(
@@ -106,7 +110,9 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：从给定 keyset 游标继续有界扫描非终态实例。
     ///
-    /// 参数说明：`after` 是上一页末尾实例，`limit` 是单页上限。
+    /// 参数说明：
+    /// - `after`：是上一页末尾实例
+    /// - `limit`：是单页上限。
     ///
     /// 返回：严格位于游标之后的已提交快照；参数或读取失败返回封闭错误。
     async fn list_non_terminal_after(
@@ -117,7 +123,10 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：按租户、workflow 与业务幂等键查找既有实例。
     ///
-    /// 参数说明：`tenant`、`workflow` 与 `business_key` 共同限定业务意图。
+    /// 参数说明：
+    /// - `tenant`：用于隔离业务事实的受信租户身份。
+    /// - `workflow`：业务意图所属的规范工作流名。
+    /// - `business_key`：与租户和工作流共同确定创建幂等意图的业务键。
     ///
     /// 返回：命中时返回实例，不存在返回 `None`，读取失败返回封闭错误。
     async fn find_instance(
@@ -129,7 +138,9 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：在当前事务内更新实例的 canonical trace 上下文。
     ///
-    /// 参数说明：`saga_id` 是实例身份，`traceparent` 是已校验的 W3C 上下文。
+    /// 参数说明：
+    /// - `saga_id`：是实例身份
+    /// - `traceparent`：是已校验的 W3C 上下文。
     ///
     /// 返回：上下文写入成功返回 `Ok`；实例或事务异常返回封闭错误。
     async fn update_trace_context(
@@ -140,7 +151,11 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：按实例版本和来源状态执行受保护状态迁移并记录 transition。
     ///
-    /// 参数说明：`saga_id`、`expected_version`、`from_status` 是 CAS 权威，`spec` 是迁移事实。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `expected_version`：状态迁移必须仍然匹配的实例业务版本。
+    /// - `from_status`：迁移要求当前实例仍处于的来源状态。
+    /// - `spec`：本次目标迁移、触发身份及需要原子记录的状态事实。
     ///
     /// 返回：区分应用、竞争失败与重复触发；基础设施失败返回封闭错误。
     async fn advance(
@@ -153,7 +168,8 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：以业务版本和控制 generation 共同门禁暂停或恢复。
     ///
-    /// 参数说明：`spec` 包含预期权威、目标控制态和审计事实。
+    /// 参数说明：
+    /// - `spec`：包含预期权威、目标控制态和审计事实。
     ///
     /// 返回：区分应用、幂等重放与竞争失败；基础设施失败返回封闭错误。
     async fn set_control_state(
@@ -163,7 +179,12 @@ pub trait SagaInstanceStore: Send + Sync {
 
     /// 业务作用：在业务副作用同一事务内登记人工管理操作的幂等审计。
     ///
-    /// 参数说明：实例、操作身份、动作、主体和原因共同构成审计事实。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `operation_id`：需与同事务人工管理审计匹配的稳定操作身份。
+    /// - `action`：要登记的人工管理动作名称。
+    /// - `actor`：管理动作的已认证执行主体。
+    /// - `reason`：记录在管理审计中的操作原因。
     ///
     /// 返回：区分首次登记与一致重放；冲突或持久化失败返回封闭错误。
     async fn record_management_operation(
@@ -181,7 +202,9 @@ pub trait SagaInstanceStore: Send + Sync {
 pub trait SagaJournalStore: Send + Sync {
     /// 业务作用：在实例创建事务内登记 definition 的完整步骤骨架。
     ///
-    /// 参数说明：`saga_id` 是实例身份，`definition` 是已冻结 workflow 定义。
+    /// 参数说明：
+    /// - `saga_id`：是实例身份
+    /// - `definition`：是已冻结 workflow 定义。
     ///
     /// 返回：全部步骤幂等登记成功返回 `Ok`，否则返回封闭错误。
     async fn register_steps(
@@ -192,21 +215,25 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：按 definition 顺序读取步骤投影。
     ///
-    /// 参数说明：`saga_id` 是实例身份。
+    /// 参数说明：
+    /// - `saga_id`：是实例身份。
     ///
     /// 返回：完整步骤集合；读取或解码失败返回封闭错误。
     async fn load_steps(&self, saga_id: &SagaId) -> Result<Vec<SagaStepRow>, SagaBackendError>;
 
     /// 业务作用：确认实例是否已经产生不可撤销的补偿成功事实。
     ///
-    /// 参数说明：`saga_id` 是实例身份。
+    /// 参数说明：
+    /// - `saga_id`：是实例身份。
     ///
     /// 返回：存在已成功补偿步骤时为 `true`；读取失败返回封闭错误。
     async fn any_compensation_succeeded(&self, saga_id: &SagaId) -> Result<bool, SagaBackendError>;
 
     /// 业务作用：复验人工关闭所需的同实例、同 operation 审计事实。
     ///
-    /// 参数说明：`saga_id` 是实例身份，`operation_id` 是管理操作身份。
+    /// 参数说明：
+    /// - `saga_id`：是实例身份
+    /// - `operation_id`：是管理操作身份。
     ///
     /// 返回：审计存在时为 `true`；读取失败返回封闭错误。
     async fn manual_close_audited(
@@ -217,7 +244,13 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：在命令 Outbox 同一事务内登记 attempt 与稳定效果身份。
     ///
-    /// 参数说明：实例、步骤、阶段、尝试号、效果和命令身份共同确定 attempt。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `phase`：本次步骤尝试所属的执行阶段。
+    /// - `attempt`：在指定步骤阶段内定位事实的尝试号。
+    /// - `effect`：同一业务效果跨尝试保持稳定的效果身份。
+    /// - `command`：与本次 attempt 对应的投递命令身份。
     ///
     /// 返回：区分首次登记与一致重放；身份冲突或持久化失败返回封闭错误。
     async fn record_attempt_started(
@@ -232,7 +265,13 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：把参与方结果记入既有 attempt 终态，保留先到事实。
     ///
-    /// 参数说明：实例、步骤、阶段和尝试号定位事实，`status` 与事件身份描述结果。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `phase`：本次步骤尝试所属的执行阶段。
+    /// - `attempt`：在指定步骤阶段内定位事实的尝试号。
+    /// - `status`：本次参与方结果要写入的 attempt 终态。
+    /// - `outcome_event_id`：可选的参与方结果事件身份，用于幂等及冲突裁决。
     ///
     /// 返回：区分首次记录、一致重放和互斥结果；持久化失败返回封闭错误。
     async fn record_attempt_outcome(
@@ -247,7 +286,9 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：读取一个步骤的完整 attempt 事实序列。
     ///
-    /// 参数说明：`saga_id` 与 `step` 定位步骤。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
     ///
     /// 返回：按阶段与尝试号排序的事实集合；读取失败返回封闭错误。
     async fn load_attempts(
@@ -258,7 +299,10 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：按效果方向统计已登记的 resolution 尝试预算。
     ///
-    /// 参数说明：实例、步骤和 `direction` 共同限定统计范围。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `direction`：需要统计结果查询尝试预算的效果方向。
     ///
     /// 返回：已登记次数；读取或数值转换失败返回封闭错误。
     async fn count_resolution_attempts(
@@ -270,7 +314,10 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：在结果事实同一事务内单调更新步骤 journal 投影。
     ///
-    /// 参数说明：实例和步骤定位行，`patch` 只携带本次允许变化的字段。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `patch`：仅包含本次允许单调更新字段的步骤投影补丁。
     ///
     /// 返回：投影更新成功返回 `Ok`；行缺失或持久化失败返回封闭错误。
     async fn update_step_journal(
@@ -282,7 +329,10 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：凭同事务管理审计重新开放冻结的补偿步骤。
     ///
-    /// 参数说明：实例、步骤和 `operation_id` 共同定位授权事实。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `operation_id`：需与同事务人工管理审计匹配的稳定操作身份。
     ///
     /// 返回：唯一合法步骤重开时成功；门禁不成立或持久化失败返回封闭错误。
     async fn reopen_halted_compensation(
@@ -294,7 +344,10 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：凭同事务管理审计重新开放冻结的结果查询。
     ///
-    /// 参数说明：实例、步骤和 `operation_id` 共同定位授权事实。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `operation_id`：需与同事务人工管理审计匹配的稳定操作身份。
     ///
     /// 返回：唯一合法查询重开时成功；门禁不成立或持久化失败返回封闭错误。
     async fn reopen_halted_resolution(
@@ -306,7 +359,9 @@ pub trait SagaJournalStore: Send + Sync {
 
     /// 业务作用：把冻结补偿计划原子投影到计划成员及稳定逆序位置。
     ///
-    /// 参数说明：`saga_id` 是实例身份，`plan` 是已由状态机冻结的计划。
+    /// 参数说明：
+    /// - `saga_id`：是实例身份
+    /// - `plan`：是已由状态机冻结的计划。
     ///
     /// 返回：全部成员投影完成时成功；计划或持久化异常返回封闭错误。
     async fn mark_compensation_plan(
@@ -321,7 +376,8 @@ pub trait SagaJournalStore: Send + Sync {
 pub trait SagaTimerStore: Send + Sync {
     /// 业务作用：在状态迁移同一事务内幂等调度 timer。
     ///
-    /// 参数说明：`spec` 是 timer 身份、作用域、期限、attempt 和实例版本。
+    /// 参数说明：
+    /// - `spec`：是 timer 身份、作用域、期限、attempt 和实例版本。
     ///
     /// 返回：区分首次调度与一致重放；冲突或持久化失败返回封闭错误。
     async fn schedule_timer(&self, spec: &TimerSpec<'_>)
@@ -329,7 +385,10 @@ pub trait SagaTimerStore: Send + Sync {
 
     /// 业务作用：在状态离开时取消同一作用域下尚未触发的 timer。
     ///
-    /// 参数说明：实例与 `scope` 定位范围，`kind` 可进一步限定种类。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `scope`：限定 timer 属于整个实例或某个步骤的作用域。
+    /// - `kind`：可选 timer 种类过滤，None 覆盖该作用域全部种类。
     ///
     /// 返回：实际取消行数；持久化失败返回封闭错误。
     async fn cancel_scope_timers(
@@ -341,7 +400,13 @@ pub trait SagaTimerStore: Send + Sync {
 
     /// 业务作用：重排仍可复活的 timer，并递增 generation 撤销旧领取权威。
     ///
-    /// 参数说明：实例、作用域、种类和 attempt 定位 timer，期限与实例版本给出新约束。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `scope`：限定 timer 属于整个实例或某个步骤的作用域。
+    /// - `kind`：与作用域和尝试号共同定位待重排 timer 的种类。
+    /// - `attempt`：与 timer 作用域及种类共同定位调度意图的尝试号。
+    /// - `due_at_ms`：重排后 timer 的 epoch 毫秒到期时刻。
+    /// - `expected_saga_version`：timer 被消费时需要匹配的实例业务版本。
     ///
     /// 返回：区分已重排与不存在；持久化失败返回封闭错误。
     async fn reschedule_timer(
@@ -356,7 +421,12 @@ pub trait SagaTimerStore: Send + Sync {
 
     /// 业务作用：以数据库可见租约和不可复制 token 领取有界到期 timer 批次。
     ///
-    /// 参数说明：`owner` 与 token 建立权威，时钟、租约和上限约束本轮领取。
+    /// 参数说明：
+    /// - `owner`：本轮 timer 领取者的持久标识。
+    /// - `fencing_token`：标识本轮领取、后续复验租约权威所需的 token。
+    /// - `now_ms`：本次到期或租约裁决采用的 epoch 毫秒时刻。
+    /// - `lease_ms`：本轮领取权威的有效毫秒时长。
+    /// - `limit`：本轮领取条数上限。
     ///
     /// 返回：领取事务明确提交后返回与 token 绑定的批次；不确定或失败返回封闭错误。
     async fn claim_due_timers(
@@ -370,7 +440,10 @@ pub trait SagaTimerStore: Send + Sync {
 
     /// 业务作用：凭当前 claim token 把 timer 标记为已触发。
     ///
-    /// 参数说明：`timer_id` 定位行，token 与时钟复验租约权威。
+    /// 参数说明：
+    /// - `timer_id`：需要完成或交还的持久 timer 身份。
+    /// - `fencing_token`：标识本轮领取、后续复验租约权威所需的 token。
+    /// - `now_ms`：本次到期或租约裁决采用的 epoch 毫秒时刻。
     ///
     /// 返回：区分应用与失权；持久化失败返回封闭错误。
     async fn complete_timer(
@@ -382,7 +455,11 @@ pub trait SagaTimerStore: Send + Sync {
 
     /// 业务作用：凭当前 claim token 交还未处理 timer 并设置下一可用时刻。
     ///
-    /// 参数说明：timer、token、当前时钟和 `available_at_ms` 共同约束交还。
+    /// 参数说明：
+    /// - `timer_id`：需要完成或交还的持久 timer 身份。
+    /// - `fencing_token`：标识本轮领取、后续复验租约权威所需的 token。
+    /// - `now_ms`：本次到期或租约裁决采用的 epoch 毫秒时刻。
+    /// - `available_at_ms`：交还后允许重新领取的 epoch 毫秒时刻。
     ///
     /// 返回：区分应用与失权；持久化失败返回封闭错误。
     async fn release_timer(
@@ -395,7 +472,8 @@ pub trait SagaTimerStore: Send + Sync {
 
     /// 业务作用：把实例尚未完成的 timer 提前置为可领取，驱动恢复收敛。
     ///
-    /// 参数说明：`saga_id` 是待唤醒实例。
+    /// 参数说明：
+    /// - `saga_id`：是待唤醒实例。
     ///
     /// 返回：实际唤醒行数；持久化失败返回封闭错误。
     async fn wake_saga_timers(&self, saga_id: &SagaId) -> Result<u64, SagaBackendError>;
@@ -406,7 +484,9 @@ pub trait SagaTimerStore: Send + Sync {
 pub trait SagaParticipantStore: Send + Sync {
     /// 业务作用：在 Inbox 事务内裁决 execute 是否首次允许产生外部效果。
     ///
-    /// 参数说明：`gate` 绑定组合身份，`execute_effect` 是跨尝试稳定效果身份。
+    /// 参数说明：
+    /// - `gate`：绑定组合身份
+    /// - `execute_effect`：是跨尝试稳定效果身份。
     ///
     /// 返回：执行许可、等待或既有结果；合同或持久化失败返回封闭错误。
     async fn admit_execute(
@@ -417,7 +497,10 @@ pub trait SagaParticipantStore: Send + Sync {
 
     /// 业务作用：在结果 Outbox 同一事务内结算 execute gate。
     ///
-    /// 参数说明：实例和步骤定位 gate，`status` 是已裁决业务结果。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `status`：已裁决的正向执行结果。
     ///
     /// 返回：唯一合法结算成功时返回 `Ok`；冲突或持久化失败返回封闭错误。
     async fn settle_execute(
@@ -429,7 +512,10 @@ pub trait SagaParticipantStore: Send + Sync {
 
     /// 业务作用：以行锁建立 cancel 屏障并裁决本地取消结果。
     ///
-    /// 参数说明：gate 与 execute/cancel 效果身份共同限定一次取消意图。
+    /// 参数说明：
+    /// - `gate`：绑定实例、步骤、租户和冻结工作流定义的参与方门禁键。
+    /// - `execute_effect`：需要保持跨尝试一致的正向业务效果身份。
+    /// - `cancel_effect`：需要保持幂等的取消效果身份。
     ///
     /// 返回：可确定取消结果或等待；身份冲突及持久化失败返回封闭错误。
     async fn adjudicate_cancel(
@@ -441,7 +527,10 @@ pub trait SagaParticipantStore: Send + Sync {
 
     /// 业务作用：建立外部 cancel 独占门禁，阻止并发 execute 提交互斥效果。
     ///
-    /// 参数说明：gate 与 execute/cancel 效果身份共同限定外部取消。
+    /// 参数说明：
+    /// - `gate`：绑定实例、步骤、租户和冻结工作流定义的参与方门禁键。
+    /// - `execute_effect`：需要保持跨尝试一致的正向业务效果身份。
+    /// - `cancel_effect`：需要保持幂等的取消效果身份。
     ///
     /// 返回：执行外部取消或重放既有裁决；冲突及持久化失败返回封闭错误。
     async fn admit_external_cancel(
@@ -453,7 +542,11 @@ pub trait SagaParticipantStore: Send + Sync {
 
     /// 业务作用：在结果 Outbox 同一事务内结算外部 cancel 与正向最终事实。
     ///
-    /// 参数说明：实例和步骤定位 gate，`forward` 与 `cancel` 必须是合法组合。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `forward`：本次外部取消同时裁决的正向终态。
+    /// - `cancel`：本次外部取消的取消终态，须与正向事实组成合法组合。
     ///
     /// 返回：组合事实唯一结算成功时返回 `Ok`；否则返回封闭错误。
     async fn settle_external_cancel(
@@ -466,7 +559,10 @@ pub trait SagaParticipantStore: Send + Sync {
 
     /// 业务作用：裁决补偿是否首次允许执行，并门禁人工恢复身份。
     ///
-    /// 参数说明：gate、补偿效果身份及可选恢复 operation 共同限定许可。
+    /// 参数说明：
+    /// - `gate`：绑定实例、步骤、租户和冻结工作流定义的参与方门禁键。
+    /// - `compensate_effect`：需要保持幂等的补偿效果身份。
+    /// - `recovery_operation_id`：人工重新开放冻结动作时必须匹配的可选管理操作身份。
     ///
     /// 返回：执行许可、等待或既有结果；冲突及持久化失败返回封闭错误。
     async fn admit_compensation(
@@ -478,7 +574,10 @@ pub trait SagaParticipantStore: Send + Sync {
 
     /// 业务作用：在结果 Outbox 同一事务内结算补偿事实。
     ///
-    /// 参数说明：实例和步骤定位 gate，`status` 是补偿裁决结果。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `status`：已裁决的补偿执行结果。
     ///
     /// 返回：合法结算成功时返回 `Ok`；冲突或持久化失败返回封闭错误。
     async fn settle_compensation(
@@ -490,7 +589,10 @@ pub trait SagaParticipantStore: Send + Sync {
 
     /// 业务作用：裁决 Unknown 结果查询是否首次允许执行，并门禁人工恢复身份。
     ///
-    /// 参数说明：gate、查询效果身份及可选恢复 operation 共同限定许可。
+    /// 参数说明：
+    /// - `gate`：绑定实例、步骤、租户和冻结工作流定义的参与方门禁键。
+    /// - `resolve_effect`：本次 Unknown 结果查询的稳定效果身份。
+    /// - `recovery_operation_id`：人工重新开放冻结动作时必须匹配的可选管理操作身份。
     ///
     /// 返回：查询许可、等待或既有结果；冲突及持久化失败返回封闭错误。
     async fn admit_resolution(
@@ -502,7 +604,11 @@ pub trait SagaParticipantStore: Send + Sync {
 
     /// 业务作用：在结果 Outbox 同一事务内结算正向或补偿 Unknown 查询事实。
     ///
-    /// 参数说明：实例和步骤定位 gate，`target` 与 `status` 描述裁决对象和结果。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `step`：该实例内已冻结的规范步骤名。
+    /// - `target`：本次结果查询要结算的正向或补偿目标。
+    /// - `status`：已裁决的 Unknown 结果查询状态。
     ///
     /// 返回：合法结算成功时返回 `Ok`；冲突或持久化失败返回封闭错误。
     async fn settle_resolution(
@@ -519,7 +625,8 @@ pub trait SagaParticipantStore: Send + Sync {
 pub trait SagaAuditStore: Send + Sync {
     /// 业务作用：在互斥 attempt 结果裁决同一事务内保存双方证据。
     ///
-    /// 参数说明：`fact` 包含定位、既有事实、incoming 事实和冲突类别。
+    /// 参数说明：
+    /// - `fact`：包含定位、既有事实、incoming 事实和冲突类别。
     ///
     /// 返回：幂等保存成功返回 `Ok`；合同或持久化失败返回封闭错误。
     async fn record_attempt_conflict(
@@ -529,7 +636,10 @@ pub trait SagaAuditStore: Send + Sync {
 
     /// 业务作用：按全局单调序号读取跨类别、不可变的实例审计事件。
     ///
-    /// 参数说明：`saga_id` 定位实例，`after` 是最后已交付序号，`limit` 限制返回量。
+    /// 参数说明：
+    /// - `saga_id`：定位实例
+    /// - `after`：是最后已交付序号
+    /// - `limit`：限制返回量。
     ///
     /// 返回：严格按 `audit_seq` 递增的事件；参数或读取失败返回封闭错误。
     async fn load_audit_events(
@@ -541,7 +651,10 @@ pub trait SagaAuditStore: Send + Sync {
 
     /// 业务作用：有界读取实例的 attempt 审计事实。
     ///
-    /// 参数说明：`saga_id` 定位实例，`after` 是上一页末项，`limit` 限制返回量。
+    /// 参数说明：
+    /// - `saga_id`：定位实例
+    /// - `after`：是上一页末项
+    /// - `limit`：限制返回量。
     ///
     /// 返回：稳定排序的事实集合；参数或读取失败返回封闭错误。
     async fn load_attempt_audit(
@@ -553,7 +666,10 @@ pub trait SagaAuditStore: Send + Sync {
 
     /// 业务作用：按序号游标读取实例状态迁移审计。
     ///
-    /// 参数说明：实例、`after_seq` 和 `limit` 共同限定结果页。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `after_seq`：上一页最后交付的审计序号，仅读取其后的事实。
+    /// - `limit`：本页最多返回的持久事实数量。
     ///
     /// 返回：稳定排序的 transition 集合；参数或读取失败返回封闭错误。
     async fn load_transition_audit(
@@ -565,7 +681,10 @@ pub trait SagaAuditStore: Send + Sync {
 
     /// 业务作用：按序号游标读取实例控制态迁移审计。
     ///
-    /// 参数说明：实例、`after_seq` 和 `limit` 共同限定结果页。
+    /// 参数说明：
+    /// - `saga_id`：需要读取或变更的持久 Saga 实例身份。
+    /// - `after_seq`：上一页最后交付的审计序号，仅读取其后的事实。
+    /// - `limit`：本页最多返回的持久事实数量。
     ///
     /// 返回：稳定排序的控制审计集合；参数或读取失败返回封闭错误。
     async fn load_control_audit(
@@ -577,7 +696,10 @@ pub trait SagaAuditStore: Send + Sync {
 
     /// 业务作用：有界读取实例的人工管理审计。
     ///
-    /// 参数说明：`saga_id` 定位实例，`after` 是上一页末项，`limit` 限制返回量。
+    /// 参数说明：
+    /// - `saga_id`：定位实例
+    /// - `after`：是上一页末项
+    /// - `limit`：限制返回量。
     ///
     /// 返回：稳定排序的管理审计集合；参数或读取失败返回封闭错误。
     async fn load_management_audit(
@@ -589,7 +711,10 @@ pub trait SagaAuditStore: Send + Sync {
 
     /// 业务作用：有界读取实例的互斥事实证据。
     ///
-    /// 参数说明：`saga_id` 定位实例，`after` 是上一页末项，`limit` 限制返回量。
+    /// 参数说明：
+    /// - `saga_id`：定位实例
+    /// - `after`：是上一页末项
+    /// - `limit`：限制返回量。
     ///
     /// 返回：稳定排序的冲突事实集合；参数或读取失败返回封闭错误。
     async fn load_conflict_audit(
@@ -605,7 +730,9 @@ pub trait SagaAuditStore: Send + Sync {
 pub trait SagaGovernanceStore: Send + Sync {
     /// 业务作用：在实例创建事务内原子预留租户在飞名额。
     ///
-    /// 参数说明：`tenant` 是受信租户，`cap` 是可选上限。
+    /// 参数说明：
+    /// - `tenant`：是受信租户
+    /// - `cap`：是可选上限。
     ///
     /// 返回：区分已预留、超额和账本未初始化；持久化失败返回封闭错误。
     async fn reserve_tenant_quota(
@@ -616,28 +743,34 @@ pub trait SagaGovernanceStore: Send + Sync {
 
     /// 业务作用：确认租户账本是否已按持久实例事实完成初始化。
     ///
-    /// 参数说明：`tenant` 是受信租户。
+    /// 参数说明：
+    /// - `tenant`：是受信租户。
     ///
     /// 返回：已初始化时为 `true`；读取失败返回封闭错误。
     async fn tenant_quota_initialized(&self, tenant: &TenantId) -> Result<bool, SagaBackendError>;
 
     /// 业务作用：读取租户在飞实例账本值。
     ///
-    /// 参数说明：`tenant` 是受信租户。
+    /// 参数说明：
+    /// - `tenant`：是受信租户。
     ///
     /// 返回：不存在账本时为零；读取失败返回封闭错误。
     async fn tenant_quota_usage(&self, tenant: &TenantId) -> Result<u64, SagaBackendError>;
 
     /// 业务作用：在同源事务内锁定账本并按非终态实例事实重算配额。
     ///
-    /// 参数说明：`tenant` 是受信租户。
+    /// 参数说明：
+    /// - `tenant`：是受信租户。
     ///
     /// 返回：对账后的在飞数；事务或持久化失败返回封闭错误。
     async fn reconcile_tenant_quota(&self, tenant: &TenantId) -> Result<u64, SagaBackendError>;
 
     /// 业务作用：在管理动作事务内按数据库时钟预留租户频率预算。
     ///
-    /// 参数说明：`tenant` 是受信租户，动作上限和窗口共同定义预算。
+    /// 参数说明：
+    /// - `tenant`：用于隔离业务事实的受信租户身份。
+    /// - `max_actions`：一个租户时间窗口内允许预留的最大管理动作数。
+    /// - `window_ms`：按数据库时钟划分动作频率窗口的毫秒长度。
     ///
     /// 返回：区分已预留和已耗尽；参数或持久化失败返回封闭错误。
     async fn reserve_tenant_action_rate(
@@ -649,7 +782,9 @@ pub trait SagaGovernanceStore: Send + Sync {
 
     /// 业务作用：按数据库时钟读取当前租户动作窗口及已用次数。
     ///
-    /// 参数说明：`tenant` 是受信租户，`window_ms` 是窗口长度。
+    /// 参数说明：
+    /// - `tenant`：是受信租户
+    /// - `window_ms`：是窗口长度。
     ///
     /// 返回：窗口起点和已用次数；参数或读取失败返回封闭错误。
     async fn tenant_action_rate_usage(
@@ -660,7 +795,8 @@ pub trait SagaGovernanceStore: Send + Sync {
 
     /// 业务作用：从已提交 Saga 表读取低基数运行指标快照。
     ///
-    /// 参数说明：`now_ms` 是统一 epoch 毫秒观测时刻。
+    /// 参数说明：
+    /// - `now_ms`：是统一 epoch 毫秒观测时刻。
     ///
     /// 返回：数据库事实快照；参数或读取失败返回封闭错误。
     async fn load_operational_metrics(
@@ -755,7 +891,8 @@ pub trait SagaBackendFactory: SagaBackend + Sized {
 
     /// 业务作用：构造绑定命名 datasource 的完整后端并在 I/O 前复验同源。
     ///
-    /// 参数说明：`datasource` 是启动期冻结的规范 qualifier。
+    /// 参数说明：
+    /// - `datasource`：是启动期冻结的规范 qualifier。
     ///
     /// 返回：名称与全部持久角色匹配时返回后端；否则返回封闭错误。
     fn backend_for(datasource: &str) -> Result<Self, SagaBackendError>;

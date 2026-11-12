@@ -19,12 +19,15 @@ use crate::web::WebComponent;
 
 /// 业务作用：从必需本地配置完成同步预检、创建 owned runtime，并执行完整应用生命周期。
 ///
-/// 该函数是进程入口的唯一所有权边界：正常返回和 Runner unwind 都会消费 runtime 并调用零等待退场，避免普通析构无限等待残留 blocking work。
+/// 该函数拥有创建的 runtime；Runner 执行正常返回或展开时均消费 runtime 并选择后台关闭，避免等待残留阻塞工作。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `spec`：属性入口生成的静态应用名和组件声明。
-/// - `user_hook`：完成业务资源装配并返回受监督 future 的启动闭包。
+/// - `user_hook`：Application 生命周期在用户阶段调用的异步入口，其失败由 Runner 归类并触发清理。
+///
+/// 返回：正常生命周期使用 Runner 提供的退出码；预检、运行时构造、组件装配错误或捕获到 Runner 展开时为失败。
+/// shutdown_background 不证明阻塞工作已经结束；展开捕获只覆盖 block_on 调用，不覆盖此前同步代码或 panic=abort。
 pub fn run<F, Fut, E>(spec: ApplicationSpec, user_hook: F) -> ExitCode
 where
     F: FnOnce(Application) -> Fut + Send + 'static,
@@ -188,9 +191,12 @@ fn build_partition_component() -> Result<Box<dyn ApplicationComponent>, Applicat
 
 /// 业务作用：构造 Web 组件；运行能力关闭时给出指向门面 feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `spec`：提供业务二进制生成的路由元数据和路由工厂。
+///
+/// 返回：Web 能力已编入且声明绑定合法时返回未启动的组件；绑定不完整或能力缺失时拒绝。
+/// 本入口不绑定监听端口，后续生命周期才准备和开放服务。
 #[cfg_attr(not(feature = "web"), allow(unused_variables))]
 fn build_web_component(
     spec: &ApplicationSpec,
@@ -207,9 +213,10 @@ fn build_web_component(
 
 /// 业务作用：构造缓存组件；`cache` feature 关闭时给出指向门面 feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入缓存组件由编译期 `cache` feature 决定。
+/// 返回：cache 已编入时返回等待生命周期装配的组件，否则返回缺少 cache 能力的错误。
+/// 不在此安装缓存后端或启动失效广播任务。
 fn build_cache_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "cache")]
     {
@@ -223,9 +230,10 @@ fn build_cache_component() -> Result<Box<dyn ApplicationComponent>, ApplicationE
 
 /// 业务作用：构造遥测组件；`telemetry` feature 关闭时给出指向门面 feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入遥测组件由编译期 `telemetry` feature 决定。
+/// 返回：telemetry 已编入时返回未装配 exporter 的组件，否则返回能力缺失错误。
+/// 构造成功不表示遥测端点可达或指标已开始导出。
 fn build_telemetry_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "telemetry")]
     {
@@ -239,9 +247,10 @@ fn build_telemetry_component() -> Result<Box<dyn ApplicationComponent>, Applicat
 
 /// 业务作用：构造认证组件；auth 能力随 Web 编入,`web` feature 关闭时给出指向门面 feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入认证组件由编译期 `web` feature 决定。
+/// 返回：web 已编入时返回尚未加载认证材料的组件，否则返回缺少 web 能力的错误。
+/// 密钥来源校验、远程加载与运行时发布由后续认证生命周期完成。
 fn build_auth_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "web")]
     {
@@ -255,9 +264,10 @@ fn build_auth_component() -> Result<Box<dyn ApplicationComponent>, ApplicationEr
 
 /// 业务作用：构造 log 组件；`log` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入 log 组件由编译期 feature 决定。
+/// 返回：log 已编入时返回尚未初始化 nalog 管理器的组件，否则返回能力缺失错误。
+/// 控制台引导与文件日志安装分别在后续阶段执行，不在此打开日志文件。
 fn build_log_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "log")]
     {
@@ -271,10 +281,13 @@ fn build_log_component() -> Result<Box<dyn ApplicationComponent>, ApplicationErr
 
 /// 业务作用：构造配置中心组件；运行能力关闭时给出指向门面 feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `spec`：提供声明组件列表，供热刷新构造同版本 reload 状态表。
 /// - `pinned_application`：同步预读到的原始 `application.*`，作为 bootstrap-only 冲突判定基准。
+///
+/// 返回：nacos-config 已编入时冻结声明组件及启动段副本并构造配置中心组件，否则返回能力缺失错误。
+/// 此处不连接 Nacos，不读取远端配置，也不改变预读到的应用启动参数。
 #[cfg_attr(not(feature = "nacos-config"), allow(unused_variables))]
 fn build_nacos_config_component(
     spec: &ApplicationSpec,
@@ -297,11 +310,12 @@ fn build_nacos_config_component(
     }
 }
 
-/// 业务作用：构造 db 组件；napp 的 `db` feature 关闭时给出指向 nasa feature 的定向错误。
+/// 业务作用：按已编入的数据库能力构造统一数据源组件，拒绝没有任何数据库支持的声明。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入数据源组件由编译期 feature 决定。
+/// 返回：db、db-pgsql、db-sqlite 任一启用时返回组件，全部关闭时返回指向门面 tx 能力的错误。
+/// 数据源目录、连接池和迁移门禁由后续生命周期准备，构造成功不证明数据库已可用。
 fn build_db_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     {
@@ -317,7 +331,7 @@ fn build_db_component() -> Result<Box<dyn ApplicationComponent>, ApplicationErro
 ///
 /// 参数说明: 无。
 ///
-/// 返回：启用 `saga-runtime` 时返回受管组件，否则返回启动配置错误。
+/// 返回：napp 的 saga 或 saga-pgsql 能力已编入时返回受管组件，否则返回提示门面 saga-runtime 能力的错误。
 fn build_saga_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     {
@@ -333,7 +347,7 @@ fn build_saga_component() -> Result<Box<dyn ApplicationComponent>, ApplicationEr
 ///
 /// 参数说明: 无。
 ///
-/// 返回：启用 `outbox` 时返回生命周期组件，否则返回指向门面 feature 的启动错误。
+/// 返回：outbox 或 outbox-pgsql 任一已编入时返回生命周期组件，均关闭时返回指向门面 outbox 能力的错误。
 fn build_outbox_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     {
@@ -347,9 +361,10 @@ fn build_outbox_component() -> Result<Box<dyn ApplicationComponent>, Application
 
 /// 业务作用：构造 redis 组件；napp 的 `redis` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入 Redis 组件由编译期 feature 决定。
+/// 返回：redis 已编入时返回等待装配命名客户端的组件，否则返回能力缺失错误。
+/// 不连接 Redis 或提前发布客户端，连接及健康门禁留在生命周期阶段。
 fn build_redis_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "redis")]
     {
@@ -379,9 +394,10 @@ fn build_redis_job_component() -> Result<Box<dyn ApplicationComponent>, Applicat
 
 /// 业务作用：构造 Kafka 组件；napp 的 `kafka` feature 关闭时给出指向门面 feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入 Kafka 生命周期组件由编译期 feature 决定。
+/// 返回：kafka 已编入时返回尚无 producer 或 consumer owner 的组件，否则返回能力缺失错误。
+/// 不在此连接 broker、冻结消费计划或启动消费任务。
 fn build_kafka_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "kafka")]
     {
@@ -395,9 +411,10 @@ fn build_kafka_component() -> Result<Box<dyn ApplicationComponent>, ApplicationE
 
 /// 业务作用：构造 scheduling 组件；napp 的 `scheduling` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入调度组件由编译期 feature 决定。
+/// 返回：scheduling 已编入时返回尚未启动任务驱动的组件，否则返回能力缺失错误。
+/// 调度规则收集、配置验证和实际任务启动由后续阶段完成。
 fn build_scheduling_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "scheduling")]
     {
@@ -411,9 +428,10 @@ fn build_scheduling_component() -> Result<Box<dyn ApplicationComponent>, Applica
 
 /// 业务作用：构造服务发现组件；运行能力关闭时给出指向门面 feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入服务发现组件由编译期 feature 决定。
+/// 返回：nacos-discovery 已编入时返回其生命周期组件，否则返回指向同名门面能力的错误。
+/// 构造不注册实例或证明发现服务健康，不能作为实例已可接流的依据。
 fn build_nacos_discovery_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "nacos-discovery")]
     {
@@ -430,9 +448,10 @@ fn build_nacos_discovery_component() -> Result<Box<dyn ApplicationComponent>, Ap
 
 /// 业务作用：构造 ws 组件；napp 的 `ws` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；是否编入长连接组件由编译期 feature 决定。
+/// 返回：ws 已编入时返回尚未绑定传输入口的组件，否则返回能力缺失错误。
+/// 端点计划、监听器和集群通知在后续阶段准备，不在此开放连接准入。
 fn build_ws_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "ws")]
     {
@@ -446,9 +465,11 @@ fn build_ws_component() -> Result<Box<dyn ApplicationComponent>, ApplicationErro
 
 /// 业务作用：构造不可由属性宏声明的内部组件身份时返回的稳定错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `id`：只属于运行时内部、不应出现在组件声明中的身份。
+///
+/// 返回：说明该身份不能由用户声明的 Application Bootstrap 错误；不构造内部组件或改变声明。
 fn non_declarable_component_error(id: ComponentId) -> ApplicationError {
     ApplicationError::new(
         ComponentId::Application,
@@ -459,14 +480,12 @@ fn non_declarable_component_error(id: ComponentId) -> ApplicationError {
 
 /// 业务作用：构造组件已声明但对应 nasa feature 未启用时的定向启动错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `id`：被声明的组件身份。
 /// - `feature`：需要在 nasa 依赖中启用的 feature 名称。
 ///
-/// # 返回
-///
-/// 返回归属 Application Bootstrap 阶段的稳定配置错误，不启动任何组件副作用。
+/// 返回：归属 Application Bootstrap 阶段的稳定配置错误，不启动任何组件副作用。
 // 组件 feature 全开时没有任何分支会调用它；这不是缺陷，而是"每个组件都已编入"的正常结果。
 #[allow(dead_code)]
 fn feature_missing_error(id: ComponentId, feature: &str) -> ApplicationError {
@@ -483,11 +502,12 @@ fn feature_missing_error(id: ComponentId, feature: &str) -> ApplicationError {
 /// 业务作用：在没有 log 组件时安装最小 fmt 日志 subscriber。
 ///
 /// 使用 `try_init`：若业务侧已安装全局 subscriber，`AlreadySet` 被忽略而不是当作启动
-/// 失败。默认级别为 `info`，`RUST_LOG` 存在时按其过滤。
+/// 失败。RUST_LOG 可解析时采用其规则，未设置或解析失败时使用 info。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；调用后全局默认 subscriber 持续生效到进程退出。
+/// 返回：尽力安装控制台 subscriber，不向调用方传播安装失败，也不替换已经安装的外部 subscriber。
+/// 启用 mapper-observability 且安装成功时保留可热加载的过滤句柄，供后续 SQL 控制台设置使用。
 fn install_fallback_subscriber() {
     use tracing_subscriber::EnvFilter;
 
@@ -516,7 +536,10 @@ type FallbackFilter = tracing_subscriber::reload::Handle<
 static FALLBACK_FILTER: std::sync::OnceLock<(String, FallbackFilter)> = std::sync::OnceLock::new();
 
 /// 业务作用：没有文件日志组件时也让 YAML 的 SQL console 开关作用于框架控制台。
-/// 参数说明：`root` 为已经合并的最终配置，过滤器只归框架 fallback subscriber 所有。
+///
+/// 参数说明：
+/// - `root`：`root` 为已经合并的最终配置。
+///
 /// 返回：固定 SQL target 合并成功；外部自定义 subscriber 不被替换，非法指令拒绝启动。
 #[cfg(feature = "mapper-observability")]
 pub(crate) fn configure_fallback_sql_logging(
@@ -553,9 +576,12 @@ pub(crate) fn configure_fallback_sql_logging(
 
 /// 业务作用：创建由同步入口独占的多线程 runtime。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `worker_threads`：本地配置显式指定的 worker 数；`None` 保留运行库默认策略。
+///
+/// 返回：启用已编入 I/O 与时间驱动的多线程 runtime；构建失败包装为 Application Bootstrap 错误。
+/// 调用方须先保证显式线程数非零，本函数不捕获 Builder 参数断言引起的 panic。
 fn build_runtime(worker_threads: Option<usize>) -> Result<Runtime, ApplicationError> {
     let mut builder = Builder::new_multi_thread();
     builder.enable_all();
@@ -573,7 +599,9 @@ fn build_runtime(worker_threads: Option<usize>) -> Result<Runtime, ApplicationEr
 }
 
 /// 业务作用：构造中性的多注册中心生命周期组件。
+///
 /// 参数说明：无。
+///
 /// 返回：编入对应 feature 时构造组件，否则在产生副作用前拒绝。
 fn build_managed_discovery_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
     #[cfg(feature = "discovery-runtime")]

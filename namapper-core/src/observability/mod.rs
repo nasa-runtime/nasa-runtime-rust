@@ -123,7 +123,9 @@ domain!(
 
 impl DbOutcome {
     /// 业务作用：将详细数据库结果映射为低基数延迟分布状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：未找到属于成功，取消单列，其它失败不能稀释成功分位数。
     pub const fn status(self) -> Status {
         match self {
@@ -133,7 +135,9 @@ impl DbOutcome {
         }
     }
     /// 业务作用：区分执行失败与未找到、取消、展开等生命周期结果。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：显式数据库失败时允许输出 execution_error 事件。
     pub const fn is_execution_error(self) -> bool {
         !matches!(
@@ -199,7 +203,9 @@ struct MethodCells {
 }
 impl MethodCells {
     /// 业务作用：为编译期方法预留全部封闭结果与固定桶，避免完成路径懒建状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：零值原子单元。
     const fn new() -> Self {
         Self {
@@ -223,8 +229,17 @@ impl MethodCells {
 
 impl MapperMethodMeta {
     /// 业务作用：把完整方法身份、事务边界与 SQL 模板绑定到静态观测单元。
-    /// 参数说明：参数均为宏确定的静态合同；sql_template 只供受控诊断，不作指标标签。
-    /// 返回：尚未安装应用策略、但已可安全采集基础指标的静态元数据。
+    ///
+    /// 参数说明：
+    /// - `method`：宏确定的完整方法身份，用于观测归属。
+    /// - `mapper`：宏确定的 Mapper 身份。
+    /// - `driver`：数据库驱动的静态标识。
+    /// - `datasource`：已冻结的数据源 qualifier。
+    /// - `operation`：查询或写入等固定操作类别。
+    /// - `tx_mode`：方法声明的事务模式。
+    /// - `sql_template`：受控诊断使用的 prepared SQL 模板，不作为指标 label。
+    ///
+    /// 返回：返回计数槽为零、策略和通知尚未绑定的静态元数据，不验证标识、SQL 内容或创建数据库连接。
     pub const fn new(
         method: &'static str,
         mapper: &'static str,
@@ -250,7 +265,11 @@ impl MapperMethodMeta {
     }
 
     /// 业务作用：在业务 I/O 前一次冻结有效策略，禁止旧 Stream 与新配置交叉解释。
-    /// 参数说明：`policy` 为逐叶合并结果，`record_rows` 决定行数附加指标。
+    ///
+    /// 参数说明：
+    /// - `policy`：为逐叶合并结果
+    /// - `record_rows`：决定行数附加指标。
+    ///
     /// 返回：首次安装成功；重复安装相同策略幂等，不同策略要求重启。
     pub fn configure(
         &'static self,
@@ -273,14 +292,18 @@ impl MapperMethodMeta {
     }
 
     /// 业务作用：读取不含敏感数据的冻结策略，独立使用时采用产品默认。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与方法单元同生命周期的策略引用。
     pub fn policy(&self) -> &EffectivePolicy {
         self.policy.get().unwrap_or_else(|| &DEFAULT_POLICY)
     }
 
     /// 业务作用：在访问可能分配字符串的 driver 错误码之前确认错误日志确实需要该字段。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：错误日志开启、允许数据库码且日志过滤器可见时为真。
     pub fn database_code_enabled(&self) -> bool {
         let policy = &self.policy().execution_error;
@@ -294,8 +317,13 @@ impl MapperMethodMeta {
     }
 
     /// 业务作用：在启动期把冻结规则绑定到框架队列句柄，执行路径不调用 provider。
-    /// 参数说明：`identity` 为进程身份，`slow_route` 与 `error_route` 为已验证的有界投递路由。
-    /// 返回：首次绑定成功；重复绑定拒绝以免运行中的调用切换渠道。
+    ///
+    /// 参数说明：
+    /// - `identity`：用于通知归属的进程身份。
+    /// - `slow_route`：可选慢 SQL 通知队列路由。
+    /// - `error_route`：可选执行失败通知队列路由。
+    ///
+    /// 返回：两路都 None 时直接成功且不冻结；存在任一路由时首次绑定成功，此后重复绑定返回固定错误。只保存队列路由，不自行验证渠道或发送通知。
     pub fn configure_alerts(
         &'static self,
         identity: Arc<NotificationIdentity>,
@@ -317,8 +345,13 @@ impl MapperMethodMeta {
     }
 
     /// 业务作用：仅在规则命中且取得冷却许可后构造拥有型通知，拥塞不影响 SQL 返回。
-    /// 参数说明：`outcome`、`duration` 为执行事实，`sql` 为可选 prepared 模板。
-    /// 返回：无；只执行具体队列 try_send，禁用时不分配文本。
+    ///
+    /// 参数说明：
+    /// - `outcome`：已确定的数据库执行结果类别。
+    /// - `duration`：本次执行耗时，用于慢 SQL 裁决。
+    /// - `sql`：由策略决定是否裁剪后附带的 prepared 模板。
+    ///
+    /// 返回：无返回值；优先选择已启用且有路由的执行错误通知，否则尝试慢 SQL，规则和冷却允许后构造并 try_send。无匹配路由时不分配通知文本，入队失败不改变 SQL 结果；入队不等于最终投递成功。
     fn notify(&self, outcome: DbOutcome, duration: Duration, sql: &str) {
         let Some(routes) = self.alerts.get() else {
             return;
@@ -393,7 +426,10 @@ impl MapperMethodMeta {
     }
 
     /// 业务作用：为指标出口构建静态身份标签，业务执行路径不调用该函数。
-    /// 参数说明：`operation` 决定是否附带操作维度。
+    ///
+    /// 参数说明：
+    /// - `operation`：决定是否附带操作维度。
+    ///
     /// 返回：顺序与公开 descriptor 一致的拥有型标签。
     fn labels(&self, operation: bool) -> Vec<(&'static str, String)> {
         let mut labels = vec![
@@ -408,7 +444,12 @@ impl MapperMethodMeta {
     }
 
     /// 业务作用：终止一次真实数据库调用并独立记录结果、时长、行数和慢阈值。
-    /// 参数说明：`outcome` 是擦除前分类，`duration` 为客户端活跃时长，`rows` 为准确行数。
+    ///
+    /// 参数说明：
+    /// - `outcome`：是擦除前分类
+    /// - `duration`：为客户端活跃时长
+    /// - `rows`：为准确行数。
+    ///
     /// 返回：是否达到慢阈值；基础事实不受出口配置影响。
     fn record_db(&self, outcome: DbOutcome, duration: Duration, rows: u64) -> bool {
         add(&self.cells.operations[outcome as usize], 1);
@@ -425,8 +466,15 @@ impl MapperMethodMeta {
     }
 
     /// 业务作用：在显式终态选择唯一慢操作或执行失败日志，原始错误和 bind 值不进入事件。
-    /// 参数说明：`outcome`、`duration`、`rows` 为观测事实，`sql` 是可选诊断模板，`code` 是结构化数据库码。
-    /// 返回：无；日志关闭或冷却时不构造文本，日志处理异常不改变数据库结果。
+    ///
+    /// 参数说明：
+    /// - `outcome`：已确定的执行结果类别。
+    /// - `duration`：本次数据库操作耗时。
+    /// - `rows`：调用方记录的影响或读取行数。
+    /// - `sql`：按配置可选输出的 prepared 模板，不含 bind 值。
+    /// - `code`：可选结构化数据库码；启用后仍须通过长度与 ASCII 字符限制。
+    ///
+    /// 返回：无返回值；先尝试独立通知，再按优先级、日志策略和冷却输出至 tracing。日志分支在 diagnostic 边界内隔离 subscriber 展开；通知与日志分别受配置约束，不是原子成对事件。
     fn emit(
         &self,
         outcome: DbOutcome,
@@ -517,7 +565,10 @@ impl MapperMethodMeta {
 }
 
 /// 业务作用：隔离诊断过滤、格式化和日志回调的展开，保持已取得的数据库结果。
-/// 参数说明：`action` 只承载已命中的诊断工作，不得包裹数据库调用或事务裁决。
+///
+/// 参数说明：
+/// - `action`：只承载已命中的诊断工作，不得包裹数据库调用或事务裁决。
+///
 /// 返回：完成时保留诊断值；展开时丢弃本次诊断，连同异常载荷的析构也不传播到业务。
 fn diagnostic<T>(action: impl FnOnce() -> T) -> Option<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
@@ -535,7 +586,11 @@ fn diagnostic<T>(action: impl FnOnce() -> T) -> Option<T> {
 }
 
 /// 业务作用：对允许输出的诊断文本按 Unicode 字符截断并替换控制字符。
-/// 参数说明：`value` 为非凭据文本，`limit` 为字符上限。
+///
+/// 参数说明：
+/// - `value`：为非凭据文本
+/// - `limit`：为字符上限。
+///
 /// 返回：有界拥有型文本；只在出口已命中时调用。
 pub fn clean_text(value: &str, limit: usize) -> String {
     value
@@ -552,7 +607,11 @@ pub fn clean_text(value: &str, limit: usize) -> String {
 }
 
 /// 业务作用：以单调时钟和原子比较控制单进程重复日志，竞争失败不等待。
-/// 参数说明：`next` 为静态冷却单元，`millis` 为冷却间隔。
+///
+/// 参数说明：
+/// - `next`：为静态冷却单元
+/// - `millis`：为冷却间隔。
+///
 /// 返回：本次取得输出许可时为真；零间隔总是允许。
 pub fn cooldown(next: &AtomicU64, millis: u64) -> bool {
     if millis == 0 {
@@ -580,7 +639,10 @@ pub struct MapperCallGuard {
 }
 impl MapperCallGuard {
     /// 业务作用：开始逻辑调用计时并占用一个在途名额。
-    /// 参数说明：`meta` 为该方法的静态身份。
+    ///
+    /// 参数说明：
+    /// - `meta`：为该方法的静态身份。
+    ///
     /// 返回：负责显式完成、取消与 unwind 的唯一守卫。
     pub fn start(meta: &'static MapperMethodMeta) -> Self {
         add(&meta.cells.calls_open, 1);
@@ -592,13 +654,19 @@ impl MapperCallGuard {
         }
     }
     /// 业务作用：记录缓存、连接前或真实执行路径，不因缓存提前返回丢失调用归属。
-    /// 参数说明：`path` 为封闭阶段。
+    ///
+    /// 参数说明：
+    /// - `path`：为封闭阶段。
+    ///
     /// 返回：更新当前路径，允许 single-flight loader 共享不可变守卫引用。
     pub fn path(&self, path: CallPath) {
         self.path.store(path as u8, Ordering::Relaxed);
     }
     /// 业务作用：终止逻辑调用，数据库已成功但缓存失败仍单独记录方法失败。
-    /// 参数说明：`outcome` 为方法最终结果。
+    ///
+    /// 参数说明：
+    /// - `outcome`：为方法最终结果。
+    ///
     /// 返回：仅记录一次完成量与时长并归还在途名额。
     pub fn finish(&mut self, outcome: CallOutcome) {
         if self.done {
@@ -621,7 +689,9 @@ impl MapperCallGuard {
 }
 impl Drop for MapperCallGuard {
     /// 业务作用：把已开始但未完成的调用记为取消或展开，避免永久遗留在途数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只更新原子事实，不输出日志或通知。
     fn drop(&mut self) {
         if !self.done {
@@ -642,7 +712,10 @@ pub struct MapperDbGuard {
 }
 impl MapperDbGuard {
     /// 业务作用：开始数据库客户端计时，连接等待不在此区间。
-    /// 参数说明：`meta` 为调用的静态方法身份。
+    ///
+    /// 参数说明：
+    /// - `meta`：为调用的静态方法身份。
+    ///
     /// 返回：数据库调用唯一终态守卫。
     pub fn start(meta: &'static MapperMethodMeta) -> Self {
         add(&meta.cells.db_open, 1);
@@ -653,7 +726,13 @@ impl MapperDbGuard {
         }
     }
     /// 业务作用：在 SQLx 结果被类型擦除前记录分类，再裁决脱敏日志。
-    /// 参数说明：`outcome` 为稳定分类，`rows` 为准确行数，`sql` 为 prepared SQL，`code` 为结构化数据库码。
+    ///
+    /// 参数说明：
+    /// - `outcome`：为稳定分类
+    /// - `rows`：为准确行数
+    /// - `sql`：为 prepared SQL
+    /// - `code`：为结构化数据库码。
+    ///
     /// 返回：无；不修改或替换原 SQL 结果。
     pub fn finish(&mut self, outcome: DbOutcome, rows: u64, sql: &str, code: Option<&str>) {
         if self.done {
@@ -667,7 +746,9 @@ impl MapperDbGuard {
 }
 impl Drop for MapperDbGuard {
     /// 业务作用：取消或展开时归还数据库在途数，只记录已观察到的活跃时长。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不格式化 SQL、不调用用户代码、不发送网络请求。
     fn drop(&mut self) {
         if !self.done {
@@ -698,14 +779,20 @@ pub struct MapperStreamGuard {
 }
 impl MapperStreamGuard {
     /// 业务作用：让流适配器在擦除 SQLx 错误前判断是否需要获取数据库码。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与该流创建时冻结的方法日志策略一致的开关。
     pub fn database_code_enabled(&self) -> bool {
         self.meta.database_code_enabled()
     }
 
     /// 业务作用：在连接交给 Stream 时记录连接占用，包含从未 poll 的生命周期。
-    /// 参数说明：`meta` 为静态身份，`sql` 只在显式允许诊断时复制。
+    ///
+    /// 参数说明：
+    /// - `meta`：为静态身份
+    /// - `sql`：只在显式允许诊断时复制。
+    ///
     /// 返回：持有进程静态单元的 Stream 守卫。
     pub fn new(meta: &'static MapperMethodMeta, sql: &str) -> Self {
         add(&meta.cells.streams_open, 1);
@@ -735,7 +822,9 @@ impl MapperStreamGuard {
         }
     }
     /// 业务作用：开始或继续一次底层取行等待；Pending 之间的等待持续计入活跃时长。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：首次 poll 才增加数据库在途数，重复 poll 不重复计数。
     pub fn poll_started(&mut self) {
         if self.done {
@@ -751,7 +840,9 @@ impl MapperStreamGuard {
         }
     }
     /// 业务作用：记录一次实际交给消费者的行，停止活跃计时直到下次请求下一行。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：首行只记录一次 TTFR；行数留在本地直到终止。
     pub fn row(&mut self) {
         if self.done {
@@ -766,7 +857,9 @@ impl MapperStreamGuard {
         self.rows = self.rows.saturating_add(1);
     }
     /// 业务作用：将当前底层 await 的时间并入本地累计，排除消费者处理间隔。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：清空当前活跃段，重复调用不重复累加。
     fn end_active(&mut self) {
         if let Some(start) = self.active_since.take() {
@@ -774,7 +867,11 @@ impl MapperStreamGuard {
         }
     }
     /// 业务作用：在 EOF 或 SQLx 失败时终止 Stream，方法构造结果不被回写。
-    /// 参数说明：`outcome` 为数据库执行结果，`code` 为受限数据库码。
+    ///
+    /// 参数说明：
+    /// - `outcome`：为数据库执行结果
+    /// - `code`：为受限数据库码。
+    ///
     /// 返回：记录 Stream 与数据库终态，并选择唯一日志事件。
     pub fn finish(&mut self, outcome: DbOutcome, code: Option<&str>) {
         if self.done {
@@ -798,7 +895,11 @@ impl MapperStreamGuard {
         );
     }
     /// 业务作用：统一归还 Stream 和数据库名额，未 poll 的对象不产生数据库调用。
-    /// 参数说明：`stream` 为流终态，`database` 为已开始数据库调用的终态。
+    ///
+    /// 参数说明：
+    /// - `stream`：为流终态
+    /// - `database`：为已开始数据库调用的终态。
+    ///
     /// 返回：只记录一次完成；取消与 unwind 不执行日志格式化。
     fn terminate(&mut self, stream: StreamOutcome, database: DbOutcome) {
         if self.done {
@@ -820,7 +921,9 @@ impl MapperStreamGuard {
 }
 impl Drop for MapperStreamGuard {
     /// 业务作用：区分未 poll 丢弃、进行中取消和展开，保证连接占用观测最终收口。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只更新原子事实，仍存活的静态单元不会悬空。
     fn drop(&mut self) {
         if self.done {
@@ -984,7 +1087,9 @@ static DESCRIPTORS: [&MetricDescriptor; 12] = [
 pub struct MapperMetricsSource;
 impl MapperMetricsSource {
     /// 业务作用：精确计算静态方法目录的最坏公开时间序列数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：包含无限桶、sum/count、封闭 outcome 和实际确定标签组合的上界。
     pub fn worst_case_series(&self) -> usize {
         MAPPER_METHOD_META
@@ -1008,13 +1113,17 @@ impl MapperMetricsSource {
 }
 impl LegacyMetricsSource for MapperMetricsSource {
     /// 业务作用：提供固定指标合同供启动冲突校验和出口共用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：方法、数据库和 Stream 的静态 descriptor。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         &DESCRIPTORS
     }
     /// 业务作用：在出口侧一次读取全部方法单元，不让标签构造进入 SQL 完成路径。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：支持 Prometheus 与 OTLP 的同源结构化快照。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         let mut out = Vec::new();
@@ -1128,7 +1237,10 @@ impl LegacyMetricsSource for MapperMetricsSource {
         Some(out)
     }
     /// 业务作用：为独立使用方渲染同一结构化快照，避免多个 exporter 口径不同。
-    /// 参数说明：`output` 接收 Prometheus 文本。
+    ///
+    /// 参数说明：
+    /// - `output`：接收 Prometheus 文本。
+    ///
     /// 返回：追加当前快照，不注册或改变指标。
     fn render_prometheus(&self, output: &mut String) {
         nametrics_core::atomic::render_snapshot(
@@ -1140,7 +1252,9 @@ impl LegacyMetricsSource for MapperMetricsSource {
 }
 
 /// 业务作用：为非 Application 宿主提供可显式注册的统一 Mapper 指标源。
+///
 /// 参数说明：无。
+///
 /// 返回：读取进程静态方法目录的共享 source；不创建 worker 或 exporter。
 pub fn metrics_source() -> Arc<MapperMetricsSource> {
     Arc::new(MapperMetricsSource)

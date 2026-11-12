@@ -55,7 +55,11 @@ pub struct DiscoveryError {
 
 impl DiscoveryError {
     /// 业务作用：构造可安全展示的后端裁决。
-    /// 参数说明：`code` 是稳定类别，`reason` 是不包含凭据的静态原因。
+    ///
+    /// 参数说明：
+    /// - `code`：是稳定类别
+    /// - `reason`：是不包含凭据的静态原因。
+    ///
     /// 返回：不保留任意 SDK 响应正文的错误。
     pub const fn new(code: ErrorCode, reason: &'static str) -> Self {
         Self {
@@ -66,7 +70,10 @@ impl DiscoveryError {
     }
 
     /// 业务作用：为配置拒绝补充可定位的字段路径，同时保留稳定原因与错误类别。
-    /// 参数说明：`prefix` 只能包含配置字段或已经校验的条目名称，不得传入配置值。
+    ///
+    /// 参数说明：
+    /// - `prefix`：只能包含配置字段或已经校验的条目名称，不得传入配置值。
+    ///
     /// 返回：路径按外层到内层拼接的错误，不保留后端响应正文。
     pub fn at_config_path(mut self, prefix: impl AsRef<str>) -> Self {
         self.config_path = Some(match self.config_path.take() {
@@ -77,7 +84,9 @@ impl DiscoveryError {
     }
 
     /// 业务作用：判断失败是否明确撤销既有发现证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：鉴权撤销、身份冲突、已确认非法候选和生命周期终止不允许使用历史路由；单纯同步不完整不构成立即撤权事实。
     pub fn revokes_evidence(&self) -> bool {
         matches!(
@@ -94,7 +103,10 @@ impl DiscoveryError {
 
 impl fmt::Display for DiscoveryError {
     /// 业务作用：输出稳定类别和已脱敏原因。
-    /// 参数说明：`formatter` 接收错误文本。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收错误文本。
+    ///
     /// 返回：仅格式化配置路径、稳定类别和公开原因。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(path) = &self.config_path {
@@ -169,7 +181,10 @@ pub enum RegistrationEvidence {
 /// 发布操作必须在实际传输提交处复验，鉴权等待不能提前消耗一次性许可。
 pub trait WriteAdmission: Send + Sync {
     /// 业务作用：在发布资格保护范围内同步提交一次后端写入。
-    /// 参数说明：`submit` 只能启动传输，不得等待或重入资格接口。
+    ///
+    /// 参数说明：
+    /// - `submit`：只能启动传输，不得等待或重入资格接口。
+    ///
     /// 返回：撤权时不执行回调；已经提交的操作由 owner 记录结果不明状态。
     fn submit(&self, submit: &mut dyn FnMut()) -> Result<()>;
 }
@@ -178,36 +193,50 @@ pub trait WriteAdmission: Send + Sync {
 #[async_trait::async_trait]
 pub trait ManagedProvider: Send + Sync + 'static {
     /// 业务作用：报告此适配器的能力边界。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：静态、解析和后端健康证据不互相冒充。
     fn capabilities(&self) -> Capabilities;
 
     /// 业务作用：在声明的服务作用域内确认出站能力，不要求目标已有实例。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：认证或作用域访问失败时拒绝连接可用状态。
     async fn prepare(&self) -> Result<()>;
 
     /// 业务作用：取得某个受信服务目标的完整实例事实。
-    /// 参数说明：`service` 为连接内服务名或显式绑定别名。
+    ///
+    /// 参数说明：
+    /// - `service`：为连接内服务名或显式绑定别名。
+    ///
     /// 返回：完整空集合表示无实例；截断、撤权和网络异常返回错误。
     async fn observe(&self, service: &str) -> Result<ProviderSnapshot>;
 
     /// 业务作用：声明后端能否提供不占用短请求额度的变更等待。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：最大等待时间；通知仅触发完整重读，不构成健康证据。
     fn change_wait_timeout(&self) -> Option<Duration> {
         None
     }
 
     /// 业务作用：为一次变更等待预留实际可能并发的后端长请求额度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：默认一个请求；同时观察多类资源的 provider 必须报告合计上限。
     fn change_wait_streams(&self) -> u32 {
         1
     }
 
     /// 业务作用：等待服务或端点变化，调用方取消时释放当前长连接。
-    /// 参数说明：`service` 与最近一次完整观察使用同一作用域。
+    ///
+    /// 参数说明：
+    /// - `_service`：与最近一次完整观察使用同一作用域。
+    ///
     /// 返回：变化时重新全量观察；同步丢失时明确失败。
     async fn wait_for_change(&self, _service: &str) -> Result<()> {
         Err(DiscoveryError::new(
@@ -217,7 +246,9 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：枚举当前连接允许的服务范围。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：没有枚举能力时明确拒绝，不申请更大作用域。
     async fn services(&self) -> Result<Vec<String>> {
         Err(DiscoveryError::new(
@@ -227,7 +258,10 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：在外部写入前校验 provider 特定注册字段与所有权键。
-    /// 参数说明：`plan` 是不可变注册计划。
+    ///
+    /// 参数说明：
+    /// - `_plan`：是不可变注册计划。
+    ///
     /// 返回：读侧 provider 或不支持的字段必须拒绝。
     fn validate_registration(&self, _plan: &RegistrationPlan) -> Result<()> {
         Err(DiscoveryError::new(
@@ -237,7 +271,10 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：计算可核对的远端注册键，用于同一 owner 内重复目标预检。
-    /// 参数说明：`plan` 是已校验注册计划。
+    ///
+    /// 参数说明：
+    /// - `plan`：是已校验注册计划。
+    ///
     /// 返回：包含真实后端作用域的键；不把配置连接别名当作远端身份。
     fn registration_key(&self, plan: &RegistrationPlan) -> String {
         format!(
@@ -247,14 +284,20 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：识别不同本地别名是否读取相同的后端服务集合，供宿主核对发布投影一致性。
-    /// 参数说明：`service` 是已绑定的服务别名。
+    ///
+    /// 参数说明：
+    /// - `service`：是已绑定的服务别名。
+    ///
     /// 返回：不含凭据的后端查询键；有实际作用域的 adapter 必须包含地址、命名空间和过滤条件。
     fn service_key(&self, service: &str) -> Result<String> {
         Ok(service.to_owned())
     }
 
     /// 业务作用：保留同地址不同后端实例的身份，避免发现层按 IP/端口错误合并。
-    /// 参数说明：`instance` 来自本 provider 的完整观察。
+    ///
+    /// 参数说明：
+    /// - `instance`：来自本 provider 的完整观察。
+    ///
     /// 返回：当前服务作用域内的稳定非空键；后端有实例 ID 时应覆盖此默认地址键。
     fn instance_key(&self, instance: &Instance) -> String {
         format!(
@@ -264,7 +307,11 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：执行一次注册，不在方法外另起自动重放。
-    /// 参数说明：`plan` 保留本次实例身份与端点，`admission` 必须用于实际传输提交。
+    ///
+    /// 参数说明：
+    /// - `_plan`：保留本次实例身份与端点
+    /// - `_admission`：必须用于实际传输提交。
+    ///
     /// 返回：远端接纳或明确错误，传输结果不明由 owner 保留待核对记录。
     async fn register(
         &self,
@@ -278,7 +325,12 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：续约既有记录或上报本地健康，不覆盖管理端禁用属性。
-    /// 参数说明：`plan` 是既有注册，`ready` 是当前本地资格，`admission` 防止鉴权等待后继续发布。
+    ///
+    /// 参数说明：
+    /// - `_plan`：是既有注册
+    /// - `_ready`：是当前本地资格
+    /// - `_admission`：防止鉴权等待后继续发布。
+    ///
     /// 返回：续约失败不能隐式变成重新注册。
     async fn renew(
         &self,
@@ -290,21 +342,30 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：提供本后端需要的最大发送间隔。
-    /// 参数说明：`plan` 指定检查模式与有效时限。
+    ///
+    /// 参数说明：
+    /// - `_plan`：指定检查模式与有效时限。
+    ///
     /// 返回：无需主动保活时为空；否则 owner 按间隔监督。
     fn renewal_interval(&self, _plan: &RegistrationPlan) -> Option<Duration> {
         None
     }
 
     /// 业务作用：声明同一冻结身份与相同健康 payload 的续约能否在响应丢失后重复提交。
-    /// 参数说明：`plan` 是已成功注册且尚未开始注销的固定计划。
+    ///
+    /// 参数说明：
+    /// - `_plan`：是已成功注册且尚未开始注销的固定计划。
+    ///
     /// 返回：默认不允许；返回 true 的 provider 必须保证重复续约不重建身份、不覆盖管理属性，且不把它视为先前请求已停止执行的证明。
     fn supports_idempotent_renewal(&self, _plan: &RegistrationPlan) -> bool {
         false
     }
 
     /// 业务作用：核对本实例的在册及健康事实。
-    /// 参数说明：`plan` 决定精确注册身份。
+    ///
+    /// 参数说明：
+    /// - `_plan`：决定精确注册身份。
+    ///
     /// 返回：查询失败与缺失、禁用、不健康明确区分。
     async fn inspect(&self, _plan: &RegistrationPlan) -> Result<RegistrationEvidence> {
         Err(DiscoveryError::new(
@@ -314,7 +375,10 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：删除当前计划的远端记录，不消费本地事实。
-    /// 参数说明：`plan` 用于确定注销目标。
+    ///
+    /// 参数说明：
+    /// - `_plan`：用于确定注销目标。
+    ///
     /// 返回：失败后 owner 仍能报告残留并安排同身份清理。
     async fn deregister(&self, _plan: &RegistrationPlan) -> Result<()> {
         Err(DiscoveryError::new(
@@ -324,7 +388,9 @@ pub trait ManagedProvider: Send + Sync + 'static {
     }
 
     /// 业务作用：停止该适配器的受管会话并禁止后续操作。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：内部资源已释放或由有界调用返回失败。
     async fn close(&self) -> Result<()>;
 }

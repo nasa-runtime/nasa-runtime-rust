@@ -34,6 +34,7 @@ const GRPC_DISCOVERY_DEREGISTER_RESERVE: Duration = Duration::from_secs(3);
 #[serde(default)]
 /// 业务作用：承载最终 Application 配置中的 `grpc` 根节点，避免解析其它配置段时放宽字段合同。
 struct GrpcConfigRoot {
+    /// 从总配置树提取的 gRPC 配置，内部字段保持严格校验。
     grpc: GrpcSettings,
 }
 
@@ -41,51 +42,97 @@ struct GrpcConfigRoot {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct GrpcSettings {
+    /// 要预绑定的 IP 与端口，缺省仅对 loopback 开放。
     bind: String,
+    /// 对外注册的 DNS 或 IP 身份，供客户端验证服务端证书。
     authority: Option<String>,
+    /// 是否明确允许在非 loopback 地址提供明文服务。
     allow_insecure_remote: bool,
+    /// 监听器同时保有的连接数上限。
     max_connections: usize,
+    /// 每连接可同时执行的 RPC 上限。
     concurrency_limit_per_connection: usize,
+    /// 单次连接握手允许占用的毫秒数。
     connection_handshake_timeout_ms: u64,
+    /// 建连后等候首个请求的毫秒上限。
     first_request_timeout_ms: u64,
+    /// 空闲连接保留的毫秒上限。
     idle_connection_timeout_ms: u64,
+    /// 单次 unary RPC 的服务端毫秒预算。
     unary_timeout_ms: u64,
+    /// 流式 RPC 连续无进展的毫秒上限。
     stream_idle_timeout_ms: u64,
+    /// 单个流式 RPC 的总持续毫秒上限。
     max_stream_duration_ms: u64,
+    /// 每条流累计可接收的消息条数。
     max_received_messages_per_stream: u64,
+    /// 每条流累计可发送的消息条数。
     max_sent_messages_per_stream: u64,
+    /// 每条流入站消息累计字节上限。
     max_received_stream_bytes: u64,
+    /// 每条流出站消息累计字节上限。
     max_sent_stream_bytes: u64,
+    /// HTTP/2 保活探测间隔，单位毫秒。
     keepalive_interval_ms: u64,
+    /// HTTP/2 保活响应等候上限，单位毫秒。
     keepalive_timeout_ms: u64,
+    /// HTTP/2 对端同时打开的流数量上限。
     max_concurrent_streams: u32,
+    /// 每条 HTTP/2 流的初始接收窗口字节数。
     initial_stream_window_size: u32,
+    /// HTTP/2 连接的初始接收窗口字节数。
     initial_connection_window_size: u32,
+    /// HTTP/2 帧负载字节上限。
     max_frame_size: u32,
+    /// HTTP/2 请求头列表容量上限。
     http2_max_header_list_size: u32,
+    /// HPACK 解码动态表容量上限。
     http2_header_table_size: u32,
+    /// 每条 HTTP/2 流的发送缓冲字节上限。
     http2_max_send_buffer_size: usize,
+    /// 接收端保留的待处理 reset stream 数上限。
     http2_max_pending_accept_reset_streams: usize,
+    /// 本地错误允许占用的 reset stream 数上限。
     http2_max_local_error_reset_streams: usize,
+    /// 每连接每秒允许处理的 HTTP/2 控制帧数。
     http2_control_frames_per_second: u32,
+    /// 每连接控制帧的短时突发容量。
     http2_control_frames_burst: u32,
+    /// 当前监听器全部连接每秒允许处理的 HTTP/2 控制帧总数。
     http2_process_control_frames_per_second: u32,
+    /// 进程级控制帧的短时突发容量。
     http2_process_control_frames_burst: u32,
+    /// TCP 空闲后开始保活探测的毫秒数。
     tcp_keepalive_ms: u64,
+    /// TCP 保活探测重试间隔，单位毫秒。
     tcp_keepalive_interval_ms: u64,
+    /// TCP 保活未获应答时的重试次数。
     tcp_keepalive_retries: u32,
+    /// 是否关闭 TCP 小包合并以降低 RPC 延迟。
     tcp_nodelay: bool,
+    /// 可选连接寿命上限，单位毫秒；未配置时不按年龄淘汰。
     max_connection_age_ms: Option<u64>,
+    /// 逐连接淘汰时 PING 与既有流共用的毫秒排空预算。
     connection_eviction_grace_ms: Option<u64>,
+    /// 监听器停机排空的毫秒子预算，仍受应用全局期限限制。
     drain_timeout_ms: u64,
+    /// 进程级在途 RPC 数量上限。
     max_inflight_rpcs: usize,
+    /// 进程级在途消息字节容量上限。
     max_inflight_message_bytes: usize,
+    /// 受管连接、流及消息容量的内存规划预算，不等于进程 RSS 硬限制。
     managed_memory_budget_bytes: usize,
+    /// 单条消息解码字节上限。
     max_decoding_bytes: usize,
+    /// 单条消息编码字节上限。
     max_encoding_bytes: usize,
+    /// 服务端 TLS 模式、秘密引用与证书时间策略。
     tls: GrpcTlsSettings,
+    /// 标准 reflection 服务的显式开放策略。
     reflection: GrpcReflectionSettings,
+    /// 是否允许未登记业务服务而只开放健康服务。
     health_only: bool,
+    /// 对 descriptor 中已存在方法收紧身份或容量边界的配置。
     methods: BTreeMap<String, GrpcMethodSettings>,
 }
 
@@ -93,9 +140,13 @@ struct GrpcSettings {
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct GrpcMethodSettings {
+    /// 是否要求通过 mTLS 提取的对端身份。
     require_peer_identity: bool,
+    /// 当前方法的并发上限，未指定时沿用受管默认值。
     max_inflight_rpcs: Option<usize>,
+    /// 当前方法的每秒速率限制，与 burst 配套声明。
     requests_per_second: Option<u32>,
+    /// 当前方法速率限制的短时突发容量。
     burst: Option<u32>,
 }
 
@@ -103,6 +154,7 @@ struct GrpcMethodSettings {
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct GrpcReflectionSettings {
+    /// 是否开放标准服务描述查询，缺省关闭。
     enabled: bool,
 }
 
@@ -110,9 +162,12 @@ struct GrpcReflectionSettings {
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum GrpcTlsMode {
+    /// 使用明文，非 loopback 还需显式允许远程明文。
     #[default]
     Disabled,
+    /// 提供服务端证书，不要求客户端证书。
     Server,
+    /// 双向 TLS，必须提供获准的客户端信任根。
     Mutual,
 }
 
@@ -136,12 +191,19 @@ impl GrpcTlsMode {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct GrpcTlsSettings {
+    /// 当前监听器采用的传输身份模式。
     mode: GrpcTlsMode,
+    /// 服务端证书链的 secret locator，不接收 PEM 明文。
     certificate: Option<String>,
+    /// 与证书匹配的私钥 secret locator。
     private_key: Option<String>,
+    /// 双向 TLS 客户端信任根的 secret locator。
     client_ca: Option<String>,
+    /// 到期前标记 Degraded 的预警窗口，单位毫秒。
     certificate_warning_window_ms: u64,
+    /// 准备身份时要求的最短剩余有效期，单位毫秒。
     certificate_minimum_remaining_ms: u64,
+    /// 证书时间校验允许的时钟偏差，单位毫秒。
     clock_skew_ms: u64,
 }
 
@@ -167,22 +229,35 @@ impl Default for GrpcTlsSettings {
 /// Start 阶段已校验的 TLS locator 与时间边界；真实材料延迟到 Ready 从同代 secret 快照取得。
 #[derive(Clone)]
 pub(crate) struct GrpcTlsPlan {
+    /// 已验证的服务端或双向 TLS 模式。
     mode: GrpcTlsMode,
+    /// 从同代秘密快照读取证书链的规范化标识。
     certificate_id: Arc<str>,
+    /// 从同代秘密快照读取私钥的规范化标识。
     private_key_id: Arc<str>,
+    /// 双向 TLS 必须具备的客户端信任根标识。
     client_ca_id: Option<Arc<str>>,
+    /// 运行时证书到期预警窗口。
     warning_window: Duration,
+    /// 准备候选身份时要求的最短剩余有效期。
     minimum_remaining: Duration,
+    /// 身份准备时允许的证书时间偏差。
     clock_skew: Duration,
 }
 
 /// Start 之前已通过地址、容量、TLS 与服务发现门禁的 listener 计划。
 struct ValidatedGrpcSettings {
+    /// 通过远程明文与地址门禁的预绑定地址。
     bind: SocketAddr,
+    /// 已统一校验容量与时间边界的底层监听器配置。
     config: nagrpc::GrpcServerConfig,
+    /// 是否在服务目录中装配 reflection。
     reflection: bool,
+    /// 是否允许空业务服务目录。
     health_only: bool,
+    /// 明文为 None，TLS 为等待 Ready 阶段读取秘密的身份计划。
     tls: Option<GrpcTlsPlan>,
+    /// 对外服务发现使用的 DNS 或 IP 身份。
     authority: Option<String>,
 }
 
@@ -505,7 +580,9 @@ fn valid_secret_locator_id(value: &str) -> bool {
 /// Ready 阶段已复验的 TLS 时间事实；不包含任何 PEM 或 secret locator。
 #[derive(Clone)]
 struct PreparedTlsCertificate {
+    /// 服务端证书链最早到期的 Unix 秒时间戳，不含证书内容。
     expiry_timestamp: u64,
+    /// 剩余有效期进入此窗口后标记 Degraded。
     warning_window: Duration,
 }
 
@@ -525,7 +602,12 @@ fn prepare_tls_identity(
 }
 
 /// 业务作用：用同代服务端身份和仍在重叠窗口内的客户端 CA 构造握手资源。
-/// 参数说明：`plan` 固定 TLS 边界，`secrets` 为同代材料，`previous_ca` 为获准暂存的旧信任根。
+///
+/// 参数说明：
+/// - `plan`：`plan` 固定 TLS 边界。
+/// - `secrets`：`secrets` 为同代材料。
+/// - `previous_ca`：`previous_ca` 为获准暂存的旧信任根。
+///
 /// 返回：身份、时间政策和 CA 均合法时返回完整身份与到期事实；任一材料非法时拒绝候选。
 fn prepare_tls_identity_with_ca(
     plan: &GrpcTlsPlan,
@@ -586,19 +668,31 @@ fn prepare_tls_identity_with_ca(
 /// 业务作用：保存服务端 TLS 候选及旧 CA 的到期边界，请求路径只选择已完成校验的握手器。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 pub(crate) struct RotatingGrpcTlsSnapshot {
+    /// 后续材料轮换必须沿用的监听器 TLS 政策。
     #[cfg(feature = "nacos-config")]
     plan: GrpcTlsPlan,
+    /// 与候选身份同代的秘密快照，用于下一轮比较信任根。
     secrets: Arc<nasecret::SecretSnapshot>,
+    /// 仅使用当前客户端信任根的握手器。
     current: nagrpc::GrpcTlsAcceptor,
+    /// 当前服务端身份的证书时间事实。
     certificate: PreparedTlsCertificate,
+    /// 旧客户端 CA 字节及各自单调到期点，最多保留八个重叠项。
     previous_ca: Vec<(Vec<u8>, std::time::Instant)>,
+    /// 按到期点排序的预构造握手器，握手开始时选择仍有效的信任集合。
     overlap_acceptors: Vec<(std::time::Instant, nagrpc::GrpcTlsAcceptor)>,
 }
 
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl RotatingGrpcTlsSnapshot {
     /// 业务作用：在配置发布前同时准备新服务端证书、私钥和所有有效客户端 CA 组合。
-    /// 参数说明：`plan` 是固定监听器政策，`secrets` 为候选秘密材料，`previous` 是已提交资源，`overlap` 限制旧 CA 接受时长。
+    ///
+    /// 参数说明：
+    /// - `plan`：`plan` 是固定监听器政策。
+    /// - `secrets`：`secrets` 为候选秘密材料。
+    /// - `previous`：`previous` 是已提交资源。
+    /// - `overlap`：`overlap` 限制旧 CA 接受时长。
+    ///
     /// 返回：全部握手器可构造时返回候选；缺失、过期、不匹配材料或超过八个重叠窗口时拒绝发布。
     pub(crate) fn prepare(
         plan: &GrpcTlsPlan,
@@ -663,7 +757,11 @@ impl RotatingGrpcTlsSnapshot {
     }
 
     /// 业务作用：用冻结的监听器政策验证下一代材料，保持地址与 TLS 模式不随秘密材料漂移。
-    /// 参数说明：`secrets` 是完整候选，`overlap` 是旧信任根的有界保留窗口。
+    ///
+    /// 参数说明：
+    /// - `secrets`：`secrets` 是完整候选。
+    /// - `overlap`：`overlap` 是旧信任根的有界保留窗口。
+    ///
     /// 返回：可发布的完整资源；校验失败保持当前资源不变。
     #[cfg(feature = "nacos-config")]
     pub(crate) fn rotated(
@@ -675,7 +773,9 @@ impl RotatingGrpcTlsSnapshot {
     }
 
     /// 业务作用：在新连接开始握手时固定一份尚未越过旧 CA 到期边界的信任集合。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前窗口的不可变握手器；旧 CA 到期后自动只采用剩余信任根。
     pub(crate) fn acceptor(&self) -> nagrpc::GrpcTlsAcceptor {
         let now = std::time::Instant::now();
@@ -687,7 +787,9 @@ impl RotatingGrpcTlsSnapshot {
     }
 
     /// 业务作用：让监控与实际握手身份使用相同证书到期事实。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前服务端证书链最早到期的 Unix 秒。
     pub(crate) fn expiry_timestamp(&self) -> u64 {
         self.certificate.expiry_timestamp
@@ -714,13 +816,17 @@ fn read_tls_secret(secrets: &nasecret::SecretSnapshot, id: &str) -> ApplicationR
     Ok(material.expose().to_vec())
 }
 
-/// 运行期证书到期监督；仅持有 Unix 时间与 readiness owner。
+/// 运行期证书到期监督；通过只读身份源跟随轮换，并独占 TLS readiness 贡献。
 #[derive(Clone)]
 struct TlsCertificateRuntime {
+    /// 无可轮换身份源时使用的启动证书到期 Unix 秒。
     expiry_timestamp: u64,
+    /// 与实际监听握手同源的可轮换证书观察入口。
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     source: Option<Arc<crate::saga::security::ManagedGrpcTlsSource>>,
+    /// 剩余有效期不足时标记降级的预警窗口。
     warning_window: Duration,
+    /// 当前 TLS 依赖状态的发布句柄，不包含关闭 listener 的权限。
     contributor: ReadinessContributor,
 }
 
@@ -729,8 +835,8 @@ impl TlsCertificateRuntime {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：证书未到期时发布 Ready/Degraded 并成功；到期或系统时钟无法表示时
-    /// 发布 NotReady 并返回运行错误，使 Runner 触发受管停机。
+    /// 返回：证书未到期时发布 Ready 或 Degraded 并成功；到期时先发布 NotReady 再返回运行错误。
+    /// 系统时钟早于 Unix 起点时直接返回错误，不发布新的贡献状态；调用方必须将错误交由 Runner 处理停机。
     fn observe(&self) -> ApplicationResult<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -749,7 +855,7 @@ impl TlsCertificateRuntime {
             .as_ref()
             .map(|source| source.expiry_timestamp())
             .unwrap_or(expiry_timestamp);
-        // 证书到期后关闭业务准入，不能仅依赖新连接握手拒绝而让既有连接继续执行业务。
+        // 先报告证书失效再返回关键错误，由 Runner 关闭准入；仅靠新握手拒绝无法停止既有连接。
         if now >= expiry_timestamp {
             self.contributor.observe(
                 DependencyState::NotReady,
@@ -945,6 +1051,7 @@ fn grpc_worst_case_metric_series(
 
 /// 把受管 listener 的接流事实接入唯一指标目录的兼容源。
 struct GrpcMetricsSource {
+    /// 已发布监听器与 TLS 事实的共享只读来源，不取得网络资源的关闭权。
     state: Arc<GrpcRuntimeState>,
 }
 
@@ -958,12 +1065,13 @@ impl nametrics_core::LegacyMetricsSource for GrpcMetricsSource {
         &GRPC_DESCRIPTORS
     }
 
-    /// 业务作用：读取同一时刻的 listener 快照并映射为结构化样本。
+    /// 业务作用：读取 listener、TLS 和方法计数的观察视图，并映射为统一结构化样本。
     ///
     /// 参数说明: 无。
     ///
     /// 返回：listener 已在 Ready 发布时返回连接、TLS 与 descriptor 固定方法样本；尚未绑定时返回空样本集，
     /// 表示本源支持结构化出口但当前无数据，不回落到自渲染。
+    /// 连接字段使用一次 listener 快照；TLS 与 RPC 另行读取，不保证全部指标来自同一原子时刻。
     fn snapshot(&self) -> Option<Vec<nametrics_core::MetricSample>> {
         let Some(observer) = self.state.observer_if_published() else {
             return Some(Vec::new());
@@ -1116,18 +1224,25 @@ fn grpc_labeled_counter(
 
 /// UserHook registry、Ready 发布与运行期观察共用的单实例状态。
 pub(crate) struct GrpcRuntimeState {
+    /// 串行化业务服务登记与一次性封口，封口后不允许补登记。
     registry: Mutex<GrpcRegistryState>,
+    /// 预绑定成功后只发布一次的观察视图，保留到应用状态释放。
     published: OnceLock<GrpcPublishedRuntime>,
 }
 
 /// Ready 一次性发布的 listener 观察面与可选 TLS 到期事实。
 struct GrpcPublishedRuntime {
+    /// 已预绑定监听器的地址、接流状态及计数，不包含激活或停机权限。
     observer: nagrpc::GrpcServerObserver,
+    /// 首次发布的证书到期 Unix 秒，明文模式为空。
     tls_certificate_expiry_timestamp: Option<u64>,
+    /// 存在时优先从当前握手身份读取证书到期值。
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     tls_source: Option<Arc<crate::saga::security::ManagedGrpcTlsSource>>,
+    /// 服务发现 metadata 使用的实际 TLS 模式。
     #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     tls_mode: GrpcTlsMode,
+    /// 服务发现公开的可选证书 DNS 或 IP 身份。
     #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     authority: Option<String>,
 }
@@ -1143,8 +1258,11 @@ pub(crate) struct GrpcEndpointRegistration {
     pub(crate) authority: Option<String>,
 }
 
+/// 服务登记权的单向状态，封口后的 registry 由组件独占。
 enum GrpcRegistryState {
+    /// 仍允许接收符合 descriptor 合同的业务服务。
     Open(nagrpc::ManagedServiceRegistry),
+    /// 已将 registry 移出，不再接受登记或重复消费。
     Taken,
 }
 
@@ -1234,6 +1352,7 @@ impl GrpcRuntimeState {
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 在移交 registry 前永久封口，后续 Prepare 失败也不能让晚到服务进入已冻结目录。
         let previous = std::mem::replace(&mut *state, GrpcRegistryState::Taken);
         match previous {
             GrpcRegistryState::Open(registry) => Ok(registry),
@@ -1249,10 +1368,12 @@ impl GrpcRuntimeState {
     /// 参数说明：
     /// - `observer`: 不含 shutdown 权限的地址、状态与连接计数视图。
     /// - `tls_mode`: Ready 阶段实际冻结并用于 listener 的 TLS 模式。
-    /// - `tls_certificate_expiry_timestamp`: TLS 链最早到期时间；明文模式为 `None`。
+    /// - `tls_certificate_expiry_timestamp`：首次准备的 TLS 链最早到期 Unix 秒时间戳；明文模式为 None。
     /// - `authority`: 服务发现发布的可选 TLS DNS/IP 身份。
+    /// - `tls_source`：启用 Saga gRPC 时持有的可轮换身份源，供观察当前证书到期时间；不向观察者开放私钥或轮换权。
     ///
-    /// 返回：首次发布成功；重复发布返回 Ready 错误。
+    /// 返回：首次写入只读发布槽时成功，重复发布返回 Ready 错误；发布不等于 listener 已激活或应用已进入 Running。
+    /// 不再复核地址或 TLS 配置，不持有 listener 的关闭权，失败后的网络清理由调用方负责。
     fn publish(
         &self,
         observer: nagrpc::GrpcServerObserver,
@@ -1295,11 +1416,12 @@ impl GrpcRuntimeState {
             .map(|published| published.observer.clone())
     }
 
-    /// 业务作用：只在 TLS listener 已 Ready 时返回实际身份链的最早到期时间。
+    /// 业务作用：读取已发布 TLS 身份的最早到期事实，供证书监控使用。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：TLS 已启用且发布时返回 Unix 秒；明文或未 Ready 时返回 `None`。
+    /// 返回：身份源可轮换时读取其当前 Unix 秒时间戳，否则使用首次发布值；明文或尚未发布为 None。
+    /// 不检查 listener 的当前接流状态，停机后仍可读取已发布的证书事实。
     fn tls_certificate_expiry_timestamp(&self) -> Option<u64> {
         self.published.get().and_then(|published| {
             #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1347,15 +1469,25 @@ impl GrpcRuntimeState {
 
 /// 稳定受管 gRPC listener 组件。
 pub(crate) struct GrpcComponent {
+    /// Start 已验证、Ready 尚待预绑定的地址。
     bind: Option<SocketAddr>,
+    /// Start 冻结、随后按方法目录应用收紧策略的监听配置。
     config: Option<nagrpc::GrpcServerConfig>,
+    /// Prepare 独占取得、Ready 消费的服务目录。
     registry: Option<nagrpc::ManagedServiceRegistry>,
+    /// 是否装配标准 reflection 服务。
     reflection: bool,
+    /// 是否允许缺少业务服务而只提供健康入口。
     health_only: bool,
+    /// Start 校验的 TLS 秘密引用与时间计划，Ready 才读取材料。
     tls: Option<GrpcTlsPlan>,
+    /// 对外注册时使用的可选 DNS 或 IP 身份。
     authority: Option<String>,
+    /// listener 的 readiness 独占贡献句柄。
     contributor: Option<ReadinessContributor>,
+    /// TLS 开启时登记的证书 readiness 贡献句柄。
     tls_contributor: Option<ReadinessContributor>,
+    /// 等待 Runner 统一放行的激活与持续监督任务，仅移交一次。
     critical_task: Option<ApplicationFuture<'static>>,
 }
 
@@ -1448,7 +1580,12 @@ impl ApplicationComponent for GrpcComponent {
             context
                 .application()
                 .metrics_hub()
-                .register_legacy_source_reserved(Arc::new(GrpcMetricsSource { state }), series)
+                .register_legacy_source_reserved(
+                    Arc::new(GrpcMetricsSource {
+                        state,
+                    }),
+                    series,
+                )
                 .map_err(|error| match error {
                     nametrics_core::MetricSourceRegistrationError::Conflict(conflict) => {
                         let message = format!(
@@ -1622,9 +1759,11 @@ impl ApplicationComponent for GrpcComponent {
 /// - `application`: 区分正常停机与运行期失权的共享容器。
 /// - `observer`: 不含取消权的 listener 状态视图。
 /// - `contributor`: `grpc:listener` readiness 的独占更新句柄。
+/// - `tls`：可选的证书时限监督状态，包含当前身份源与独立 TLS readiness 贡献；明文监听器不提供该项。
 ///
-/// 返回：正常停机时成功退出；持续 accept 失败只维持 NotReady 并等待恢复，运行期进入 Draining、
-/// Closed 或 Failed 时返回 gRPC 运行错误。
+/// 返回：观察到应用停止或失败状态时将 listener 标记为 NotReady 并成功退出；接流停滞时摘流、做本机 TCP 探测并继续观察。
+/// 运行期 listener 不再 Running，或 TLS 监督失败时返回错误，由 Runner 承担停止准入与清理责任。
+/// 周期等待本身不监听取消信号，正常停机状态在下一轮观察。
 async fn run_health_monitor(
     application: Application,
     observer: nagrpc::GrpcServerObserver,
@@ -1711,8 +1850,11 @@ fn local_probe_address(mut address: SocketAddr) -> SocketAddr {
 
 /// 停机 action 独占 gRPC listener 的取消和 join 权限。
 struct GrpcShutdown {
+    /// 唯一拥有停止接流与等待网络任务退出权限的句柄。
     handle: nagrpc::GrpcServerHandle,
+    /// 停机时先标记不可用的 listener 贡献。
     contributor: ReadinessContributor,
+    /// 存在时随停机一同标记不可用的证书贡献。
     tls_contributor: Option<ReadinessContributor>,
 }
 

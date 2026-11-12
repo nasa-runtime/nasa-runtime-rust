@@ -38,7 +38,16 @@ impl DltReplayPlan {
     pub const MAX_ENCODED_BYTES: usize = 16 * 1024 * 1024;
 
     /// 业务作用：保留只读 DLT 范围，用过滤、回投及隔离语义重绑持久合同。
-    /// 参数说明：source_ranges 为固定范围；target 为批准目标；routes 选择原 DLT 坐标；origin_groups 为空表示全部组；payload_policy 为 schema 策略；invalid_policy 为失败隔离；max_replays 为1至16的回投上限。
+    ///
+    /// 参数说明：
+    /// - `source_ranges`：source_ranges 为固定范围。
+    /// - `target`：target 为批准目标。
+    /// - `routes`：routes 选择原 DLT 坐标。
+    /// - `origin_groups`：origin_groups 为空表示全部组。
+    /// - `payload_policy`：payload_policy 为 schema 策略。
+    /// - `invalid_policy`：invalid_policy 为失败隔离。
+    /// - `max_replays`：max_replays 为1至16的回投上限。
+    ///
     /// 返回：排序固定的计划，不沿用原 handler 指纹、不取得 lease 或发送消息。
     pub fn freeze(
         mut source_ranges: ReplayPlan,
@@ -89,7 +98,10 @@ impl DltReplayPlan {
     }
 
     /// 业务作用：在执行公开可变字段前验证完整合同，阻止恢复时静默换过滤或输出规则。
-    /// 参数说明：无。返回：范围、目标、路由、隔离和处理指纹全部一致才通过。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：范围、目标、路由、隔离和处理指纹全部一致才通过。
     pub fn validate(&self) -> Result<()> {
         self.replay
             .validate()
@@ -129,7 +141,10 @@ impl DltReplayPlan {
     }
 
     /// 业务作用：保存范围与全部处理规则，恢复不重算移动边界或重新解释消息头路由。
-    /// 参数说明：无。返回：NSKDPL01 规范正文与 SHA-256，最大16MiB；摘要不认证来源。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：NSKDPL01 规范正文与 SHA-256，最大16MiB；摘要不认证来源。
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
         let ranges = self
@@ -156,7 +171,11 @@ impl DltReplayPlan {
     }
 
     /// 业务作用：验证持久计划的完整性与唯一表达，在非法或截断输入上拒绝执行。
-    /// 参数说明：bytes 为完整计划。返回：规范合法的只读合同，否则统一为 CorruptPlan。
+    ///
+    /// 参数说明：
+    /// - `bytes`：bytes 为完整计划。
+    ///
+    /// 返回：规范合法的只读合同，否则统一为 CorruptPlan。
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if !(44..=Self::MAX_ENCODED_BYTES).contains(&bytes.len()) {
             return Err(Error::CorruptPlan);
@@ -177,7 +196,11 @@ impl DltReplayPlan {
     }
 
     /// 业务作用：禁止向正在读取的 DLT topic 直接写回，避免固定范围任务自产死信输入。
-    /// 参数说明：tp 为批准输出坐标。返回：不同于当前同集群输入 topic 才通过。
+    ///
+    /// 参数说明：
+    /// - `tp`：tp 为批准输出坐标。
+    ///
+    /// 返回：不同于当前同集群输入 topic 才通过。
     fn output(&self, tp: &Tp) -> Result<()> {
         if self.replay.cluster_id == self.target.cluster_id
             && self.replay.topic_generations.contains_key(&tp.topic)
@@ -190,7 +213,15 @@ impl DltReplayPlan {
 }
 
 /// 业务作用：以唯一大端正文绑定全部输出规则，复用转发的目标和 schema 格式。
-/// 参数说明：target/routes/groups/payload_policy/invalid_policy/max_replays 为固定处理语义。
+///
+/// 参数说明：
+/// - `target`：固定目标源、物理资源及发布 lane 的完整声明。
+/// - `routes`：按来源分区严格排序的批准目标映射。
+/// - `groups`：允许回投的原始消费组过滤列表，最多 256 项且必须严格排序。
+/// - `payload_policy`：回投正文的原样保留或 schema 映射规则。
+/// - `invalid_policy`：证据无效时停止任务或转入指定隔离分区的策略。
+/// - `max_replays`：允许同一来源事件回投的次数上限，写入固定处理合同。
+///
 /// 返回：NSKDSP01 规范字节；无界、重复或非规范字段拒绝。
 fn spec(
     target: &TransferTarget,
@@ -236,7 +267,11 @@ fn spec(
 }
 
 /// 业务作用：在集合分配前检查长度，拒绝计划中的尾部和类型歧义。
-/// 参数说明：payload 为已通过摘要的正文。返回：完整字段组成的冻结计划，来源及处理身份仍须复验。
+///
+/// 参数说明：
+/// - `payload`：payload 为已通过摘要的正文。
+///
+/// 返回：完整字段组成的冻结计划，来源及处理身份仍须复验。
 fn parse(payload: &[u8]) -> Result<DltReplayPlan> {
     let mut input = Input {
         bytes: payload,
@@ -288,7 +323,12 @@ fn parse(payload: &[u8]) -> Result<DltReplayPlan> {
 }
 
 /// 业务作用：用长度前缀表达已验证 UTF-8 文本，避免拼接歧义。
-/// 参数说明：bytes 为输出缓冲，value 为文本。返回：追加大端 u16 长度及原文。
+///
+/// 参数说明：
+/// - `bytes`：bytes 为输出缓冲。
+/// - `value`：value 为文本。
+///
+/// 返回：追加大端 u16 长度及原文。
 fn text(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
     bytes.extend_from_slice(value.as_bytes());
@@ -300,7 +340,12 @@ struct Input<'a> {
     position: usize,
 }
 impl<'a> Input<'a> {
-    /// 业务作用：拒绝溢出、截断和越界字段。参数说明：length 为所需字节数。返回：完整借用切片并移动游标。
+    /// 业务作用：拒绝溢出、截断和越界字段。
+    ///
+    /// 参数说明：
+    /// - `length`：length 为所需字节数。
+    ///
+    /// 返回：完整借用切片并移动游标。
     fn take(&mut self, length: usize) -> Result<&'a [u8]> {
         let end = self
             .position
@@ -313,19 +358,32 @@ impl<'a> Input<'a> {
         self.position = end;
         Ok(bytes)
     }
-    /// 业务作用：读取共同大端长度字段。参数说明：无。返回：完整 u16 值。
+    /// 业务作用：读取共同大端长度字段。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：完整 u16 值。
     fn u16(&mut self) -> Result<u16> {
         Ok(u16::from_be_bytes(
             self.take(2)?.try_into().map_err(|_| Error::CorruptPlan)?,
         ))
     }
-    /// 业务作用：读取共同大端数量或坐标字段。参数说明：无。返回：完整 u32 位模式，业务范围由外层验证。
+    /// 业务作用：读取共同大端数量或坐标字段。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：完整 u32 位模式，业务范围由外层验证。
     fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_be_bytes(
             self.take(4)?.try_into().map_err(|_| Error::CorruptPlan)?,
         ))
     }
-    /// 业务作用：在分配身份文本之前限制长度并采用严格 UTF-8。参数说明：max 为字节上限。返回：非空完整文本。
+    /// 业务作用：在分配身份文本之前限制长度并采用严格 UTF-8。
+    ///
+    /// 参数说明：
+    /// - `max`：max 为字节上限。
+    ///
+    /// 返回：非空完整文本。
     fn text(&mut self, max: usize) -> Result<String> {
         let length = self.u16()? as usize;
         if length == 0 || length > max {
@@ -335,7 +393,12 @@ impl<'a> Input<'a> {
             .map(str::to_owned)
             .map_err(|_| Error::CorruptPlan)
     }
-    /// 业务作用：拒绝其它协议被解释为 DLT 合同。参数说明：expected 为固定协议标识。返回：完全相同才继续。
+    /// 业务作用：拒绝其它协议被解释为 DLT 合同。
+    ///
+    /// 参数说明：
+    /// - `expected`：expected 为固定协议标识。
+    ///
+    /// 返回：完全相同才继续。
     fn magic(&mut self, expected: &[u8]) -> Result<()> {
         if self.take(expected.len())? == expected {
             Ok(())

@@ -39,21 +39,28 @@ pub struct ReadSource {
 
 impl FileEvidence {
     /// 业务作用：显式取得声明路径以建立对应观察。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：实际读取时使用的逻辑路径。
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// 业务作用：提供本次实际读取的内容身份给内部去重逻辑。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：摘要材料，调用方不得用于公开指标或口令指纹日志。
     pub fn content_digest(&self) -> &[u8; 32] {
         &self.digest
     }
 
     /// 业务作用：识别符号链接和支持平台上的硬链接重复来源。
-    /// 参数说明：`other` 为另一份已读取文件的身份。
+    ///
+    /// 参数说明：
+    /// - `other`：为另一份已读取文件的身份。
+    ///
     /// 返回：两次读取指向同一文件时为真。
     pub fn same_file(&self, other: &Self) -> bool {
         #[cfg(unix)]
@@ -68,7 +75,9 @@ impl FileEvidence {
     }
 
     /// 业务作用：区分相同值来自不同文件身份的观察变化。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：供内部对账使用的摘要，不适合公开日志或指标。
     pub fn observation_fingerprint(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
@@ -87,7 +96,10 @@ impl FileEvidence {
     }
 
     /// 业务作用：复验已读文档内容，拒绝已知改变的候选。
-    /// 参数说明：`policy` 是原来源读取规则。
+    ///
+    /// 参数说明：
+    /// - `policy`：是原来源读取规则。
+    ///
     /// 返回：身份和内容均未改变时成功。
     pub fn revalidate(&self, policy: &LoadPolicy) -> Result<()> {
         let next = read_source(&self.path, false, policy)?
@@ -101,7 +113,10 @@ impl FileEvidence {
 
 impl fmt::Debug for FileEvidence {
     /// 业务作用：默认诊断不显示文件路径和原文摘要。
-    /// 参数说明：`f` 是格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：是格式化目标。
+    ///
     /// 返回：仅文件规模。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileEvidence")
@@ -111,7 +126,12 @@ impl fmt::Debug for FileEvidence {
 }
 
 /// 业务作用：以同一文件句柄读取有限的普通文件并取得来源证据。
-/// 参数说明：`path` 为逻辑路径；`optional` 只允许不存在；`policy` 控制根目录和读取预算。
+///
+/// 参数说明：
+/// - `path`：为逻辑路径
+/// - `optional`：只允许不存在
+/// - `policy`：控制根目录和读取预算。
+///
 /// 返回：文档及证据，可选不存在返回 None；异常来源不被吞掉。
 pub fn read_source(path: &Path, optional: bool, policy: &LoadPolicy) -> Result<Option<ReadSource>> {
     policy.check_cancelled()?;
@@ -190,7 +210,12 @@ pub fn read_source(path: &Path, optional: bool, policy: &LoadPolicy) -> Result<O
 }
 
 /// 业务作用：展开单目录模式并复用自然排序，零匹配严格遵循 optional。
-/// 参数说明：`pattern` 为合法模式；`optional` 允许目录或匹配集合缺失；`policy` 为读取限制。
+///
+/// 参数说明：
+/// - `pattern`：为合法模式
+/// - `optional`：允许目录或匹配集合缺失
+/// - `policy`：为读取限制。
+///
 /// 返回：稳定有序的逻辑路径，目录异常和预算超限均失败。
 pub fn expand_pattern(
     pattern: &FilePattern,
@@ -229,7 +254,11 @@ pub fn expand_pattern(
 }
 
 /// 业务作用：检查受信目录与链接状态，不把损坏链接伪装成可选缺失。
-/// 参数说明：`path` 是逻辑路径；`policy` 包含允许根。
+///
+/// 参数说明：
+/// - `path`：是逻辑路径
+/// - `policy`：包含允许根。
+///
 /// 返回：当前真实路径；此检查不声称抵御恶意本机并发替换者。
 fn checked_path(path: &Path, policy: &LoadPolicy) -> Result<PathBuf> {
     let mut prefix = PathBuf::new();
@@ -259,7 +288,10 @@ fn checked_path(path: &Path, policy: &LoadPolicy) -> Result<PathBuf> {
 }
 
 /// 业务作用：从已打开文件的 metadata 取得可复验身份。
-/// 参数说明：`metadata` 为句柄或复验路径的元数据。
+///
+/// 参数说明：
+/// - `metadata`：为句柄或复验路径的元数据。
+///
 /// 返回：文件尺寸、修改时间和平台身份。
 fn identity(metadata: &Metadata) -> Identity {
     #[cfg(unix)]
@@ -275,7 +307,10 @@ fn identity(metadata: &Metadata) -> Identity {
 }
 
 /// 业务作用：保留不存在与其它 I/O 失败的区别，同时隐藏路径。
-/// 参数说明：`error` 为操作系统错误。
+///
+/// 参数说明：
+/// - `error`：为操作系统错误。
+///
 /// 返回：安全稳定类别。
 fn io_error(error: std::io::Error) -> ConfigError {
     ConfigError::new(if error.kind() == std::io::ErrorKind::NotFound {

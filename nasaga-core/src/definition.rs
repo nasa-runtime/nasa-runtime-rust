@@ -264,9 +264,10 @@ impl StepDefinition {
 
     /// 业务作用：将正文媒体类型和 schema 固定为步骤语义的一部分。
     ///
-    /// 参数说明：contract 是所有部署副本共同支持的正文解释合同。
+    /// 参数说明：
+    /// - `contract`：所有部署副本需共同支持的正文解释合同。
     ///
-    /// 返回：合同合法时返回新步骤；改变合同会改变整个 definition 摘要。
+    /// 返回：contract.validate 通过时替换步骤正文合同并返回新步骤，否则报错；本方法不重算整个 definition 摘要，定义摘要计算会包含该合同。
     pub fn with_payload_contract(
         mut self,
         contract: crate::SagaPayloadContract,

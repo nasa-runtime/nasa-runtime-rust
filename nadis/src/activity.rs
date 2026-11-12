@@ -26,23 +26,37 @@ pub struct RedisTaskObservation {
 
 #[derive(Default)]
 pub(crate) struct Activity {
+    /// 同锁维护本地数量、最后进展时刻及不可逆关闭标记，使发布与任务退出互斥。
     state: Mutex<(RedisTaskObservation, Option<Instant>, bool)>,
 }
 pub(crate) enum TaskKind {
+    /// 从 Stream 接收新消息的普通消费责任。
     Consumer,
+    /// 从 PEL 领取待恢复消息的回收责任。
     Reclaimer,
+    /// 从本地队列组批发送的自动微批责任。
     Flusher,
 }
-pub(crate) struct TaskGuard(Arc<Activity>, TaskKind);
+pub(crate) struct TaskGuard(
+    /// 任务退出时归还数量并撤销接流权威的本代状态。
+    Arc<Activity>,
+    /// 决定退出时归还哪一类任务数量。
+    TaskKind,
+);
 
 pub(crate) struct CompletionOwner<T> {
+    /// 与业务接流裁决共享的本代任务状态。
     activity: Arc<Activity>,
+    /// 保留最终状态的通知端，其退出必须晚于本代准入撤销。
     sender: tokio::sync::watch::Sender<T>,
 }
 
 impl<T> CompletionOwner<T> {
     /// 业务作用：由唯一收尾 owner 发布领域退出证据。
-    /// 参数说明：`value` 为已经裁决的本地状态或报告。
+    ///
+    /// 参数说明：
+    /// - `value`：已经裁决的本地状态或报告，不能把任务仍未退出描述为已完成。
+    ///
     /// 返回：替换保留的最新证据，不开放已关闭准入。
     pub(crate) fn send_replace(&self, value: T) {
         self.sender.send_replace(value);
@@ -50,7 +64,9 @@ impl<T> CompletionOwner<T> {
 }
 impl<T> Drop for CompletionOwner<T> {
     /// 业务作用：收尾 owner 失去责任前先撤销接流权威，包含执行器销毁和未首次轮询的路径。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：先与最终发布串行收口，再释放退出证据通道，不遗留可接流的旧快照。
     fn drop(&mut self) {
         self.activity.close();
@@ -59,7 +75,10 @@ impl<T> Drop for CompletionOwner<T> {
 
 impl Activity {
     /// 业务作用：让独立收尾 owner 的退出与最终接流裁决使用同一保护。
-    /// 参数说明：`sender` 为本代唯一完成证据发布端。
+    ///
+    /// 参数说明：
+    /// - `sender`：本代完成证据发布端，调用方应确保唯一收尾责任，不另留独立发布者。
+    ///
     /// 返回：持有证据通道的责任守卫，释放时先撤销准入再关闭通道。
     pub(crate) fn completion<T>(
         self: &Arc<Self>,
@@ -72,14 +91,22 @@ impl Activity {
     }
 
     /// 业务作用：永久撤销本代接流权威，并等待正在提交的本地发布完成。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：后续最终裁决均拒绝执行，不代表后台任务已经退出。
     pub(crate) fn close(&self) {
         self.state.lock().unwrap().2 = true;
     }
     /// 业务作用：在本地任务责任完整的保护范围内执行接流裁决，与任务退出串行化。
-    /// 参数说明：三个数量为准备时固定的任务数；`publish` 不得阻塞或重入本 owner 的任务观测。
-    /// 返回：数量均匹配时返回裁决结果，否则不执行；不推断远端可用性。
+    ///
+    /// 参数说明：
+    /// - `consumers`：准备阶段固定的普通消费任务数。
+    /// - `reclaimers`：准备阶段固定的 PEL 回收任务数。
+    /// - `flushers`：准备阶段固定的自动微批任务数。
+    /// - `publish`：持锁执行的最终接流裁决，不得阻塞或重入本 owner 的状态操作。
+    ///
+    /// 返回：本代未关闭且全部任务数匹配时返回裁决结果，否则不执行；不推断远端可用性。
     pub(crate) fn with_tasks<T>(
         &self,
         consumers: usize,
@@ -98,8 +125,11 @@ impl Activity {
         Some(publish())
     }
     /// 业务作用：在任务移交执行器之前登记责任，使未被首次轮询的取消也能归还数量。
-    /// 参数说明：`kind` 为固定任务类别。
-    /// 返回：随任务 future 持有的退出守卫。
+    ///
+    /// 参数说明：
+    /// - `kind`：登记任务的固定类别，用于独立统计消费、回收或微批责任。
+    ///
+    /// 返回：随任务 future 持有的退出守卫；登记增加对应数量，不重新开放已关闭的本代准入。
     pub(crate) fn task(self: &Arc<Self>, kind: TaskKind) -> TaskGuard {
         let mut state = self.state.lock().unwrap();
         match kind {
@@ -110,7 +140,11 @@ impl Activity {
         TaskGuard(self.clone(), kind)
     }
     /// 业务作用：登记已被本地接受的处理责任，准备阶段不虚构业务进展。
-    /// 参数说明：`count` 为工作次数；`queued_bytes` 仅为微批入队的参数字节。
+    ///
+    /// 参数说明：
+    /// - `count`：本次新增的未完成工作次数，必须与后续结束记账配对。
+    /// - `queued_bytes`：微批队列新增的命令参数字节，普通消费传零，不包含传输编码开销。
+    ///
     /// 返回：增加未完成数量和排队字节。
     pub(crate) fn accept(&self, count: usize, queued_bytes: usize) {
         let mut state = self.state.lock().unwrap();
@@ -118,13 +152,20 @@ impl Activity {
         state.0.queued_parameter_bytes += queued_bytes;
     }
     /// 业务作用：命令移入在途批次时解除其排队字节占用，未完成责任继续保留。
-    /// 参数说明：`bytes` 为已取出命令的参数字节。
+    ///
+    /// 参数说明：
+    /// - `bytes`：本次从队列取出的命令参数字节，必须已登记且不超过当前排队量。
+    ///
     /// 返回：减少排队字节，不表示写入已完成。
     pub(crate) fn dequeue(&self, bytes: usize) {
         self.state.lock().unwrap().0.queued_parameter_bytes -= bytes;
     }
     /// 业务作用：记录本轮处理结束或有效空轮询，保留结果与业务成功的区别。
-    /// 参数说明：`count` 为本地已结束工作次数；`transport_failed` 表示微批传输证据不完整。
+    ///
+    /// 参数说明：
+    /// - `count`：已结束的本地工作次数，不得超过已登记未完成量；有效空轮询传零。
+    /// - `transport_failed`：本次微批是否缺少完整传输结果，为真时累计一次批次传输失败。
+    ///
     /// 返回：更新计数和进展时间；取消而未调用本方法的责任继续显示未完成。
     pub(crate) fn finish(&self, count: usize, transport_failed: bool) {
         let mut state = self.state.lock().unwrap();
@@ -137,13 +178,17 @@ impl Activity {
         state.1 = Some(Instant::now());
     }
     /// 业务作用：任务退出后释放本地队列字节，仍保留没有结果证据的命令数量。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：队列内存不再占用；不把未知工作标记为完成。
     pub(crate) fn queue_dropped(&self) {
         self.state.lock().unwrap().0.queued_parameter_bytes = 0;
     }
     /// 业务作用：读取有限维度的本地证据，不查询或改变 Redis 数据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同锁采样的数量与进展时间。
     pub(crate) fn snapshot(&self) -> RedisTaskObservation {
         let state = self.state.lock().unwrap();
@@ -154,7 +199,9 @@ impl Activity {
 }
 impl Drop for TaskGuard {
     /// 业务作用：任务 future 释放时归还对应存活数量，包含异常和取消路径。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：撤销本代接流权威并减少任务数，未完成工作仍需独立裁决。
     fn drop(&mut self) {
         let mut state = self.0.state.lock().unwrap();

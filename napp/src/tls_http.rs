@@ -28,7 +28,10 @@ pub(crate) struct PreparedHttp {
 
 impl std::fmt::Debug for PreparedHttp {
     /// 业务作用：配置诊断只展示代次，不输出目标地址和安全材料。
-    /// 参数说明：`formatter` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `formatter`：`formatter` 为格式化目标。
+    ///
     /// 返回：代次和固定隐藏标记。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -39,7 +42,11 @@ impl std::fmt::Debug for PreparedHttp {
 }
 
 /// 业务作用：构造与秘密同代的完整 HTTP/TLS 集合，不安装独立轮换指针。
-/// 参数说明：`tree` 为配置声明；`secrets` 为本候选已经解析的材料。
+///
+/// 参数说明：
+/// - `tree`：`tree` 为配置声明。
+/// - `secrets`：`secrets` 为本候选已经解析的材料。
+///
 /// 返回：最多 64 个完整 client，任一配置或 PEM 失败拒绝整个候选。
 pub(crate) fn prepare(
     tree: &Value,
@@ -82,7 +89,9 @@ pub(crate) fn prepare(
         config.trust = plan
             .trust
             .map(|value| {
-                reference(&value).map(|certificates| nasecret::TrustBundleRef { certificates })
+                reference(&value).map(|certificates| nasecret::TrustBundleRef {
+                    certificates,
+                })
             })
             .transpose()?;
         let timeout = plan.request_timeout_ms.unwrap_or(10_000);
@@ -107,7 +116,10 @@ pub(crate) fn prepare(
 }
 
 /// 业务作用：从明确的 secret locator 取得稳定身份，不接受内联 PEM。
-/// 参数说明：`value` 为配置引用。
+///
+/// 参数说明：
+/// - `value`：`value` 为配置引用。
+///
 /// 返回：非空身份；其它形式拒绝。
 fn reference(value: &str) -> Result<Arc<str>, crate::secret::SecretResolveError> {
     value
@@ -118,7 +130,9 @@ fn reference(value: &str) -> Result<Arc<str>, crate::secret::SecretResolveError>
 }
 
 /// 业务作用：对候选拒绝仅给出固定 TLS 分类，隐藏证书和 endpoint。
+///
 /// 参数说明：无。
+///
 /// 返回：材料准备错误。
 fn material_error() -> crate::secret::SecretResolveError {
     crate::secret::SecretResolveError::MalformedSpec {
@@ -149,7 +163,13 @@ pub struct ManagedHttpResponse {
 
 impl ManagedHttpClient {
     /// 业务作用：在永久关闭门禁内完成一次 HTTP 请求与有界正文读取。
-    /// 参数说明：`method` 为显式 HTTP 方法；`path` 是相对目标路径；`body` 为有界正文；`budget` 为可选调用预算。
+    ///
+    /// 参数说明：
+    /// - `method`：`method` 为显式 HTTP 方法。
+    /// - `path`：`path` 是相对目标路径。
+    /// - `body`：`body` 为有界正文。
+    /// - `budget`：`budget` 为可选调用预算。
+    ///
     /// 返回：完整响应及实际代次；取消只停止本地等待，不证明远端未执行，写操作不自动重放。
     pub async fn request(
         &self,
@@ -233,7 +253,10 @@ impl ManagedHttpClient {
 }
 
 /// 业务作用：把首代命名 client 绑定到标准资源表和调用排干 owner。
-/// 参数说明：`context` 提供准备阶段的资源登记与清理链。
+///
+/// 参数说明：
+/// - `context`：`context` 提供准备阶段的资源登记与清理链。
+///
 /// 返回：每个名称只装配一次；后续材料通过 ConfigView 原子切换，旧句柄不得绕过关闭门禁。
 pub(crate) fn install(context: &mut PrepareContext<'_>) -> ApplicationResult<()> {
     let app = context.application().clone();
@@ -256,7 +279,10 @@ pub(crate) fn install(context: &mut PrepareContext<'_>) -> ApplicationResult<()>
 
 impl Application {
     /// 业务作用：取得已装配名称的受管 HTTP client，不暴露可绕过关闭门禁的原始 client。
-    /// 参数说明：`name` 为 http_clients 中启用的稳定名称。
+    ///
+    /// 参数说明：
+    /// - `name`：`name` 为 http_clients 中启用的稳定名称。
+    ///
     /// 返回：共享调用 owner 的句柄；未知或应用关闭时拒绝。
     pub async fn http_client(&self, name: &str) -> ApplicationResult<ManagedHttpClient> {
         Ok(self
@@ -267,7 +293,10 @@ impl Application {
 }
 
 /// 业务作用：以固定原因汇报受管 HTTP 边界，不包含 URL、正文或证书。
-/// 参数说明：`message` 为稳定错误摘要。
+///
+/// 参数说明：
+/// - `message`：`message` 为稳定错误摘要。
+///
 /// 返回：运行阶段的安全错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Application, ApplicationPhase::Running, message)

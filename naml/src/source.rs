@@ -7,6 +7,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 const PROFILE_EXTENSIONS: &[&str] = &["toml", "json", "yaml", "yml"];
+pub(crate) const CONFIG_FILE_ENV: &str = "APP_CONFIG_FILE";
+
+/// 业务作用：统一标准加载器的主配置路径选择，避免启动与重载采用不同的默认来源。
+///
+/// 参数说明：
+/// - `configured`：环境中指定的主配置路径，空路径与未设置均采用默认值。
+///
+/// 返回：非空的指定路径或默认主配置路径；不检查文件是否存在，指定来源不可读时由加载阶段拒绝。
+pub(crate) fn standard_base_file(configured: Option<PathBuf>) -> PathBuf {
+    configured
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("zcf/application.yml"))
+}
 
 /// 一次加载使用的本地文件集合，以及文件监听需要覆盖的候选路径。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,10 +80,13 @@ impl YmlLocalSources {
 
 /// 业务作用：按 loader 的主文件、profile 环境变量和文件名模式解析本轮本地来源。
 ///
-/// 参数说明：`base_file` 是必需主文件；`profile_env` 指定 profile 环境变量；
-/// `profile_pattern` 包含可选的 `{profile}` 占位符；`env_override` 用于隔离进程环境。
+/// 参数说明：
+/// - `base_file`：loader 指定的主文件路径，本函数仅记录。
+/// - `profile_env`：需要读取的 profile 环境变量名。
+/// - `profile_pattern`：替换全部 {profile} 后探测的文件模式。
+/// - `env_override`：Some 仅查询此环境映射，不回退进程环境；None 读取进程环境。
 ///
-/// 返回：实际加载文件和精确监听候选；已存在但格式不受支持的 profile 会失败闭合。
+/// 返回：返回主文件原路径、首个可用 profile 文件和有序监听候选；显式 profile 文件存在但扩展名不支持时失败。无有效 profile 时只返回主路径，不在此证明主文件存在、读取内容或限制符号链接。
 pub(crate) fn resolve_local_sources(
     base_file: &Path,
     profile_env: &str,
@@ -147,7 +163,9 @@ pub(crate) fn resolve_local_sources(
 
 /// 业务作用：从单一文件句柄有界读取本地配置，避免 metadata 预检后文件增长造成无界分配。
 ///
-/// 参数说明：`path` 是配置源；`max_bytes` 为可选硬上限，`None` 表示保持兼容的不设上限行为。
+/// 参数说明：
+/// - `path`：是配置源
+/// - `max_bytes`：为可选硬上限，`None` 表示保持兼容的不设上限行为。
 ///
 /// 返回：去除 UTF-8 BOM、将非法 UTF-8 字节替换为 U+FFFD 后的文本；文件缺失、读取失败或超过上限时返回错误。
 pub(crate) fn read_local_source(path: &Path, max_bytes: Option<usize>) -> Result<String> {
@@ -182,7 +200,8 @@ pub(crate) fn read_local_source(path: &Path, max_bytes: Option<usize>) -> Result
 
 /// 业务作用：把 profile 探测候选格式化进失败信息，帮助运维区分缺扩展名、编码和格式错误。
 ///
-/// 参数说明：`candidates` 是与实际探测顺序一致的路径列表。
+/// 参数说明：
+/// - `candidates`：是与实际探测顺序一致的路径列表。
 ///
 /// 返回：使用逗号分隔的可读路径文本。
 fn display_candidates(candidates: &[PathBuf]) -> String {

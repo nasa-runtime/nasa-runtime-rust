@@ -39,6 +39,8 @@ pub(in crate::partition) struct SourceAuthority {
     pub io: AtomicUsize,
     pub blocked: AtomicBool,
     pub parked: AtomicBool,
+    /// 每次本地隔离责任形成时递增；恢复复验期间新增的隔离不能被旧快照解除。
+    pub park_revision: std::sync::atomic::AtomicU64,
     pub uncertain: AtomicBool,
     pub sweep_requested: AtomicBool,
     pub oversized: AtomicBool,
@@ -50,14 +52,23 @@ pub(in crate::partition) struct SourceAuthority {
 
 impl SourceAuthority {
     /// 业务作用：判断来源生命周期是否仍允许读取监督存活，Park 不等于释放 Claim。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：Active 且未失权时为 true。
     pub(super) fn active(&self) -> bool {
         self.phase.load(Ordering::Acquire) == SourcePhase::Active as u8 && self.can_commit()
     }
     /// 业务作用：冻结当前持锁期凭据；相同物理分区重新持锁必须创建新 epoch。
-    /// 参数说明：`rt` 为物理组；`partition` 为分区；`identity` 为任期；`guard` 提供锁凭据；`stamp` 为 fencing 戳。
-    /// 返回：Active 来源权威，尚未开放恢复后的新消息读取。
+    ///
+    /// 参数说明：
+    /// - `rt`: 提供物理布局和本地执行域的消费组。
+    /// - `partition`: 当前取得锁的分区编号。
+    /// - `identity`: 本地不复用的 Claim 身份，确定来源 epoch。
+    /// - `guard`: 当前持有的锁守卫，提供 holder、完整锁键及失锁观察通道。
+    /// - `stamp`: 启用 fencing 时取得的分区任期戳；未启用时为 None。
+    ///
+    /// 返回：尚未登记到共享账本的 Active 来源，隔离修订从零开始；读取开放仍受持久恢复与本地保护态约束。
     pub(super) fn new(
         rt: &Arc<GroupRuntime>,
         partition: u32,
@@ -77,6 +88,7 @@ impl SourceAuthority {
             io: AtomicUsize::new(0),
             blocked: AtomicBool::new(false),
             parked: AtomicBool::new(false),
+            park_revision: std::sync::atomic::AtomicU64::new(0),
             uncertain: AtomicBool::new(false),
             sweep_requested: AtomicBool::new(false),
             oversized: AtomicBool::new(false),
@@ -88,7 +100,9 @@ impl SourceAuthority {
     }
 
     /// 业务作用：检查是否仍允许开始下一条业务，隔离失锁、停机与人工冻结。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：仅 Active 且持锁观察未失效、未 Park 时为 true。
     pub(in crate::partition) fn can_start(&self) -> bool {
         self.phase.load(Ordering::Acquire) == SourcePhase::Active as u8
@@ -97,7 +111,9 @@ impl SourceAuthority {
     }
 
     /// 业务作用：区分正常排干与失权，允许正常停止期间提交既有成功事实。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：Active/Quiescing 且看门狗未确认失锁时为 true。
     pub(in crate::partition) fn can_commit(&self) -> bool {
         self.phase.load(Ordering::Acquire) < SourcePhase::Releasing as u8
@@ -105,7 +121,9 @@ impl SourceAuthority {
     }
 
     /// 业务作用：先关闭下一条业务准入，再等待已开始任务和提交责任收口。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：Active 单向进入 Quiescing，不撤销已成功业务的提交权。
     pub(in crate::partition) fn quiesce(&self) {
         let _ = self.phase.compare_exchange(
@@ -117,7 +135,9 @@ impl SourceAuthority {
     }
 
     /// 业务作用：全部来源责任取得退出证明后封闭最后提交窗口，再开始释放租约。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：Quiescing 进入 Releasing，Lost 不会恢复为可释放的有效权威。
     pub(super) fn begin_release(&self) {
         let _ = self.phase.compare_exchange(
@@ -129,7 +149,9 @@ impl SourceAuthority {
     }
 
     /// 业务作用：失去租约时立即撤销所有新业务及 Redis 修改权限。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：来源进入不可恢复的 Lost；新持锁必须创建另一权威。
     pub(in crate::partition) fn lose(&self) {
         self.phase.store(SourcePhase::Lost as u8, Ordering::Release);
@@ -214,7 +236,9 @@ struct RetiredPayloadBudget<'a> {
 
 impl Drop for RetiredPayloadBudget<'_> {
     /// 业务作用：未执行对象析构完成后归还容量和来源责任，防止析构期间提前解锁。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：移交中的记录、正文与 I/O 引用归零；析构展开同样释放 guard。
     fn drop(&mut self) {
         let mut state = self.core.state.lock().expect("ledger");
@@ -390,8 +414,11 @@ pub(in crate::partition) struct RedisPartitionRuntime {
 
 impl RedisPartitionRuntime {
     /// 业务作用：接管异常退出来源的读取句柄，取消请求不能替代真实 join 证明。
-    /// 参数说明：`reader` 为已请求中止但尚未等待退出的唯一读取任务。
-    /// 返回：句柄纳入共享监督与停机报告，直到任务终结后被 await。
+    ///
+    /// 参数说明：
+    /// - `reader`: 已请求中止但尚未等待退出的唯一读取任务，调用后由共享监督持有回收责任。
+    ///
+    /// 返回：句柄进入待回收账本并唤醒监督，只有实际 await 终结后才解除未 join 责任。
     pub(super) fn abandoned_reader(&self, reader: tokio::task::JoinHandle<()>) {
         self.state
             .lock()
@@ -402,8 +429,11 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：缺少完整退出证明时登记停止续租的锁，直到服务端确认原 holder 不再持有。
-    /// 参数说明：`source` 为失权或显式强停的原始来源。
-    /// 返回：保留有界租约对账责任，不发送提前 unlock。
+    ///
+    /// 参数说明：
+    /// - `source`: 失权或显式强停的原始来源，以不可复用的 epoch 标识同一次持锁责任。
+    ///
+    /// 返回：共享监督持有该来源并接收唤醒，保留原 holder 的租约对账责任；不会提前 unlock。
     pub(super) fn abandoned_source(&self, source: &Arc<SourceAuthority>) {
         self.state
             .lock()
@@ -413,11 +443,24 @@ impl RedisPartitionRuntime {
         self.changed.notify_waiters();
     }
 
-    /// 业务作用：人工处置完成后重新接管本地未执行后缀，未知计划仍保持来源保护。
-    /// 参数说明：`source` 为收到处置完成通知的现役任期。
-    /// 返回：可判定后缀进入精确读取，原来源随后通过 PEL 空页重新开放新消息。
-    pub(super) fn resume_source(&self, source: &Arc<SourceAuthority>) {
+    /// 业务作用：持久状态已确认解除冻结后，在账本锁内复验同一隔离修订并恢复本地未执行后缀。
+    ///
+    /// 参数说明：
+    /// - `source`: 收到处置完成通知的现役来源任期。
+    /// - `park_revision`: 发起 Redis 复验之前捕获的本地隔离修订，禁止跨越新的隔离责任。
+    ///
+    /// 返回：来源仍可用、没有在途 I/O 且修订匹配时返回 true，后缀进入精确读取，仍需 PEL 空页才开放新消息。
+    /// 停机、失权、在途 I/O 或新隔离使证据过期时返回 false，不修改任何记录或保护态。
+    pub(super) fn resume_source(&self, source: &Arc<SourceAuthority>, park_revision: u64) -> bool {
         let mut state = self.state.lock().expect("ledger");
+        // Redis 查询后的本地发布也必须复验；期间形成的新隔离或尚未完成的处置不能被旧通知解除。
+        if !source.active()
+            || self.roots_closed.load(Ordering::Acquire)
+            || source.io.load(Ordering::Acquire) != 0
+            || source.park_revision.load(Ordering::Acquire) != park_revision
+        {
+            return false;
+        }
         // 管理处置可能是重投，也可能已 ACK；保留原 gate，先按精确 PEL 事实决定下一责任。
         for (coordinate, record) in state.records.iter_mut() {
             if record.source.epoch == source.epoch && matches!(record.owner, RecordOwner::Parked) {
@@ -460,9 +503,12 @@ impl RedisPartitionRuntime {
         source.uncertain.store(true, Ordering::Release);
         source.parked.store(false, Ordering::Release);
         self.changed.notify_waiters();
+        true
     }
     /// 业务作用：显式强停时撤销全部持锁任期的新副作用权限。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：所有来源单向进入 Lost，不主动解锁。
     pub(in crate::partition) fn revoke_all(&self) {
         self.roots_closed.store(true, Ordering::Release);
@@ -481,11 +527,15 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：空闲来源周期对账 PEL，仍由原来源唯一读者负责网络执行。
-    /// 参数说明：`group` 为要巡检的物理组。
-    /// 返回：没有本地记录和读责任的来源设置恢复标志，其它来源不受影响。
+    ///
+    /// 参数说明：
+    /// - `group`: 要巡检的物理消费组前缀，仅匹配仍存活的组运行时。
+    ///
+    /// 返回：匹配组中没有本地记录和读取预留的来源设置恢复请求，供原读者下一轮处理；不直接读取 Redis。
     pub(in crate::partition) fn request_recovery(&self, group: &str) {
         let state = self.state.lock().expect("ledger");
         for source in state.sources.values().filter_map(Weak::upgrade) {
+            // 已有记录或读取预留仍承担恢复顺序，不能在这些责任之外额外发起 PEL 扫描。
             if source
                 .group
                 .upgrade()
@@ -501,8 +551,12 @@ impl RedisPartitionRuntime {
         }
     }
     /// 业务作用：同步建立本源全部执行域和共享账本，供激活事务先取得清理责任。
-    /// 参数说明：`limits` 为源级预算；`plan` 为已校验的域表和配额。
-    /// 返回：未启动任何后台任务的运行时；注册失败不产生消费副作用。
+    ///
+    /// 参数说明：
+    /// - `limits`: 已校验的整个分区来源共享预算，约束读取与后继处理责任。
+    /// - `plan`: 已校验的执行域映射和各域配额，用于构造 Runner 与本地容量账本。
+    ///
+    /// 返回：成功时获得尚未启动后台任务的共享运行时；执行域构造失败时返回错误，不开始消费。
     pub(in crate::partition) fn new(
         limits: PartitionLimits,
         plan: crate::partition::execution::ExecutionPlan,
@@ -529,8 +583,11 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：在激活事务已持有全部清理责任后启动 Runner 和每域单飞监督。
-    /// 参数说明：`gate` 为全组共同的消费激活屏障。
-    /// 返回：全部执行器就绪时成功；任一步失败或取消均由既有激活事务排干。
+    ///
+    /// 参数说明：
+    /// - `gate`: 全组共同的激活屏障，其取消信号表示准备完成并允许监督开始推进；停止也可唤醒监督收口。
+    ///
+    /// 返回：全部 Runner 启动且监督句柄登记后成功，监督可能仍等待屏障；启动错误返回配置错误，已启动部分由激活事务排干。
     pub(in crate::partition) async fn start(
         self: &Arc<Self>,
         gate: tokio_util::sync::CancellationToken,
@@ -542,6 +599,7 @@ impl RedisPartitionRuntime {
                 .await
                 .map_err(|e| NasaRedisError::Config(e.to_string()))?;
         }
+        // 全部执行器可用后才建立监督，监督仍受共同屏障约束，避免部分组准备期间开始消费。
         for domain in 0..self.executions.domains.len() {
             let owner = self.clone();
             let gate = gate.clone();
@@ -576,10 +634,14 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：在首次读 PEL 前登记来源，所有后继责任始终引用同一不可变任期。
-    /// 参数说明：`source` 为新持锁期权威。
-    /// 返回：来源进入共享索引；同物理坐标的旧记录仍保留原 owner。
+    ///
+    /// 参数说明：
+    /// - `source`: 使用本运行时有效执行域和唯一 epoch 构造的新持锁期权威。
+    ///
+    /// 返回：来源以弱引用进入共享索引；根准入关闭或执行域降级时先转入排干态，同物理坐标的旧记录不被覆盖。
     pub(in crate::partition) fn register_source(&self, source: &Arc<SourceAuthority>) {
         let mut state = self.state.lock().expect("ledger");
+        // 与停止或域降级并发取得的 Claim 仍须登记以完成释放，但不得因此重新开放业务准入。
         if self.roots_closed.load(Ordering::Acquire)
             || self.executions.domains[source.domain]
                 .degraded
@@ -592,14 +654,20 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：按跨组 FIFO 原子预留批次、记录、正文及最坏后继容量。
-    /// 参数说明：`source` 为读取来源；`count` 为本次 Redis COUNT。
-    /// 返回：队首且容量充足时取得唯一读取票据；否则保持至多一个有界等待项。
+    ///
+    /// 参数说明：
+    /// - `source`: 已登记的现役持锁来源，同一 epoch 至多持有一份读取预留。
+    /// - `count`: 来自已校验读取配置的正数 Redis COUNT，用最大单条正文预算估算本批占用。
+    ///
+    /// 返回：来源满足准入、位于 FIFO 队首且全部预算充足时，登记预算与 I/O 后返回唯一票据。
+    /// 失权、保护态、已有读取、容量不足或算术不可表示时返回 None；符合等待条件时至多保留一个有界排队项。
     pub(in crate::partition) fn reserve(
         self: &Arc<Self>,
         source: &Arc<SourceAuthority>,
         count: usize,
     ) -> Option<ReadPermit> {
         let mut state = self.state.lock().expect("ledger");
+        // 账本与来源必须同时允许新增责任，已有数量欠额或协议保护不能被另一次读取扩大。
         if self.roots_closed.load(Ordering::Acquire)
             || self.degraded.load(Ordering::Acquire)
             || self.executions.domains[source.domain]
@@ -687,6 +755,7 @@ impl RedisPartitionRuntime {
         if state.waiters.front().map(|(id, _)| *id) != Some(source.epoch) {
             return None;
         }
+        // 队首资格不替代全源预算；保留位置等待释放，禁止先读出记录再补占容量。
         if state.reads.len() >= self.limits.max_active_batches
             || state
                 .records
@@ -698,6 +767,7 @@ impl RedisPartitionRuntime {
         {
             return None;
         }
+        // 所有占用与来源 I/O 在同一账本临界区发布，使排干和恢复检查看不到未登记的读取责任。
         state.waiters.pop_front();
         state.reads.insert(source.epoch, (count, bytes));
         state.reserved_records += count;
@@ -714,8 +784,12 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：判断来源本地责任是否已全部交回，作为 unlock 的必要门禁。
-    /// 参数说明：`source` 为待释放持锁期。
-    /// 返回：记录、任务、读取和在途 Redis I/O 全部为零时为 true。
+    ///
+    /// 参数说明：
+    /// - `source`: 已关闭新增工作准入、等待释放的原始持锁期，以 epoch 对应账本责任。
+    ///
+    /// 返回：同一账本临界区内，该 epoch 的记录、任务、读取预留和来源 I/O 全为空时为 true。
+    /// 此结果只证明本地责任收口，不代替读者 join 或服务端 holder 释放确认。
     pub(in crate::partition) fn drained(&self, source: &SourceAuthority) -> bool {
         let state = self.state.lock().expect("ledger");
         source.io.load(Ordering::Acquire) == 0
@@ -728,7 +802,9 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：停止读者与下一条业务，同时保留正在运行任务的成功后继发布窗口。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：全部来源进入 Quiescing；排队任务被取消，已运行 Future 继续受到监督。
     pub(in crate::partition) fn close_roots(&self) {
         let mut state = self.state.lock().expect("ledger");
@@ -746,7 +822,9 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：从固定计数和状态轴构造就绪与容量观测，不暴露高基数业务身份。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：记录、正文、批次与任务在同一账本锁下采样；来源、删除与 Runner 状态独立读取，
     /// 不构成全部字段在同一时刻的原子证明。
     pub(in crate::partition) fn snapshot(&self) -> PartitionSnapshot {
@@ -853,13 +931,20 @@ impl RedisPartitionRuntime {
             .count();
         for record in state.records.values() {
             match record.owner {
-                RecordOwner::Commit { unknown, .. } => {
+                RecordOwner::Commit {
+                    unknown,
+                    ..
+                } => {
                     result.pending_commits += 1;
                     result.unknown_commits += usize::from(unknown);
                 }
-                RecordOwner::Retry { .. } => result.retry_tickets += 1,
+                RecordOwner::Retry {
+                    ..
+                } => result.retry_tickets += 1,
                 RecordOwner::Parked => result.parked_records += 1,
-                RecordOwner::Unroutable { .. } => result.unroutable_records += 1,
+                RecordOwner::Unroutable {
+                    ..
+                } => result.unroutable_records += 1,
                 RecordOwner::Ready if record.gate.is_some() => result.deferred_records += 1,
                 _ => {}
             }
@@ -873,8 +958,15 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：冻结整批路由后一次性发布记录责任；任意不可判定路由使整批停在来源保护态。
-    /// 参数说明：`permit` 为读取预留；`batch` 为来源批次；`rows` 为明确区分墓碑的原始记录；`plans` 为不可变路由。
-    /// 返回：已登记坐标不会被新 epoch 覆盖；COUNT 越界永久关闭读取，超大正文冻结当前来源。
+    ///
+    /// 参数说明：
+    /// - `permit`: 此来源唯一读取预留，发布责任时一次性归还预留并转记实际占用。
+    /// - `batch`: 本次读取的本地批次身份，约束任务合并与后续重试。
+    /// - `rows`: 物理 Stream ID 与原始 Envelope；正文为 None 表示 PEL 墓碑。
+    /// - `plans`: 已冻结的事件路由与解码计划，解码失败不得推测业务顺序键。
+    ///
+    /// 返回：来源组已消失时仅归还预留；其余记录按可执行、提交、精确重读或隔离责任登记，已有坐标不被覆盖。
+    /// COUNT 越界关闭后续读取，超大正文冻结来源；正文预算不足保留重读责任，不把合法消息视为毒消息。
     pub(in crate::partition) fn dispatch(
         &self,
         mut permit: ReadPermit,
@@ -883,6 +975,7 @@ impl RedisPartitionRuntime {
         plans: &PlanMap,
     ) {
         let source = permit.source.clone();
+        // 组已退出时没有可用路由权威；票据析构归还预留，服务端读取结果仍由后继持锁者恢复。
         let Some(rt) = source.group.upgrade() else {
             return;
         };
@@ -904,6 +997,7 @@ impl RedisPartitionRuntime {
             let mut failure = None;
             if let Some(body) = body {
                 if body.len() > self.limits.max_record_bytes {
+                    // 超限正文不能交给应用解码；保持来源保护，避免继续吸收无法纳入预算的消息。
                     source.oversized.store(true, Ordering::Release);
                     failure = Some(DecodeFailure::Internal);
                 } else {
@@ -953,6 +1047,7 @@ impl RedisPartitionRuntime {
         state.domains[source.domain].batches -= 1;
         source.io.fetch_sub(1, Ordering::AcqRel);
         permit.released = true;
+        // 服务端响应超过已预约数量时保留真实欠额，禁止后续读取把账本超额隐藏为正常容量。
         if prepared.len() > reserved {
             state.record_debt = state.record_debt.saturating_add(prepared.len() - reserved);
             unroutable = true;
@@ -1001,10 +1096,12 @@ impl RedisPartitionRuntime {
             .checked_add(gate_counts.len() as u64)
             .is_none()
         {
+            // 不复用门禁身份；新旧业务责任无法区分时保持关闭，不能发布部分可执行批次。
             state.protocol_closed = true;
             unroutable = true;
         }
         if unroutable || payload_wait {
+            // 在发布记录前冻结来源，确保监督不会抢先执行路由未知或容量尚未获得的后缀。
             source.blocked.store(true, Ordering::Release);
         }
         // 未受理对象留在准备集合中，账本锁释放后再析构，避免应用 Drop 重入运行状态。
@@ -1023,7 +1120,10 @@ impl RedisPartitionRuntime {
                         } else {
                             d.route
                         };
-                        route.map(|route| GateKey { plan: p.id, route })
+                        route.map(|route| GateKey {
+                            plan: p.id,
+                            route,
+                        })
                     })
                 })
             };
@@ -1107,8 +1207,12 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：归约稳定 napart 终态并转移已预留的提交、重试与未执行责任。
-    /// 参数说明：`state` 为唯一账本写锁。
-    /// 返回：只有 Completed 且业务事实完整时生成 Commit；其它终态均保留 PEL。
+    ///
+    /// 参数说明：
+    /// - `state`: 调用方持有的唯一账本写锁，任务票据、记录持有者与门禁在此锁内一致转移。
+    ///
+    /// 返回：移除已稳定终结的任务票据；只有 Completed 且结果恰好覆盖每个坐标一次时采纳成功或失败事实。
+    /// 成功进入提交责任，其余进入精确重读；本函数不执行 ACK，记录修订耗尽时撤销该来源权威。
     fn settle_tasks(&self, state: &mut State) {
         let done: Vec<_> = state
             .tasks
@@ -1130,6 +1234,7 @@ impl RedisPartitionRuntime {
             .collect();
         for (id, status) in done {
             let task = state.tasks.remove(&id).expect("task ticket");
+            // 只有执行器稳定终态与完整、不重复的业务结果共同成立，才能把某个坐标认定为成功。
             let outcome = task
                 .outcome
                 .value
@@ -1162,6 +1267,7 @@ impl RedisPartitionRuntime {
                 let Some(record) = state.records.get_mut(coordinate) else {
                     continue;
                 };
+                // 迟到终态不拥有已经转交的记录，不能扣减其容量或改写新的责任。
                 if !matches!(record.owner, RecordOwner::Task(current) if current == id) {
                     continue;
                 }
@@ -1175,7 +1281,14 @@ impl RedisPartitionRuntime {
                     .as_ref()
                     .is_some_and(|o| o.failed.contains(coordinate));
                 let Some(revision) = record.revision.checked_add(1) else {
+                    // 修订不能回绕后复用旧重试身份；失权后禁止产生新的提交或业务副作用。
                     record.source.lose();
+                    // 任务已经稳定终结，不能继续由已移除票据持有；标为不可路由，交给失权收口且不认定为毒消息。
+                    record.owner = RecordOwner::Unroutable {
+                        malformed: false,
+                        next: Instant::now(),
+                    };
+                    record.retry_intent = None;
                     continue;
                 };
                 record.revision = revision;
@@ -1208,9 +1321,15 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：在提交屏障内先登记任务、门禁与 OutcomeCell，再交给来源所属执行域。
-    /// 参数说明：`state` 为共享账本；`payload_holds` 将拒绝任务的析构责任保持到账本锁外。
-    /// 返回：受理成功保存 Submission；拒绝保留相同队头并进入精确重试。
+    ///
+    /// 参数说明：
+    /// - `state`: 调用方持有的共享账本写锁，保证票据先于 Runner 受理发布。
+    /// - `payload_holds`: 调用方保留到账本锁外的载荷引用，避免同步拒绝导致应用析构重入账本。
+    ///
+    /// 返回：符合来源、批次与顺序门禁的记录转交任务；受理后保存 Submission，拒绝保留票据供终态归约转为精确重读。
+    /// 根准入关闭或全局降级时不提交；类型合同或 Runner 失效使对应执行域关闭新业务。
     fn submit_ready(self: &Arc<Self>, state: &mut State, payload_holds: &mut Vec<TaskPayloads>) {
+        // 停机只允许既有责任收口，不能从 Ready 再创建业务调用。
         if self.roots_closed.load(Ordering::Acquire) || self.degraded.load(Ordering::Acquire) {
             return;
         }
@@ -1280,6 +1399,7 @@ impl RedisPartitionRuntime {
                 gate_token = Some((key, gate.token));
             }
             let Some(id) = issue(state) else {
+                // 无法取得不复用的任务身份时保持记录原责任，不能把载荷交给无票据的执行器。
                 return;
             };
             let outcome = Arc::new(OutcomeCell {
@@ -1287,6 +1407,7 @@ impl RedisPartitionRuntime {
                 changed: Notify::new(),
             });
             let mut payloads = Vec::with_capacity(records.len());
+            // 先在同一锁内转交全部记录与门禁，再暴露闭包；立即完成的任务也能找到完整责任链。
             for coordinate in &records {
                 let record = state.records.get_mut(coordinate).expect("record");
                 record.owner = RecordOwner::Task(id);
@@ -1352,10 +1473,16 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：业务调用前复验票据、来源和 gate 的同一所有者，阻止迟到执行越过权威撤销。
-    /// 参数说明：`id` 为任务身份；`source` 为提交时冻结的持锁期。
-    /// 返回：票据仍拥有全部坐标且 gate token 未变化时允许开始下一条业务。
+    ///
+    /// 参数说明：
+    /// - `id`: 已登记且不可复用的本地任务身份。
+    /// - `source`: 提交任务时冻结的持锁期，不能用后来取得的 Claim 替代。
+    ///
+    /// 返回：来源仍允许业务、票据与全部坐标属于同一 epoch、顺序门禁仍由该任务持有时为 true。
+    /// 任一事实缺失或过期均为 false；该本地检查不代替 Redis holder 的原子副作用门禁。
     fn task_can_start(&self, id: u64, source: &SourceAuthority) -> bool {
         let state = self.state.lock().expect("ledger");
+        // 一次快照内验证完整持有链，避免仅凭仍存活的任务闭包越过来源撤销或门禁移交。
         source.can_start()
             && state.tasks.get(&id).is_some_and(|task| {
                 task.source.epoch == source.epoch
@@ -1375,8 +1502,16 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：在 napart 受监督任务内顺序执行已冻结的同 key 记录，并先发布门禁事实再发布业务结果。
-    /// 参数说明：`id` 为任务票据；`source` 为原始权威；`plan` 为计划；`items` 为单次解码结果；`cell` 为可重读结果。
-    /// 返回：成功前缀、失败头和未执行后缀完整写入结果；本函数不 ACK。
+    ///
+    /// 参数说明：
+    /// - `id`: 已登记的任务票据，用于逐次复验记录和顺序门禁持有关系。
+    /// - `source`: 任务创建时冻结的来源权威，失权或停机后不得开始下一次业务调用。
+    /// - `plan`: 不可变消费计划，决定兼容批量调用或按记录顺序调用。
+    /// - `items`: 同一任务持有的精确坐标与解码载荷，按已冻结顺序移交给业务。
+    /// - `cell`: 可由监督重复读取的结果单元，只在门禁事实更新后发布完整结果。
+    ///
+    /// 返回：成功、失败和未执行记录完整发布到结果单元；超时或异常按失败归约，组已退出时不调用业务且不发布结果。
+    /// 本函数不 ACK；提交还须等待 Runner 稳定 Completed 并校验结果覆盖关系。
     async fn execute(
         self: Arc<Self>,
         id: u64,
@@ -1391,6 +1526,7 @@ impl RedisPartitionRuntime {
             deferred: Vec::new(),
         };
         let Some(rt) = source.group.upgrade() else {
+            // 路由所属组已退出，保留无结果终态供监督重读，不能借旧计划继续调用业务。
             return;
         };
         let all: Vec<_> = items.iter().map(|(c, _)| c.clone()).collect();
@@ -1398,6 +1534,7 @@ impl RedisPartitionRuntime {
         let held = source.can_start()
             && rt.lock.holds_status(&source.lock_key, &source.holder).await == HoldStatus::Held;
         if !held || !self.task_can_start(id, &source) {
+            // 持锁与本地票据任一不成立都不执行；后继只能依据 PEL 恢复，不能推定已经成功。
             outcome.deferred = all;
         } else if plan.legacy {
             let args = items
@@ -1473,8 +1610,12 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：周期扫描权威注册表，确保通知遗漏和取消不会遗失完成或提交责任。
-    /// 参数说明：`domain` 为唯一归属的执行域。
-    /// 返回：停止且所有记录及任务清空后退出；同域 Redis I/O 单飞，跨域不等待彼此网络返回。
+    ///
+    /// 参数说明：
+    /// - `domain`: 本监督唯一负责网络推进的执行域编号；账本终态归约仍在共享锁内协作执行。
+    ///
+    /// 返回：收到停止请求且全源记录、任务、读取、失权锁与遗留读者责任全部清空后退出。
+    /// 正常运行持续回收稳定终态并单飞推进本域 I/O；锁状态未知时继续保留释放责任。
     async fn supervise(self: Arc<Self>, domain: usize) {
         loop {
             let readers = {
@@ -1519,6 +1660,7 @@ impl RedisPartitionRuntime {
             let action = {
                 let mut state = self.state.lock().expect("ledger");
                 self.settle_tasks(&mut state);
+                // 已失权的非任务责任只能交回；正常排干则保留成功 Commit 窗口，不能把未提交成功视为可丢弃。
                 let retained: Vec<_> = state
                     .records
                     .iter()
@@ -1551,6 +1693,7 @@ impl RedisPartitionRuntime {
             drop(payload_holds);
             if let Some(action) = action {
                 let lost = action.source.lost_cancel.clone();
+                // 强停和来源失权优先撤销本地 I/O 等待；已发送请求的远端结果仍由持有权与持久状态对账。
                 tokio::select! {
                     biased;
                     _ = self.force_io.cancelled() => {
@@ -1572,6 +1715,7 @@ impl RedisPartitionRuntime {
                     .cloned();
                 if let Some(source) = abandoned {
                     if let Some(rt) = source.group.upgrade() {
+                        // 只有明确 Lost 才可删除遗留锁责任，网络未知或仍持有均不能当作释放成功。
                         if rt.lock.holds_status(&source.lock_key, &source.holder).await
                             == HoldStatus::Lost
                         {
@@ -1595,7 +1739,9 @@ impl RedisPartitionRuntime {
     }
 
     /// 业务作用：在全部来源已经排干后关闭后继监督，并停止本实例拥有的 runner。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：监督与 runner 取得退出证明后返回；不通过替换 runner 恢复降级执行域。
     pub(in crate::partition) async fn stop(&self) {
         self.close_roots();
@@ -1633,7 +1779,9 @@ pub(in crate::partition) struct ReadPermit {
 
 impl Drop for ReadPermit {
     /// 业务作用：取消或空响应时归还尚未移交记录的全部预留，不影响已登记责任。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：释放本次来源读取占位和 I/O 引用，并唤醒公平队列。
     fn drop(&mut self) {
         if !self.released {
@@ -1652,8 +1800,11 @@ impl Drop for ReadPermit {
 }
 
 /// 业务作用：签发所有本地 task/gate 身份，耗尽时永久关闭根准入。
-/// 参数说明：`state` 为权威写锁。
-/// 返回：不复用身份；溢出时不产生部分身份。
+///
+/// 参数说明：
+/// - `state`: 持有写锁的共享账本，统一管理任务与门禁的单调身份序列。
+///
+/// 返回：能推进下一身份时返回本次唯一值；耗尽时返回 None 并设置协议保护，不回绕或重复签发。
 fn issue(state: &mut State) -> Option<u64> {
     let id = state.next_identity;
     match id.checked_add(1) {
@@ -1662,6 +1813,7 @@ fn issue(state: &mut State) -> Option<u64> {
             Some(id)
         }
         None => {
+            // 复用身份会使迟到结果取得新责任的权限，耗尽后必须保持读取保护。
             state.protocol_closed = true;
             None
         }
@@ -1669,8 +1821,15 @@ fn issue(state: &mut State) -> Option<u64> {
 }
 
 /// 业务作用：释放终态记录的全部本地引用并维护同 key 队头，Retained 不形成永久墓碑缓存。
-/// 参数说明：`core` 负责延迟归还；`state` 为账本；`coordinate` 为精确坐标；`committed` 表示服务端提交已确认。
-/// 返回：记录从账本移除；未执行载荷连同容量和来源责任由调用方在账本锁外释放。
+///
+/// 参数说明：
+/// - `core`: 负责载荷析构之后归还容量并通知监督的共享运行时。
+/// - `state`: 调用方持有写锁的账本，在移除记录的同时转移预算责任。
+/// - `coordinate`: 已确认终结本地责任的完整物理记录坐标。
+/// - `committed`: 服务端提交是否已明确确认，仅用于区分提交与保留计数，不触发远端删除。
+///
+/// 返回：移除记录与顺序依赖；尚有载荷时返回必须在账本锁外析构的守卫，其间仍保留容量与来源 I/O。
+/// 无载荷时立即归还预算，坐标不存在时不扣减；两种情况均返回 None。
 fn retire<'a>(
     core: &'a RedisPartitionRuntime,
     state: &mut State,
@@ -1706,8 +1865,13 @@ fn retire<'a>(
 }
 
 /// 业务作用：ACK 确认或责任交回后解除该记录的顺序依赖，删除队列背压不撤销确认事实。
-/// 参数说明：`state` 为账本；`coordinate` 为已取得明确终态的记录。
-/// 返回：记录退出 gate，仍可由 Commit 持有删除交接与容量责任。
+///
+/// 参数说明：
+/// - `state`: 持有写锁的共享账本，保证记录关联与门禁队列同步解除。
+/// - `coordinate`: 已取得提交确认或可交回本地责任的完整记录坐标。
+///
+/// 返回：清除该记录的 gate 关联并退出门禁队列，空且无执行任务的门禁被回收；重复调用不改变其它记录。
+/// 记录本身保留，可继续由 Commit 承担删除交接与容量责任。
 fn detach_gate(state: &mut State, coordinate: &Coordinate) {
     if let Some(key) = state
         .records
@@ -1716,6 +1880,7 @@ fn detach_gate(state: &mut State, coordinate: &Coordinate) {
     {
         if let Some(gate) = state.gates.get_mut(&key) {
             gate.queue.retain(|candidate| candidate != coordinate);
+            // 执行中的任务仍需凭原 token 发布终态，队列空不能单独证明门禁已可销毁。
             if gate.queue.is_empty() && gate.executing.is_none() {
                 state.gates.remove(&key);
             }
@@ -1724,8 +1889,12 @@ fn detach_gate(state: &mut State, coordinate: &Coordinate) {
 }
 
 /// 业务作用：按 Redis Stream ID 数值顺序比较，同毫秒的序号也保持稳定顺序。
-/// 参数说明：`left`、`right` 为服务端记录 ID。
-/// 返回：毫秒与序号二元组的顺序，非法 ID 落固定最小值并由协议层拒绝。
+///
+/// 参数说明：
+/// - `left`: 已经由线路解析层校验为两个 u64 分量的左侧记录 ID。
+/// - `right`: 按同一规则校验的右侧记录 ID。
+///
+/// 返回：先比较毫秒、再比较序号的数值顺序；防御性解析失败统一按零元组比较，本函数不承担协议准入。
 fn stream_id_cmp(left: &str, right: &str) -> std::cmp::Ordering {
     let parse = |value: &str| {
         value

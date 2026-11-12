@@ -10,7 +10,10 @@ pub type MigrationPlanFactory = fn() -> Vec<(String, Migrator)>;
 pub static MIGRATION_PLANS: [MigrationPlanFactory];
 
 /// 业务作用：合并静态计划与 Service 动态计划，在迁移 SQL 执行前拒绝重复来源。
-/// 参数说明：`runtime` 为 UserHook 登记的迁移集合。
+///
+/// 参数说明：
+/// - `runtime`：`runtime` 为 UserHook 登记的迁移集合。
+///
 /// 返回：至多 128 个唯一 datasource 计划；重复、空名称或容量超限时拒绝。
 pub(crate) fn collect(
     mut runtime: Vec<(String, Migrator)>,
@@ -35,7 +38,9 @@ pub(crate) fn collect(
 }
 
 /// 业务作用：为迁移计划门禁返回不含 SQL 的固定原因。
+///
 /// 参数说明：无。
+///
 /// 返回：Prepare 错误，工作负载不得开始。
 fn error() -> ApplicationError {
     ApplicationError::new(

@@ -52,7 +52,11 @@ pub enum TransactionError {
 
 impl std::fmt::Display for TransactionError {
     /// 业务作用：向业务提供固定且脱敏的事务失败文本。
-    /// 参数说明：formatter 为输出目标。返回：仅包含固定错误类别。
+    ///
+    /// 参数说明：
+    /// - `formatter`：formatter 为输出目标。
+    ///
+    /// 返回：仅包含固定错误类别。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "Kafka transaction: {self:?}")
     }
@@ -75,7 +79,10 @@ pub struct TransactionIdentity {
 
 impl TransactionIdentity {
     /// 业务作用：按共同编码派生 Java 与 Rust 可以互相接管的事务 ID。
-    /// 参数说明：无。返回：NSKTXI01 与三个大端 u16 长度前缀 UTF-8 字段的 SHA-256，以 nasa-tx- 开头；空值、NUL 或超长字段拒绝。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：NSKTXI01 与三个大端 u16 长度前缀 UTF-8 字段的 SHA-256，以 nasa-tx- 开头；空值、NUL 或超长字段拒绝。
     pub fn transactional_id(&self) -> TransactionResult<String> {
         let mut bytes = b"NSKTXI01".to_vec();
         for value in [&self.application, &self.slot, &self.owner] {
@@ -112,7 +119,10 @@ pub struct TransactionLimits {
 
 impl Default for TransactionLimits {
     /// 业务作用：提供双端一致且有界的单 owner 初始预算。
-    /// 参数说明：无。返回：100条输入、1000条输出、8MiB输入、16MiB输出、10秒回调、60秒事务与3次中止重试。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：100条输入、1000条输出、8MiB输入、16MiB输出、10秒回调、60秒事务与3次中止重试。
     fn default() -> Self {
         Self {
             max_batch_records: 100,
@@ -130,7 +140,10 @@ impl Default for TransactionLimits {
 
 impl TransactionLimits {
     /// 业务作用：对公开可变预算重新验证，避免溢出或未给提交留下时间。
-    /// 参数说明：无。返回：所有上限合法且回调与一次原生操作之和小于事务时限才通过。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：所有上限合法且回调与一次原生操作之和小于事务时限才通过。
     pub fn validate(&self) -> TransactionResult<()> {
         if !(1..=4096).contains(&self.max_batch_records)
             || !(1..=4096).contains(&self.max_output_records)
@@ -173,7 +186,10 @@ pub struct TransactionPlan {
 
 impl TransactionPlan {
     /// 业务作用：执行前冻结并验证输入组、物理集群和全部输出范围。
-    /// 参数说明：无。返回：完整合法合同才通过，组名原样保留；组或其它声明非法时返回 InvalidConfiguration，不取得组权威、不发送数据。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：完整合法合同才通过，组名原样保留；组或其它声明非法时返回 InvalidConfiguration，不取得组权威、不发送数据。
     pub fn validate(&self) -> TransactionResult<()> {
         text(&self.source_id, 256)?;
         text(&self.cluster_id, 256)?;
@@ -203,7 +219,12 @@ impl TransactionPlan {
 }
 
 /// 业务作用：确保共同身份字段不被底层 C 字符串截断或超出声明上限。
-/// 参数说明：value 为精确文本，max 为 UTF-8字节上限。返回：空、NUL 或超长字段拒绝，不做隐式裁剪。
+///
+/// 参数说明：
+/// - `value`：value 为精确文本。
+/// - `max`：max 为 UTF-8字节上限。
+///
+/// 返回：空、NUL 或超长字段拒绝，不做隐式裁剪。
 fn text(value: &str, max: usize) -> TransactionResult<()> {
     if value.is_empty() || value.len() > max || value.contains('\0') {
         return Err(TransactionError::InvalidConfiguration);
@@ -212,7 +233,11 @@ fn text(value: &str, max: usize) -> TransactionResult<()> {
 }
 
 /// 业务作用：验证明确业务 topic，防止非法目标穿透白名单。
-/// 参数说明：value 为输入或输出 topic。返回：1至249字节的合法 Kafka ASCII 名称。
+///
+/// 参数说明：
+/// - `value`：value 为输入或输出 topic。
+///
+/// 返回：1至249字节的合法 Kafka ASCII 名称。
 fn topic(value: &str) -> TransactionResult<()> {
     if value.is_empty()
         || value.len() > 249

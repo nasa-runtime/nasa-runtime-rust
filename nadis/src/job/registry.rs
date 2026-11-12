@@ -41,9 +41,13 @@ static EXECUTOR_RECORD_FANOUT_EVIDENCE: JobScript =
 /// 本进程执行器身份；节点身份与启动代次共同确定 registry 中的唯一执行器记录。
 #[derive(Debug, Clone)]
 pub struct ExecutorIdentity {
+    /// 通过名称校验的稳定应用名。
     application_name: String,
+    /// 应用名与稳定实例身份组合，重启后仍定位同一逻辑节点。
     node_identity: String,
+    /// 节点身份与启动标识组合，用于隔离不同进程代次的登记。
     executor_id: String,
+    /// 调用方提供的本次启动唯一标识。
     startup_id: String,
 }
 
@@ -96,19 +100,35 @@ impl ExecutorIdentity {
         Self::new(&config.application_name, fallback.trim(), startup_id)
     }
 
-    /// 业务作用：返回稳定应用名。参数说明: 无。返回：应用名。
+    /// 业务作用：提供执行器所属的稳定应用名，供能力登记和实现摘要关联。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用构造时已校验的应用名，不复制或修改身份。
     pub fn application_name(&self) -> &str {
         &self.application_name
     }
-    /// 业务作用：返回稳定节点身份。参数说明: 无。返回：`applicationName:instanceIdentity`。
+    /// 业务作用：提供跨重启稳定的逻辑节点身份，供通知寻址及失联证据关联。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用 `applicationName:instanceIdentity`，不包含本次启动标识。
     pub fn node_identity(&self) -> &str {
         &self.node_identity
     }
-    /// 业务作用：返回本进程执行器身份。参数说明: 无。返回：`nodeIdentity:startupId`。
+    /// 业务作用：提供隔离进程启动代次的执行器身份，供注册表成员键和操作权威匹配。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用 `nodeIdentity:startupId`，重启后不应复用相同启动标识。
     pub fn executor_id(&self) -> &str {
         &self.executor_id
     }
-    /// 业务作用：返回本次启动代次。参数说明: 无。返回：startupId。
+    /// 业务作用：提供本次进程启动标识，使能力快照和失联证据能够拒绝旧进程记录。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用构造时已校验的启动标识，不生成新身份。
     pub fn startup_id(&self) -> &str {
         &self.startup_id
     }
@@ -257,11 +277,17 @@ pub struct RegistryGc {
 
 /// 单个执行器的注册表客户端；持有连接、键模型、配置与身份，并跟踪本节点已登记的 Worker 能力集合。
 pub struct ExecutorRegistry {
+    /// 当前 source 的共享客户端，注册表操作使用普通命令连接。
     client: Arc<RedisClient>,
+    /// 已冻结的 source 与注册表键布局。
     keyspace: JobKeyspace,
+    /// 已校验的登记、存活、回收与快照容量约束。
     config: Arc<JobConfig>,
+    /// 所有登记和撤销操作所绑定的本次进程身份。
     identity: ExecutorIdentity,
+    /// 已确认登记且尚未撤销的能力，心跳只续期此集合。
     workers: Mutex<BTreeSet<String>>,
+    /// 已尝试登记的能力坐标，包含回包不确定项，停机据此尝试完整撤销。
     known_workers: Mutex<BTreeSet<String>>,
 }
 
@@ -291,7 +317,11 @@ impl ExecutorRegistry {
         }
     }
 
-    /// 业务作用：返回本节点执行器身份，供 Dispatcher 与 Fanout 快照复用。参数说明: 无。返回：执行器身份引用。
+    /// 业务作用：向派发器和快照流程提供与当前注册表操作一致的执行器身份。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用注册表构造时绑定的身份，不读取 Redis 或改变登记状态。
     pub fn identity(&self) -> &ExecutorIdentity {
         &self.identity
     }
@@ -508,10 +538,11 @@ impl ExecutorRegistry {
 
     /// 业务作用：撤销本执行器的单个 Worker 能力，使定义删除后新 Fanout 快照不再选择本节点。
     ///
-    /// 参数说明：`worker_name` 为本地引用已归零的 Worker 能力名。
+    /// 参数说明：
+    /// - `worker_name`：本地定义引用已归零、需要撤销的 Worker 能力名。
     ///
-    /// 返回：本地心跳集合先永久移除该能力，Redis 成员与元数据原子撤销后成功；脚本或传输失败返回错误，
-    /// 后续心跳仍不会重新发布旧能力，调用方可用相同 Worker 名安全重试。
+    /// 返回：先移除本地心跳集合项，Redis 成员与元数据撤销后成功；失败保留注销坐标，
+    /// 后续心跳不会选择该能力，调用方可用相同 Worker 名重试；并发重新登记由上层生命周期协调。
     pub async fn remove_capability(&self, worker_name: &str) -> Result<()> {
         // 先从心跳集合移除，确保 Redis 撤销失败时也不会在下一次续期把已删除能力重新写回。
         self.workers
@@ -570,7 +601,8 @@ impl ExecutorRegistry {
     ///
     /// 参数说明：
     /// - `node_identity`: 目标稳定节点身份。
-    /// - `startup_id`/`heartbeat_revision`: 快照观测到的启动代次与心跳修订号，用于拒绝过期证据。
+    /// - `startup_id`：快照观测到的启动标识，避免把旧进程失联归给新进程。
+    /// - `heartbeat_revision`：快照观测到的心跳修订号，拒绝心跳恢复后的旧证据。
     /// - `fanout_id`: 产生本次证据的 Fanout 标识；同一 fanoutId 只计一次。
     ///
     /// 返回：达门槛返回 `MarkedUnready` 与冷却截止；未达返回 `Recorded`；启动代次/心跳变化或节点不活跃返回对应结局。
@@ -674,6 +706,8 @@ impl ExecutorRegistry {
 ///
 /// 参数说明：
 /// - `raw`: 脚本返回 `{OK, selectedAt, (7 字段/成员)*}` 或 `CONTRACT_MISMATCH`。
+/// - `qualifier`：当前 source 身份，参与快照摘要以隔离同名跨源能力。
+/// - `namespace`：当前命名空间，参与摘要避免跨命名空间复用快照身份。
 /// - `worker_name`: 参与摘要派生的 Worker 名。
 ///
 /// 返回：兼容时返回排序成员与派生标识；`CONTRACT_MISMATCH` 返回对应结局；成员字段不齐或非数值 fail-closed。
@@ -855,7 +889,12 @@ fn parse_i64_value(value: &redis::Value, field: &str) -> Result<i64> {
         .map_err(|_| protocol(&format!("registry {field} 字段非法")))
 }
 
-/// 业务作用：构造 Job 协议错误。参数说明：`message` 摘要。返回：协议错误。
+/// 业务作用：将注册表响应的合同违例包装为可识别的 Job 协议错误。
+///
+/// 参数说明：
+/// - `message`：不包含凭据、载荷或任意响应正文的固定错误摘要。
+///
+/// 返回：复制摘要并生成协议错误，不修改注册表或重试 Redis 操作。
 fn protocol(message: &str) -> NasaRedisError {
     crate::job::JobError::Protocol(message.to_owned()).into()
 }

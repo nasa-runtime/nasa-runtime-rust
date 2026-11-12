@@ -48,13 +48,11 @@ pub enum SecurityMetricOutcome {
 impl SecurityMetricOutcome {
     /// 业务作用：根据最终 HTTP 状态收敛一次端点请求的结果。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `status`: 安全 composer 产生的最终公开状态，不包含响应正文。
     ///
-    /// # 返回
-    ///
-    /// 2xx/3xx 为成功、4xx 为拒绝、5xx 为服务故障；显式 deadline 应由调用方记录为
+    /// 返回：2xx/3xx 为成功、4xx 为拒绝、5xx 为服务故障；显式 deadline 应由调用方记录为
     /// [`Self::Timeout`]，避免把同为 503 的超时与后端故障混为一类。
     pub fn from_status(status: StatusCode) -> Self {
         if status.is_success() || status.is_redirection() {
@@ -68,9 +66,9 @@ impl SecurityMetricOutcome {
 
     /// 业务作用：返回原子数组使用的固定槽位。
     ///
-    /// # 返回
+    /// 返回：返回 `0..4` 的稳定索引，不接受外部字符串。
     ///
-    /// 返回 `0..4` 的稳定索引，不接受外部字符串。
+    /// 参数说明: 无。
     const fn index(self) -> usize {
         match self {
             Self::Success => 0,
@@ -82,9 +80,9 @@ impl SecurityMetricOutcome {
 
     /// 业务作用：返回 Prometheus 使用的固定结果标签。
     ///
-    /// # 返回
+    /// 返回：返回低基数小写文本。
     ///
-    /// 返回低基数小写文本。
+    /// 参数说明: 无。
     const fn label(self) -> &'static str {
         match self {
             Self::Success => "success",
@@ -111,9 +109,9 @@ pub enum AuthMetricOutcome {
 impl AuthMetricOutcome {
     /// 业务作用：返回原子数组使用的固定槽位。
     ///
-    /// # 返回
+    /// 返回：返回 `0..4` 的稳定索引。
     ///
-    /// 返回 `0..4` 的稳定索引。
+    /// 参数说明: 无。
     const fn index(self) -> usize {
         match self {
             Self::Authenticated => 0,
@@ -125,9 +123,9 @@ impl AuthMetricOutcome {
 
     /// 业务作用：返回 Prometheus 使用的固定身份结果标签。
     ///
-    /// # 返回
+    /// 返回：返回不含身份值的低基数文本。
     ///
-    /// 返回不含身份值的低基数文本。
+    /// 参数说明: 无。
     const fn label(self) -> &'static str {
         match self {
             Self::Authenticated => "authenticated",
@@ -158,9 +156,9 @@ pub enum SecurityMetricOperation {
 impl SecurityMetricOperation {
     /// 业务作用：返回直方图数组使用的固定槽位。
     ///
-    /// # 返回
+    /// 返回：返回 `0..6` 的稳定索引。
     ///
-    /// 返回 `0..6` 的稳定索引。
+    /// 参数说明: 无。
     const fn index(self) -> usize {
         match self {
             Self::Auth => 0,
@@ -174,9 +172,9 @@ impl SecurityMetricOperation {
 
     /// 业务作用：返回 Prometheus 使用的固定操作标签。
     ///
-    /// # 返回
+    /// 返回：返回低基数小写文本。
     ///
-    /// 返回低基数小写文本。
+    /// 参数说明: 无。
     const fn label(self) -> &'static str {
         match self {
             Self::Auth => "auth",
@@ -203,9 +201,9 @@ pub enum ReplayMetricOutcome {
 impl ReplayMetricOutcome {
     /// 业务作用：返回原子数组使用的固定槽位。
     ///
-    /// # 返回
+    /// 返回：返回 `0..3` 的稳定索引。
     ///
-    /// 返回 `0..3` 的稳定索引。
+    /// 参数说明: 无。
     const fn index(self) -> usize {
         match self {
             Self::Fresh => 0,
@@ -216,9 +214,9 @@ impl ReplayMetricOutcome {
 
     /// 业务作用：返回 Prometheus 使用的固定重放结果标签。
     ///
-    /// # 返回
+    /// 返回：返回不含 rid 的低基数文本。
     ///
-    /// 返回不含 rid 的低基数文本。
+    /// 参数说明: 无。
     const fn label(self) -> &'static str {
         match self {
             Self::Fresh => "fresh",
@@ -241,9 +239,9 @@ struct DurationHistogram {
 impl DurationHistogram {
     /// 业务作用：建立所有槽位为零的直方图。
     ///
-    /// # 返回
+    /// 返回：返回可被多线程无锁写入的固定 bucket 集合。
     ///
-    /// 返回可被多线程无锁写入的固定 bucket 集合。
+    /// 参数说明: 无。
     fn new() -> Self {
         Self {
             buckets: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -358,13 +356,11 @@ pub struct RouteSecurityMetrics {
 impl RouteSecurityMetrics {
     /// 业务作用：从已审计静态路由建立有限指标槽位。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `policy`: 过程宏生成且不包含请求输入的路由合同。
     ///
-    /// # 返回
-    ///
-    /// 返回只使用静态 label 的原子指标集合。
+    /// 返回：返回只使用静态 label 的原子指标集合。
     fn new(policy: RoutePolicy) -> Self {
         Self {
             route_id: policy.route_id,
@@ -385,10 +381,11 @@ impl RouteSecurityMetrics {
 
     /// 业务作用：记录一次最终端点结果和总耗时。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `outcome`：已由 composer 收敛的有限结果类别。
+    /// - `duration`：从进入 route layer 到最终响应的单调时长。
     ///
-    /// - `outcome`: 已由 composer 收敛的有限结果类别。
-    /// - `duration`: 从进入 route layer 到最终响应的单调时长。
+    /// 返回：无返回值；先递增指定结果计数，再登记 Total 时长，两类指标不是原子成对更新。
     pub fn record_request(&self, outcome: SecurityMetricOutcome, duration: Duration) {
         self.requests[outcome.index()].fetch_add(1, Ordering::Relaxed);
         self.observe_duration(SecurityMetricOperation::Total, duration);
@@ -396,10 +393,11 @@ impl RouteSecurityMetrics {
 
     /// 业务作用：记录一次身份阶段结果和耗时。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `outcome`：不包含 subject、token 或后端详情的身份结果。
+    /// - `duration`：provider 与 condition 的单调总耗时。
     ///
-    /// - `outcome`: 不包含 subject、token 或后端详情的身份结果。
-    /// - `duration`: provider 与 condition 的单调总耗时。
+    /// 返回：无返回值；递增指定身份结果计数并登记 Auth 时长，不验证身份，也不原子发布两类指标。
     pub fn record_auth(&self, outcome: AuthMetricOutcome, duration: Duration) {
         self.auth[outcome.index()].fetch_add(1, Ordering::Relaxed);
         self.observe_duration(SecurityMetricOperation::Auth, duration);
@@ -407,11 +405,12 @@ impl RouteSecurityMetrics {
 
     /// 业务作用：记录一次请求解密或响应加密结果。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `request_direction`：`true` 表示请求解密，`false` 表示响应加密。
+    /// - `outcome`：有限成功、拒绝、故障或超时类别。
+    /// - `duration`：本方向协议与 provider 执行的单调耗时。
     ///
-    /// - `request_direction`: `true` 表示请求解密，`false` 表示响应加密。
-    /// - `outcome`: 有限成功、拒绝、故障或超时类别。
-    /// - `duration`: 本方向协议与 provider 执行的单调耗时。
+    /// 返回：无返回值；更新所选方向的结果计数和 Decrypt/Encrypt 时长，不改变协议执行结果。
     pub fn record_crypto(
         &self,
         request_direction: bool,
@@ -436,27 +435,30 @@ impl RouteSecurityMetrics {
 
     /// 业务作用：记录 required replay 的有限占位结果。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `outcome`：首次占位、重复或共享后端故障，不包含 rid。
     ///
-    /// - `outcome`: 首次占位、重复或共享后端故障，不包含 rid。
+    /// 返回：无返回值；仅递增对应结果槽，不执行共享存储占位。
     pub fn record_replay(&self, outcome: ReplayMetricOutcome) {
         self.replay[outcome.index()].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// 业务作用：记录 condition 实际关闭 route 声明方向的次数。
+    /// 业务作用：记录 condition 实际关闭 route 声明方向的次数。 调用方只有在 effective directions 严格小于 declared directions 时调用，避免把普通请求误记为 旁路。指标 label 只使用 route 静态 condition ID。
     ///
-    /// 调用方只有在 effective directions 严格小于 declared directions 时调用，避免把普通请求误记为
-    /// 旁路。指标 label 只使用 route 静态 condition ID。
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；递增旁路计数，不自行判断方向是否缩小。
     pub fn record_bypass(&self) {
         self.bypass.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 业务作用：记录一个固定操作的单调耗时。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `operation`：编译期有限操作类别。
+    /// - `duration`：调用方用 `Instant` 测得的时长。
     ///
-    /// - `operation`: 编译期有限操作类别。
-    /// - `duration`: 调用方用 `Instant` 测得的时长。
+    /// 返回：无返回值；更新所选固定操作的直方图，不测量时钟或校验调用阶段。
     pub fn observe_duration(&self, operation: SecurityMetricOperation, duration: Duration) {
         self.durations[operation.index()].observe(duration);
     }
@@ -477,13 +479,11 @@ pub struct SecurityMetrics {
 impl SecurityMetrics {
     /// 业务作用：建立空注册表并设置初始快照代次。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `generation`: 应用启动期已经完整构建的非敏感配置代次。
     ///
-    /// # 返回
-    ///
-    /// 返回跨后续 ArcSwap 热更新持续复用的指标对象。
+    /// 返回：返回跨后续 ArcSwap 热更新持续复用的指标对象。
     pub fn new(generation: u64) -> Self {
         Self {
             routes: RwLock::new(BTreeMap::new()),
@@ -495,13 +495,11 @@ impl SecurityMetrics {
 
     /// 业务作用：返回或注册一条静态路由的指标句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `policy`: 已由宏生成并将在启动期审计的静态路由合同。
     ///
-    /// # 返回
-    ///
-    /// 同一 route ID 始终返回同一原子集合；注册数量受二进制静态路由数限制，不读取 raw path。
+    /// 返回：同一 route ID 始终返回同一原子集合；注册数量受二进制静态路由数限制，不读取 raw path。
     ///
     /// # Panics
     ///
@@ -551,27 +549,29 @@ impl SecurityMetrics {
 
     /// 业务作用：记录一次安全快照热更新结果。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `success`：`true` 表示更高代次已发布，`false` 表示保留 last-good。
     ///
-    /// - `success`: `true` 表示更高代次已发布，`false` 表示保留 last-good。
+    /// 返回：无返回值；递增成功或失败槽，不自行发布快照或保留旧配置。
     pub fn record_reload(&self, success: bool) {
         self.reloads[usize::from(!success)].fetch_add(1, Ordering::Relaxed);
     }
 
     /// 业务作用：更新当前快照代次 gauge。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `generation`：已完成全量构建和原子发布的更高代次。
     ///
-    /// - `generation`: 已完成全量构建和原子发布的更高代次。
+    /// 返回：无返回值；以 Release 写入 gauge，不检查是否递增，也不发布配置快照。
     pub fn set_generation(&self, generation: u64) {
         self.generation.store(generation, Ordering::Release);
     }
 
     /// 业务作用：渲染不含密钥、凭证、请求数据和动态 path 的 Prometheus 文本。
     ///
-    /// # 返回
+    /// 返回：返回稳定排序的 text exposition 片段，可与应用其它指标直接拼接。
     ///
-    /// 返回稳定排序的 text exposition 片段，可与应用其它指标直接拼接。
+    /// 参数说明: 无。
     pub fn render_prometheus(&self) -> String {
         let routes = read_routes(&self.routes)
             .values()
@@ -790,9 +790,9 @@ fn worst_case_series_for(routes: &BTreeMap<&'static str, Arc<RouteSecurityMetric
 impl Default for SecurityMetrics {
     /// 业务作用：建立 generation 为零的空安全指标注册表。
     ///
-    /// # 返回
+    /// 返回：返回适合无安全路由兼容运行时的指标对象。
     ///
-    /// 返回适合无安全路由兼容运行时的指标对象。
+    /// 参数说明: 无。
     fn default() -> Self {
         Self::new(0)
     }
@@ -800,13 +800,11 @@ impl Default for SecurityMetrics {
 
 /// 业务作用：从读锁取得路由注册表，并在锁中毒时保留已有数据继续服务。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `lock`: 安全指标私有路由注册表锁。
 ///
-/// # 返回
-///
-/// 返回读 guard；恢复中毒只影响观测，不允许指标故障打断业务请求。
+/// 返回：返回读 guard；恢复中毒只影响观测，不允许指标故障打断业务请求。
 fn read_routes<'a>(
     lock: &'a RwLock<BTreeMap<&'static str, Arc<RouteSecurityMetrics>>>,
 ) -> std::sync::RwLockReadGuard<'a, BTreeMap<&'static str, Arc<RouteSecurityMetrics>>> {
@@ -816,13 +814,11 @@ fn read_routes<'a>(
 
 /// 业务作用：从写锁取得路由注册表，并在锁中毒时保留已有数据继续注册。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `lock`: 安全指标私有路由注册表锁。
 ///
-/// # 返回
-///
-/// 返回写 guard；调用方只插入编译期静态 route ID。
+/// 返回：返回写 guard；调用方只插入编译期静态 route ID。
 fn write_routes<'a>(
     lock: &'a RwLock<BTreeMap<&'static str, Arc<RouteSecurityMetrics>>>,
 ) -> std::sync::RwLockWriteGuard<'a, BTreeMap<&'static str, Arc<RouteSecurityMetrics>>> {
@@ -832,13 +828,11 @@ fn write_routes<'a>(
 
 /// 业务作用：返回身份要求的固定 Prometheus 标签。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `requirement`: 路由编译期身份合同。
 ///
-/// # 返回
-///
-/// 返回四种有限小写文本之一。
+/// 返回：返回四种有限小写文本之一。
 fn auth_requirement_label(requirement: AuthRequirement) -> &'static str {
     match requirement {
         AuthRequirement::Unspecified => "unspecified",
@@ -850,13 +844,11 @@ fn auth_requirement_label(requirement: AuthRequirement) -> &'static str {
 
 /// 业务作用：转义 Prometheus label 中的反斜线、引号和换行。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 只来自编译期 route policy 的静态文本。
 ///
-/// # 返回
-///
-/// 返回符合 text exposition 的安全标签值。
+/// 返回：返回符合 text exposition 的安全标签值。
 fn escape_label(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -872,10 +864,11 @@ fn escape_label(value: &str) -> String {
 
 /// 业务作用：渲染端点最终结果计数。
 ///
-/// # 参数
+/// 参数说明：
+/// - `output`：调用方拥有的 Prometheus 文本缓冲区。
+/// - `routes`：已按 route ID 排序复制出的有限指标句柄。
 ///
-/// - `output`: 调用方拥有的 Prometheus 文本缓冲区。
-/// - `routes`: 已按 route ID 排序复制出的有限指标句柄。
+/// 返回：无返回值；向现有缓冲追加全部结果类别的计数 family，不清空缓冲；并发更新时各槽按读取时刻取值。
 fn render_request_counters(output: &mut String, routes: &[Arc<RouteSecurityMetrics>]) {
     output.push_str("# HELP mapping_security_requests_total 安全端点最终请求结果计数。\n");
     output.push_str("# TYPE mapping_security_requests_total counter\n");
@@ -893,10 +886,11 @@ fn render_request_counters(output: &mut String, routes: &[Arc<RouteSecurityMetri
 
 /// 业务作用：渲染身份阶段结果计数。
 ///
-/// # 参数
+/// 参数说明：
+/// - `output`：调用方拥有的 Prometheus 文本缓冲区。
+/// - `routes`：已按 route ID 排序复制出的有限指标句柄。
 ///
-/// - `output`: 调用方拥有的 Prometheus 文本缓冲区。
-/// - `routes`: 已按 route ID 排序复制出的有限指标句柄。
+/// 返回：无返回值；向缓冲追加声明身份要求的路由计数，跳过 public/unspecified，各槽读取不组成一致快照。
 fn render_auth_counters(output: &mut String, routes: &[Arc<RouteSecurityMetrics>]) {
     output.push_str("# HELP mapping_auth_requests_total 身份阶段结果计数，不包含身份值。\n");
     output.push_str("# TYPE mapping_auth_requests_total counter\n");
@@ -918,10 +912,11 @@ fn render_auth_counters(output: &mut String, routes: &[Arc<RouteSecurityMetrics>
 
 /// 业务作用：渲染请求解密与响应加密结果计数。
 ///
-/// # 参数
+/// 参数说明：
+/// - `output`：调用方拥有的 Prometheus 文本缓冲区。
+/// - `routes`：已按 route ID 排序复制出的有限指标句柄。
 ///
-/// - `output`: 调用方拥有的 Prometheus 文本缓冲区。
-/// - `routes`: 已按 route ID 排序复制出的有限指标句柄。
+/// 返回：无返回值；仅为声明启用的密码方向追加所有结果计数，不输出未声明方向。
 fn render_crypto_counters(output: &mut String, routes: &[Arc<RouteSecurityMetrics>]) {
     output.push_str("# HELP mapping_crypto_requests_total 密码方向执行结果计数。\n");
     output.push_str("# TYPE mapping_crypto_requests_total counter\n");
@@ -956,10 +951,11 @@ fn render_crypto_counters(output: &mut String, routes: &[Arc<RouteSecurityMetric
 
 /// 业务作用：渲染 required replay 原子占位结果。
 ///
-/// # 参数
+/// 参数说明：
+/// - `output`：调用方拥有的 Prometheus 文本缓冲区。
+/// - `routes`：已按 route ID 排序复制出的有限指标句柄。
 ///
-/// - `output`: 调用方拥有的 Prometheus 文本缓冲区。
-/// - `routes`: 已按 route ID 排序复制出的有限指标句柄。
+/// 返回：无返回值；仅为 required replay 路由追加占位结果计数，不查询共享存储。
 fn render_replay_counters(output: &mut String, routes: &[Arc<RouteSecurityMetrics>]) {
     output.push_str("# HELP mapping_crypto_replay_total required replay 占位结果计数。\n");
     output.push_str("# TYPE mapping_crypto_replay_total counter\n");
@@ -980,10 +976,11 @@ fn render_replay_counters(output: &mut String, routes: &[Arc<RouteSecurityMetric
 
 /// 业务作用：渲染受控 condition 实际旁路计数。
 ///
-/// # 参数
+/// 参数说明：
+/// - `output`：调用方拥有的 Prometheus 文本缓冲区。
+/// - `routes`：已按 route ID 排序复制出的有限指标句柄。
 ///
-/// - `output`: 调用方拥有的 Prometheus 文本缓冲区。
-/// - `routes`: 已按 route ID 排序复制出的有限指标句柄。
+/// 返回：无返回值；仅为声明 condition 的路由追加旁路计数，静态 label 经转义后写入缓冲。
 fn render_bypass_counters(output: &mut String, routes: &[Arc<RouteSecurityMetrics>]) {
     output.push_str("# HELP mapping_crypto_bypass_total 静态 condition 实际关闭密码方向的次数。\n");
     output.push_str("# TYPE mapping_crypto_bypass_total counter\n");
@@ -1002,10 +999,11 @@ fn render_bypass_counters(output: &mut String, routes: &[Arc<RouteSecurityMetric
 
 /// 业务作用：渲染全部已观测安全阶段的累计延迟直方图。
 ///
-/// # 参数
+/// 参数说明：
+/// - `output`：调用方拥有的 Prometheus 文本缓冲区。
+/// - `routes`：已按 route ID 排序复制出的有限指标句柄。
 ///
-/// - `output`: 调用方拥有的 Prometheus 文本缓冲区。
-/// - `routes`: 已按 route ID 排序复制出的有限指标句柄。
+/// 返回：无返回值；仅对已有观测的操作追加累计 bucket、+Inf、秒数总和与 count，各操作分别取当前视图。
 fn render_duration_histograms(output: &mut String, routes: &[Arc<RouteSecurityMetrics>]) {
     output.push_str("# HELP mapping_crypto_duration_seconds 安全流水线固定阶段延迟秒数。\n");
     output.push_str("# TYPE mapping_crypto_duration_seconds histogram\n");
@@ -1044,9 +1042,9 @@ fn render_duration_histograms(output: &mut String, routes: &[Arc<RouteSecurityMe
 
 /// 业务作用：返回全部端点结果类别的固定顺序。
 ///
-/// # 返回
+/// 返回：返回用于稳定渲染的四项数组。
 ///
-/// 返回用于稳定渲染的四项数组。
+/// 参数说明: 无。
 const fn metric_outcomes() -> [SecurityMetricOutcome; 4] {
     [
         SecurityMetricOutcome::Success,
@@ -1058,9 +1056,9 @@ const fn metric_outcomes() -> [SecurityMetricOutcome; 4] {
 
 /// 业务作用：返回全部身份结果类别的固定顺序。
 ///
-/// # 返回
+/// 返回：返回用于稳定渲染的四项数组。
 ///
-/// 返回用于稳定渲染的四项数组。
+/// 参数说明: 无。
 const fn auth_outcomes() -> [AuthMetricOutcome; 4] {
     [
         AuthMetricOutcome::Authenticated,
@@ -1072,9 +1070,9 @@ const fn auth_outcomes() -> [AuthMetricOutcome; 4] {
 
 /// 业务作用：返回全部重放结果类别的固定顺序。
 ///
-/// # 返回
+/// 返回：返回用于稳定渲染的三项数组。
 ///
-/// 返回用于稳定渲染的三项数组。
+/// 参数说明: 无。
 const fn replay_outcomes() -> [ReplayMetricOutcome; 3] {
     [
         ReplayMetricOutcome::Fresh,
@@ -1085,9 +1083,9 @@ const fn replay_outcomes() -> [ReplayMetricOutcome; 3] {
 
 /// 业务作用：返回全部安全阶段的固定顺序。
 ///
-/// # 返回
+/// 返回：返回用于稳定渲染的六项数组。
 ///
-/// 返回用于稳定渲染的六项数组。
+/// 参数说明: 无。
 const fn metric_operations() -> [SecurityMetricOperation; 6] {
     [
         SecurityMetricOperation::Auth,

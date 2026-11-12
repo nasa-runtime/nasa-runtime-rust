@@ -6,25 +6,37 @@ use crate::{
 };
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// 首个源冻结的进程输入边界，后续源只能复用相同声明。
 static PROCESS: OnceLock<Arc<ProcessCapacity>> = OnceLock::new();
 
+/// 全进程普通消费输入的共同计量，不按源数量放大额度。
 struct ProcessCapacity {
+    /// 所有源合计可持有的最大输入记录数。
     max_records: usize,
+    /// 所有源合计可保留的最大原文及框架副本字节。
     max_bytes: usize,
+    /// 锁内同步更新的记录数及字节占用。
     usage: Mutex<(usize, usize)>,
 }
 
 /// 同一源全部普通消费组共享的原文与框架副本预留，不包含 native 队列与解码对象堆大小。
 pub(crate) struct SourceCapacity {
+    /// 当前源必须同时遵守的进程共同边界。
     process: Arc<ProcessCapacity>,
+    /// 当前源全部普通消费组共用的记录上限。
     max_records: usize,
+    /// 当前源全部普通消费组共用的字节上限。
     max_bytes: usize,
+    /// 与进程计量共同取得锁后更新的源占用。
     usage: Mutex<(usize, usize)>,
 }
 
 impl SourceCapacity {
     /// 业务作用：在创建原生资源前冻结源和进程边界，所有源必须声明相同进程上限。
-    /// 参数说明：config 为已验证的行为配置。
+    ///
+    /// 参数说明：
+    /// - `config`：config 为已验证的行为配置。
+    ///
     /// 返回：零占用源池；声明冲突返回配置错误，进程边界只能随进程重启改变。
     pub(crate) fn new(config: &BehaviorConfig) -> Result<Arc<Self>> {
         let process = PROCESS.get_or_init(|| {
@@ -49,7 +61,10 @@ impl SourceCapacity {
     }
 
     /// 业务作用：同时保留源和进程责任，拒绝时不产生半份计费。
-    /// 参数说明：bytes 为原文及框架副本的保守预留。
+    ///
+    /// 参数说明：
+    /// - `bytes`：bytes 为原文及框架副本的保守预留。
+    ///
     /// 返回：必须保留到实际责任退出的凭证；任一边界耗尽时为 None。
     pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Option<SourcePermit> {
         // 全路径固定为组、源、进程的锁顺序，归还时不得反向取得其它组的锁。
@@ -76,7 +91,12 @@ impl SourceCapacity {
     }
 
     /// 业务作用：依据共同快照判断一次取入是否满足两层数量及字节边界。
-    /// 参数说明：source/process 为锁内占用，bytes 为待取入原文及框架副本的保守预留。
+    ///
+    /// 参数说明：
+    /// - `source`：源池锁内的记录数及字节占用，不超过该池冻结上限。
+    /// - `process`：进程池锁内的记录数及字节占用，不超过进程共同上限。
+    /// - `bytes`：bytes 为待取入原文及框架副本的保守预留。
+    ///
     /// 返回：两个域都足够才允许继续。
     fn available(&self, source: (usize, usize), process: (usize, usize), bytes: usize) -> bool {
         source.0 < self.max_records
@@ -86,7 +106,10 @@ impl SourceCapacity {
     }
 
     /// 业务作用：恢复拉取前观察两层余量，避免无容量时重复拉取和定位。
-    /// 参数说明：bytes 为等待输入大小。
+    ///
+    /// 参数说明：
+    /// - `bytes`：bytes 为等待输入大小。
+    ///
     /// 返回：当前可重试的提示，取入时仍须原子裁决。
     pub(crate) fn can_reserve(&self, bytes: usize) -> bool {
         let source = self
@@ -102,7 +125,9 @@ impl SourceCapacity {
     }
 
     /// 业务作用：识别空池也无法接纳的原文，避免永久等待容量。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：源与进程的更小字节边界。
     pub(crate) fn maximum_record_bytes(&self) -> usize {
         self.max_bytes.min(self.process.max_bytes)
@@ -111,13 +136,17 @@ impl SourceCapacity {
 
 /// 输入、业务与提交责任共用的源级凭证，由最终记录引用持有。
 pub(crate) struct SourcePermit {
+    /// 凭证退出时必须归还责任的源及其进程池。
     source: Arc<SourceCapacity>,
+    /// 该条输入已占用的保守字节额度。
     bytes: usize,
 }
 
 impl Drop for SourcePermit {
     /// 业务作用：实际责任退出时同时归还源和进程额度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：减少计费，不表达业务确认或提交成功。
     fn drop(&mut self) {
         let mut source = self

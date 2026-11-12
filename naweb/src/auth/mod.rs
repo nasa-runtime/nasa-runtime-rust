@@ -66,13 +66,11 @@ pub struct AuthContext {
 impl std::fmt::Debug for AuthContext {
     /// 业务作用：输出不含主体值和业务对象的认证摘要。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AuthContext")
@@ -88,9 +86,9 @@ impl AuthContext {
     ///
     /// - `T`: provider 写入的具体主体类型，必须可在线程间安全共享。
     ///
-    /// # 返回
+    /// 返回：类型一致时返回主体引用，否则返回 `None`；该操作不会复制敏感字段。
     ///
-    /// 类型一致时返回主体引用，否则返回 `None`；该操作不会复制敏感字段。
+    /// 参数说明: 无。
     pub fn principal_as<T>(&self) -> Option<&T>
     where
         T: Any + Send + Sync,
@@ -163,14 +161,12 @@ pub struct AuthError {
 impl AuthError {
     /// 业务作用：建立一个不包含敏感输入的认证错误。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `kind`: 统一错误映射使用的稳定类别。
     /// - `internal_reason`: 由实现者写死的低基数原因，不得包含凭证或后端响应。
     ///
-    /// # 返回
-    ///
-    /// 返回可安全传过 endpoint composer 的内部错误。
+    /// 返回：返回可安全传过 endpoint composer 的内部错误。
     pub const fn new(kind: AuthErrorKind, internal_reason: &'static str) -> Self {
         Self {
             kind,
@@ -180,9 +176,9 @@ impl AuthError {
 
     /// 业务作用：返回标准 HTTP profile 对应的状态码。
     ///
-    /// # 返回
+    /// 返回：缺失或无效凭证映射为 401，禁用映射为 403，依赖与策略错误映射为 503。
     ///
-    /// 缺失或无效凭证映射为 401，禁用映射为 403，依赖与策略错误映射为 503。
+    /// 参数说明: 无。
     pub const fn status(&self) -> StatusCode {
         match self.kind {
             AuthErrorKind::Missing | AuthErrorKind::Invalid => StatusCode::UNAUTHORIZED,
@@ -195,13 +191,11 @@ impl AuthError {
 impl std::fmt::Display for AuthError {
     /// 业务作用：输出不含凭证与后端细节的内部类别。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 错误链提供的输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "身份认证失败：{:?}", self.kind)
     }
@@ -213,33 +207,28 @@ impl std::error::Error for AuthError {}
 pub trait AuthProvider: Send + Sync + 'static {
     /// 业务作用：返回注册表使用的稳定 provider ID。
     ///
-    /// # 返回
+    /// 返回：返回非空、有限长度的 ASCII 标识，不得包含实例地址或凭证信息。
     ///
-    /// 返回非空、有限长度的 ASCII 标识，不得包含实例地址或凭证信息。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str;
 
     /// 业务作用：在监听端口前检查 provider 对当前路由的应用侧依赖。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `_route`：过程宏生成的静态路由合同，默认实现不使用。
     ///
-    /// - `route`: 过程宏生成的静态路由合同，不含任何请求或凭证数据。
-    ///
-    /// # 返回
-    ///
-    /// 默认实现不增加约束；维护 route registry 的应用适配器应在缺少稳定 route ID 时拒绝启动。
+    /// 返回：默认实现始终成功，不验证路由依赖或调用 provider；应用适配器需覆盖以增加启动拒绝条件。
     fn audit_route(&self, _route: &RoutePolicy) -> Result<(), MappingBuildError> {
         Ok(())
     }
 
     /// 业务作用：根据受限请求视图认证一次请求。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 只在本次调用期有效的请求视图；header 可能含敏感凭证，禁止持久化和日志输出。
     ///
-    /// # 返回
-    ///
-    /// 返回认证、匿名或受控短路结果；后端错误必须 fail closed。
+    /// 返回：返回认证、匿名或受控短路结果；后端错误必须 fail closed。
     fn authenticate<'a>(
         &'a self,
         input: AuthInput<'a>,
@@ -250,21 +239,19 @@ pub trait AuthProvider: Send + Sync + 'static {
 pub trait AuthCondition: Send + Sync + 'static {
     /// 业务作用：返回注册表使用的稳定 condition ID。
     ///
-    /// # 返回
+    /// 返回：返回非空、有限长度的 ASCII 标识。
     ///
-    /// 返回非空、有限长度的 ASCII 标识。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str;
 
     /// 业务作用：依据可信元数据收窄静态身份要求。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 不含 body 的请求视图，生命周期限定为本次调用。
     /// - `declared`: 路由静态声明的上限，condition 不得提升到更强的未审计要求。
     ///
-    /// # 返回
-    ///
-    /// 返回本请求的有效身份要求；错误时 endpoint composer 关闭请求。
+    /// 返回：返回本请求的有效身份要求；错误时 endpoint composer 关闭请求。
     fn requirement<'a>(
         &'a self,
         input: AuthConditionInput<'a>,
@@ -282,13 +269,11 @@ pub struct AuthRuntime {
 impl std::fmt::Debug for AuthRuntime {
     /// 业务作用：输出注册数量，避免泄露适配器内部缓存与连接状态。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AuthRuntime")
@@ -301,15 +286,13 @@ impl std::fmt::Debug for AuthRuntime {
 impl AuthRuntime {
     /// 业务作用：从完整注册表建立不可变身份运行时。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `providers`: 应用启动期创建的有限 provider 集合，ID 必须唯一。
     /// - `conditions`: 应用启动期创建的有限 condition 集合，ID 必须唯一。
     /// - `default_provider`: 路由没有显式指定时使用的 provider ID。
     ///
-    /// # 返回
-    ///
-    /// 配置一致时返回运行时；重复 ID、空 ID 或不存在的默认项会拒绝启动。
+    /// 返回：配置一致时返回运行时；重复 ID、空 ID 或不存在的默认项会拒绝启动。
     pub fn new(
         providers: Vec<Arc<dyn AuthProvider>>,
         conditions: Vec<Arc<dyn AuthCondition>>,
@@ -345,13 +328,11 @@ impl AuthRuntime {
 
     /// 业务作用：在监听端口前检查一条路由的身份依赖。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `route`: 过程宏生成的不可变路由合同，不包含请求数据。
     ///
-    /// # 返回
-    ///
-    /// provider 与 condition 都可解析时返回空值，否则拒绝启动。
+    /// 返回：provider 与 condition 都可解析时返回空值，否则拒绝启动。
     pub fn audit(&self, route: &RoutePolicy) -> Result<(), MappingBuildError> {
         let provider_id = route
             .auth_provider
@@ -379,14 +360,12 @@ impl AuthRuntime {
 
     /// 业务作用：按固定顺序执行身份 condition 与 provider。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `route`: 已通过启动审计的静态路由合同。
     /// - `input`: 本次请求的受限认证视图，header 借用只在 await 期间有效。
     ///
-    /// # 返回
-    ///
-    /// 返回规范化身份决策；condition/provider 缺失和后端故障均 fail closed。
+    /// 返回：返回规范化身份决策；condition/provider 缺失和后端故障均 fail closed。
     pub async fn evaluate(
         &self,
         route: &RoutePolicy,
@@ -450,13 +429,11 @@ impl AuthRuntime {
 
 /// 业务作用：校验应用 provider 返回的身份上下文不会把空值、控制字符或无界文本带入密钥域和业务层。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `context`: provider 刚返回、尚未写入 request extensions 的最小身份对象。
 ///
-/// # 返回
-///
-/// subject、tenant 和认证方式满足长度与字符边界时返回空值；适配器违反合同时返回 Policy，
+/// 返回：subject、tenant 和认证方式满足长度与字符边界时返回空值；适配器违反合同时返回 Policy，
 /// 请求不会进入解密或 handler。
 pub(crate) fn validate_auth_context(context: &AuthContext) -> Result<(), AuthError> {
     let bounded_text = |value: &str, maximum: usize| {
@@ -479,14 +456,12 @@ pub(crate) fn validate_auth_context(context: &AuthContext) -> Result<(), AuthErr
 
 /// 业务作用：判断 condition 返回值是否仍在路由静态声明允许的范围内。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `declared`: 启动审计可见的身份上限。
 /// - `effective`: condition 根据可信元数据计算的本请求要求。
 ///
-/// # 返回
-///
-/// required 可收窄为任意显式状态，optional 只能保持 optional 或 public，其它状态必须保持不变。
+/// 返回：required 可收窄为任意显式状态，optional 只能保持 optional 或 public，其它状态必须保持不变。
 fn requirement_within_declared(declared: AuthRequirement, effective: AuthRequirement) -> bool {
     match declared {
         AuthRequirement::Required => effective != AuthRequirement::Unspecified,
@@ -503,14 +478,12 @@ fn requirement_within_declared(declared: AuthRequirement, effective: AuthRequire
 
 /// 业务作用：校验启动配置中的有限 ASCII 组件标识。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `kind`: 错误消息使用的组件类别，不含外部输入。
 /// - `id`: provider 或 condition 暴露的静态 ID，最大 64 字节。
 ///
-/// # 返回
-///
-/// 合法时返回空值；空值、过长或非安全 ASCII 字符会拒绝启动。
+/// 返回：合法时返回空值；空值、过长或非安全 ASCII 字符会拒绝启动。
 fn validate_component_id(kind: &str, id: &str) -> Result<(), MappingBuildError> {
     let valid = !id.is_empty()
         && id.len() <= 64

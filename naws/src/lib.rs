@@ -29,6 +29,8 @@ pub mod sender;
 pub mod server;
 /// 会话状态、索引表、出站队列和会话句柄。
 pub mod session;
+/// 有界原始 TCP/WebSocket 接入；应用自行定义控制协议和业务模型。
+pub mod transport;
 /// NASA frame 编解码器和帧类型常量。
 pub mod wire;
 

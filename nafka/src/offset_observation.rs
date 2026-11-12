@@ -48,7 +48,10 @@ pub struct ObservedOffset {
 
 impl ObservedOffset {
     /// 业务作用：封存原生查询确认的非负位置。
-    /// 参数说明：value 为已校验的实际 offset 或距离。
+    ///
+    /// 参数说明：
+    /// - `value`：value 为已校验的实际 offset 或距离。
+    ///
     /// 返回：有值且没有缺失原因的时点证据。
     pub(crate) fn present(value: i64) -> Self {
         Self {
@@ -59,7 +62,10 @@ impl ObservedOffset {
     }
 
     /// 业务作用：保留本项证据缺席的原因，不补造默认位置。
-    /// 参数说明：reason 为确定缺失或暂不可观测的类别。
+    ///
+    /// 参数说明：
+    /// - `reason`：reason 为确定缺失或暂不可观测的类别。
+    ///
     /// 返回：没有位置且带原因的时点证据。
     pub(crate) fn absent(reason: OffsetMissing) -> Self {
         Self {

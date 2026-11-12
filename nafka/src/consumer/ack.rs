@@ -42,11 +42,13 @@ pub(crate) struct AckSlot {
 }
 
 impl AckSlot {
-    /// 业务作用：创建开放确认槽。
+    /// 业务作用：为当前记录建立开放确认槽，将临时确认绑定到调用和 assignment 身份。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `identity`: 本次调用和记录的内部身份。
+    ///
+    /// 返回：尚未确认的本地槽；不验证当前权限、不接触 broker 或推进提交水位。
     fn new(identity: AckIdentity) -> Self {
         Self {
             state: AtomicU8::new(SLOT_OPEN),
@@ -61,6 +63,7 @@ impl AckSlot {
     /// 回调已结束或 assignment 已失效时返回 [`NafkaError::AckExpired`]。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：仅当前有效调用可临时确认；失权、超时或封存后返回 AckExpired。
     fn acknowledge(&self) -> Result<()> {
         loop {
@@ -97,6 +100,7 @@ impl AckSlot {
     /// 业务作用：封存槽并返回封存前是否已确认。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：仅确认状态和 owner 权威同时有效时为 true，失权后的临时确认不能进入水位。
     fn seal(&self) -> bool {
         self.state.swap(SLOT_SEALED, Ordering::AcqRel) == SLOT_ACKED && self.authorized()
@@ -105,6 +109,7 @@ impl AckSlot {
     /// 业务作用：读取并发调用的实时确认许可，兼容 owner 栈内的同步路由。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：源尚未永久停止且调用仍获 owner 授权；同步调用也不能跨源停止边界确认。
     fn authorized(&self) -> bool {
         !self
@@ -135,11 +140,19 @@ impl AckToken {
     /// # 错误
     ///
     /// 回调已经结束或 assignment 已失效时返回 [`NafkaError::AckExpired`]。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：本地临时确认被接受时成功；源停止、调用失权或槽已封存时返回 AckExpired。成功不代表 offset 已提交。
     pub fn ack(&self) -> Result<()> {
         self.inner.acknowledge()
     }
 
     /// 业务作用：暴露内部身份给 owner fencing，不向业务公开 offset 修改入口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：槽绑定的原始身份引用；读取本身不复验实时权威，也不能重新开放已封存的槽。
     #[allow(dead_code)]
     pub(crate) fn identity(&self) -> &AckIdentity {
         &self.inner.identity
@@ -160,6 +173,10 @@ impl RecordAck {
     /// # 错误
     ///
     /// 自动模式返回 [`NafkaError::AckNotManual`]；过期 token 返回确认过期。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：手动模式委托 token 记录临时确认；自动模式或失效确认返回对应错误，不直接改变 broker 进度。
     pub(crate) fn acknowledge(&self) -> Result<()> {
         match self {
             Self::Auto => Err(NafkaError::AckNotManual),
@@ -172,6 +189,10 @@ impl RecordAck {
     /// # 错误
     ///
     /// 自动模式没有 token，返回 [`NafkaError::AckNotManual`]。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：手动模式移交原 token，自动模式返回错误；移交不确认记录或延长 token 的有效期。
     pub(crate) fn into_token(self) -> Result<AckToken> {
         match self {
             Self::Auto => Err(NafkaError::AckNotManual),
@@ -197,9 +218,11 @@ pub(crate) struct ManualAckSummary {
 impl ManualAckSet {
     /// 业务作用：按连续记录身份构造一组开放确认槽。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `identities`: 与 handler 输入顺序一致的记录身份。
+    ///
+    /// 返回：每条记录各有独立开放槽的集合；空输入得到空集合，不生成业务 token 或授予源读取权。
     pub(crate) fn new(identities: Vec<AckIdentity>) -> Self {
         Self {
             slots: identities
@@ -209,25 +232,27 @@ impl ManualAckSet {
         }
     }
 
-    /// 业务作用：为指定输入下标生成不可复制的记录确认能力。
+    /// 业务作用：为指定输入下标生成不实现 Clone 的记录确认 token，由 owner 保证每条输入只交付一次。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `index`: handler 输入记录下标。
+    ///
+    /// 返回：共享对应确认槽的手动 token；下标越界会 panic，本方法不记录下标是否已经领取，再次调用仍会生成同槽 token。
     pub(crate) fn record_ack(&self, index: usize) -> RecordAck {
         let inner = Arc::clone(&self.slots[index]);
-        RecordAck::Manual(AckToken { inner })
+        RecordAck::Manual(AckToken {
+            inner,
+        })
     }
 
     /// 业务作用：结束本次回调，封存全部 token，并计算有效连续确认前缀。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `handler_succeeded`: 仅 handler 返回成功时允许临时确认生效。
     ///
-    /// # 返回
-    ///
-    /// handler 成功时返回从首记录开始的连续确认数；失败时固定返回零。
+    /// 返回：handler 成功时同时统计有效连续前缀和全部有效确认数，失败时两者均为零；所有槽先被封存，重复调用不恢复确认。
     pub(crate) fn finish(&self, handler_succeeded: bool) -> ManualAckSummary {
         let states: Vec<bool> = self.slots.iter().map(|slot| slot.seal()).collect();
         if handler_succeeded {
@@ -246,6 +271,10 @@ impl ManualAckSet {
 
 impl Drop for ManualAckSet {
     /// 业务作用：handler future 被 timeout 或取消丢弃时也必须封存全部 token。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：全部槽进入永久封存状态，遗留 token 不能再确认；不根据此前临时确认推进任何提交水位。
     fn drop(&mut self) {
         for slot in &self.slots {
             let _ = slot.seal();

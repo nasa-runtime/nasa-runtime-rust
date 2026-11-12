@@ -89,7 +89,7 @@ impl Default for RunnerHealth {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：Stopped。
+    /// 返回：尚未启动的 Stopped 状态，不授予任务接纳资格。
     fn default() -> Self {
         Self::Stopped
     }
@@ -1756,7 +1756,10 @@ impl RunnerInner {
             .ok_or(SubmitRejection::LaneFailed)?
             .clone();
         let reservation = slot.reserve_main().map_err(queue_rejection)?;
-        Ok(Placement::Main { slot, reservation })
+        Ok(Placement::Main {
+            slot,
+            reservation,
+        })
     }
 
     /// 业务作用：消费主队列任务；源 worker 按现役路由决定执行或搬入盗洞 stock。
@@ -2995,7 +2998,10 @@ impl RunnerInner {
                     let mut finished_direct = false;
                     for _ in 0..self.config.drain_batch {
                         match tunnel.poll_return(StrictQueue::Incremental) {
-                            crate::queue::ConsumerPoll::Item { sequence, value } => {
+                            crate::queue::ConsumerPoll::Item {
+                                sequence,
+                                value,
+                            } => {
                                 if value
                                     .authority()
                                     .claim_container(Owner::Slot(target.index()))
@@ -3026,13 +3032,17 @@ impl RunnerInner {
                                     break;
                                 }
                             }
-                            crate::queue::ConsumerPoll::Poisoned { .. } => continue,
+                            crate::queue::ConsumerPoll::Poisoned {
+                                ..
+                            } => continue,
                             crate::queue::ConsumerPoll::Empty
                             | crate::queue::ConsumerPoll::Closed => {
                                 finished_direct = true;
                                 break;
                             }
-                            crate::queue::ConsumerPoll::Reserved { .. } => break,
+                            crate::queue::ConsumerPoll::Reserved {
+                                ..
+                            } => break,
                             crate::queue::ConsumerPoll::Failed => {
                                 self.fail_strict_tunnel(
                                     target,
@@ -3065,7 +3075,10 @@ impl RunnerInner {
                     let mut finished_staging = false;
                     for _ in 0..self.config.drain_batch {
                         match tunnel.poll_return(StrictQueue::Staging) {
-                            crate::queue::ConsumerPoll::Item { sequence, value } => {
+                            crate::queue::ConsumerPoll::Item {
+                                sequence,
+                                value,
+                            } => {
                                 if value
                                     .authority()
                                     .claim_container(Owner::ReturnStaging)
@@ -3096,13 +3109,17 @@ impl RunnerInner {
                                     break;
                                 }
                             }
-                            crate::queue::ConsumerPoll::Poisoned { .. } => continue,
+                            crate::queue::ConsumerPoll::Poisoned {
+                                ..
+                            } => continue,
                             crate::queue::ConsumerPoll::Empty
                             | crate::queue::ConsumerPoll::Closed => {
                                 finished_staging = true;
                                 break;
                             }
-                            crate::queue::ConsumerPoll::Reserved { .. } => break,
+                            crate::queue::ConsumerPoll::Reserved {
+                                ..
+                            } => break,
                             crate::queue::ConsumerPoll::Failed => {
                                 self.fail_strict_tunnel(
                                     target,
@@ -3130,7 +3147,10 @@ impl RunnerInner {
                             break;
                         }
                         match tunnel.poll_return(StrictQueue::Staging) {
-                            crate::queue::ConsumerPoll::Item { value, .. } => {
+                            crate::queue::ConsumerPoll::Item {
+                                value,
+                                ..
+                            } => {
                                 if value
                                     .authority()
                                     .claim_return_staging(target.index())
@@ -3144,13 +3164,17 @@ impl RunnerInner {
                                 }
                                 self.dispatch_business(target.index(), value);
                             }
-                            crate::queue::ConsumerPoll::Poisoned { .. } => continue,
+                            crate::queue::ConsumerPoll::Poisoned {
+                                ..
+                            } => continue,
                             crate::queue::ConsumerPoll::Empty
                             | crate::queue::ConsumerPoll::Closed => {
                                 caught_up = true;
                                 break;
                             }
-                            crate::queue::ConsumerPoll::Reserved { .. } => break,
+                            crate::queue::ConsumerPoll::Reserved {
+                                ..
+                            } => break,
                             crate::queue::ConsumerPoll::Failed => {
                                 self.fail_strict_tunnel(
                                     target,
@@ -3185,7 +3209,10 @@ impl RunnerInner {
         for _ in 0..self.config.drain_batch {
             let (queue, poll) = tunnel.poll_failure();
             match poll {
-                crate::queue::ConsumerPoll::Item { value, .. } => {
+                crate::queue::ConsumerPoll::Item {
+                    value,
+                    ..
+                } => {
                     let owner = if queue == StrictQueue::Staging {
                         Owner::ReturnStaging
                     } else {
@@ -3203,8 +3230,12 @@ impl RunnerInner {
                     }
                     self.fail_before_running(&value, failure_reason);
                 }
-                crate::queue::ConsumerPoll::Poisoned { .. } => continue,
-                crate::queue::ConsumerPoll::Reserved { .. } => break,
+                crate::queue::ConsumerPoll::Poisoned {
+                    ..
+                } => continue,
+                crate::queue::ConsumerPoll::Reserved {
+                    ..
+                } => break,
                 crate::queue::ConsumerPoll::Failed => break,
                 crate::queue::ConsumerPoll::Empty | crate::queue::ConsumerPoll::Closed => break,
             }
@@ -3847,8 +3878,18 @@ impl Placement {
     /// 返回：主队列所属 slot 或盗洞唯一目标 slot。
     fn target(&self) -> u32 {
         match self {
-            Self::Main { slot, .. } => slot.index(),
-            Self::NonStrict { target, .. } | Self::Strict { target, .. } => *target,
+            Self::Main {
+                slot,
+                ..
+            } => slot.index(),
+            Self::NonStrict {
+                target,
+                ..
+            }
+            | Self::Strict {
+                target,
+                ..
+            } => *target,
         }
     }
 
@@ -3875,9 +3916,19 @@ impl Placement {
     /// 返回：与主队列、非严格盗洞或严格阶段 FIFO 一致的初始逻辑归属。
     fn logical_owner(&self) -> LogicalOwner {
         let (slot, container) = match self {
-            Self::Main { slot, .. } => (slot.index(), LogicalContainer::Main),
-            Self::NonStrict { target, .. } => (*target, LogicalContainer::NonStrictTunnel),
-            Self::Strict { target, queue, .. } => (
+            Self::Main {
+                slot,
+                ..
+            } => (slot.index(), LogicalContainer::Main),
+            Self::NonStrict {
+                target,
+                ..
+            } => (*target, LogicalContainer::NonStrictTunnel),
+            Self::Strict {
+                target,
+                queue,
+                ..
+            } => (
                 *target,
                 match queue {
                     StrictQueue::Stock => LogicalContainer::StrictStock,
@@ -3902,7 +3953,10 @@ impl Placement {
     /// 故障域并返回尚未交给 consumer 的载荷。
     fn publish(self, envelope: Arc<TaskEnvelope>) -> Result<(), Arc<TaskEnvelope>> {
         match self {
-            Self::Main { slot, reservation } => {
+            Self::Main {
+                slot,
+                reservation,
+            } => {
                 if let Err(error) = reservation.publish(envelope) {
                     slot.abort_main_reserved();
                     return Err(error.into_inner());
@@ -4186,8 +4240,8 @@ async fn supervise(inner: Arc<RunnerInner>) {
                 .is_empty();
         if needs_control_tick {
             tokio::select! {
-                _ = lifecycle.changed_since(revision) => {}
-                _ = tokio::time::sleep(inner.config.control_tick) => {}
+                _ = lifecycle.changed_since(revision) => {},
+                _ = tokio::time::sleep(inner.config.control_tick) => {},
             }
         } else {
             // 稳态没有 Moving 审计或停止动作时只等待真实变化，避免每个空闲 Runner
@@ -4342,9 +4396,9 @@ async fn wait_operation_until(
         let lifecycle = inner.lifecycle();
         let operation_done = crate::shield_future(inner.operation.done.notified());
         tokio::select! {
-            _ = operation_done => {}
-            _ = lifecycle.changed_since(revision) => {}
-            _ = tokio::time::sleep(remaining.min(Duration::from_millis(2))) => {}
+            _ = operation_done => {},
+            _ = lifecycle.changed_since(revision) => {},
+            _ = tokio::time::sleep(remaining.min(Duration::from_millis(2))) => {},
         }
     }
 }

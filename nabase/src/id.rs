@@ -32,6 +32,10 @@ pub enum SnowflakeError {
     WorkerIdRange(String),
     /// 外部 worker id 分配或归还失败;纯本地生成器不会返回此项。
     External(String),
+    /// 时间差或逻辑时间已超出非负 ID 的时间位容量。
+    TimeRange,
+    /// 发号状态锁中毒，无法再确认状态完整。
+    StateUnavailable,
 }
 
 impl core::fmt::Display for SnowflakeError {
@@ -46,6 +50,8 @@ impl core::fmt::Display for SnowflakeError {
             SnowflakeError::BitRange(s) => write!(f, "snowflake bit range: {s}"),
             SnowflakeError::WorkerIdRange(s) => write!(f, "snowflake worker id range: {s}"),
             SnowflakeError::External(s) => write!(f, "snowflake external worker id error: {s}"),
+            SnowflakeError::TimeRange => f.write_str("snowflake timestamp capacity exhausted"),
+            SnowflakeError::StateUnavailable => f.write_str("snowflake state unavailable"),
         }
     }
 }
@@ -80,15 +86,16 @@ pub fn validate_bits(worker_id_bits: u32, seq_bits: u32) -> Result<(), Snowflake
     Ok(())
 }
 
-/// 业务作用：当前 epoch 毫秒。
+/// 业务作用：取得本地发号使用的 Unix 毫秒时间，并避免窄化转换回绕。
 ///
 /// 参数说明: 无。
 ///
-/// 返回: 系统时间相对 Unix epoch 的毫秒数；系统时间早于 epoch 时返回零。
+/// 返回：早于 Unix epoch 时返回零；超出 i64 毫秒范围时返回 i64::MAX，由生成器的时间容量门禁裁决。
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
+        // 超大时间不能截断成过去的时间；饱和值继续接受相对时间容量核对。
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
@@ -108,16 +115,16 @@ pub struct Snowflake {
 }
 
 impl Snowflake {
-    /// 业务作用：按完整参数构造雪花 ID 生成器。
+    /// 业务作用：为调用方独占的 worker 编号建立具有有限时间容量的本地生成器。
     ///
     /// 参数说明:
-    /// - `worker_id`: 当前进程使用的 worker 编号，必须落在 `worker_id_bits` 可表达的范围内。
-    /// - `base_time`: 业务纪元毫秒时间戳，生成结果会存储相对该时间的毫秒差。
-    /// - `worker_id_bits`: worker 编号占用位数，影响可分配节点数量。
-    /// - `seq_bits`: 毫秒内序列号占用位数，影响单节点同毫秒内可生成的 ID 数。
+    /// - `worker_id`: 当前实例独占的 worker 编号，必须落在 worker 位宽允许范围内。
+    /// - `base_time`: ID 空间统一的 Unix 毫秒纪元；未来纪元从逻辑毫秒零开始递增。
+    /// - `worker_id_bits`: worker 编号位数，合法范围为 1 到 15。
+    /// - `seq_bits`: 序列位数，合法范围为 3 到 21，与 worker 位数之和不超过 22。
     ///
-    /// 返回: 参数合法时返回独立的本地生成器；位长或 worker id 越界时返回相应
-    /// [`SnowflakeError`]。
+    /// 返回：参数合法且当前相对时间尚可编码时返回生成器；位宽、worker 或时间容量不合法时返回相应错误。
+    /// 不协调其它实例或保存重启时间上界；同一 worker 的新实例必须由调用方证明不会与历史 ID 重叠。
     pub fn new(
         worker_id: i64,
         base_time: i64,
@@ -131,12 +138,21 @@ impl Snowflake {
                 "worker_id must be [0, {max_worker_id}], got {worker_id}"
             )));
         }
+        let total_shift = worker_id_bits + seq_bits;
+        let elapsed = i128::from(now_ms()) - i128::from(base_time);
+        // 保留符号位为零；构造时已耗尽的时间域不能交付可发号实例。
+        if elapsed > i128::from(i64::MAX >> total_shift) {
+            return Err(SnowflakeError::TimeRange);
+        }
         Ok(Self {
-            total_shift: worker_id_bits + seq_bits,
+            total_shift,
             max_seq: (1i64 << seq_bits) - 1,
             base_time,
             shifted_worker_id: worker_id << seq_bits,
-            state: Mutex::new(State { last_ts: 0, seq: 0 }),
+            state: Mutex::new(State {
+                last_ts: 0,
+                seq: 0,
+            }),
         })
     }
 
@@ -145,7 +161,7 @@ impl Snowflake {
     /// 参数说明:
     /// - `worker_id`: 当前进程使用的 worker 编号，按默认 worker 位长校验范围。
     ///
-    /// 返回: worker id 合法时返回使用默认纪元和位长的生成器，否则返回范围错误。
+    /// 返回: worker id 合法且默认纪元的相对时间可编码时返回生成器，否则返回 worker 或时间容量错误。
     pub fn with_default_bits(worker_id: i64) -> Result<Self, SnowflakeError> {
         Self::new(
             worker_id,
@@ -155,46 +171,96 @@ impl Snowflake {
         )
     }
 
-    /// 业务作用：生成一个 ID。
+    /// 业务作用：为需要处理时间耗尽或状态失效的调用方申请一个本地 ID。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回: 当前生成器的下一个本地 ID；内部互斥锁失效时终止当前调用。
+    /// 返回：成功时提交一次发号并返回非负 ID；时间容量耗尽或状态锁中毒时返回错误，不交付 ID。
+    pub fn try_generate(&self) -> Result<i64, SnowflakeError> {
+        // 锁中毒时不能证明先前状态完整，必须停止发号而不是恢复使用可能重叠的序列。
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SnowflakeError::StateUnavailable)?;
+        self.next_id_locked(&mut state)
+    }
+
+    /// 业务作用：提供遇到发号错误时终止调用的单次 ID 接口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：成功时返回非负且严格递增的本地 ID；时间容量耗尽或状态锁中毒时 panic。
+    /// 需要显式处理失败的调用方使用 try_generate；此入口不会在时间位耗尽后回绕。
     pub fn generate(&self) -> i64 {
-        let mut st = self.state.lock().expect("snowflake mutex poisoned");
-        self.next_id_locked(&mut st)
+        self.try_generate()
+            .expect("snowflake generation unavailable")
     }
 
-    /// 业务作用：批量生成 `count` 个 ID,只加一次锁。
+    /// 业务作用：在一次持锁期间准备整批 ID，只在全部可编码时提交生成器状态。
     ///
     /// 参数说明:
-    /// - `count`: 本次批量申请的 ID 数量；为 `0` 时返回空列表。
+    /// - `count`: 本次需要的连续发号次数；零表示不申请 ID。
     ///
-    /// 返回: 在一次持锁区间内按生成顺序分配的 `count` 个 ID。
+    /// 返回：成功时返回按生成顺序排列的整批 ID；时间容量耗尽或状态锁中毒时返回错误，原发号状态不变。
+    pub fn try_generate_n(&self, count: usize) -> Result<Vec<i64>, SnowflakeError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SnowflakeError::StateUnavailable)?;
+        let mut candidate = State {
+            last_ts: state.last_ts,
+            seq: state.seq,
+        };
+        // 不把未能完整交付的批次部分写入状态，失败后仍保留调用前的时间和序列。
+        let ids = (0..count)
+            .map(|_| self.next_id_locked(&mut candidate))
+            .collect::<Result<Vec<_>, _>>()?;
+        *state = candidate;
+        Ok(ids)
+    }
+
+    /// 业务作用：提供遇到发号错误时终止调用的整批 ID 接口。
+    ///
+    /// 参数说明:
+    /// - `count`: 本次申请的 ID 数量；零时返回空列表。
+    ///
+    /// 返回：成功时提交整批状态并返回按生成顺序排列的 ID；时间容量耗尽或状态锁中毒时 panic，原发号状态不变。
+    /// 需要显式处理失败的调用方使用 try_generate_n。
     pub fn generate_n(&self, count: usize) -> Vec<i64> {
-        let mut st = self.state.lock().expect("snowflake mutex poisoned");
-        (0..count).map(|_| self.next_id_locked(&mut st)).collect()
+        self.try_generate_n(count)
+            .expect("snowflake generation unavailable")
     }
 
-    /// 业务作用：在已持锁状态下生成下一个 ID。
+    /// 业务作用：在持锁状态中预先核对时间容量，再提交一次不会回绕的发号状态。
     ///
     /// 参数说明:
-    /// - `st`: 当前生成器的时间戳和序列状态；调用方必须已持有对应互斥锁。
+    /// - `st`: 由本生成器建立的时间和序列状态，调用方必须已持有对应互斥锁。
     ///
-    /// 返回: 更新状态后生成的下一个 ID；墙钟未前进时通过序列或逻辑毫秒保持递增。
+    /// 返回：成功时更新状态并返回非负且严格递增的 ID；墙钟或逻辑毫秒超出容量时返回 TimeRange，保持输入状态不变。
+    /// 墙钟回退或纪元尚未到达时继续使用逻辑时间，序列耗尽后推进一毫秒。
     #[inline]
-    fn next_id_locked(&self, st: &mut State) -> i64 {
-        let now = now_ms() - self.base_time;
-        if now > st.last_ts {
-            st.last_ts = now;
-            st.seq = 0;
-        } else if st.seq < self.max_seq {
-            st.seq += 1;
-        } else {
-            st.last_ts += 1;
-            st.seq = 0;
+    fn next_id_locked(&self, st: &mut State) -> Result<i64, SnowflakeError> {
+        let now = i128::from(now_ms()) - i128::from(self.base_time);
+        let max_timestamp = i64::MAX >> self.total_shift;
+        // 先拒绝无法编码的墙钟，避免移位丢弃高位后重新发出历史编号。
+        if now > i128::from(max_timestamp) {
+            return Err(SnowflakeError::TimeRange);
         }
-        (st.last_ts << self.total_shift) | self.shifted_worker_id | st.seq
+        let (timestamp, sequence) = if now > i128::from(st.last_ts) {
+            (now as i64, 0)
+        } else if st.seq < self.max_seq {
+            (st.last_ts, st.seq + 1)
+        } else {
+            // 序列耗尽只能推进仍可编码的逻辑毫秒，不能绕过时间位上界。
+            if st.last_ts >= max_timestamp {
+                return Err(SnowflakeError::TimeRange);
+            }
+            (st.last_ts + 1, 0)
+        };
+        let id = (timestamp << self.total_shift) | self.shifted_worker_id | sequence;
+        st.last_ts = timestamp;
+        st.seq = sequence;
+        Ok(id)
     }
 }
 
@@ -203,7 +269,7 @@ impl IdGenerate for Snowflake {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回: 当前生成器分配的下一个本地 ID。
+    /// 返回: 当前生成器分配的下一个非负本地 ID；时间容量耗尽或状态锁中毒时 panic。
     fn next_id(&self) -> i64 {
         self.generate()
     }
@@ -213,9 +279,9 @@ impl IdGenerate for Snowflake {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SnowflakeConfig {
-    /// worker id。
+    /// 节点机器码；同一 ID 空间内各生成节点必须使用不同值以避免重复。
     pub worker_id: i64,
-    /// 基础时间戳。
+    /// ID 空间统一的 Unix 毫秒纪元；未来纪元使用从零开始的逻辑时间，不能据此假定 ID 是实际创建时间。
     pub base_time: i64,
     /// 机器码位长。
     pub worker_id_bits: u32,
@@ -244,7 +310,7 @@ impl SnowflakeConfig {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回: 配置合法时返回本地生成器，否则返回位长或 worker id 范围错误。
+    /// 返回: 位宽、worker id 和相对时间容量合法时返回本地生成器，否则返回相应配置或时间错误。
     pub fn build(&self) -> Result<Snowflake, SnowflakeError> {
         Snowflake::new(
             self.worker_id,
@@ -254,9 +320,7 @@ impl SnowflakeConfig {
         )
     }
 
-    /// 业务作用：[`build`](Self::build) 的别名；“local”强调只做本地构造，
-    /// (位长校验 + 纯算法,无副作用),不含 Redis workerId 分配;分布式分配走
-    /// `nadis::SnowflakeConfig::build_with_redis`。
+    /// 业务作用：作为 [`build`](Self::build) 的本地构造别名，校验位宽、worker id 和时间容量；不领取分布式编号。
     ///
     /// 参数说明: 无。
     ///

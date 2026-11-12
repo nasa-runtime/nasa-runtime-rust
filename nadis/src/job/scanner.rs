@@ -32,8 +32,11 @@ pub(crate) struct JobScanOutcome {
 
 /// 单节点调度扫描器；持有仓库、配置与本地定义注册表。
 pub struct JobScanner {
+    /// 当前 source 的调度候选读取与原子触发入口。
     repository: JobRepository,
+    /// 扫描批量、重算次数和历史补偿边界。
     config: Arc<JobConfig>,
+    /// 本地已登记的任务定义，缺少定义或修订不一致时不得生成触发请求。
     definitions: HashMap<String, JobDefinition>,
 }
 
@@ -71,14 +74,16 @@ impl JobScanner {
     /// 参数说明：
     /// - `shard`: 目标调度分片。
     ///
-    /// 返回：本轮实际创建或幂等采用的 Run 数；候选并发变化时有界重算，耗尽后返回零并留待下一轮。
+    /// 返回：本轮全部重算累计创建或幂等采用的 Run 数；重算预算耗尽保留已完成数量，余项留待下一轮。
+    /// Redis、协议或调度计算失败返回错误，已提交的触发不会因此撤销。
     pub async fn scan_once(&self, shard: u32) -> Result<usize> {
         Ok(self.scan_once_observed(shard).await?.fired)
     }
 
     /// 业务作用：扫描一个分片并保留调度延迟与每类脚本结局，供受管运行时发布完整低基数观测。
     ///
-    /// 参数说明：`shard` 为目标调度分片。
+    /// 参数说明：
+    /// - `shard`：当前冻结布局内需要扫描的调度分片。
     ///
     /// 返回：全部有界重算期间实际产生的 Run 数、最大延迟和封闭结果计数。
     pub(crate) async fn scan_once_observed(&self, shard: u32) -> Result<JobScanOutcome> {
@@ -98,9 +103,11 @@ impl JobScanner {
             }
             let mut requests = Vec::new();
             for entry in &scan.entries {
+                // 本地缺少定义时没有足够合同计算下一时刻，保留持久候选供具备定义的节点处理。
                 let Some(definition) = self.definitions.get(&entry.job_name) else {
                     continue;
                 };
+                // 能力定义不参与定时触发；修订不同则不能用本地旧合同推进持久调度分数。
                 if definition.trigger() == JobTrigger::FanoutOnly
                     || definition.definition_revision() != entry.definition_revision
                 {
@@ -335,7 +342,13 @@ impl JobScanner {
 
 /// 业务作用：构造一项批量触发请求，集中保持标志位顺序与 Lua 合同一致。
 ///
-/// 参数说明：`definition`、逻辑时刻、下一时刻及三个策略标志组成一次 CAS 项。
+/// 参数说明：
+/// - `definition`：提供任务身份、修订及触发合同的已登记定义。
+/// - `logical_fire_at`：本项要求仍然成立的原调度分数，作为 CAS 前提。
+/// - `proposed_next_fire_at`：本项提交后的下一逻辑时刻；固定延迟执行项使用零等待完成时安排。
+/// - `skip_run`：为真时只推进调度状态，不创建本次 Run。
+/// - `misfire`：标记本项来自误触发处理，供脚本应用对应语义。
+/// - `must_end_in_future`：要求下一时刻晚于脚本观测时间，用于结束补偿链或请求重算。
 ///
 /// 返回：可直接交给 `fire_due_batch` 的借用项。
 fn item(
@@ -358,7 +371,10 @@ fn item(
 
 /// 业务作用：完成固定速率时刻的受检乘加，避免补偿链在整数回绕后写入错误 score。
 ///
-/// 参数说明：`base + count * interval` 的三个有符号整数分量。
+/// 参数说明：
+/// - `base`：当前逻辑时间基准，单位为毫秒。
+/// - `count`：需要跨过的固定间隔数量。
+/// - `interval`：每个固定间隔的毫秒数。
 ///
 /// 返回：未溢出的毫秒时刻；乘法或加法溢出返回配置错误。
 fn checked_add_mul(base: i64, count: i64, interval: i64) -> Result<i64> {

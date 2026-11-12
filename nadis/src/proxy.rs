@@ -7,8 +7,9 @@
 // at-least-once:handler 失败 → 不 ACK,留 group PEL;`XAUTOCLAIM` 周期回收 idle pending(含崩溃
 // consumer 的 + 本节点失败的)重投;超 `max_redeliver` → poison(Drop=XACK 丢弃 / Dlq=转 DLQ stream)。
 //
-// 设计取向:与 PARTITION 同一 `Envelope`(topic/event/data)+ 同一 handler 注册形态(逐 ID 解码、
-// handler 失败/panic 归约为该批 failed),复用心智模型;publish = 无路由 XADD 到共享 stream。
+// 发布沿用 Envelope 信封，按主题与事件匹配处理器；逐 ID 解码失败或展开只保留对应身份，
+// 处理器构造、轮询或结果失败则保留已交付的整桶身份。XADD 写入共享 Stream，由同组消费者竞争领取，
+// 不提供分区排他权威。
 // ============================================================================
 
 use std::collections::HashMap;
@@ -32,11 +33,10 @@ const MAX_PROXY_CONSUMERS: usize = 256;
 
 /// PROXY 消费配置。
 ///
-/// ⚠ **PROXY handler 应幂等**:本路径无 owner-fence,reclaim(XAUTOCLAIM)会回收
-/// idle pending 重投——慢/崩溃 consumer 的在途消息可能被另一 consumer 重跑。当 `handler_timeout_ms>0`
-/// 且 `reclaim_min_idle_ms > handler_timeout_ms` 时,handler 被 timeout 中断早于被 reclaim 抢占,从时间上
-/// **关闭"抢占仍在跑的 handler"双跑窗口**。**默认 `handler_timeout_ms=10s`(< 默认 reclaim 30s)→ 双跑窗口
-/// 默认关闭**；启动校验拒绝无界 handler。
+/// handler 必须幂等：本路径没有 owner-fence，XAUTOCLAIM 可以重新分配闲置 PEL。
+/// handler 超时小于回收阈值只约束一次本地异步等待，不能排除批内排队、执行器停顿或已产生的外部副作用；
+/// Future 取消也不能强制中断不让出执行权的同步代码。因此同一消息可能被重复或重叠处理。
+/// 启动校验要求有界 handler 超时及更长的回收闲置阈值，不提供恰好一次执行保证。
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProxyCfg {
@@ -47,16 +47,14 @@ pub struct ProxyCfg {
     /// 冷流再 poll 间隔毫秒(**NOBLOCK 轮询** + 空轮 sleep——不在共享多路复用连接上用 BLOCK,
     /// 否则 BLOCK 命令会卡住整条 multiplexed 连接的其它命令,对齐 partition 托管模式 NOBLOCK 语义)。
     pub poll_idle_ms: u64,
-    /// 重投上限,超过即 poison(必须 >=1;0 会让首投即判毒)。
+    /// 回收时允许的累计投递次数上限，超过后按毒消息策略处置；必须至少为一。
     pub max_redeliver: u32,
     /// XAUTOCLAIM 回收 idle 阈值毫秒(pending 闲置超此即可被重投)。
     pub reclaim_min_idle_ms: u64,
     /// 毒消息策略。
     pub poison: ProxyPoison,
-    /// handler 强制超时毫秒。超时整桶留 PEL 待重投。
-    /// ⚠ 启用时**必须** `reclaim_min_idle_ms > handler_timeout_ms`(prepare 校验):这样在途 handler
-    /// 要么超时释放、要么 ACK 完成,**早于**被 XAUTOCLAIM 回收的时点——从结构上关闭"reclaim 抢占
-    /// 仍在跑的慢 handler 致双跑"窗口。
+    /// 每个 handler 桶的异步等待超时毫秒，超时后整桶保留在 PEL 待重投。
+    /// 必须小于 reclaim_min_idle_ms；此约束不包含领取到调用之间的排队，也不撤销已发生的业务副作用。
     pub handler_timeout_ms: u64,
     /// publish 时给共享 stream 的近似上限。
     /// `Some(n)` → `XADD MAXLEN ~ n`,防 ACK 只出 PEL、entry 留存的无界增长 OOM。
@@ -76,15 +74,17 @@ pub struct ProxyCfg {
     /// 注册了 handler 的节点未必先抢到 → 最终仍可能 poison。要**严格路由**请按 handler 集**拆 stream/group**
     /// (异构节点各消费各自的 stream),`requeue_unregistered=true` 只是同构假设破裂时的兜底,非保证。
     pub requeue_unregistered: bool,
-    /// 停机 drain 预算毫秒。超时未退的 task 强制 abort,
-    /// 停机不被卡死 handler 永久阻塞。
+    /// 停机排干预算毫秒，到期请求 abort 并继续等待真实任务退出。
+    /// 不能强制中断不让出执行权的同步 handler，因此预算不构成所有宿主代码的退出时间保证。
     pub drain_deadline_ms: u64,
 }
 
 impl Default for ProxyCfg {
-    /// 业务作用：构造 stream proxy 默认配置。
+    /// 业务作用：构造共享组消费的默认容量、轮询、重投和退出策略。
     ///
-    /// 默认单消费者、100 条批量、Park 前的重投上限为 5,并设置非零 handler 超时避免慢处理器双跑。
+    /// 参数说明：无。
+    ///
+    /// 返回：返回单消费者、100 条批量、重投上限 5、10 秒 handler 超时及 30 秒回收闲置阈值的配置；默认毒消息丢弃、未注册事件确认，handler 仍须幂等。
     fn default() -> Self {
         Self {
             consumers: 1,
@@ -93,9 +93,7 @@ impl Default for ProxyCfg {
             max_redeliver: 5,
             reclaim_min_idle_ms: 30_000,
             poison: ProxyPoison::Drop,
-            //**默认非零**(< 默认 reclaim_min_idle 30s)关掉"慢 handler 双跑"footgun——
-            // 默认配置下 handler 10s 必被 timeout 中断,早于 30s 被 reclaim 抢占重投,故无在途双跑。
-            // 与 partition 一样，prepare 拒绝 0，防止无限 handler 与 reclaim 双跑。
+            // 本地等待需早于回收阈值到期，为合作式异步处理留出退出余量；重复执行仍由业务幂等性承担。
             handler_timeout_ms: 10_000,
             max_stream_len: Some(1_000_000),
             requeue_unregistered: false,
@@ -128,7 +126,11 @@ pub enum ProxyStartOffset {
 }
 
 impl ProxyStartOffset {
-    /// 业务作用：XGROUP CREATE 的位点字面量。
+    /// 业务作用：把首次建组的消费策略映射为 Redis 起始位点。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：New 返回 $，History 返回 0-0；已有组的位点不由此值重置。
     fn redis_id(self) -> &'static str {
         match self {
             ProxyStartOffset::New => "$",
@@ -139,23 +141,28 @@ impl ProxyStartOffset {
 
 /// 阶段一:已建 group,未启消费(register 只在此阶段)。
 pub struct PreparedProxy {
+    /// 本次准备与后续消费固定使用的 Redis 来源。
     client: Arc<RedisClient>,
+    /// 竞争领取消息的共享 Stream。
     stream: String,
+    /// 已确认存在且不重置位点的消费组。
     group: String,
+    /// 启动前可登记的主题与事件处理目录。
     handlers: HandlerMap,
+    /// 已通过准备校验的消费与处置边界。
     cfg: ProxyCfg,
 }
 
 impl PreparedProxy {
-    /// 业务作用：创建共享 Stream 与 consumer group，已存在的组保持原位点。
-    /// 默认使用 `$`，只消费建组后的新消息；需要历史 backlog 时调用
-    /// [`prepare_with_offset`](Self::prepare_with_offset) 并传入 [`ProxyStartOffset::History`]。
+    /// 业务作用：为共享 Stream 准备竞争消费组，默认只领取首次建组之后的新消息。
     ///
-    /// # 参数
-    /// - `client`: Redis 客户端共享句柄。
-    /// - `stream`: 共享 stream 名。
-    /// - `group`: consumer group 名。
-    /// - `cfg`: proxy 消费运行配置。
+    /// 参数说明：
+    /// - `client`：固定 Redis 来源的共享连接入口。
+    /// - `stream`：共享 Stream 名，须非空、无首尾空白且在名称字节上限内。
+    /// - `group`：竞争消费组名，受同样的名称约束。
+    /// - `cfg`：消费并发、容量、重投、毒消息与停机策略，准备时校验。
+    ///
+    /// 返回：建组成功或识别为已有组时返回尚未启动的计划；配置或其它 Redis 错误返回失败。需要首次读取历史消息时使用 prepare_with_offset 和 History。
     pub async fn prepare(
         client: Arc<RedisClient>,
         stream: impl Into<String>,
@@ -165,15 +172,17 @@ impl PreparedProxy {
         Self::prepare_with_offset(client, stream, group, cfg, ProxyStartOffset::New).await
     }
 
-    /// 业务作用：显式指定首次建组的起始位点，New 使用 `$`，History 使用 `0-0`。
-    /// 已有 consumer group 保持原位点，本入口不重置其消费进度。
+    /// 业务作用：校验共享组运行约束并按指定起点尝试建组，不重置已有消费进度。
     ///
-    /// # 参数
-    /// - `client`: Redis 客户端共享句柄。
-    /// - `stream`: 共享 stream 名。
-    /// - `group`: consumer group 名。
-    /// - `cfg`: proxy 消费运行配置。
-    /// - `start_offset`: 首次建组时使用的 stream 起始位点。
+    /// 参数说明：
+    /// - `client`：固定 Redis 来源的共享客户端。
+    /// - `stream`：共享 Stream 的合法业务名称。
+    /// - `group`：本组固定名称，用于领取、确认与回收。
+    /// - `cfg`：有界消费者数量、批量、轮询、handler 超时和回收闲置阈值等约束。
+    /// - `start_offset`：仅首次建组生效的起点；New 使用 $，History 使用 0-0。
+    ///
+    /// 返回：配置不满足边界时在建组前返回错误；仅接受 OK 回包或精确 BUSYGROUP 错误码作为组已就绪的证据。
+    /// 成功返回空 handler 目录的准备态；其它回包或 Redis 错误均拒绝交付，不重置已有组位点。
     pub async fn prepare_with_offset(
         client: Arc<RedisClient>,
         stream: impl Into<String>,
@@ -226,17 +235,16 @@ impl PreparedProxy {
                 "ProxyCfg 的 poll/reclaim/handler/drain 时长必须位于 1..={MAX_REDIS_RUNTIME_DURATION_MS}ms"
             )));
         }
-        //max_redeliver=0 会让每条消息首投(deliveries>=1)即判毒 → 全量进毒处置。
+        // 回收查询使用累计投递次数，零额度会使第一次回收就失去重投机会。
         if cfg.max_redeliver == 0 {
             return Err(NasaRedisError::Config(
-                "ProxyCfg.max_redeliver 必须 >= 1(否则首投即判毒)".into(),
+                "ProxyCfg.max_redeliver 必须 >= 1".into(),
             ));
         }
-        //启用 handler 超时时,必须 reclaim_min_idle > handler_timeout,
-        // 否则仍在跑的 handler 会被 XAUTOCLAIM 抢占重投(双跑 + 跨消费者 ACK)。
+        // 回收阈值至少应晚于一次本地等待超时；这只是基本时长约束，不授予排他处理或跨消费者确认权威。
         if cfg.handler_timeout_ms > 0 && cfg.reclaim_min_idle_ms <= cfg.handler_timeout_ms {
             return Err(NasaRedisError::Config(format!(
-                "ProxyCfg.reclaim_min_idle_ms({}) 必须 > handler_timeout_ms({})——否则 reclaim 会抢占在途 handler 致双跑",
+                "ProxyCfg.reclaim_min_idle_ms({}) 必须 > handler_timeout_ms({})，为本地异步等待预留退出余量",
                 cfg.reclaim_min_idle_ms, cfg.handler_timeout_ms
             )));
         }
@@ -263,8 +271,14 @@ impl PreparedProxy {
             .query_async(&mut client.conn())
             .await;
         match r {
-            Ok(_) => {}
-            Err(e) if e.to_string().contains("BUSYGROUP") => {}
+            Ok(reply) if reply == "OK" => {}
+            // 只有准确的已存在事实才能复用消费组，错误正文或相似错误码不能授权后续消费。
+            Err(e) if e.code() == Some("BUSYGROUP") => {}
+            Ok(_) => {
+                return Err(NasaRedisError::Parsing(
+                    "PROXY 建组回复不是预期的 OK".into(),
+                ));
+            }
             Err(e) => return Err(e.into()),
         }
         Ok(Self {
@@ -276,13 +290,15 @@ impl PreparedProxy {
         })
     }
 
-    /// 业务作用：注册 handler(逐 ID 解码 T;handler 失败/panic → 该批 failed)。与 partition 同形态。
+    /// 业务作用：为主题和事件登记批量业务处理器，并把类型解码或异步处理失败归还为待重投 ID。
     ///
+    /// 参数说明：
+    /// - `topic`：信封中的业务主题，与 event 共同选择本地处理器。
+    /// - `event`：主题内的事件名；相同主题和事件再次登记会替换原处理器。
+    /// - `f`：接收本桶成功解码的消息，返回整桶成功或失败的异步处理器。
     ///
-    /// # 参数
-    /// - `topic`: stream/partition 使用的业务主题。
-    /// - `event`: 该 topic 下的事件类型,用于选择批量处理器。
-    /// - `f`: 解码出同批业务消息后执行的异步处理器。
+    /// 返回：返回当前准备态供链式登记；类型解码错误或展开保留各自 ID，处理器构造 Future、轮询或返回结果失败时保留全部已交付 ID。
+    /// 已发生的业务副作用不回滚，失败 ID 留待重投；本函数显式记录的处理失败日志不包含业务错误正文。
     pub fn register<T, F, Fut>(&mut self, topic: &str, event: &str, f: F) -> &mut Self
     where
         T: DeserializeOwned + Send + 'static,
@@ -297,13 +313,20 @@ impl PreparedProxy {
                 let mut good_ids: Vec<String> = Vec::with_capacity(items.len());
                 let mut failed: Vec<String> = Vec::new();
                 for (id, v) in items {
-                    match serde_json::from_value::<T>(v) {
-                        Ok(t) => {
+                    // Deserialize 可执行业务自定义代码；单条解码展开只归还该身份，不能使整组消费责任意外退出。
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        serde_json::from_value::<T>(v)
+                    })) {
+                        Ok(Ok(t)) => {
                             typed.push(t);
                             good_ids.push(id);
                         }
-                        Err(e) => {
-                            tracing::error!(id, err = %e, "PROXY 业务类型解码失败,该 ID 进重投/毒");
+                        Ok(Err(e)) => {
+                            tracing::error!(id, category = ?e.classify(), "PROXY 业务类型解码失败,该 ID 进重投/毒");
+                            failed.push(id);
+                        }
+                        Err(_) => {
+                            tracing::error!(id, "PROXY 业务类型解码展开,该 ID 保留重投");
                             failed.push(id);
                         }
                     }
@@ -311,16 +334,24 @@ impl PreparedProxy {
                 if typed.is_empty() {
                     return failed;
                 }
-                let fut = std::panic::AssertUnwindSafe(f(typed));
-                match futures::FutureExt::catch_unwind(fut).await {
+                // 调用处理器构造 Future 时已经可能发生副作用或展开，保护范围必须早于该调用。
+                let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(typed)
+                })) {
+                    Ok(future) => {
+                        futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(future)).await
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
                     Ok(Ok(())) => failed,
-                    Ok(Err(e)) => {
-                        tracing::warn!(err = %e, "PROXY handler 失败,本桶 ID 转重投");
+                    Ok(Err(_)) => {
+                        tracing::warn!("PROXY handler 失败,本桶 ID 转重投");
                         failed.extend(good_ids);
                         failed
                     }
                     Err(_) => {
-                        tracing::error!("PROXY handler panic,本桶 ID 转重投");
+                        tracing::error!("PROXY handler 构造或轮询展开,本桶 ID 转重投");
                         failed.extend(good_ids);
                         failed
                     }
@@ -333,14 +364,18 @@ impl PreparedProxy {
     }
 
     /// 业务作用：提供消费路由目录规模，用于放行前拒绝空计划和超量计划。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：去重后的主题与事件组合数量。
     pub fn handler_count(&self) -> usize {
         self.handlers.len()
     }
 
     /// 业务作用：建立并立即激活独立竞争消费，保持原有独立入口行为。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：消费者与回收任务的唯一关闭句柄；配置与准备失败时不开放消费。
     pub async fn start(self) -> Result<RunningProxy> {
         let running = self.start_suspended().await?;
@@ -349,20 +384,29 @@ impl PreparedProxy {
     }
 
     /// 业务作用：建立由激活屏障保护的消费任务及独立关闭 owner。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：准备完成但不会读取、回收或调用 handler 的运行句柄。
     pub async fn start_suspended(self) -> Result<RunningProxy> {
         self.start_suspended_with_activation(CancellationToken::new())
             .await
     }
 
-    /// 业务作用：让共享组消费和回收等待宿主统一启动许可。
-    /// 参数说明：`ready` 的取消表示许可发布；共享许可时仅由宿主取消，不能逐项调用 activate。
-    /// 返回：等待许可的运行句柄，关闭优先于激活，不提前读取或调用业务。
+    /// 业务作用：建立等待宿主统一许可的消费者、回收任务及独立关闭责任。
+    ///
+    /// 参数说明：
+    /// - `ready`：取消表示开放本代消费；共享许可时由宿主统一取消，不逐项调用 activate。
+    ///
+    /// 返回：取得有效 Tokio 上下文并维持完整任务责任时返回运行句柄；缺少上下文或交付前已失去任务责任时返回错误。
+    /// 任务关闭优先于激活，在许可之前不读取或调用 handler；错误不会回滚准备期建组或已经获许可执行的业务副作用。
     pub async fn start_suspended_with_activation(
         self,
         ready: CancellationToken,
     ) -> Result<RunningProxy> {
+        // 派发前取得执行器，避免缺少上下文时在建立部分本地责任后展开。
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| NasaRedisError::Config("PROXY 启动需要有效的 Tokio 执行上下文".into()))?;
         let cancel = CancellationToken::new();
         let activity = Arc::new(crate::activity::Activity::default());
         let shared = Arc::new(ProxyShared {
@@ -387,7 +431,7 @@ impl PreparedProxy {
             } else {
                 crate::activity::TaskKind::Consumer
             });
-            handles.push(tokio::spawn(async move {
+            handles.push(runtime.spawn(async move {
                 let _active = active;
                 // 连接准备不授予消费权；取消优先于激活，禁止启动回滚时晚到消费。
                 tokio::select! {
@@ -417,8 +461,8 @@ impl PreparedProxy {
             report: activity.completion(report),
         };
         // 任务句柄从创建时移交 owner，任何调用方取消都不会取得或分离唯一等待责任。
-        tokio::spawn(owner.run());
-        Ok(RunningProxy {
+        runtime.spawn(owner.run());
+        let running = RunningProxy {
             activity,
             client: self.client,
             stream: self.stream,
@@ -429,27 +473,41 @@ impl PreparedProxy {
             max_stream_len: self.cfg.max_stream_len,
             drain_deadline_ms: self.cfg.drain_deadline_ms,
             consumers: self.cfg.consumers,
-        })
+        };
+        // 已关闭的执行器可能同步销毁派发任务；失去责任时关闭准入，不能交付假就绪句柄。
+        if running.with_running(|| ()).is_none() {
+            running.begin_shutdown();
+            return Err(NasaRedisError::Config(
+                "PROXY 启动时未取得完整任务责任，已请求关闭".into(),
+            ));
+        }
+        Ok(running)
     }
 }
 
-/// 保存内部共享状态；用于在多个调用路径之间复用数据。
+/// 本代竞争消费者与回收任务共同使用的冻结目录、连接和本地责任证据。
 struct ProxyShared {
+    /// 本地活动任务及已领取处理次数，不替代远端 PEL。
     activity: Arc<crate::activity::Activity>,
+    /// 各领取、回收、确认与处置调用的同一来源。
     client: Arc<RedisClient>,
+    /// 同组竞争读取的共享 Stream。
     stream: String,
+    /// 领取及确认使用的固定消费组。
     group: String,
+    /// 启动后冻结的主题与事件处理器。
     handlers: HandlerMap,
+    /// 所有消费者共同遵守的容量、超时与毒消息策略。
     cfg: ProxyCfg,
 }
 
-/// Proxy 清理的确定性分类；证据不足时保留 consumer 与 PEL。
+/// Proxy 清理的证据分类；不能确认结果时不宣告完成，已发出的清理可能已经删除空消费者。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProxyCleanup {
     /// 尚未执行或任务非正常退出，不进行删除。
     #[default]
     Skipped,
-    /// 完整摘要确认空 PEL，允许清理的 consumer 已完成删除。
+    /// 各消费者经原子复验确认没有 pending，相应清理调用均已取得完成回复。
     Complete,
     /// 存在 pending，相关 consumer 被保留。
     Pending,
@@ -474,22 +532,53 @@ pub struct ProxyStopReport {
 
 /// 运行态发布、激活和关闭句柄；退出证据由独立 owner 持有。
 pub struct RunningProxy {
+    /// 准备时确定的普通消费者数，最终接流裁决不接受缺席任务。
     consumers: usize,
+    /// 与任务退出串行化的本代接流和进展证据。
     activity: Arc<crate::activity::Activity>,
+    /// 发布及后台收口仍需持有的 Redis 依赖。
     client: Arc<RedisClient>,
+    /// 本入口允许追加消息的共享 Stream。
     stream: String,
+    /// 永久关闭本代发布、领取和回收的信号。
     cancel: CancellationToken,
+    /// 宿主发布的消费许可，不覆盖关闭信号。
     ready: CancellationToken,
+    /// 多次关闭取较短预算的共享绝对截止。
     deadline: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+    /// 独立 owner 保留的任务退出及清理证据。
     outcome: tokio::sync::watch::Receiver<ProxyStopReport>,
+    /// 发布时采用的可选近似长度上限，不保护 pending 正文。
     max_stream_len: Option<u64>,
+    /// 本领域最大排干等待预算，宿主可以进一步缩短。
     drain_deadline_ms: u64,
 }
 
+/// 业务作用：解析具体 Redis Stream 坐标，为写入回包和扫描边界提供整数证据。
+///
+/// 参数说明：
+/// - `id`：由连字符分隔毫秒与序号两个分量的文本身份。
+///
+/// 返回：两个非空 ASCII 十进制分量均位于 u64 范围时返回坐标，否则返回 None；0-0 是合法扫描坐标，写入成功须另行排除。
+fn parse_stream_id(id: &str) -> Option<(u64, u64)> {
+    let (milliseconds, sequence) = id.split_once('-')?;
+    if milliseconds.is_empty()
+        || sequence.is_empty()
+        || !milliseconds.bytes().all(|byte| byte.is_ascii_digit())
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((milliseconds.parse().ok()?, sequence.parse().ok()?))
+}
+
 impl RunningProxy {
-    /// 业务作用：在消费和回收责任完整时完成宿主接流裁决，与任务退出串行化。
-    /// 参数说明：`publish` 必须短小同步、不阻塞、不重入本 Proxy。
-    /// 返回：全部固定任务仍运行且未关闭时返回 Some，否则不执行；不代替远端健康探针。
+    /// 业务作用：在固定消费与回收责任完整时执行宿主的同步接流裁决，与活动任务退出串行化。
+    ///
+    /// 参数说明：
+    /// - `publish`：短小、不阻塞且不重入本 Proxy 的同步发布动作。
+    ///
+    /// 返回：全部固定任务仍存在且本代未关闭时返回 Some；否则不执行，不据此证明远端 Redis 可用或 handler 成功。
     pub fn with_running<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
         self.activity
             .with_tasks(self.consumers, 1, 0, || {
@@ -503,22 +592,24 @@ impl RunningProxy {
             .flatten()
     }
     /// 业务作用：读取 consumer、reclaim 和本地处理次数，不将其替代远端 PEL 证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本地工作快照，取消或异常退出时没有结束证据的处理继续计入未完成。
     pub fn observation(&self) -> crate::RedisTaskObservation {
         self.activity.snapshot()
     }
 
-    /// 业务作用：向共享 Stream 写入单个 data 字段，内容为标准 JSON 编码的
-    /// `Envelope{topic,event,data,passthrough}`，由消费者竞争消费。
+    /// 业务作用：把主题、事件和业务内容编码为标准 Envelope，经 data 字段追加到共享 Stream。
     ///
-    /// 生产者必须使用相同信封结构；以事件名作为 entry field 的编码不兼容，缺少 data 的
-    /// entry 会进入 DLQ。本入口不自动识别其它编码。返回 entry ID，不代表消费者已处理。
+    /// 参数说明：
+    /// - `topic`：非空业务主题，供消费者选择处理器。
+    /// - `event`：主题内的非空事件名。
+    /// - `data`：可序列化的业务内容，写入信封的 data 字段。
     ///
-    /// # 参数
-    /// - `topic`: stream/partition 使用的业务主题。
-    /// - `event`: 写入信封的事件类型。
-    /// - `data`: 待序列化进信封 `data` 字段的业务对象。
+    /// 返回：身份为空、入口关闭、序列化失败或展开时在发送前返回错误；成功只接受合法非零 Stream ID，不表示消费完成。
+    /// XADD 调用失败或回包身份不合法时返回 PublishOutcomeUnknown，不自动重发；错误摘要不携带业务正文。
+    /// 追加可按配置近似裁剪，不复验 PEL；其它生产者必须遵守信封格式，无法解析的内容按毒消息策略处置。
     pub async fn publish<T: Serialize>(
         &self,
         topic: &str,
@@ -526,20 +617,36 @@ impl RunningProxy {
         data: &T,
     ) -> Result<String> {
         if topic.is_empty() || event.is_empty() {
-            return Err(NasaRedisError::Config(format!(
-                "InvalidPublish: topic/event 为空(topic={topic:?}, event={event:?})"
-            )));
+            return Err(NasaRedisError::Config(
+                "Proxy 发布的 topic/event 不能为空".into(),
+            ));
         }
         if self.cancel.is_cancelled() {
             return Err(NasaRedisError::NotExecuted("Proxy 已关闭".into()));
         }
-        let env = Envelope {
-            topic: topic.to_string(),
-            event: event.to_string(),
-            data: serde_json::to_value(data).map_err(|e| NasaRedisError::Codec(e.to_string()))?,
-            passthrough: None,
+        // 自定义 Serialize 属于业务代码，返回错误和展开都须在构造写入前收束，且不把原始错误正文带给调用方。
+        let body = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let env = Envelope {
+                topic: topic.to_string(),
+                event: event.to_string(),
+                data: serde_json::to_value(data)?,
+                passthrough: None,
+            };
+            serde_json::to_vec(&env)
+        })) {
+            Ok(Ok(body)) => body,
+            Ok(Err(error)) => {
+                return Err(NasaRedisError::Codec(format!(
+                    "Proxy 序列化失败: {:?}, line={}, column={}",
+                    error.classify(),
+                    error.line(),
+                    error.column()
+                )));
+            }
+            Err(_) => {
+                return Err(NasaRedisError::Codec("Proxy 序列化展开".into()));
+            }
         };
-        let body = serde_json::to_vec(&env).map_err(|e| NasaRedisError::Codec(e.to_string()))?;
         let mut cmd = redis::cmd("XADD");
         cmd.arg(&self.stream);
         //可选近似上限,防共享 stream 无界增长 OOM(ACK 只出 PEL,entry 留存)。
@@ -547,12 +654,28 @@ impl RunningProxy {
             cmd.arg("MAXLEN").arg("~").arg(n);
         }
         cmd.arg("*").arg(DATA_FIELD).arg(body);
-        let id: String = cmd.query_async(&mut self.client.conn()).await?;
+        let id: String = cmd.query_async(&mut self.client.conn()).await.map_err(
+            |error: redis::RedisError| {
+                NasaRedisError::PublishOutcomeUnknown(format!(
+                    "Proxy XADD 未取得有效回包: {:?}",
+                    error.kind()
+                ))
+            },
+        )?;
+        // 命令已经交给连接，异常成功值不能证明写入或未写入；不得授权调用方按确定未发送自动重放。
+        if !matches!(parse_stream_id(&id), Some((milliseconds, sequence)) if milliseconds != 0 || sequence != 0)
+        {
+            return Err(NasaRedisError::PublishOutcomeUnknown(
+                "Proxy XADD 返回非法条目身份".into(),
+            ));
+        }
         Ok(id)
     }
 
     /// 业务作用：宿主完成准备后一次性开放本代消费。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：未关闭时开放成功；关闭后永久拒绝。
     pub fn activate(&self) -> bool {
         if self.cancel.is_cancelled() {
@@ -562,9 +685,12 @@ impl RunningProxy {
         true
     }
 
-    /// 业务作用：按同一绝对截止时间停止消费与回收准入。
-    /// 参数说明：`deadline` 为宿主分配的剩余关闭期限。
-    /// 返回：已提出关闭请求；任务退出与清理由独立 owner 继续完成。
+    /// 业务作用：按宿主预算与本领域预算中较早的截止，永久关闭本代接流并通知独立收尾任务。
+    ///
+    /// 参数说明：
+    /// - `deadline`：宿主分配的绝对截止；重复关闭只能缩短已有截止。
+    ///
+    /// 返回：关闭准入并发布停止信号；不等待退出或 PEL 清理，不把取消信号当作完成证据。
     pub fn begin_shutdown_until(&self, deadline: tokio::time::Instant) {
         self.activity.close();
         let local = tokio::time::Instant::now() + Duration::from_millis(self.drain_deadline_ms);
@@ -576,7 +702,9 @@ impl RunningProxy {
     }
 
     /// 业务作用：使用领域预算启动关闭，不将取消信号视为完成证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：新发布和新消费已关闭。
     pub fn begin_shutdown(&self) {
         self.begin_shutdown_until(
@@ -585,7 +713,9 @@ impl RunningProxy {
     }
 
     /// 业务作用：读取本代任务及清理的确定性状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：terminated 仅在取得全部任务退出证据后为 true；证据通道丢失时 failed 为 true。
     pub fn stop_report(&self) -> ProxyStopReport {
         let disconnected = self.outcome.has_changed().is_err();
@@ -597,7 +727,9 @@ impl RunningProxy {
     }
 
     /// 业务作用：等待 owner 发布最终退出结果，取消此等待不影响收口责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有任务已退出的报告；证据通道提前关闭时报告失败且不伪报退出。
     pub async fn wait_closed(&self) -> ProxyStopReport {
         let mut outcome = self.outcome.clone();
@@ -616,7 +748,9 @@ impl RunningProxy {
     }
 
     /// 业务作用：兼容独立入口，关闭并等待本代任务与可选 PEL 清理。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：退出结果通过日志记录；需要裁决时使用 begin_shutdown 与 wait_closed。
     pub async fn shutdown(self) {
         self.begin_shutdown();
@@ -640,7 +774,9 @@ impl RunningProxy {
 
 impl Drop for RunningProxy {
     /// 业务作用：最后释放运行句柄时收回准入，关闭 owner 继续等待任务和保留必要 PEL。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：触发关闭，不以 Drop 作为退出证据。
     fn drop(&mut self) {
         self.begin_shutdown();
@@ -648,21 +784,33 @@ impl Drop for RunningProxy {
 }
 
 struct ProxyCloseOwner {
+    /// 保留到任务退出和清理裁决结束的连接来源。
     client: Arc<RedisClient>,
+    /// 本代消费者所属 Stream。
     stream: String,
+    /// 本代消费者所属共享组。
     group: String,
+    /// 仅本次创建的消费者身份，清理不删除其它实例的消费者。
     names: Vec<String>,
+    /// 唯一等待的消费与回收任务句柄。
     handles: Vec<JoinHandle<()>>,
+    /// 预算耗尽或 owner 消失时提出终止请求的句柄。
     aborts: Vec<tokio::task::AbortHandle>,
+    /// 关闭业务接流与后台新轮次的信号。
     cancel: CancellationToken,
+    /// 宿主可持续缩短的共享绝对截止。
     deadline: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+    /// 无显式宿主截止时采用的领域排干预算。
     budget: Duration,
+    /// 发布最终报告前一直保留的完成责任。
     report: crate::activity::CompletionOwner<ProxyStopReport>,
 }
 
 impl ProxyCloseOwner {
     /// 业务作用：独占本代 consumer/reclaim 的等待责任，在关闭预算内排干并保守清理 PEL。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有任务真实退出后发布报告；任务未退出期间继续持有 Redis 依赖。
     async fn run(mut self) {
         use futures::StreamExt;
@@ -707,9 +855,13 @@ impl ProxyCloseOwner {
         self.report.send_replace(report);
     }
 
-    /// 业务作用：以共享截止点约束同一在途动作，后来的更短预算立即生效且不重发命令。
-    /// 参数说明：`deadline` 为本轮预算；`future` 为已建立的唯一操作。
-    /// 返回：预算内完成的原结果，耗尽时保留远端结果未知语义。
+    /// 业务作用：以可缩短的共享截止约束同一个在途动作，预算更新时继续轮询原 Future。
+    ///
+    /// 参数说明：
+    /// - `deadline`：本轮不可延长的初始绝对截止。
+    /// - `future`：唯一在途操作；预算更新不重新创建或重发它。
+    ///
+    /// 返回：在截止前完成时返回原结果，到期返回 Err 并停止等待；不据此撤销已提交的外部副作用。
     async fn within_deadline<T>(
         &self,
         deadline: tokio::time::Instant,
@@ -722,61 +874,67 @@ impl ProxyCloseOwner {
                 .borrow_and_update()
                 .unwrap_or(deadline)
                 .min(deadline);
-            tokio::select! {biased;
-                _=tokio::time::sleep_until(current)=>return Err(()),
-                result=&mut future=>return Ok(result),
-                _=changes.changed()=>{},
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(current) => return Err(()),
+                result = &mut future => return Ok(result),
+                _ = changes.changed() => {},
             }
         }
     }
 
-    /// 业务作用：只在完整有效的 PEL 证据允许时删除空 consumer，所有命令共享剩余期限。
-    /// 参数说明：`deadline` 为任务排干使用的同一截止时间。
-    /// 返回：清理分类；失败或超时不把 pending 当作零。
+    /// 业务作用：本代任务正常退出后，在同一 Redis 脚本内复验每个消费者没有 pending，再删除其元数据。
+    ///
+    /// 参数说明：
+    /// - `deadline`：排干与清理共用的截止，后续更短预算同样生效。
+    ///
+    /// 返回：返回完成、存在 pending、证据不可用或到期分类；脚本或命令权限不足、回复异常均不视为空 PEL。
+    /// 已完成的删除不会因后续失败回滚；脚本只保证每次复验与删除原子，不保证外部调用方之后不能重建同名消费者。
     async fn cleanup(&self, deadline: tokio::time::Instant) -> ProxyCleanup {
-        if tokio::time::Instant::now() >= self.deadline.borrow().unwrap_or(deadline).min(deadline) {
-            return ProxyCleanup::Deadline;
-        }
-        let pending = match self
-            .within_deadline(
-                deadline,
-                consumer_pending_counts(&self.client, &self.stream, &self.group),
-            )
-            .await
-        {
-            Ok(Ok(pending)) => pending,
-            Ok(Err(_)) => return ProxyCleanup::Unavailable,
-            Err(_) => return ProxyCleanup::Deadline,
-        };
+        // 空摘要与删除分开执行会留下重新分配 PEL 的窗口；原子复验只查询当前消费者的一条待确认记录。
+        let script = redis::Script::new(
+            r#"
+local pending = redis.call('XPENDING', KEYS[1], ARGV[1], '-', '+', 1, ARGV[2])
+if type(pending) ~= 'table' then
+    return redis.error_reply('PROXY pending reply is invalid')
+end
+if next(pending) ~= nil then
+    return 1
+end
+local removed = redis.call('XGROUP', 'DELCONSUMER', KEYS[1], ARGV[1], ARGV[2])
+if removed ~= 0 then
+    return redis.error_reply('PROXY consumer deletion reply is invalid')
+end
+return 0
+"#,
+        );
         let mut outcome = ProxyCleanup::Complete;
         for name in &self.names {
-            if pending.get(name).copied().unwrap_or(0) > 0 {
-                outcome = ProxyCleanup::Pending;
-                continue;
-            }
-            // 只有正常退出且摘要完整时，缺失 consumer 才能解释为没有 pending。
+            // 排干和清理共用截止；预算耗尽后不再发起可能产生外部副作用的脚本。
             if tokio::time::Instant::now()
                 >= self.deadline.borrow().unwrap_or(deadline).min(deadline)
             {
                 return ProxyCleanup::Deadline;
             }
-            let result: std::result::Result<i64, _> = match self
+            let result: std::result::Result<redis::Value, _> = match self
                 .within_deadline(
                     deadline,
-                    redis::cmd("XGROUP")
-                        .arg("DELCONSUMER")
-                        .arg(&self.stream)
+                    script
+                        .key(&self.stream)
                         .arg(&self.group)
                         .arg(name)
-                        .query_async(&mut self.client.conn()),
+                        .invoke_async(&mut self.client.conn()),
                 )
                 .await
             {
                 Ok(result) => result,
                 Err(_) => return ProxyCleanup::Deadline,
             };
-            if result.is_err() {
-                return ProxyCleanup::Unavailable;
+            // 只有脚本定义的两个整数状态有效，不能把任意成功回包转换成清理完成。
+            match result {
+                Ok(redis::Value::Int(0)) => {}
+                Ok(redis::Value::Int(1)) => outcome = ProxyCleanup::Pending,
+                _ => return ProxyCleanup::Unavailable,
             }
         }
         outcome
@@ -785,7 +943,9 @@ impl ProxyCloseOwner {
 
 impl Drop for ProxyCloseOwner {
     /// 业务作用：收尾 future 被销毁时收回发布准入并请求终止所有消费任务。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不再允许旧句柄发布；未获得 join 结果时保留失败和未知退出语义，不清理 PEL。
     fn drop(&mut self) {
         // 先关闭业务准入，再请求子任务终止，不能因 owner 丢失而继续接受无消费者归属的工作。
@@ -796,77 +956,12 @@ impl Drop for ProxyCloseOwner {
     }
 }
 
-/// 业务作用：严格验证 XPENDING 摘要，禁止查询或解析不完整时将未知证据解释为零。
-/// 参数说明：`client` 为来源；`stream` 和 `group` 固定目标消费组。
-/// 返回：完整有效的 consumer 计数；类型、总数或计数异常均拒绝清理。
-async fn consumer_pending_counts(
-    client: &RedisClient,
-    stream: &str,
-    group: &str,
-) -> std::result::Result<HashMap<String, i64>, redis::RedisError> {
-    let value: redis::Value = redis::cmd("XPENDING")
-        .arg(stream)
-        .arg(group)
-        .query_async(&mut client.conn())
-        .await?;
-    let invalid =
-        || redis::RedisError::from((redis::ErrorKind::Client, "invalid XPENDING summary"));
-    let redis::Value::Array(cols) = value else {
-        return Err(invalid());
-    };
-    if cols.len() != 4 {
-        return Err(invalid());
-    }
-    let redis::Value::Int(total) = cols[0] else {
-        return Err(invalid());
-    };
-    if total < 0 {
-        return Err(invalid());
-    }
-    if total == 0 {
-        if cols[1] != redis::Value::Nil
-            || cols[2] != redis::Value::Nil
-            || cols[3] != redis::Value::Nil
-        {
-            return Err(invalid());
-        }
-        return Ok(HashMap::new());
-    }
-    if !matches!(
-        (&cols[1], &cols[2]),
-        (redis::Value::BulkString(_), redis::Value::BulkString(_))
-    ) {
-        return Err(invalid());
-    }
-    let redis::Value::Array(rows) = &cols[3] else {
-        return Err(invalid());
-    };
-    let mut out = HashMap::new();
-    let mut sum = 0_i64;
-    for row in rows {
-        let redis::Value::Array(kv) = row else {
-            return Err(invalid());
-        };
-        if kv.len() != 2 {
-            return Err(invalid());
-        }
-        let name: String = redis::from_redis_value(kv[0].clone()).map_err(|_| invalid())?;
-        let count: i64 = redis::from_redis_value(kv[1].clone()).map_err(|_| invalid())?;
-        if name.is_empty() || count <= 0 || out.insert(name, count).is_some() {
-            return Err(invalid());
-        }
-        sum = sum.checked_add(count).ok_or_else(invalid)?;
-    }
-    if sum != total {
-        return Err(invalid());
-    }
-    Ok(out)
-}
-
 /// 无 `data` 字段或无法解码 Envelope 的 entry；保留身份、失败原因和原始字段交给 [`dispose_bad`]。
 /// 此类 entry 已进入 PEL，确定性解析失败时直接按毒消息策略处置，避免无效重投长期占用回收名额。
 struct BadEntry {
+    /// 本轮取得的条目身份，用于源确认与 DLQ 关联。
     id: String,
+    /// 无法恢复为标准信封的原因。
     reason: String,
     /// 原始 field/value 字节对，保留顺序、重复 field 和二进制字节，供 DLQ 完整还原消息。
     raw: Vec<(Vec<u8>, Vec<u8>)>,
@@ -874,61 +969,70 @@ struct BadEntry {
 
 /// `parse_entries` 结果:成功 `(id, Envelope)` 与坏 entry 分流。
 struct ParsedEntries {
+    /// 可交给业务目录的信封及来源身份。
     ok: Vec<(String, Envelope)>,
+    /// 已取得身份但无法解码的条目，按毒消息策略处理。
     bad: Vec<BadEntry>,
 }
 
-/// 业务作用：解析 XREADGROUP / XAUTOCLAIM 的 entry 列表 → 成功 `(id, Envelope)` + 坏 entry(保留 id,不丢)。
+/// 业务作用：从 Redis 条目集合分离可解码的 Envelope 和需要按毒消息策略处置的条目。
 ///
-/// # 参数
-/// - `entries`: 批处理或流水线中的命令条目集合。
-fn parse_entries(entries: &redis::Value) -> ParsedEntries {
+/// 参数说明：
+/// - `entries`：XREADGROUP、XAUTOCLAIM 或精确重读中的条目集合。
+/// - `allow_deleted`：仅两元素 XAUTOCLAIM 回复可包含没有身份的已删除条目占位。
+///
+/// 返回：完整验证条目结构、递增非零身份和原始字段后，返回可解码信封及坏信封；协议异常整批返回错误，不能据此授权 ACK 或 DLQ。
+/// 允许的匿名删除占位仅跳过，不证明其 PEL 已清理，也不产生可确认身份。
+fn parse_entries(entries: &redis::Value, allow_deleted: bool) -> Result<ParsedEntries> {
     let mut ok = Vec::new();
     let mut bad = Vec::new();
-    //接受 Array|Set(RESP3 部分形态返 Set);其它非 nil 形态不静默吞,记 warn。
-    let (redis::Value::Array(items) | redis::Value::Set(items)) = entries else {
-        if !matches!(entries, redis::Value::Nil) {
-            tracing::warn!("PROXY entries 形态非 Array/Set(疑似 RESP3 未适配),本批跳过");
-        }
-        return ParsedEntries { ok, bad };
+    let invalid = || NasaRedisError::Parsing("PROXY 条目回复结构或身份无效".into());
+    let redis::Value::Array(items) = entries else {
+        return Err(invalid());
     };
+    let mut previous = (0, 0);
     for item in items {
-        // item = [id, [field, value, ...]]
+        // 早期 XAUTOCLAIM 可能只返回匿名 Nil；没有来源身份时不能补造 ACK 或 DLQ。
+        if allow_deleted && matches!(item, redis::Value::Nil) {
+            continue;
+        }
         let redis::Value::Array(pair) = item else {
-            continue;
+            return Err(invalid());
         };
-        let Some(redis::Value::BulkString(id_bytes)) = pair.first() else {
-            continue;
+        let [redis::Value::BulkString(id_bytes), redis::Value::Array(fields)] = pair.as_slice()
+        else {
+            return Err(invalid());
         };
-        let id = String::from_utf8_lossy(id_bytes).into_owned();
-        //Nil/缺字段段 = XAUTOCLAIM 已删 entry(此 id 不在本 consumer PEL),跳过;
-        // 但**拿到 id 而字段段形态异常(非 Array 非 Nil)**不能静默丢——entry 可能在 PEL,转 BadEntry。
-        let fields = match pair.get(1) {
-            Some(redis::Value::Array(f)) => f,
-            None | Some(redis::Value::Nil) => continue,
-            Some(_) => {
-                bad.push(BadEntry {
-                    id,
-                    reason: "entry 字段段形态异常(非 Array/Nil)".to_string(),
-                    raw: Vec::new(),
-                });
-                continue;
-            }
-        };
-        // 收集 DATA_FIELD 的值 + 全部原始字段(lossless 字节,供坏 entry 转 DLQ 完整复盘)
+        let id = std::str::from_utf8(id_bytes).map_err(|_| invalid())?;
+        let coordinate = parse_stream_id(id).ok_or_else(invalid)?;
+        // 三种读取均按 ID 升序返回；重复或倒序身份意味着不能确定本批的责任集合。
+        if coordinate <= previous || fields.is_empty() || fields.len() % 2 != 0 {
+            return Err(invalid());
+        }
+        previous = coordinate;
         let mut data_bytes: Option<&[u8]> = None;
+        let mut duplicate_data = false;
         let mut raw: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        let mut it = fields.iter();
-        while let (Some(f), Some(v)) = (it.next(), it.next()) {
-            if let (redis::Value::BulkString(fk), redis::Value::BulkString(vv)) = (f, v) {
-                if fk == DATA_FIELD.as_bytes() {
-                    data_bytes = Some(vv);
-                }
-                raw.push((fk.clone(), vv.clone()));
+        for pair in fields.chunks_exact(2) {
+            let [redis::Value::BulkString(field), redis::Value::BulkString(value)] = pair else {
+                return Err(invalid());
+            };
+            if field == DATA_FIELD.as_bytes() {
+                duplicate_data |= data_bytes.replace(value).is_some();
             }
+            raw.push((field.clone(), value.clone()));
+        }
+        let id = id.to_owned();
+        // Redis 允许重复字段，但多个 data 不能唯一决定业务信封；保留全部原始字节供毒消息策略处理。
+        if duplicate_data {
+            bad.push(BadEntry {
+                id,
+                reason: "存在多个 data 字段".into(),
+                raw,
+            });
+            continue;
         }
         let Some(bytes) = data_bytes else {
-            // 无 `data` 字段(如以事件名作为字段的编码，或缺字段的 producer)→ 坏 entry,不丢。
             bad.push(BadEntry {
                 id,
                 reason: "缺 data 字段(非标准 Envelope wire)".to_string(),
@@ -939,24 +1043,33 @@ fn parse_entries(entries: &redis::Value) -> ParsedEntries {
         match serde_json::from_slice::<Envelope>(bytes) {
             Ok(env) => ok.push((id, env)),
             Err(e) => {
-                tracing::error!(id, err = %e, "PROXY entry envelope 解析失败,转 DLQ/Drop(不再静默卡 PEL)");
+                tracing::error!(id, category = ?e.classify(), "PROXY 信封无法解码，进入毒消息策略");
                 bad.push(BadEntry {
                     id,
-                    reason: format!("envelope 解析失败: {e}"),
+                    reason: format!(
+                        "envelope 解码失败: {:?}, line={}, column={}",
+                        e.classify(),
+                        e.line(),
+                        e.column()
+                    ),
                     raw,
                 });
             }
         }
     }
-    ParsedEntries { ok, bad }
+    Ok(ParsedEntries {
+        ok,
+        bad,
+    })
 }
 
-/// 业务作用：把一批 (id, Envelope) 按 (topic,event) 分桶,逐桶 dispatch handler,返回**失败 ID 集合**。
-/// 无 handler 的 (topic,event) → 当作成功(ACK,不滞留;对齐 partition 未注册即跳过的语义)。
+/// 业务作用：将已领取消息按主题和事件分桶，逐桶执行对应 handler 并汇总未完成的 ID。
 ///
-/// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
-/// - `batch`: 一次性提交到 Redis 的批量命令。
+/// 参数说明：
+/// - `shared`：本组固定 handler 目录、超时和未注册事件策略。
+/// - `batch`：本轮已领取且信封可解码的消息，不是待发送 Redis 命令。
+///
+/// 返回：返回处理失败、超时或按配置保留的未注册消息 ID；其余 ID 由调用方尝试确认。桶之间没有全局顺序保证，超时不会撤销已发生的业务副作用。
 async fn dispatch(shared: &ProxyShared, batch: Vec<(String, Envelope)>) -> Vec<String> {
     let mut buckets: HashMap<(String, String), Vec<(String, serde_json::Value)>> = HashMap::new();
     for (id, env) in batch {
@@ -981,9 +1094,8 @@ async fn dispatch(shared: &ProxyShared, batch: Vec<(String, Envelope)>) -> Vec<S
                 }
             }
             None => {
-                //共享 stream 多节点下,本节点无 handler 即丢弃 → 注册了的节点永收不到
-                // = 确定性丢消息。降级为 **warn**(非 debug)使可见;requeue_unregistered=true 时留 PEL
-                // 交 XAUTOCLAIM 转给注册节点。
+                // 共享组中当前节点缺少处理器并不代表其它节点也没有；按配置保留 PEL 可以等待再次竞争，
+                // 但不保证下一次认领者拥有该处理器，不能把此策略当成可靠路由。
                 tracing::warn!(topic = %key.0, event = %key.1, requeue = shared.cfg.requeue_unregistered, "PROXY 本节点无注册 handler");
                 if shared.cfg.requeue_unregistered {
                     failed.extend(items.into_iter().map(|(id, _)| id));
@@ -994,11 +1106,14 @@ async fn dispatch(shared: &ProxyShared, batch: Vec<(String, Envelope)>) -> Vec<S
     failed
 }
 
-// Acknowledges processed proxy stream entries.
+/// 业务作用：确认本轮可结束的共享组 PEL 责任，空集合不发送命令。
 ///
-/// # 参数
-/// 业务作用：- `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
-/// - `ids`: Redis stream entry id 或业务记录 id 列表。
+/// 参数说明：
+/// - `shared`：提供固定来源、Stream 和消费组。
+/// - `ids`：本轮准备从 PEL 确认移除的条目身份。
+///
+/// 返回：等待 XACK 结束，对非整数或超出本次数量的回复记录固定告警，传输错误只记录类别；不返回逐条确认结果。
+/// ACK 不删除 Stream 正文；错误或非法回复不证明确认未发生，不能保证同一身份后续一定重投。
 async fn ack(shared: &ProxyShared, ids: &[String]) {
     if ids.is_empty() {
         return;
@@ -1008,58 +1123,79 @@ async fn ack(shared: &ProxyShared, ids: &[String]) {
     for id in ids {
         cmd.arg(id);
     }
-    let r: std::result::Result<i64, redis::RedisError> =
+    let r: std::result::Result<redis::Value, redis::RedisError> =
         cmd.query_async(&mut shared.client.conn()).await;
-    if let Err(e) = r {
-        tracing::warn!(err = %e, "PROXY XACK 失败(下轮 XAUTOCLAIM 会重投)");
+    // Redis 的确认数量只能是本次身份集合内的非负整数，通用数值转换会掩盖异常回复类型。
+    match r {
+        Ok(redis::Value::Int(count))
+            if usize::try_from(count).is_ok_and(|count| count <= ids.len()) => {}
+        Ok(_) => tracing::warn!("PROXY XACK 回复计数无效，确认结果未知"),
+        Err(e) => tracing::warn!(kind = ?e.kind(), "PROXY XACK 未取得有效回复，确认结果未知"),
     }
 }
 
-/// 业务作用：按共享组竞争读取、处置与确认消息，记录本地处理责任。
-/// 参数说明：`shared` 为冻结计划及依赖；`consumer` 为本代身份；`cancel` 关闭后停止新读取。
-/// 返回：关闭后结束；正在执行的 handler 由关闭 owner 等待或强制终止。
+/// 业务作用：竞争领取本组新消息，依次处置坏条目、调用业务并确认成功子集，维护本地处理责任。
+///
+/// 参数说明：
+/// - `shared`：冻结的来源、处理器和消费策略。
+/// - `consumer`：本代独立消费者身份。
+/// - `cancel`：在轮次边界停止新领取；已开始的读取及其后续处理由收尾任务等待或强停。
+///
+/// 返回：关闭后等待已开始的领取回包和本轮处置，空闲与退避等待可立即结束；收尾预算耗尽时仍可强停。
+/// 正常轮次记录处理结束，强停后已登记但未结束的责任保留；尚未收到领取回复时不能据本地计数推断远端 PEL。
 async fn consumer_loop(shared: Arc<ProxyShared>, consumer: String, cancel: CancellationToken) {
     loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            r = read_new(&shared, &consumer) => {
-                match r {
-                    Ok(parsed) if !parsed.ok.is_empty() || !parsed.bad.is_empty() => {
-                        let count = parsed.ok.len() + parsed.bad.len();
-                        shared.activity.accept(count, 0);
-                        // 坏 entry 立即处置(转 DLQ/Drop),否则永久卡 PEL。
-                        if !parsed.bad.is_empty() {
-                            dispose_bad(&shared, &parsed.bad).await;
-                        }
-                        if !parsed.ok.is_empty() {
-                            let ids: Vec<String> = parsed.ok.iter().map(|(id, _)| id.clone()).collect();
-                            let failed = dispatch(&shared, parsed.ok).await;
-                            // ACK 成功子集(failed 留 PEL,reclaim_loop 重投/poison);failed 进 HashSet 避免 O(n²)。
-                            let failed: std::collections::HashSet<String> = failed.into_iter().collect();
-                            let ok: Vec<String> = ids.into_iter().filter(|i| !failed.contains(i)).collect();
-                            ack(&shared, &ok).await;
-                        }
-                        shared.activity.finish(count, false);
-                    }
-                    // 空轮(无新消息)→ 冷流 sleep,不忙等(NOBLOCK 轮询语义)
-                    Ok(_) => { shared.activity.finish(0, false); tokio::time::sleep(Duration::from_millis(shared.cfg.poll_idle_ms.max(1))).await; },
-                    Err(e) => {
-                        tracing::warn!(err = %e, "PROXY XREADGROUP 失败,短暂退避");
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                    }
+        // 领取可能已改变远端 PEL；关闭只阻止下一轮，不能丢弃在途回复后提前进入消费者清理。
+        if cancel.is_cancelled() {
+            break;
+        }
+        let idle = match read_new(&shared, &consumer).await {
+            Ok(parsed) if !parsed.ok.is_empty() || !parsed.bad.is_empty() => {
+                let count = parsed.ok.len() + parsed.bad.len();
+                shared.activity.accept(count, 0);
+                // 坏信封仍占用 PEL，须按配置完成本轮处置，不能仅因停止新领取而遗失其身份。
+                if !parsed.bad.is_empty() {
+                    dispose_bad(&shared, &parsed.bad).await;
                 }
+                if !parsed.ok.is_empty() {
+                    let ids: Vec<String> = parsed.ok.iter().map(|(id, _)| id.clone()).collect();
+                    let failed = dispatch(&shared, parsed.ok).await;
+                    // 仅确认成功子集；失败身份保留 PEL，集合查询避免大批量筛选的平方成本。
+                    let failed: std::collections::HashSet<String> = failed.into_iter().collect();
+                    let ok: Vec<String> = ids.into_iter().filter(|i| !failed.contains(i)).collect();
+                    ack(&shared, &ok).await;
+                }
+                shared.activity.finish(count, false);
+                continue;
             }
+            Ok(_) => {
+                shared.activity.finish(0, false);
+                Duration::from_millis(shared.cfg.poll_idle_ms.max(1))
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "PROXY XREADGROUP 失败,短暂退避");
+                Duration::from_millis(200)
+            }
+        };
+        // 此时没有本轮处置在途，取消空闲或退避不放弃消息责任，也不消耗剩余排干预算。
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(idle) => {},
         }
     }
 }
 
-// Reads new proxy entries for one consumer.
+/// 业务作用：以非阻塞 XREADGROUP 为当前消费者领取共享 Stream 的新消息。
 ///
-/// # 参数
-/// 业务作用：- `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
-/// - `consumer`: Redis Stream consumer 名称。
+/// 参数说明：
+/// - `shared`：固定 Stream、消费组、批量与 Redis 连接入口。
+/// - `consumer`：本次领取写入 PEL 的消费者身份。
+///
+/// 返回：Nil 或空集合表示本轮没有新消息；仅接受当前 Stream 的完整单项回复及不超批量的条目集合。
+/// 传输、来源身份或条目解析失败返回错误，不把协议异常记作有效空轮，也不授权后续 ACK 或 DLQ。
 async fn read_new(shared: &ProxyShared, consumer: &str) -> Result<ParsedEntries> {
-    // **NOBLOCK**(无 BLOCK 参数):立即返回(空则空数组)——不在共享多路复用连接上阻塞。
+    // 不使用 BLOCK，避免一次冷流等待占用共享多路复用连接。
     let v: redis::Value = redis::cmd("XREADGROUP")
         .arg("GROUP")
         .arg(&shared.group)
@@ -1071,49 +1207,66 @@ async fn read_new(shared: &ProxyShared, consumer: &str) -> Result<ParsedEntries>
         .arg(">")
         .query_async(&mut shared.client.conn())
         .await?;
-    // 形态:RESP2 `[[stream, [entries]]]` / nil(空);RESP3 `{stream: [entries]}`(Map)。
     let empty = || ParsedEntries {
         ok: Vec::new(),
         bad: Vec::new(),
     };
-    match &v {
-        redis::Value::Nil => Ok(empty()),
-        redis::Value::Array(streams) | redis::Value::Set(streams) => {
-            if let Some(redis::Value::Array(pair) | redis::Value::Set(pair)) = streams.first() {
-                if let Some(entries) = pair.get(1) {
-                    return Ok(parse_entries(entries));
-                }
+    let invalid = || NasaRedisError::Parsing("PROXY XREADGROUP 回复来源或结构无效".into());
+    let (stream, entries) = match &v {
+        redis::Value::Nil => return Ok(empty()),
+        redis::Value::Array(streams) => {
+            if streams.is_empty() {
+                return Ok(empty());
             }
-            Ok(empty())
+            let [redis::Value::Array(pair)] = streams.as_slice() else {
+                return Err(invalid());
+            };
+            let [stream, entries] = pair.as_slice() else {
+                return Err(invalid());
+            };
+            (stream, entries)
         }
-        //RESP3 HELLO 3 下 XREADGROUP 返 Map{stream:entries}——取首个 stream 的 entries。
-        redis::Value::Map(pairs) => Ok(pairs
-            .first()
-            .map(|(_, entries)| parse_entries(entries))
-            .unwrap_or_else(empty)),
-        _ => {
-            tracing::warn!("PROXY XREADGROUP 顶层形态异常(疑似 RESP3 未适配),本轮空轮");
-            Ok(empty())
+        redis::Value::Map(pairs) => {
+            if pairs.is_empty() {
+                return Ok(empty());
+            }
+            let [(stream, entries)] = pairs.as_slice() else {
+                return Err(invalid());
+            };
+            (stream, entries)
         }
+        _ => return Err(invalid()),
+    };
+    // 查询只授权一个固定来源；错误来源或超量回包不能进入业务处理与确认路径。
+    if !matches!(stream, redis::Value::BulkString(name) if name == shared.stream.as_bytes())
+        || !matches!(entries, redis::Value::Array(items) if items.len() <= shared.cfg.batch_size)
+    {
+        return Err(invalid());
     }
+    parse_entries(entries, false)
 }
 
-/// 业务作用：回收循环:周期 XAUTOCLAIM 回收 idle pending(崩溃 consumer 的 + 本节点失败的)→ 查重投次数 →
-/// 超 max_redeliver 的 poison(Drop/Dlq),其余重投(再 dispatch);ACK 成功子集。
+/// 业务作用：按有界周期扫描闲置 PEL，将每轮回收交给重投与毒消息处置流程。
 ///
-/// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
-/// - `consumer`: Redis Stream consumer 名称。
-/// - `cancel`: 后台任务使用的取消信号。
+/// 参数说明：
+/// - `shared`：共享来源、处理器与闲置阈值等冻结配置。
+/// - `consumer`：本代回收消费者身份，与普通新消息消费者区分。
+/// - `cancel`：终止后续回收轮次的关闭信号，不撤销已开始的处置。
+///
+/// 返回：观察到关闭后退出；连续使用已验证的扫描游标，服务器返回 0-0 后从头扫描。
+/// 轮次失败记录后等待下一周期，错过的 tick 跳过，不堆积补跑；取消不打断已进入的单轮处置。
 async fn reclaim_loop(shared: Arc<ProxyShared>, consumer: String, cancel: CancellationToken) {
     let period = Duration::from_millis((shared.cfg.reclaim_min_idle_ms / 2).clamp(200, 10_000));
     let mut tick = tokio::time::interval(period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut cursor = "0-0".to_owned();
     loop {
+        // 上一轮可能耗尽整个周期；tick 与关闭同时就绪时须先停止，不能再认领新的 PEL。
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => break,
             _ = tick.tick() => {
-                if let Err(e) = reclaim_once(&shared, &consumer).await {
+                if let Err(e) = reclaim_once(&shared, &consumer, &mut cursor).await {
                     tracing::warn!(err = %e, "PROXY reclaim 失败,下轮重试");
                 }
             }
@@ -1121,32 +1274,89 @@ async fn reclaim_loop(shared: Arc<ProxyShared>, consumer: String, cancel: Cancel
     }
 }
 
-/// 业务作用：接管闲置 PEL 并按重投与毒消息策略完成本轮本地处置。
-/// 参数说明：`shared` 为固定依赖和策略；`consumer` 为本代回收身份。
-/// 返回：本轮完成或 Redis 错误；缺少处置结束证据时保留本地未完成次数。
-async fn reclaim_once(shared: &ProxyShared, consumer: &str) -> Result<()> {
-    // XAUTOCLAIM stream group consumer min-idle 0 COUNT n —— 回收闲置 pending 到本回收 consumer
+/// 业务作用：接管一批闲置 PEL，查询投递次数并分别执行重投、毒消息处置和成功子集确认。
+///
+/// 参数说明：
+/// - `shared`：本组来源、处理器、闲置阈值和毒消息策略。
+/// - `consumer`：本轮 XAUTOCLAIM 接管目标身份。
+/// - `cursor`：本代连续扫描起点；完整领取回复验证后推进，0-0 表示下一轮从头开始。
+///
+/// 返回：读取、回包结构与计数查询错误向上传播；回包完整验证前不执行消息处置。
+/// 正常返回的本轮处理包括计数查询失败均结束本地记账，不承诺逐条 ACK 或 DLQ 成功；Future 中途销毁的责任保留未完成。
+async fn reclaim_once(shared: &ProxyShared, consumer: &str, cursor: &mut String) -> Result<()> {
+    let start = parse_stream_id(cursor)
+        .ok_or_else(|| NasaRedisError::Config("PROXY 回收扫描起点无效".into()))?;
+    // 连续传递服务器扫描位置，避免有限扫描预算反复耗在尚不满足 idle 的前缀。
     let v: redis::Value = redis::cmd("XAUTOCLAIM")
         .arg(&shared.stream)
         .arg(&shared.group)
         .arg(consumer)
         .arg(shared.cfg.reclaim_min_idle_ms)
-        .arg("0")
+        .arg(cursor.as_str())
         .arg("COUNT")
         .arg(shared.cfg.batch_size)
         .query_async(&mut shared.client.conn())
         .await?;
-    // 形态:[cursor, [entries], [deleted-ids]](RESP2/3 同为序列;接受 Array|Set)
-    let (redis::Value::Array(parts) | redis::Value::Set(parts)) = &v else {
-        if !matches!(v, redis::Value::Nil) {
-            tracing::warn!("PROXY XAUTOCLAIM 形态异常(疑似 RESP3 未适配),本轮跳过");
+    let invalid = || NasaRedisError::Parsing("PROXY XAUTOCLAIM 回复结构或身份无效".into());
+    let redis::Value::Array(parts) = &v else {
+        return Err(invalid());
+    };
+    if parts.len() != 2 && parts.len() != 3 {
+        return Err(invalid());
+    }
+    let redis::Value::BulkString(next_cursor) = &parts[0] else {
+        return Err(invalid());
+    };
+    let next_cursor = std::str::from_utf8(next_cursor).map_err(|_| invalid())?;
+    let next = parse_stream_id(next_cursor).ok_or_else(invalid)?;
+    if next != (0, 0) && next <= start {
+        return Err(invalid());
+    }
+    let entries = &parts[1];
+    if !matches!(entries, redis::Value::Array(items) if items.len() <= shared.cfg.batch_size) {
+        return Err(invalid());
+    }
+    let parsed = parse_entries(entries, parts.len() == 2)?;
+    let delivered: std::collections::HashSet<_> = parsed
+        .ok
+        .iter()
+        .map(|(id, _)| id)
+        .chain(parsed.bad.iter().map(|entry| &entry.id))
+        .filter_map(|id| parse_stream_id(id))
+        .collect();
+    // 交付身份必须落在本轮已扫描区间；区间矛盾不能授权处置，也不能跳过尚未证实的后续位置。
+    if delivered
+        .iter()
+        .any(|id| *id < start || (next != (0, 0) && *id >= next))
+    {
+        return Err(invalid());
+    }
+    // 新协议的删除列表只能说明相应正文已缺席；它不能与实际交付消息重叠，也不能提供毒消息处置身份。
+    if let Some(deleted) = parts.get(2) {
+        let redis::Value::Array(deleted) = deleted else {
+            return Err(invalid());
+        };
+        let mut previous = (0, 0);
+        for id in deleted {
+            let redis::Value::BulkString(id) = id else {
+                return Err(invalid());
+            };
+            let coordinate = std::str::from_utf8(id)
+                .ok()
+                .and_then(parse_stream_id)
+                .ok_or_else(invalid)?;
+            if coordinate <= previous
+                || coordinate < start
+                || (next != (0, 0) && coordinate >= next)
+                || delivered.contains(&coordinate)
+            {
+                return Err(invalid());
+            }
+            previous = coordinate;
         }
-        return Ok(());
-    };
-    let Some(entries) = parts.get(1) else {
-        return Ok(());
-    };
-    let parsed = parse_entries(entries);
+    }
+    // 完整回复已确认扫描进度；后续处理失败的消息仍在 PEL，可在下一次扫描回绕后再次竞争。
+    *cursor = next_cursor.to_owned();
     let count = parsed.ok.len() + parsed.bad.len();
     shared.activity.accept(count, 0);
     // 坏 entry(无 data / 非 Envelope JSON,可能来自崩溃 consumer 的 PEL)立即处置,不卡 PEL。
@@ -1160,13 +1370,20 @@ async fn reclaim_once(shared: &ProxyShared, consumer: &str) -> Result<()> {
     }
     let ids: Vec<String> = batch.iter().map(|(id, _)| id.clone()).collect();
     // 查每条重投次数(XPENDING),分流 poison vs 重投
-    let counts = pending_counts(shared, &ids).await?;
+    let counts = match pending_counts(shared, &ids).await {
+        Ok(counts) => counts,
+        Err(error) => {
+            // 本轮已明确结束，源消息仍可重投；本地完成次数不能与远端确认成功混为一谈。
+            // 仅正常错误分支结束记账，中途取消尚无结束证据时不执行此步骤。
+            shared.activity.finish(count, false);
+            return Err(error);
+        }
+    };
     let mut to_dispatch = Vec::new();
     let mut poison_ids = Vec::new();
     for (id, env) in batch {
-        //XPENDING 概要未返回该 id 的 count(协议异常/竞态)→ 缺省 **1** 重投。
-        // 注:**故意取安全方向**(重投,非判毒)——判毒=Drop/Dlq 是销毁性的,若误把正常消息判毒会**丢消息**;
-        // 缺省 1 最多让真毒多重投几次(无丢失,且重投上限仍兜底)。缺省发生时记 warn 暴露不可见性。
+        // 缺少计数时不以猜测授权 Drop 或 DLQ，当前路径按一进入普通重投。
+        // 该缺省不证明 PEL 持有者，也不能保证实际投递次数；持续缺失必须保留可观测性。
         let n = match counts.get(&id).copied() {
             Some(n) => n,
             None => {
@@ -1177,7 +1394,8 @@ async fn reclaim_once(shared: &ProxyShared, consumer: &str) -> Result<()> {
                 1
             }
         };
-        if n > shared.cfg.max_redeliver {
+        // 计数保持服务器返回的完整宽度；窄化可能把已经超限的消息重新送入普通重投。
+        if n > u64::from(shared.cfg.max_redeliver) {
             poison_ids.push(id);
         } else {
             to_dispatch.push((id, env));
@@ -1197,19 +1415,15 @@ async fn reclaim_once(shared: &ProxyShared, consumer: &str) -> Result<()> {
     Ok(())
 }
 
-/// 业务作用：取本批每个 id 的 delivery count(重投次数),用于 poison 判定。
+/// 业务作用：对本批每个 ID 精确指定 XPENDING 查询范围，供重投与毒消息策略读取投递次数。
 ///
-///**逐 id 精确查询**,不再用全局近似 `XPENDING stream group IDLE 0 - + count`——
-/// 后者按 entry-ID 升序取**全局最早的 N 条**,当 group PEL 里存在比本批更早的积压时(典型:某 consumer
-/// 崩溃留大量 pending,reclaim 按 batch_size 分批认领),返回窗口与本批 ∩=∅ → 本批 count 全缺失 →
-/// 缺省按 1 重投 → **非最早批次的真毒永远 n≤max_redeliver,Drop/Dlq 永不触发**(毒消息无限重投)。
-/// 改为每 id `XPENDING stream group {id} {id} 1`,批量进一条 pipeline 一次 RTT(同 stream 单 key,
-/// cluster 下同 slot 不 CROSSSLOT);结果按入队顺序与 ids 一一对应,取第 4 列 deliveries。
+/// 参数说明：
+/// - `shared`：提供同一 Stream 和消费组的连接入口。
+/// - `ids`：本轮待核对的条目身份，查询结果按命令顺序关联。
 ///
-/// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
-/// - `ids`: Redis stream entry id 或业务记录 id 列表。
-async fn pending_counts(shared: &ProxyShared, ids: &[String]) -> Result<HashMap<String, u32>> {
+/// 返回：空输入返回空映射；每个回复必须为零行或一条身份一致、idle/投递次数非负的完整行，异常整批返回错误。
+/// 合法空行不进入映射；投递次数保留为 u64，不窄化为配置上限的 u32。结果只是查询时刻的 PEL 快照，不提供持有权或原子处置保证。
+async fn pending_counts(shared: &ProxyShared, ids: &[String]) -> Result<HashMap<String, u64>> {
     let mut out = HashMap::new();
     if ids.is_empty() {
         return Ok(out);
@@ -1226,29 +1440,47 @@ async fn pending_counts(shared: &ProxyShared, ids: &[String]) -> Result<HashMap<
     let mut conn = shared.client.conn();
     let results: Vec<redis::Value> =
         redis::aio::ConnectionLike::req_packed_commands(&mut conn, &pipe, 0, ids.len()).await?;
-    // 每个 id 的结果 = [[id, consumer, idle, deliveries]](0 或 1 行);按位置与 ids 对齐。
+    let invalid = || NasaRedisError::Parsing("PROXY XPENDING 回复结构、身份或计数无效".into());
+    // 查询槽位和身份必须同时一致，否则错误行可能授权丢弃另一条源消息。
+    if results.len() != ids.len() {
+        return Err(invalid());
+    }
     for (id, res) in ids.iter().zip(results) {
-        let (redis::Value::Array(rows) | redis::Value::Set(rows)) = res else {
-            continue;
+        let redis::Value::Array(rows) = res else {
+            return Err(invalid());
         };
-        if let Some(redis::Value::Array(cols) | redis::Value::Set(cols)) = rows.into_iter().next() {
-            if let Some(redis::Value::Int(n)) = cols.get(3) {
-                out.insert(id.clone(), (*n).max(0) as u32);
-            }
+        if rows.is_empty() {
+            continue;
         }
+        let [redis::Value::Array(columns)] = rows.as_slice() else {
+            return Err(invalid());
+        };
+        let [redis::Value::BulkString(reply_id), redis::Value::BulkString(_consumer), redis::Value::Int(idle), redis::Value::Int(deliveries)] =
+            columns.as_slice()
+        else {
+            return Err(invalid());
+        };
+        if reply_id != id.as_bytes() || *idle < 0 {
+            return Err(invalid());
+        }
+        let deliveries = u64::try_from(*deliveries).map_err(|_| invalid())?;
+        out.insert(id.clone(), deliveries);
     }
     Ok(out)
 }
 
-/// 业务作用：毒消息处置。
-/// ⚠ Dlq 路径的 XRANGE→XADD→XACK 三步**非事务**：XADD 转存成功但 XACK 失败时，
-/// 该消息会 **DLQ 重复 + 源仍重投**——这是 PROXY at-least-once 语义的固有取舍(DLQ 消费方需幂等/去重),
-/// 可接受;若需精确一次转存可改 Lua 原子化(留 backlog)。
+/// 业务作用：按配置确认丢弃超限消息，或先尝试把可解析正文转存 DLQ 再确认源 PEL。
 ///
-/// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
-/// - `ids`: Redis stream entry id 或业务记录 id 列表。
+/// 参数说明：
+/// - `shared`：本组来源、固定毒消息策略及 DLQ 命名依据。
+/// - `ids`：本轮判为超过投递上限的源条目身份。
+///
+/// 返回：空输入不发送；Drop 直接尝试 ACK。Dlq 逐项验证重读身份、唯一正文及写入回复后才尝试 ACK，失败时保留源待确认责任。
+/// 转存与确认非事务，部分写入或 ACK 失败可能留下重复 DLQ，接收方须幂等。
 async fn handle_poison(shared: &ProxyShared, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
     match shared.cfg.poison {
         ProxyPoison::Drop => {
             tracing::error!(?ids, "PROXY 毒消息超重投上限,按 Drop 策略 XACK 丢弃");
@@ -1280,30 +1512,36 @@ async fn handle_poison(shared: &ProxyShared, ids: &[String]) {
                     return;
                 }
             };
-            // ② 解析 + 序列化,收集 DLQ body(序列化失败跳过该条,不写空 body)
+            // 每条 XRANGE 都只授权对应的源 ID；总数相同不能替代逐项身份一致。
+            if ranges.len() != ids.len() {
+                tracing::warn!("PROXY DLQ 重读回复数量异常，保留源 PEL");
+                return;
+            }
             let mut bodies: Vec<Vec<u8>> = Vec::new();
-            for r in &ranges {
-                // 仅转存可解析的 Envelope;坏 entry 在 dispose_bad 已单独处置(此处只处理 max_redeliver 判毒的 id)。
-                for (_eid, env) in parse_entries(r).ok {
-                    match serde_json::to_vec(&env) {
-                        Ok(b) => bodies.push(b),
-                        Err(e) => {
-                            tracing::warn!(err = %e, "PROXY DLQ 序列化失败,跳过该条(不写空 body)")
-                        }
+            for (id, range) in ids.iter().zip(&ranges) {
+                let parsed = match parse_entries(range, false) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        tracing::warn!(id, "PROXY DLQ 重读协议异常，保留源 PEL");
+                        return;
+                    }
+                };
+                let [(entry_id, env)] = parsed.ok.as_slice() else {
+                    // 正文缺席或不能唯一解码时没有完整转存证据，不能用 ACK 丢弃源责任。
+                    tracing::warn!(id, "PROXY DLQ 重读没有唯一信封，保留源 PEL");
+                    return;
+                };
+                if !parsed.bad.is_empty() || entry_id != id {
+                    tracing::warn!(id, "PROXY DLQ 重读身份不一致，保留源 PEL");
+                    return;
+                }
+                match serde_json::to_vec(env) {
+                    Ok(body) => bodies.push(body),
+                    Err(e) => {
+                        tracing::warn!(id, category = ?e.classify(), "PROXY DLQ 信封编码失败，保留源 PEL");
+                        return;
                     }
                 }
-            }
-            //**数量一致性 fail-closed**——若可转存 body 少于 ids(源 entry 被外部 XDEL/XTRIM、
-            // 或序列化失败),不能"只写部分 DLQ 又 XACK 全批"(会丢审计 body)。整批不 ACK,留 PEL 待下轮;
-            // 被外部删的 entry 由下轮 XAUTOCLAIM **自动 reap**(返回在 deleted-ids,Redis 自清 PEL),不会永久卡。
-            if bodies.len() != ids.len() {
-                tracing::warn!(
-                    ?ids,
-                    got = bodies.len(),
-                    want = ids.len(),
-                    "PROXY DLQ body 数量与 ids 不一致(源 entry 可能被外部删/序列化失败),本批不 ACK"
-                );
-                return;
             }
             // ③ 批量 XADD 到 DLQ(此时 bodies 非空且数量 == ids)
             let mut apipe = redis::pipe();
@@ -1315,8 +1553,7 @@ async fn handle_poison(shared: &ProxyShared, ids: &[String]) {
                     .arg(DATA_FIELD)
                     .arg(b.as_slice());
             }
-            //**逐槽位校验** XADD 结果——server error(WRONGTYPE 等)逐槽位内联在 Ok 里,
-            // 不检查就会"DLQ 没写进去却 XACK 源 = 丢消息"。任一失败 → 不 ACK,留 PEL 下轮重投。
+            // 每个槽位必须给出有效写入身份；服务器错误或畸形成功值都不足以解除源责任。
             match redis::aio::ConnectionLike::req_packed_commands(
                 &mut conn,
                 &apipe,
@@ -1326,41 +1563,51 @@ async fn handle_poison(shared: &ProxyShared, ids: &[String]) {
             .await
             {
                 Ok(v) if all_pipeline_replies_ok(&v, bodies.len()) => {}
-                Ok(v) => {
-                    tracing::warn!(?ids, replies = ?v, "PROXY DLQ XADD 返回 server error/数量异常,本批不 ACK 待重投");
+                Ok(_) => {
+                    tracing::warn!(?ids, "PROXY DLQ XADD 缺少完整有效的写入回复，保留源 PEL");
                     return;
                 }
                 Err(e) => {
-                    tracing::warn!(?ids, err = %e, "PROXY DLQ XADD 传输失败,本批不 ACK 待重投");
+                    tracing::warn!(?ids, kind = ?e.kind(), "PROXY DLQ XADD 未取得完整回复，保留源 PEL");
                     return;
                 }
             }
-            tracing::error!(?ids, dlq = %dlq, "PROXY 毒消息超上限,已转 DLQ 并 XACK 源");
+            tracing::error!(?ids, dlq = %dlq, "PROXY 毒消息转存回复通过，开始确认源 PEL");
             ack(shared, ids).await;
         }
     }
 }
 
-/// 业务作用：pipeline 批量回复是否**全部成功**。本 redis crate 把单命令 server error
-/// **逐槽位内联**成 `Value::ServerError`(不聚合成 outer `Err`,见 `pipeline.rs` 注释),故 DLQ XADD
-/// 这类写入**必须逐槽位检查**——否则 `XADD {dlq}` 撞 WRONGTYPE(key 被占成 string 等)会被当成功、随后
-/// XACK 源 → **消息既没进 DLQ 又被确认 = 永久丢失**。返回 true 仅当数量相符且无任一 `ServerError`。
+/// 业务作用：核对每条 DLQ 写入均取得有效 XADD 身份，供处置流程决定是否可以继续确认源消息。
 ///
-/// # 参数
-/// - `values`: 待校验、写入或比较的值列表。
-/// - `expected`: 协议或状态机期望值。
+/// 参数说明：
+/// - `values`：按物理批次顺序取得的 Redis 回复。
+/// - `expected`：本批预期命令数，必须与实际回复数一致。
+///
+/// 返回：数量相符且每项都是合法非零 Stream ID 时返回 true；错误、缺失或畸形回复返回 false，源消息继续保留。
+/// 回复缺乏证据不代表目标没有写入，下一次转存仍可能重复，不能据此自动回滚或认定未执行。
 fn all_pipeline_replies_ok(values: &[redis::Value], expected: usize) -> bool {
     values.len() == expected
-        && !values
-            .iter()
-            .any(|v| matches!(v, redis::Value::ServerError(_)))
+        && values.iter().all(|value| {
+            let id = match value {
+                redis::Value::BulkString(bytes) => match std::str::from_utf8(bytes) {
+                    Ok(id) => id,
+                    Err(_) => return false,
+                },
+                redis::Value::SimpleString(id) => id.as_str(),
+                _ => return false,
+            };
+            // 非错误回复也可能没有提供写入身份，只有完整非零坐标才能继续源 ACK。
+            matches!(parse_stream_id(id), Some((ms, sequence)) if ms != 0 || sequence != 0)
+        })
 }
 
-/// 业务作用：标准 base64 编码(RFC 4648,带 `=` padding)。**dep-free**:仅 DLQ raw 字段做 lossless 还原用,
-/// 量小,无需引第三方 crate。
+/// 业务作用：把 DLQ 中的原始字段字节编码为可逆的标准 Base64 文本。
 ///
-/// # 参数
-/// - `bytes`: 原始字节切片。
+/// 参数说明：
+/// - `bytes`：需要原样保留的任意字段或值字节。
+///
+/// 返回：返回 RFC 4648 字母表和等号填充的编码；空输入返回空字符串，不进行 UTF-8 转换或丢失字节。
 fn base64_encode(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -1384,18 +1631,13 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// 业务作用：处置**不可解析**的坏 entry（无 `data` 字段或 `data` 不是 Envelope JSON）：
-/// 坏 entry 确定性不可解析，重复读取无法改变结果，因此
-/// **立即处置不重投**:`Drop` → XACK 丢弃;`Dlq` → 把 `{reason, stream, group, id, raw 字段}` 转存
-/// `{stream}:dlq` 后 XACK 源(原始字段 lossless 保留供运维复盘)。Dlq 转存失败 → 不 ACK,留 PEL 待下轮重试(不丢)。
+/// 业务作用：按毒消息策略处置不能解码为标准信封的条目，DLQ 使用身份、原因及可逆原始字段记录。
 ///
-/// ⚠ **at-least-once 转存**(同 [`handle_poison`] 的 DLQ):XADD→XACK 非事务,XADD 成功
-/// 但 XACK 失败时该 entry 下轮会**再次写 DLQ**(DLQ 重复)。DLQ body 带 `stream/group/id/reason` 足够做
-/// 幂等去重 key。若需精确一次转存须 Lua 化 XADD+XACK(cluster 下还要 source 与 dlq 同 slot,留 backlog)。
+/// 参数说明：
+/// - `shared`：固定来源、Stream、消费组及毒消息策略。
+/// - `bad`：已经取得身份且判定无法解析的条目集合，包含原始字段和失败原因。
 ///
-/// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
-/// - `bad`: 检测到异常的 Redis 连接或节点。
+/// 返回：空集合不发送；Drop 尝试确认丢弃，Dlq 在批量转存回复检查通过后才尝试 ACK。转存与确认不原子，失败可能部分完成或重复写入，不能自动解释为无副作用。
 async fn dispose_bad(shared: &ProxyShared, bad: &[BadEntry]) {
     if bad.is_empty() {
         return;
@@ -1443,22 +1685,21 @@ async fn dispose_bad(shared: &ProxyShared, bad: &[BadEntry]) {
                     .arg(DATA_FIELD)
                     .arg(body);
             }
-            //**逐槽位校验**——server error(WRONGTYPE 等)逐槽位内联在 Ok 里,outer Err
-            // 只覆盖传输失败;不检查就会"DLQ 没写进去却 XACK 源 = 丢消息"。任一失败 → 不 ACK,留 PEL 下轮重试。
+            // 原始字段必须取得逐条有效写入身份后才能确认源 PEL；不完整回复不能视为未执行或成功。
             match redis::aio::ConnectionLike::req_packed_commands(&mut conn, &apipe, 0, bad.len())
                 .await
             {
                 Ok(v) if all_pipeline_replies_ok(&v, bad.len()) => {}
-                Ok(v) => {
-                    tracing::warn!(?ids, replies = ?v, "PROXY 不可解析 entry 转 DLQ 返回 server error/数量异常,本批不 ACK 待重试");
+                Ok(_) => {
+                    tracing::warn!(?ids, "PROXY 不可解析条目转存缺少完整有效回复，保留源 PEL");
                     return;
                 }
                 Err(e) => {
-                    tracing::warn!(?ids, err = %e, "PROXY 不可解析 entry 转 DLQ 传输失败,本批不 ACK 待重试");
+                    tracing::warn!(?ids, kind = ?e.kind(), "PROXY 不可解析条目转存未取得完整回复，保留源 PEL");
                     return;
                 }
             }
-            tracing::error!(?ids, dlq = %dlq, "PROXY 不可解析 entry 已转 DLQ 并 XACK 源");
+            tracing::error!(?ids, dlq = %dlq, "PROXY 不可解析条目转存回复通过，开始确认源 PEL");
         }
     }
     ack(shared, &ids).await;

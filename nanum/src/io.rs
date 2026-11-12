@@ -3,7 +3,10 @@
 use crate::{check_scale, pow10, NumericError, Result};
 
 /// 业务作用：按 `floor(x + 0.5)` 为定点输入取整，半数朝正无穷。
-/// 参数说明：`x` 为缩放后的浮点值。
+///
+/// 参数说明：
+/// - `x`：为缩放后的浮点值。
+///
 /// 返回：整数浮点值；与默认乘除的半数远离零规则不同。
 pub(crate) fn compat_math_round(x: f64) -> f64 {
     (x + 0.5).floor()
@@ -16,7 +19,7 @@ pub(crate) fn compat_math_round(x: f64) -> f64 {
 /// f64 中转只有 53 位有效二进制精度，长十进制金额可能丢失末位；需要精确文本计算时使用
 /// [`crate::decimal`]。返回：目标 scale 的定点值；解析、scale 或范围非法时返回错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `val`: 待转换的十进制或科学计数法金额文本。
 /// - `scale`: 目标定点小数位数，必须不超过 [`crate::MAX_SCALE`]。
@@ -31,9 +34,10 @@ pub fn to_fixed_str(val: &str, scale: u32) -> Result<i128> {
 
 /// 业务作用：将有限 f64 按 scale 放大并以 `floor(x + 0.5)` 转换为定点 i128。
 /// 半数朝正无穷；NaN 与无穷不能作为有效金额。
+///
 /// 返回：目标 scale 的定点值；非法 scale、非有限数或越界时返回错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `val`: 待转换的有限 f64 数值。
 /// - `scale`: 目标定点小数位数，必须不超过 [`crate::MAX_SCALE`]。
@@ -53,16 +57,13 @@ pub fn to_fixed_f64(val: f64, scale: u32) -> Result<i128> {
     Ok(scaled as i128)
 }
 
-/// 业务作用: 定点 i128 → 易读字符串,**自动去尾零**,整数不带小数点。
+/// 业务作用：用纯整数格式化定点系数并去掉小数尾零。
 ///
-/// 纯整数算术,无 BigDecimal/f64。例:
-/// `to_plain_string(123456789, 8) = "1.23456789"`、`(120000000,8)="1.2"`、`(100000000,8)="1"`、
-/// `(-100,8)="-0.000001"`、`(50,8)="0.0000005"`、`(0,8)="0"`。
+/// 参数说明：
+/// - `fixed`：待格式化的有符号定点系数。
+/// - `scale`：原定点精度，不超过 MAX_SCALE。
 ///
-/// # 参数
-///
-/// - `fixed`: 待展示的定点 mantissa。
-/// - `scale`: `fixed` 当前使用的小数位数。
+/// 返回：返回不带多余小数点及尾零的文本；非法精度返回 Scale，支持 i128 最小值。
 pub fn to_plain_string(fixed: i128, scale: u32) -> Result<String> {
     check_scale(scale)?;
     if scale == 0 {
@@ -100,64 +101,68 @@ pub fn to_plain_string(fixed: i128, scale: u32) -> Result<String> {
 // ==================== 默认精度重载(不传 scale → DEFAULT_SCALE=8)====================
 // 不传 scale 默认 8。Rust 无重载,故以 `_default` 后缀区分。
 
-/// 业务作用: `to_fixed_str` 默认精度(scale=8)。
+/// 业务作用：按默认八位精度把数字文本经 f64 转为定点。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：十进制或科学计数法文本，允许首尾空白。
 ///
-/// - `val`: 待转换的十进制或科学计数法金额文本。
+/// 返回：返回八位定点系数；解析、非有限值或范围失败返回错误，长文本仍受 f64 中转精度限制。
 pub fn to_fixed_str_default(val: &str) -> Result<i128> {
     to_fixed_str(val, crate::DEFAULT_SCALE)
 }
 
-/// 业务作用: `to_fixed_f64` 默认精度(scale=8)。
+/// 业务作用：按默认八位精度把有限浮点转换为定点。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待转换的有限 f64。
 ///
-/// - `val`: 待转换的有限 f64 数值。
+/// 返回：返回半数朝正无穷取整后的系数；非有限或超出 i128 范围时返回错误。
 pub fn to_fixed_f64_default(val: f64) -> Result<i128> {
     to_fixed_f64(val, crate::DEFAULT_SCALE)
 }
 
-/// 业务作用: `to_plain_string` 默认精度(scale=8)。
+/// 业务作用：按默认八位精度格式化定点系数并删除尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `fixed`：八位精度的有符号定点系数。
 ///
-/// - `fixed`: 默认 8 位精度的定点 mantissa。
+/// 返回：返回精确十进制文本，整数不附加小数点。
 pub fn to_plain_string_default(fixed: i128) -> Result<String> {
     to_plain_string(fixed, crate::DEFAULT_SCALE)
 }
 
 // ==================== double → 字符串(中转定点防漂移)====================
 
-/// 业务作用: f64 → 字符串,自动去尾零(先 round 到定点再转,避开 f64 表示噪音)。
-/// 例:`to_plain_string_f64(0.30000000000000004, 8) = "0.3"`。
+/// 业务作用：先按目标精度量化浮点，再格式化并去尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待量化的有限 f64。
+/// - `scale`：中转及格式化精度，不超过 MAX_SCALE。
 ///
-/// - `val`: 待展示的有限 f64 数值。
-/// - `scale`: 中转定点和展示使用的小数位数。
+/// 返回：返回量化后的十进制文本；非法精度、非有限输入或范围溢出返回错误。
 pub fn to_plain_string_f64(val: f64, scale: u32) -> Result<String> {
     to_plain_string(to_fixed_f64(val, scale)?, scale)
 }
 
-/// 业务作用: f64 → 字符串,默认精度(scale=8),去尾零。
+/// 业务作用：用默认八位定点中转格式化浮点并去尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待量化的有限 f64。
 ///
-/// - `val`: 待展示的有限 f64 数值。
+/// 返回：返回量化后的十进制文本；非有限输入或范围溢出返回错误。
 pub fn to_plain_string_f64_default(val: f64) -> Result<String> {
     to_plain_string_f64(val, crate::DEFAULT_SCALE)
 }
 
 // ==================== 保尾零 / 定点-显示精度分离 ====================
 
-/// 业务作用: 定点 i128 → 字符串,**保留所有尾零**(固定 scale 位小数)。
-/// 例:`to_plain_string_raw(120000000, 8) = "1.20000000"`、`(100, 8) = "0.00000100"`。
+/// 业务作用：按原精度格式化定点系数并保留小数尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `fixed`：待展示的有符号定点系数。
+/// - `scale`：原定点精度及输出小数位数，不超过 MAX_SCALE。
 ///
-/// - `fixed`: 待展示的定点 mantissa。
-/// - `scale`: `fixed` 当前使用的小数位数，也是输出保留的小数位数。
+/// 返回：返回固定小数位文本，scale 为零时只显示整数；非法精度返回 Scale。
 pub fn to_plain_string_raw(fixed: i128, scale: u32) -> Result<String> {
     check_scale(scale)?;
     let neg = fixed < 0;
@@ -177,16 +182,14 @@ pub fn to_plain_string_raw(fixed: i128, scale: u32) -> Result<String> {
     Ok(s)
 }
 
-/// 业务作用：按独立显示精度格式化定点数并保留尾零。
-/// `display_scale <= 0` 统一显示四舍五入后的整数，不把负显示精度解释为十、百等量级。
-/// 所有输入使用同一整数舍入规则，包括最小有符号值。
-/// 返回：指定显示位数的字符串；定点或显示精度不合法时返回错误。
+/// 业务作用：以独立显示精度舍入定点数并保留输出尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `fixed`：按 fixed_scale 表示的有符号系数。
+/// - `fixed_scale`：原定点精度，不超过 MAX_SCALE。
+/// - `display_scale`：显示小数位数，非正值显示整数；正值没有独立分配上限。
 ///
-/// - `fixed`: 待展示的定点 mantissa。
-/// - `fixed_scale`: `fixed` 当前使用的小数位数。
-/// - `display_scale`: 输出时保留的小数位数；`<= 0` 表示只显示整数。
+/// 返回：返回按幅值半数进位的文本；负值舍入为零时仍可显示负零。仅原精度非法返回 Scale，超大显示精度可能要求巨大字符串分配。
 pub fn to_plain_string_raw_display(
     fixed: i128,
     fixed_scale: u32,
@@ -232,16 +235,14 @@ pub fn to_plain_string_raw_display(
     Ok(format!("{sign}{int_part}.{frac_str}"))
 }
 
-/// 业务作用：按独立显示精度格式化定点数并删除小数尾零。
-/// `display_scale <= 0` 统一显示四舍五入后的整数。负值舍入为零时保留负号，例如
-/// `to_plain_string_display(-40_000_000, 8, 0)` 返回 `"-0"`；需要普通零时由展示层归一。
-/// 返回：格式化字符串；精度不合法时返回错误。
+/// 业务作用：以独立显示精度舍入定点数并移除小数尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `fixed`：按 fixed_scale 表示的有符号系数。
+/// - `fixed_scale`：原定点精度，不超过 MAX_SCALE。
+/// - `display_scale`：显示最多保留的小数位数，非正值统一显示整数。
 ///
-/// - `fixed`: 待展示的定点 mantissa。
-/// - `fixed_scale`: `fixed` 当前使用的小数位数。
-/// - `display_scale`: 输出时最多保留的小数位数；`<= 0` 表示只显示整数。
+/// 返回：返回按幅值半数进位后的文本，负值舍入到零可保留负号；原精度非法返回 Scale。高于原精度不额外补零。
 pub fn to_plain_string_display(
     fixed: i128,
     fixed_scale: u32,
@@ -295,23 +296,25 @@ pub fn to_plain_string_display(
     Ok(format!("{sign}{int_part}.{frac_str}"))
 }
 
-/// 业务作用: f64 → 字符串,保尾零(中转定点)。
+/// 业务作用：把浮点量化为定点后按原精度保留尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待量化的有限 f64。
+/// - `scale`：中转及固定输出精度，不超过 MAX_SCALE。
 ///
-/// - `val`: 待展示的有限 f64 数值。
-/// - `scale`: 中转定点和输出保留的小数位数。
+/// 返回：返回固定小数位文本；精度、有限性或范围检查失败返回错误。
 pub fn to_plain_string_raw_f64(val: f64, scale: u32) -> Result<String> {
     to_plain_string_raw(to_fixed_f64(val, scale)?, scale)
 }
 
-/// 业务作用: f64 → 字符串,定点/显示精度分离,保尾零(中转定点)。
+/// 业务作用：先量化浮点，再用独立显示精度格式化并保留尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待量化的有限 f64。
+/// - `fixed_scale`：中转定点精度，不超过 MAX_SCALE。
+/// - `display_scale`：显示精度，非正值显示整数，正值没有独立分配上限。
 ///
-/// - `val`: 待展示的有限 f64 数值。
-/// - `fixed_scale`: f64 中转定点时使用的小数位数。
-/// - `display_scale`: 输出时保留的小数位数；`<= 0` 表示只显示整数。
+/// 返回：返回舍入后的文本；量化或原精度失败返回错误，超大显示精度可能要求巨大分配。
 pub fn to_plain_string_raw_f64_display(
     val: f64,
     fixed_scale: u32,
@@ -320,13 +323,14 @@ pub fn to_plain_string_raw_f64_display(
     to_plain_string_raw_display(to_fixed_f64(val, fixed_scale)?, fixed_scale, display_scale)
 }
 
-/// 业务作用: f64 → 字符串,定点/显示精度分离,去尾零(中转定点)。
+/// 业务作用：先量化浮点，再用独立显示精度格式化并去尾零。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待量化的有限 f64。
+/// - `fixed_scale`：中转定点精度，不超过 MAX_SCALE。
+/// - `display_scale`：最多显示的小数位数，非正值显示整数。
 ///
-/// - `val`: 待展示的有限 f64 数值。
-/// - `fixed_scale`: f64 中转定点时使用的小数位数。
-/// - `display_scale`: 输出时最多保留的小数位数；`<= 0` 表示只显示整数。
+/// 返回：返回舍入后的文本，可保留负零；量化或原精度检查失败返回错误，不补超出原精度的尾零。
 pub fn to_plain_string_f64_display(
     val: f64,
     fixed_scale: u32,
@@ -337,24 +341,25 @@ pub fn to_plain_string_f64_display(
 
 // ==================== 定点 i128 → BigDecimal ====================
 
-/// 业务作用: 定点 i128 → [`BigDecimal`](bigdecimal::BigDecimal)(真需 BigDecimal 入参的外部 API 时用)。
-/// 结果值为 `fixed × 10^-scale`，保留指定 scale。
+/// 业务作用：把定点系数和原精度直接组合成十进制数。
 ///
-/// # 参数
+/// 参数说明：
+/// - `fixed`：作为 BigDecimal 整数系数的有符号值。
+/// - `scale`：原定点小数位数，不超过 MAX_SCALE。
 ///
-/// - `fixed`: 待转换的定点 mantissa。
-/// - `scale`: `fixed` 当前使用的小数位数。
+/// 返回：返回精确的 fixed 乘以 10 的负 scale 次幂并保留 scale；非法精度返回 Scale，不经浮点或舍入。
 pub fn to_big_decimal(fixed: i128, scale: u32) -> Result<bigdecimal::BigDecimal> {
     check_scale(scale)?;
     // fixed 已经是定点系数，直接设置系数与 scale 可避免额外除法和舍入。
     Ok(bigdecimal::BigDecimal::new(fixed.into(), scale as i64))
 }
 
-/// 业务作用: 定点 i128 → `BigDecimal`,默认精度(scale=8)。
+/// 业务作用：把默认八位定点系数转换为十进制数。
 ///
-/// # 参数
+/// 参数说明：
+/// - `fixed`：八位精度的有符号定点系数。
 ///
-/// - `fixed`: 默认 8 位精度的定点 mantissa。
+/// 返回：返回系数相同且 scale 为八的精确 BigDecimal。
 pub fn to_big_decimal_default(fixed: i128) -> Result<bigdecimal::BigDecimal> {
     to_big_decimal(fixed, crate::DEFAULT_SCALE)
 }

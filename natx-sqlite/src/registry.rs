@@ -21,7 +21,7 @@ impl SqliteDataSourceRegistry {
     /// 业务作用：从启动期已建立的 pool 一次性构造冻结命名表。
     ///
     /// 参数说明：
-    /// - `pools` 为 qualifier 与已受管连接池的集合。
+    /// - `pools`： qualifier 与已受管连接池的集合。
     ///
     /// 返回：名称全部合法、不重复且数量有界时返回 registry；失败时不发布部分表。
     pub fn try_new(
@@ -82,7 +82,7 @@ impl SqliteDataSourceRegistry {
     /// 业务作用：在 registry 尚未停机时选择指定连接池。
     ///
     /// 参数说明：
-    /// - `datasource` 是已校验或配置边界传入的 qualifier。
+    /// - `datasource`：已校验或配置边界传入的 qualifier。
     ///
     /// 返回：运行期内命中时返回同一 pool 的 clone；停机或名称缺失时失败且不回退默认库。
     pub fn datasource(&self, datasource: &str) -> Result<SqliteDataSource, DataSourceLookupError> {
@@ -118,7 +118,7 @@ impl SqliteDataSourceRegistry {
     /// 业务作用：确认命名 datasource 是否属于该冻结表。
     ///
     /// 参数说明：
-    /// - `datasource` 是待复验的 qualifier。
+    /// - `datasource`：待复验的 qualifier。
     ///
     /// 返回：registry 尚开放且名称存在时返回真。
     pub fn contains(&self, datasource: &str) -> bool {
@@ -231,7 +231,7 @@ impl SqliteDataSourceRegistry {
     /// 业务作用：把 SQLite typed registry 绑定到唯一 Application owner，阻止跨实例复用资源表。
     ///
     /// 参数说明：
-    /// - `owner` 是构造 catalog 与其它 typed registry 共同使用的身份。
+    /// - `owner`：构造 catalog 与其它 typed registry 共同使用的身份。
     ///
     /// 返回：首次绑定或同身份重复绑定成功；另一 owner 已占用时保持原身份并失败。
     fn bind_owner(&self, owner: &ManagedRegistryOwner) -> anyhow::Result<()> {
@@ -279,7 +279,7 @@ impl SqliteDataSourceRegistry {
 /// 业务作用：发布当前 Application 拥有的唯一 datasource registry。
 ///
 /// 参数说明：
-/// - `registry` 是 DB 组件在全部数据源建立成功后冻结的命名表。
+/// - `registry`： DB 组件在全部数据源建立成功后冻结的命名表。
 ///
 /// 返回：当前进程没有独立注册表且没有其它 live Application 时成功；冲突时保留原权威并失败。
 pub fn install_managed_registry(registry: &Arc<SqliteDataSourceRegistry>) -> anyhow::Result<()> {
@@ -337,7 +337,7 @@ pub fn install_managed_registry(registry: &Arc<SqliteDataSourceRegistry>) -> any
 /// 业务作用：为 napp 领取受管 datasource owner 与安装 token，但不创建或开放连接池。
 ///
 /// 参数说明：
-/// - `kind` 区分配置建池与 UserHook 延后 default。
+/// - `kind`：区分配置建池与 UserHook 延后 default。
 ///
 /// 返回：进程入口为空时进入 Bootstrapping；已有 standalone 或 managed 权威时失败。
 #[doc(hidden)]
@@ -405,7 +405,7 @@ pub fn open_managed_registry(
 /// 业务作用：在 catalog 封口后按 registry Arc 身份撤销 SQLite typed 槽。
 ///
 /// 参数说明：
-/// - `registry` 是正在停机或启动失败清理的资源表。
+/// - `registry`：正在停机或启动失败清理的资源表。
 ///
 /// 返回：无；旧实例不命中当前槽时不修改新实例。
 #[doc(hidden)]
@@ -419,7 +419,7 @@ pub fn clear_managed_registry_slot(registry: &Arc<SqliteDataSourceRegistry>) {
 /// 业务作用：在全局数据源协调锁内发布唯一受管 registry。
 ///
 /// 参数说明：
-/// - `registry` 是已冻结且由 Application 持有的资源表。
+/// - `registry`：已冻结且由 Application 持有的资源表。
 ///
 /// 返回：独立入口为空且无其它 live registry 时成功；冲突时不改变全局槽。
 fn install_managed_slot_locked(registry: &Arc<SqliteDataSourceRegistry>) -> anyhow::Result<()> {
@@ -435,7 +435,7 @@ fn install_managed_slot_locked(registry: &Arc<SqliteDataSourceRegistry>) -> anyh
 /// 业务作用：按 Arc 身份清除 SQLite typed registry 弱槽，防止旧实例撤销新实例。
 ///
 /// 参数说明：
-/// - `registry` 是正在失败清理或停机的 registry。
+/// - `registry`：正在失败清理或停机的 registry。
 ///
 /// 返回：无；槽为空或身份不匹配时保持当前状态。
 fn clear_managed_slot_locked(registry: &Arc<SqliteDataSourceRegistry>) {
@@ -454,7 +454,7 @@ fn clear_managed_slot_locked(registry: &Arc<SqliteDataSourceRegistry>) {
 /// 业务作用：仅在全局槽仍指向目标 Application registry 时封口并撤销发布。
 ///
 /// 参数说明：
-/// - `registry` 是正在进入逆序停机的资源表。
+/// - `registry`：正在进入逆序停机的资源表。
 ///
 /// 返回：无；指针复验防止旧 Application 误清理后续实例的槽位。
 pub fn clear_managed_registry(registry: &Arc<SqliteDataSourceRegistry>) {
@@ -468,7 +468,9 @@ pub fn clear_managed_registry(registry: &Arc<SqliteDataSourceRegistry>) {
 }
 
 /// 业务作用：检查 standalone 与 Application 两种资源权威是否冲突。
+///
 /// 参数说明：无。
+///
 /// 返回：独立注册表为空才允许受管安装。
 fn ensure_local_standalone_empty() -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -482,8 +484,10 @@ fn ensure_local_standalone_empty() -> anyhow::Result<()> {
 }
 
 /// 业务作用：安装 standalone 数据源使用句柄，关闭责任仍由调用方持有。
+///
 /// 参数说明：
 /// - `source`：已经完成打开验证的数据源。
+///
 /// 返回：名称首次注册且进程模式一致时成功；不会替换已有来源。
 pub fn try_init_datasource(source: SqliteDataSource) -> anyhow::Result<()> {
     natx_core::coordinate(|coordinator| {
@@ -499,8 +503,10 @@ pub fn try_init_datasource(source: SqliteDataSource) -> anyhow::Result<()> {
 }
 
 /// 业务作用：通过共享 catalog 和 typed registry 取得一致的数据源身份。
+///
 /// 参数说明：
 /// - `name`：业务选择的 datasource 名称。
+///
 /// 返回：名称、driver 与生命周期均匹配时返回句柄；绝不回退默认来源。
 pub fn datasource_for(name: &str) -> Result<SqliteDataSource, DataSourceLookupError> {
     let reference = natx_core::resolve_datasource(name, DatabaseDriver::Sqlite)?;
@@ -522,8 +528,10 @@ pub fn datasource_for(name: &str) -> Result<SqliteDataSource, DataSourceLookupEr
 }
 
 /// 业务作用：让直接持有的 source 也遵循受管目录的开放与停机门禁。
+///
 /// 参数说明：
 /// - `registry`：即将发布的唯一来源表。
+///
 /// 返回：所有来源都绑定同一 owner 后成功；来源被其它目录占用时拒绝。
 fn bind_sources(registry: &Arc<SqliteDataSourceRegistry>) -> anyhow::Result<()> {
     for source in registry.pools.values() {

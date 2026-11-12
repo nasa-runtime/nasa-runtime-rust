@@ -16,8 +16,10 @@ struct Bindings {
 
 impl SourceBinding {
     /// 业务作用：把显式来源绑定到 client 的同名槽。
+    ///
     /// 参数说明：
     /// - `source`：宿主授予的来源使用句柄。
+    ///
     /// 返回：首次或同身份重复绑定成功，不允许替换已有 owner。
     pub fn bind(&self, source: SqliteDataSource) -> anyhow::Result<()> {
         let mut binding = self.0.lock().unwrap_or_else(|error| error.into_inner());
@@ -34,8 +36,10 @@ impl SourceBinding {
     }
 
     /// 业务作用：取得方法指定来源并在首次调用时固定身份。
+    ///
     /// 参数说明：
     /// - `name`：宏生成的静态 datasource 名称。
+    ///
     /// 返回：已有绑定或全局目录中的当前来源，不自动重新绑定旧 client。
     pub fn resolve(&self, name: &str) -> anyhow::Result<SqliteDataSource> {
         let mut binding = self.0.lock().unwrap_or_else(|error| error.into_inner());
@@ -54,9 +58,11 @@ impl SourceBinding {
 }
 
 /// 业务作用：在缓存和连接之前执行 Mapper 声明的事务传播门禁。
+///
 /// 参数说明：
 /// - `source`：client 固定的来源。
 /// - `mode`：auto、mandatory 或 never。
+///
 /// 返回：来源和事务上下文均允许调用时成功。
 pub fn check_mapper_source(source: &SqliteDataSource, mode: &str) -> anyhow::Result<()> {
     natx_sqlite::check_source(source)?;
@@ -76,16 +82,20 @@ pub fn check_mapper_source(source: &SqliteDataSource, mode: &str) -> anyhow::Res
 }
 
 /// 业务作用：检查 SQLite runtime 共享的跨 driver 事务身份。
+///
 /// 参数说明：无。
+///
 /// 返回：当前环境事务 driver 或空值。
 fn natx_core_driver() -> Option<natx_sqlite::DatabaseDriver> {
     natx_sqlite::current_driver()
 }
 
 /// 业务作用：按固定来源取得受控 SQL 执行连接，避免查找与执行之间更换 owner。
+///
 /// 参数说明：
 /// - `source`：本次调用已固定的来源。
 /// - `mode`：方法传播声明。
+///
 /// 返回：符合传播门禁的连接或明确拒绝。
 pub async fn mapper_conn_from(source: &SqliteDataSource, mode: &str) -> anyhow::Result<SqliteConn> {
     check_mapper_source(source, mode)?;
@@ -93,9 +103,11 @@ pub async fn mapper_conn_from(source: &SqliteDataSource, mode: &str) -> anyhow::
 }
 
 /// 业务作用：缓存读取之前让原生解析器确认最终 SQL 没有写入或多语句副作用。
+///
 /// 参数说明：
 /// - `source`：固定来源。
 /// - `sql`：动态 SQL 完整展开后的文本。
+///
 /// 返回：只读验证成功，不执行 SQL step。
 pub async fn validate_cached_read(source: &SqliteDataSource, sql: &str) -> anyhow::Result<()> {
     let mut connection = natx_sqlite::conn_from(source).await?;
@@ -103,17 +115,21 @@ pub async fn validate_cached_read(source: &SqliteDataSource, sql: &str) -> anyho
 }
 
 /// 业务作用：保持已由宏解析过的 SQLite 引号字节，避免以其它方言的反斜线规则改写文本。
+///
 /// 参数说明：
 /// - `sql`：受控节点拼接后的 SQL。
+///
 /// 返回：仅移除整个语句首尾空白，保留字面量内部内容。
 pub fn normalize_sql_whitespace(sql: &str) -> String {
     sql.trim().to_owned()
 }
 
 /// 业务作用：把共享缓存隔离到文件 owner 和已提交状态，事务内只允许显式读取已有缓存。
+///
 /// 参数说明：
 /// - `cache`：宿主提供的可选缓存实现。
 /// - `source`：本次方法固定的数据源。
+///
 /// 返回：状态可信时返回作用域缓存；宏决定事务内是否启用，事务查询结果不写入共享缓存。
 pub fn scoped_cache(
     cache: Option<Arc<dyn MapperL2Cache>>,
@@ -141,8 +157,10 @@ struct ScopedCache {
 
 impl ScopedCache {
     /// 业务作用：为静态 Mapper namespace 补齐运行期文件 owner，避免每次提交产生新 namespace。
+    ///
     /// 参数说明：
     /// - `key`：宏生成的 driver、datasource 与 Mapper 身份。
+    ///
     /// 返回：与其它文件来源隔离、在 owner 内保持稳定的缓存键。
     fn key(&self, key: &str) -> String {
         format!("{}:{key}", self.source.cache_namespace())
@@ -152,11 +170,13 @@ impl ScopedCache {
 #[async_trait::async_trait]
 impl MapperL2Cache for ScopedCache {
     /// 业务作用：保留底层 single-flight，同时拒绝并发提交前留下的缓存代际。
+    ///
     /// 参数说明：
     /// - `key`：当前 Mapper namespace。
     /// - `hash_key`：只读 SQL 与绑定签名。
     /// - `ttl_ms`：缓存保留时间。
     /// - `loader`：只允许消费一次的数据库读取回调。
+    ///
     /// 返回：可信命中或实际读取结果；状态变化时旁路，绝不重放已消费的 loader。
     async fn get_or_load(
         &self,
@@ -233,10 +253,12 @@ impl MapperL2Cache for ScopedCache {
     }
 
     /// 业务作用：只读取仍对应当前已提交状态的缓存。
+    ///
     /// 参数说明：
-    /// - `key`：Mapper namespace。
-    /// - `hash_key`：SQL 与参数签名。
-    /// 返回：状态变化则未命中，缓存服务失败原样传播。
+    /// - `key`：当前 Mapper 的缓存命名空间。
+    /// - `hash_key`：SQL 与参数对应的查询签名。
+    ///
+    /// 返回：读取前后 source 检查通过、缓存仍安全且当前 epoch 与记录前缀一致时返回正文；不安全、代次变化或坏前缀按未命中处理。source 或底层缓存错误传播，不建立跨后续业务写入的一致快照。
     async fn get(&self, key: &str, hash_key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         natx_sqlite::check_source(&self.source)?;
         if !self.source.cache_safe() || self.source.cache_epoch() != self.epoch {
@@ -254,13 +276,15 @@ impl MapperL2Cache for ScopedCache {
         }
     }
 
-    /// 业务作用：避免并发写入完成之后把较早查询结果写入当前缓存状态。
+    /// 业务作用：只为当前安全状态下的非事务查询写入带代次前缀的缓存，供读取方排除过期状态。
+    ///
     /// 参数说明：
-    /// - `key`：Mapper namespace。
-    /// - `hash_key`：查询签名。
-    /// - `value`：序列化结果。
-    /// - `ttl_ms`：缓存保留时间。
-    /// 返回：状态仍可信才写入，状态变化直接旁路。
+    /// - `key`：当前 Mapper 的缓存命名空间。
+    /// - `hash_key`：SQL 与参数对应的查询签名。
+    /// - `value`：需要缓存的已序列化查询结果。
+    /// - `ttl_ms`：可选保留毫秒数，具体过期语义交给底层缓存。
+    ///
+    /// 返回：事务内、缓存不安全或 epoch 已变化时直接旁路；否则把捕获 epoch 前缀与正文写入并传播底层结果。写入前后的并发提交可能留下旧代次记录，读取方须继续验代次。
     async fn put(
         &self,
         key: &str,
@@ -282,17 +306,21 @@ impl MapperL2Cache for ScopedCache {
     }
 
     /// 业务作用：删除当前查询使用的作用域缓存字段。
+    ///
     /// 参数说明：
-    /// - `key`：Mapper namespace。
-    /// - `hash_key`：查询签名。
-    /// 返回：底层缓存确认删除或返回错误。
+    /// - `key`：当前 Mapper 的缓存命名空间。
+    /// - `hash_key`：SQL 与参数对应的查询签名。
+    ///
+    /// 返回：原样传播底层删除结果或错误，不复验 source 当前代次，不删除其它查询字段。
     async fn evict(&self, key: &str, hash_key: &str) -> anyhow::Result<()> {
         self.cache.evict(&self.key(key), hash_key).await
     }
 
     /// 业务作用：清理本次方法使用的缓存状态，清理失败时隔离来源缓存。
+    ///
     /// 参数说明：
     /// - `key`：需要失效的 Mapper namespace。
+    ///
     /// 返回：底层清理结果，失败后后续调用直接读取数据库。
     async fn clear_key(&self, key: &str) -> anyhow::Result<()> {
         let result = self.cache.clear_key(&self.key(key)).await;
@@ -304,8 +332,10 @@ impl MapperL2Cache for ScopedCache {
 }
 
 /// 业务作用：为 SQLite IN 列表生成匿名参数，拒绝空列表和超过引擎参数容量的展开。
+///
 /// 参数说明：
 /// - `len`：列表元素数量。
+///
 /// 返回：数量一致的占位符或明确边界错误。
 pub fn sql_in_placeholders(len: usize) -> anyhow::Result<String> {
     anyhow::ensure!(

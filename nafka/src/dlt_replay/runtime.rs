@@ -33,7 +33,10 @@ pub struct DltReplayStatus {
 }
 impl DltReplayStatus {
     /// 业务作用：区分停止请求与来源、目标和lease实际退出。
-    /// 参数说明：无。返回：所有实际责任排干才为true。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：所有实际责任排干才为true。
     pub fn drained(&self) -> bool {
         self.replay.drained()
     }
@@ -41,30 +44,44 @@ impl DltReplayStatus {
 /// 同时受来源和目标关闭约束的一次DLT执行句柄。
 #[derive(Clone)]
 pub struct DltReplayHandle {
+    /// 管理来源历史范围、持久进度和实际排空的控制器。
     replay: ReplayHandle,
+    /// 保持回投或隔离交付责任及分类计数的处理器。
     processor: Arc<Processor>,
 }
 impl DltReplayHandle {
     /// 业务作用：暂停后续准入，保留在途交付责任。
-    /// 参数说明：无。返回：即时状态，不改变冻结来源范围。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：即时状态，不改变冻结来源范围。
     pub fn pause(&self) -> DltReplayStatus {
         self.replay.pause();
         self.status()
     }
     /// 业务作用：恢复尚未停止的任务。
-    /// 参数说明：无。返回：即时状态，终态不能重开。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：即时状态，终态不能重开。
     pub fn resume(&self) -> DltReplayStatus {
         self.replay.resume();
         self.status()
     }
     /// 业务作用：永久关闭本实例后续准入，不遗弃实际native回执。
-    /// 参数说明：无。返回：停止中或已排干状态。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：停止中或已排干状态。
     pub fn cancel(&self) -> DltReplayStatus {
         self.replay.cancel();
         self.status()
     }
     /// 业务作用：无需网络读取持久责任与本实例处理结果。
-    /// 参数说明：无。返回：脱敏快照，确认计数可能领先于checkpoint。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：脱敏快照，确认计数可能领先于checkpoint。
     pub fn status(&self) -> DltReplayStatus {
         DltReplayStatus {
             replay: self.replay.status(),
@@ -79,14 +96,26 @@ impl DltReplayHandle {
         }
     }
     /// 业务作用：等待真实任务与lease退出，超时不能解除后台责任。
-    /// 参数说明：timeout为本次预算，零只查询。返回：实际排干才为true。
+    ///
+    /// 参数说明：
+    /// - `timeout`：timeout为本次预算。
+    ///
+    /// 返回：实际排干才为true。
     pub async fn await_drained(&self, timeout: Duration) -> bool {
         self.replay.await_drained(timeout).await
     }
 }
 impl KafkaProxy {
     /// 业务作用：按固定来源过滤和批准映射回投有限DLT，不修改线上group位点。
-    /// 参数说明：plan为共同合同，destination为固定目标源，store为独占后端，source_identity/destination_identity为资源代次目录，registries为可空schema能力。
+    ///
+    /// 参数说明：
+    /// - `plan`：plan为共同合同。
+    /// - `destination`：destination为固定目标源。
+    /// - `store`：store为独占后端。
+    /// - `source_identity`：用于复验当前 DLT 来源 topic 资源代次的目录。
+    /// - `destination_identity`：用于发送前复验回投或隔离目标资源代次的目录。
+    /// - `registries`：registries为可空schema能力。
+    ///
     /// 返回：双方受管句柄；不可靠lane或错误绑定在副作用前拒绝。
     pub fn replay_dlt(
         &self,
@@ -146,26 +175,44 @@ impl KafkaProxy {
             }
         };
         dependency.bind(replay.clone());
-        Ok(DltReplayHandle { replay, processor })
+        Ok(DltReplayHandle {
+            replay,
+            processor,
+        })
     }
 }
+/// 在来源持久进度推进前执行证据验证、过滤和目标确认。
 struct Processor {
+    /// 固定来源过滤条件与回投规则。
     plan: DltReplayPlan,
+    /// 负责目标复验及 broker 确认的共享交付器。
     delivery: crate::transfer::Delivery,
+    /// 来源分区到批准回投分区的映射。
     routes: BTreeMap<Tp, Tp>,
+    /// 首个稳定失败，不保存消息正文。
     failure: Mutex<Option<Error>>,
+    /// 已取得目标确认的回投记录数。
     forwarded: AtomicU64,
+    /// 完整证据验证后被显式过滤的记录数。
     skipped: AtomicU64,
+    /// 原文已取得隔离目标确认的记录数。
     quarantined: AtomicU64,
 }
 impl ReplayProcessor for Processor {
     /// 业务作用：把来源持久任务绑定到完整DLT处理策略。
-    /// 参数说明：无。返回：冻结计划的共同摘要。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：冻结计划的共同摘要。
     fn fingerprint(&self) -> String {
         self.plan.replay.pipeline_fingerprint.clone()
     }
     /// 业务作用：同步完成回投、确定过滤或真实隔离，失败阻止checkpoint推进。
-    /// 参数说明：record为持有来源责任的原文。返回：只接受确定成功，首个失败保留稳定分类。
+    ///
+    /// 参数说明：
+    /// - `record`：record为持有来源责任的原文。
+    ///
+    /// 返回：只接受确定成功，首个失败保留稳定分类。
     fn process(&self, record: ReplayRecord) -> ReplayResult<()> {
         match crate::replay::runtime::isolate(|| self.process_record(&record))
             .unwrap_or(Err(Error::ObservationFailed))
@@ -183,7 +230,11 @@ impl ReplayProcessor for Processor {
 }
 impl Processor {
     /// 业务作用：只允许确定输入拒绝由原文隔离承接，防止交付未知被误记成功。
-    /// 参数说明：record为实际DLT输入。返回：隔离必须收到真实确认，否则保留来源失败坐标。
+    ///
+    /// 参数说明：
+    /// - `record`：record为实际DLT输入。
+    ///
+    /// 返回：隔离必须收到真实确认，否则保留来源失败坐标。
     fn process_record(&self, record: &ReplayRecord) -> Result<()> {
         if record.cluster_id != self.plan.replay.cluster_id {
             return Err(Error::ContractMismatch);
@@ -204,7 +255,11 @@ impl Processor {
         }
     }
     /// 业务作用：先验证完整证据再按原业务来源过滤，头字段不能直接授权路由。
-    /// 参数说明：record为实际DLT记录。返回：过滤确认或真实回投成功；无效记录不得由过滤隐式丢弃。
+    ///
+    /// 参数说明：
+    /// - `record`：record为实际DLT记录。
+    ///
+    /// 返回：过滤确认或真实回投成功；无效记录不得由过滤隐式丢弃。
     fn forward(&self, record: &ReplayRecord) -> Result<()> {
         let evidence = DltEvidence::read(&record.headers)?.ok_or(Error::MissingEvidence)?;
         DltReplayTrace::read(&record.headers)?;
@@ -234,7 +289,11 @@ impl Processor {
     }
 }
 /// 业务作用：保留共享目标交付的稳定失败类别，DLT不放松原Transfer路径规则。
-/// 参数说明：error为转发错误。返回：对应DLT错误，路径证据错误统一为HeaderInvalid。
+///
+/// 参数说明：
+/// - `error`：error为转发错误。
+///
+/// 返回：对应DLT错误，路径证据错误统一为HeaderInvalid。
 fn transfer_error(error: TransferError) -> Error {
     match error {
         TransferError::Authorization => Error::Authorization,

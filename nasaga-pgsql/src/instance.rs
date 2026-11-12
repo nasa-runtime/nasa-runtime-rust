@@ -558,7 +558,9 @@ impl PgSagaStore {
             drop(connection);
             self.release_tenant_quota(saga_id).await?;
         }
-        Ok(CasOutcome::Applied { new_version })
+        Ok(CasOutcome::Applied {
+            new_version,
+        })
     }
 
     /// 业务作用：以 CAS 切换管理面控制状态（暂停/恢复），不触碰业务状态机。

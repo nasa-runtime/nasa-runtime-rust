@@ -30,9 +30,9 @@ pub enum ShutdownSignal {
 impl ShutdownSignal {
     /// 业务作用：返回信号对应的进程退出码。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回值遵循常用的 `128 + signal number` 约定。
+    /// 返回：CtrlC 与 Interrupt 为 130，Terminate 为 143，遵循 `128 + signal number`；不会终止进程。
     pub fn exit_code(self) -> u8 {
         match self {
             Self::CtrlC | Self::Interrupt => 130,
@@ -42,9 +42,9 @@ impl ShutdownSignal {
 
     /// 业务作用：返回适合固定诊断标记使用的信号名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回值不包含业务输入。
+    /// 返回：CtrlC 与 Interrupt 映射为 SIGINT，Terminate 映射为 SIGTERM，名称不含业务输入。
     pub fn name(self) -> &'static str {
         match self {
             Self::CtrlC => "SIGINT",
@@ -119,11 +119,14 @@ pub(crate) struct ShutdownTaskCleanup {
 impl ShutdownTaskCleanup {
     /// 业务作用：接管已通过登记门的 future，为尚未执行和执行中的任务建立相同释放边界。
     ///
-    /// 参数说明：`task` 为已完成类型擦除、尚未执行的业务停机任务。
+    /// 参数说明：
+    /// - `task`：`task` 为已完成类型擦除、尚未执行的业务停机任务。
     ///
     /// 返回：持有唯一释放权的守卫，不执行或移动已固定的 future 本体。
     fn new(task: ShutdownTaskFuture) -> Self {
-        Self { task: Some(task) }
+        Self {
+            task: Some(task),
+        }
     }
 
     /// 业务作用：在独立展开边界内一次性释放任务，供正常停机路径累计析构失败。
@@ -142,7 +145,8 @@ impl Future for ShutdownTaskCleanup {
 
     /// 业务作用：借用守卫内的固定 future 执行业务任务，poll 期间仍由守卫承担取消时的释放责任。
     ///
-    /// 参数说明：`context` 为当前执行器提供的唤醒上下文。
+    /// 参数说明：
+    /// - `context`：`context` 为当前执行器提供的唤醒上下文。
     ///
     /// 返回：透传业务任务的 Pending 或完成结果；显式释放后再次 poll 属于内部状态错误。
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
@@ -699,44 +703,51 @@ fn shutdown_task_error(phase: ApplicationPhase, message: impl Into<String>) -> A
 /// 传给资源和组件的统一停机预算。子步骤只能消费剩余时间，不能重置 deadline。
 #[derive(Debug, Clone)]
 pub struct ShutdownContext {
+    /// 所有派生清理步骤共用或进一步缩短的单调时钟截止点。
     deadline: Instant,
+    /// 启动清理时确定的原因，后续失败不能覆盖。
     reason: ShutdownReason,
 }
 
 impl ShutdownContext {
     /// 业务作用：创建共享同一绝对截止时间的停机上下文。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `deadline`：所有清理步骤都不能突破的绝对时间点。
     /// - `reason`：由首次终止意图映射出的稳定停机原因。
+    ///
+    /// 返回：保存给定截止点与原因的上下文；允许已过期的截止点，不延长预算或启动清理任务。
     pub fn new(deadline: Instant, reason: ShutdownReason) -> Self {
-        Self { deadline, reason }
+        Self {
+            deadline,
+            reason,
+        }
     }
 
     /// 业务作用：返回全局停机截止时间。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；子步骤不得据此创建新的完整预算。
+    /// 返回：构造时确定的绝对截止点；子步骤应据此消费剩余时间，不能重置完整预算。
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
 
     /// 业务作用：返回首次停机原因。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；后续清理错误不会改变该值。
+    /// 返回：构造时保存的停机原因借用；读取不受后续清理错误影响。
     pub fn reason(&self) -> &ShutdownReason {
         &self.reason
     }
 
     /// 业务作用：计算当前步骤还能消费的剩余预算。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；过期后饱和为零而不会回绕。
+    /// 返回：同一绝对截止点减去当前单调时钟的时长；已到期或过期时为零，不改变截止点。
     pub fn remaining(&self) -> Duration {
         self.deadline.saturating_duration_since(Instant::now())
     }
@@ -785,9 +796,9 @@ impl ShutdownContext {
 
     /// 业务作用：判断全局清理预算是否已经耗尽。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；结果来自同一绝对 deadline。
+    /// 返回：当前时刻已达到截止点时为 true；仅观察预算，不取消正在执行的清理任务。
     pub fn is_expired(&self) -> bool {
         self.remaining().is_zero()
     }

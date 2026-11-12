@@ -24,7 +24,7 @@ Application 负责连接准备、注册确认、就绪贡献、摘流、业务�
 
 ## 两个 Nacos 连接
 
-在进程工作目录的 `zcf/application.yml` 中配置：
+在主配置中声明，路径由非空环境变量 `APP_CONFIG_FILE` 指定，未设置或为空时使用进程工作目录的 `zcf/application.yml`：
 
 ```yaml
 application:
@@ -76,20 +76,24 @@ use serde_json::Value;
 #[rest_client(service = "orders")]
 pub trait OrderApi {
     /// 业务作用：通过默认连接查询订单。
-    /// 参数说明：id 为订单标识。
+    /// 参数说明：
+    /// - `id`：需要查询的订单标识。
     /// 返回：订单 JSON；发现、请求或解码失败时返回错误。
     #[GetMapping(path = "/orders/{id}")]
     async fn get(&self, #[PathVariable("id")] id: u64) -> anyhow::Result<Value>;
 
     /// 业务作用：通过指定连接查询归档订单。
-    /// 参数说明：id 为订单标识。
+    /// 参数说明：
+    /// - `id`：需要查询的订单标识。
     /// 返回：归档订单 JSON；目标连接不可用时返回错误。
     #[GetMapping(path = "/orders/{id}", qualifier = "nacos-order")]
     async fn archived(&self, #[PathVariable("id")] id: u64) -> anyhow::Result<Value>;
 }
 
 /// 业务作用：在已装配的应用中读取指定环境的归档订单。
-/// 参数说明：app 提供受管客户端；id 为订单标识。
+/// 参数说明：
+/// - `app`：提供已装配具名 REST 客户端集合的应用。
+/// - `id`：需要查询的归档订单标识。
 /// 返回：归档接口响应；客户端获取或调用失败时返回错误。
 pub async fn read_archived(app: &Application, id: u64) -> anyhow::Result<Value> {
     let orders = OrderApiClient::with_clients(app.discovery()?.rest_clients()?);
@@ -113,7 +117,9 @@ pub async fn read_archived(app: &Application, id: u64) -> anyhow::Result<Value> 
 #[rest_client]
 pub trait GoogleDnsApi {
     /// 业务作用：通过 Google 公网接口查询 DNS 记录。
-    /// 参数说明：domain 为域名；record_type 为 A、AAAA 等记录类型。
+    /// 参数说明：
+    /// - `domain`：需要查询的 DNS 域名。
+    /// - `record_type`：A、AAAA 等 DNS 记录类型。
     /// 返回：原始 DNS JSON；请求或解码失败时返回错误，DNS 状态由调用方判断。
     #[GetMapping(url = "https://dns.google/resolve", response = "json")]
     async fn resolve(
@@ -124,7 +130,8 @@ pub trait GoogleDnsApi {
 }
 
 /// 业务作用：在已装配的应用中查询 Google 域名的 A 记录。
-/// 参数说明：app 提供受管 HTTP 客户端。
+/// 参数说明：
+/// - `app`：提供已装配 HTTP 客户端集合的应用。
 /// 返回：Google JSON 响应；客户端获取或调用失败时返回错误。
 pub async fn query_google(app: &Application) -> anyhow::Result<Value> {
     let google = GoogleDnsApiClient::with_clients(app.discovery()?.rest_clients()?);

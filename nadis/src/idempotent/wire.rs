@@ -154,7 +154,8 @@ fn base36(value: u64) -> String {
 /// 参数说明：
 /// - `prefix`: 配置的 `ledger_key_prefix`。
 /// - `target_key`: 目标键命令字节。
-/// - `family`/`member`: 结构身份与 field/member 命令字节。
+/// - `family`：不区分增减方向的计数结构身份字节。
+/// - `member`：Hash 字段或有序集合成员的命令字节；字符串计数传空字节。
 /// - `shards`: `ledger_shards`（2 的幂）。
 ///
 /// 返回：shard 配置合法时返回 `prefix:{slot-token}:target-hex:shard` 文本；否则返回 `None`。

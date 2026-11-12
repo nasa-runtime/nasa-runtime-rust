@@ -146,7 +146,7 @@ Hosted 任务与组件终端、受管 Redis 消费和派生发送、出站 Clien
 
 ## YML 配置与边界
 
-本宏不读取 yml；它只生成 `ApplicationSpec`。`zcf/application.yml` 和各组件配置由 `napp` 运行时读取。
+本宏不读取 yml；它只生成 `ApplicationSpec`。主配置和各组件配置由 `napp` 运行时读取，主路径优先使用非空环境变量 `APP_CONFIG_FILE`，未设置或为空时使用 `zcf/application.yml`。
 
 - 属性只能放在 crate 根异步 `main` 上。
 - 声明 `"web"` 后宏会生成唯一的路由收集模块，业务不能再手工生成同名收集器。

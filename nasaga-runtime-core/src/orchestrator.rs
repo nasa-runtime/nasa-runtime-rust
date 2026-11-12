@@ -167,7 +167,8 @@ pub enum StartSagaError {
 impl StartSagaError {
     /// 业务作用：从完整错误链中提取协议层可以安全公开的 Saga 创建拒绝类别。
     ///
-    /// 参数说明：`error` 是运行核心返回且可能附加调用上下文的完整错误链。
+    /// 参数说明：
+    /// - `error`：是运行核心返回且可能附加调用上下文的完整错误链。
     ///
     /// 返回：包含封闭创建拒绝时返回对应类别；基础设施或未知失败返回 `None`。
     pub fn from_error(error: &anyhow::Error) -> Option<Self> {
@@ -180,7 +181,8 @@ impl StartSagaError {
 impl std::fmt::Display for StartSagaError {
     /// 业务作用：输出不含租户用量、请求正文或持久化细节的稳定创建拒绝摘要。
     ///
-    /// 参数说明：`formatter` 是标准格式化输出目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化输出目标。
     ///
     /// 返回：摘要写入成功时返回 `Ok`；格式化失败返回对应错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -209,7 +211,8 @@ pub enum SagaConcurrencyError {
 impl SagaConcurrencyError {
     /// 业务作用：从事务与调用上下文包裹的错误链中提取 CAS 并发裁决。
     ///
-    /// 参数说明：`error` 是状态迁移调用返回的完整错误链。
+    /// 参数说明：
+    /// - `error`：是状态迁移调用返回的完整错误链。
     ///
     /// 返回：包含确定性并发裁决时返回对应类别；其它失败返回 `None`。
     pub fn from_error(error: &anyhow::Error) -> Option<Self> {
@@ -222,7 +225,8 @@ impl SagaConcurrencyError {
 impl std::fmt::Display for SagaConcurrencyError {
     /// 业务作用：输出不携带实例身份与业务数据的稳定 CAS 裁决摘要。
     ///
-    /// 参数说明：`formatter` 是标准格式化输出目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化输出目标。
     ///
     /// 返回：摘要写入成功时返回 `Ok`；格式化失败返回对应错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -396,7 +400,8 @@ fn checked_deadline(now_ms: i64, delay_ms: i64) -> anyhow::Result<i64> {
 
 /// 业务作用：为管理状态门禁保留脱敏诊断，同时让协议层从错误链按类型分类。
 ///
-/// 参数说明：`message` 是不含实例身份与业务数据的稳定前置条件摘要。
+/// 参数说明：
+/// - `message`：是不含实例身份与业务数据的稳定前置条件摘要。
 ///
 /// 返回：外层显示具体门禁、内层保留 [`SagaManagementError::PreconditionFailed`] 的错误。
 fn management_precondition(message: &'static str) -> anyhow::Error {
@@ -484,9 +489,13 @@ fn derive_legacy_start_request_digest(
 
 /// 业务作用：以规范领域字段和原始正文构造跨协议相同的创建摘要。
 ///
-/// 参数说明：request 固定业务身份，definition_digest 与 first_step 固定执行合同，payload 保留原始字节。
+/// 参数说明：
+/// - `request`：包含租户、业务键等创建身份及可选正文声明的请求。
+/// - `definition_digest`：创建所绑定的不可变流程定义摘要。
+/// - `first_step`：该流程首个待执行步骤。
+/// - `payload`：已经规范化的可选原始命令正文与媒体、schema 信息。
 ///
-/// 返回：有正文时把媒体、schema 和正文纳入独立摘要域；无正文沿用既有空输入摘要。
+/// 返回：无 payload 时返回去除请求中两种正文声明后的既有领域摘要；有 payload 时将该摘要、媒体类型、schema 与原始正文纳入独立 SHA-256 域。不修改原请求，不验证 payload 合同。
 fn derive_start_request_digest(
     request: &StartSagaRequest<'_>,
     definition_digest: &str,
@@ -609,7 +618,8 @@ where
 
     /// 业务作用：原子发布已经完成 Catalog、历史实例与 capability 门禁的新 registry generation。
     ///
-    /// 参数说明：`registry` 同时包含 active definition 和旧实例仍需的 deprecated definition。
+    /// 参数说明：
+    /// - `registry`：同时包含 active definition 和旧实例仍需的 deprecated definition。
     ///
     /// 返回：新快照成为后续操作唯一入口后完成；进行中的操作继续持有旧快照直到事务结束。
     pub fn replace_registry(&self, registry: DefinitionRegistry) {
@@ -621,7 +631,8 @@ where
 
     /// 业务作用：在动态 Catalog 快照发布前确认全部非终态实例仍能找到相同摘要的 definition。
     ///
-    /// 参数说明：`registry` 是 watcher 刚从共享 generation 完整装载的候选快照。
+    /// 参数说明：
+    /// - `registry`：是 watcher 刚从共享 generation 完整装载的候选快照。
     ///
     /// 返回：所有在途实例均可安全继续时成功；缺失或摘要漂移时拒绝切换。
     pub async fn verify_registry_snapshot(
@@ -668,9 +679,11 @@ where
 
     /// 业务作用：读取当前 registry 快照中指定 definition 的 canonical 摘要，供协议兼容门禁在创建前校验。
     ///
-    /// 参数说明：`workflow` 与 `version` 共同定位不可变流程版本。
+    /// 参数说明：
+    /// - `workflow`：待查询的流程名称。
+    /// - `version`：不可变业务流程定义版本。
     ///
-    /// 返回：当前快照已注册时返回摘要；未知或未激活版本返回空。
+    /// 返回：当前 registry 快照存在对应条目时返回其摘要，否则返回 None；本方法不单独检查持久 Catalog 的实时生命周期。
     pub fn definition_digest(
         &self,
         workflow: &WorkflowName,
@@ -683,9 +696,12 @@ where
 
     /// 业务作用：按租户读取当前可用于运行期复验的 definition 摘要。
     ///
-    /// 参数说明：`tenant`、`workflow` 与 `version` 共同定位租户专属流程版本。
+    /// 参数说明：
+    /// - `tenant`：用于选择租户专属或可用全局条目的租户身份。
+    /// - `workflow`：待查询的流程名称。
+    /// - `version`：不可变业务流程定义版本。
     ///
-    /// 返回：active、deprecated 或静态全局定义存在时返回摘要；未知版本为空。
+    /// 返回：当前快照能按租户与定义键解析到条目时返回其摘要，否则 None；本方法不读取数据库或单独复验生命周期。
     pub fn definition_digest_for_tenant(
         &self,
         tenant: &TenantId,
@@ -1043,11 +1059,14 @@ where
 
     /// 业务作用：在宿主冻结的资格下接收已认证结果，数据库等待期间失权时回滚全部推进事实。
     ///
-    /// 参数说明：`envelope` 是原结果，`producer` 是认证身份，`receipt_trace` 是可选受信链路，
-    /// `now_ms` 是裁决时刻，`authorize` 同步复验同一次操作的期限、撤销代际和安全合同。
+    /// 参数说明：
+    /// - `envelope`：已认证入口接收的结果信封，仍需本层复验消息合同。
+    /// - `producer`：认证得到的参与方服务身份，必须与结果生产权限相符。
+    /// - `receipt_trace`：已由入口取得的可选追踪上下文，推进时可随实例保存。
+    /// - `now_ms`：本次状态裁决使用的 Unix 毫秒时刻。
+    /// - `authorize`：固定本次操作资格的同步复验闭包，应检查期限、撤销代际与安全合同。
     ///
-    /// 返回：资格持续有效且事务提交后才返回应用或重复收据；失权回滚，COMMIT 已发出后的不确定性保持原分类。
-    /// 加入已有同源事务时，调用方仍须在外层最终提交前复验自己的执行资格。
+    /// 返回：返回结果推进或 Inbox 重复收据，矛盾尝试结论可留存冲突并冻结自动动作后返回 Applied；资格、消息合同、持久化或 CAS 失败返回原分类。独立事务须确认提交后才能 ACK，加入外层事务时仍须等外层最终提交并复验资格；提交阶段失败可能结果未知。
     pub async fn handle_authenticated_result_authorized_traced(
         &self,
         envelope: &SagaResultEnvelope,
@@ -1105,7 +1124,10 @@ where
 
     /// 业务作用：在调用方冻结的执行资格下裁决 Saga 创建与重复收据，连接池、行锁和事务等待不能延长权限。
     ///
-    /// 参数说明：`request` 是创建事实，`trace` 是受信链路上下文，`authorize` 同步复验本次操作的资格与期限。
+    /// 参数说明：
+    /// - `request`：是创建事实
+    /// - `trace`：是受信链路上下文
+    /// - `authorize`：同步复验本次操作的资格与期限。
     ///
     /// 返回：资格有效且创建事务提交后返回创建或重复收据；失权走事务回滚，底层提交不确定分类保持不变。
     /// deprecated 定义仍按持久请求摘要裁决重复与冲突；只有真正的新建适用 active 门禁。
@@ -1286,20 +1308,15 @@ where
         Ok(outcome)
     }
 
-    /// 业务作用：消费一条参与方结果事件并推进状态机，是 Orchestrator 的主推进入口。
-    ///
-    /// 事务序固定为：Inbox claim → 合同交叉校验 → attempt journal 记账（幂等吸收）→
-    /// 按阶段路由裁决（CAS + transition + 下一命令 Outbox + timer）→ COMMIT。
-    /// CAS 冲突时返回错误使事务回滚且**不得 ACK**，重投后基于新快照重新裁决。
+    /// 业务作用：在本次执行资格下以 Inbox、尝试账本和状态 CAS 原子编排结果推进，重复事实不再产生路由副作用。
     ///
     /// 参数说明：
-    /// - `envelope`: 已通过 transport 层 producer 认证的结果 envelope。
-    /// - `now_ms`: 当前时刻（epoch 毫秒）。
-    /// - `authorize`: 本次结果操作固定的执行资格，等待与提交前必须保持有效。
+    /// - `envelope`：已认证入口接收的结果信封，仍需本层复验消息合同。
+    /// - `receipt_trace`：已由入口取得的可选追踪上下文，推进时可随实例保存。
+    /// - `now_ms`：本次状态裁决使用的 Unix 毫秒时刻。
+    /// - `authorize`：固定本次操作资格的同步复验闭包，应检查期限、撤销代际与安全合同。
     ///
-    /// 返回：推进成功返回 [`HandleOutcome::Applied`]（COMMIT 已确认，调用方可 ACK）；
-    /// 重复事件返回 `Duplicate`（可 ACK）；身份复验失败、合同不匹配、矛盾 outcome 或
-    /// CAS 冲突返回错误（已回滚，不得 ACK）。
+    /// 返回：返回结果推进或 Inbox 重复收据，矛盾尝试结论可留存冲突并冻结自动动作后返回 Applied；资格、消息合同、持久化或 CAS 失败返回原分类。独立事务须确认提交后才能 ACK，加入外层事务时仍须等外层最终提交并复验资格；提交阶段失败可能结果未知。
     async fn handle_verified_result(
         &self,
         envelope: &SagaResultEnvelope,
@@ -1376,7 +1393,9 @@ where
                         status: instance.status,
                     });
                 }
-                AttemptOutcomeRecord::Conflicting { existing } => {
+                AttemptOutcomeRecord::Conflicting {
+                    existing,
+                } => {
                     // 后到互斥事实不能覆盖 journal 先到结论，也不能通过返回错误让 Inbox 与
                     // 冲突证据一起回滚形成永久毒消息；先留存双方状态，再同事务冻结自动动作。
                     self.backend
@@ -1407,7 +1426,9 @@ where
                         )
                         .await?
                     };
-                    return Ok(HandleOutcome::Applied { status });
+                    return Ok(HandleOutcome::Applied {
+                        status,
+                    });
                 }
                 AttemptOutcomeRecord::Recorded => {}
             }
@@ -1450,11 +1471,15 @@ where
                 StepPhase::Compensate => Box::pin(self.on_compensate_result(&context)).await?,
                 StepPhase::Resolve => Box::pin(self.on_resolve_result(&context)).await?,
             };
-            Ok(HandleOutcome::Applied { status: new_status })
+            Ok(HandleOutcome::Applied {
+                status: new_status,
+            })
         })
         .await?;
         match &outcome {
-            HandleOutcome::Applied { status } => tracing::info!(
+            HandleOutcome::Applied {
+                status,
+            } => tracing::info!(
                 saga_id = identity.saga_id.as_str(),
                 workflow = identity.workflow.as_str(),
                 step = identity.step.as_str(),
@@ -1511,7 +1536,9 @@ where
                 .fire_timer_inner(timer, claimed.token(), now_ms, Some(claimed_at))
                 .await?
             {
-                TimerOutcome::Applied { status } => {
+                TimerOutcome::Applied {
+                    status,
+                } => {
                     applied += 1;
                     tracing::info!(
                         saga_id = timer.saga_id.as_str(),
@@ -1733,7 +1760,9 @@ where
                 _ => anyhow::bail!("unknown timer kind"),
             };
             Ok(match status {
-                Some(status) => TimerOutcome::Applied { status },
+                Some(status) => TimerOutcome::Applied {
+                    status,
+                },
                 // 语义已过时(状态或步骤已迁移):timer 已消费,无业务动作。
                 None => TimerOutcome::SkippedStale,
             })
@@ -1769,10 +1798,14 @@ where
 
     /// 业务作用：在事务内复验调用方版本后暂停实例，避免旧管理快照覆盖并发状态或控制迁移。
     ///
-    /// 参数说明：管理上下文、租户、实例和操作身份定位动作，`expectation` 约束事务内实例版本。
+    /// 参数说明：
+    /// - `management`：已经认证的管理主体、权限与操作原因上下文。
+    /// - `tenant`：必须与持久实例归属一致的租户身份。
+    /// - `saga_id`：本次管理动作定位的实例身份。
+    /// - `operation_id`：持久幂等管理操作标识，重放应保持动作和主体语义一致。
+    /// - `expectation`：首次操作必须在事务内命中的实例与控制版本前置条件；已提交的相同操作重放优先识别。
     ///
-    /// 返回：版本匹配且暂停提交时成功；初始控制态不允许动作返回管理前置条件错误，
-    /// 提交 CAS 失去竞争返回可重试快照过期，权限或持久化失败返回对应错误。
+    /// 返回：有权限、租户归属和首次版本前置条件满足时完成暂停，相同持久操作重放直接成功且不重复占用预算。非法状态、过期快照、并发冲突或数据库失败返回分类错误；恢复只唤醒原 timer，不重置业务期限。加入外层事务时不代表已最终提交，提交失败可能结果未知。
     pub async fn pause_with_expectation(
         &self,
         management: &SagaManagementContext,
@@ -1872,10 +1905,14 @@ where
 
     /// 业务作用：在事务内复验调用方版本后恢复实例，并保持原业务 deadline 语义。
     ///
-    /// 参数说明：管理上下文、租户、实例和操作身份定位动作，`expectation` 约束事务内实例版本。
+    /// 参数说明：
+    /// - `management`：已经认证的管理主体、权限与操作原因上下文。
+    /// - `tenant`：必须与持久实例归属一致的租户身份。
+    /// - `saga_id`：本次管理动作定位的实例身份。
+    /// - `operation_id`：持久幂等管理操作标识，重放应保持动作和主体语义一致。
+    /// - `expectation`：首次操作必须在事务内命中的实例与控制版本前置条件；已提交的相同操作重放优先识别。
     ///
-    /// 返回：版本匹配且恢复提交时成功；初始控制态不允许动作返回管理前置条件错误，
-    /// 提交 CAS 失去竞争返回可重试快照过期，权限或持久化失败返回对应错误。
+    /// 返回：有权限、租户归属和首次版本前置条件满足时完成恢复，相同持久操作重放直接成功且不重复占用预算。非法状态、过期快照、并发冲突或数据库失败返回分类错误；恢复只唤醒原 timer，不重置业务期限。加入外层事务时不代表已最终提交，提交失败可能结果未知。
     pub async fn resume_with_expectation(
         &self,
         management: &SagaManagementContext,
@@ -1984,9 +2021,15 @@ where
 
     /// 业务作用：在事务内命中调用方版本后重开冻结补偿计划，禁止旧快照发布新的外部命令。
     ///
-    /// 参数说明：管理上下文、实例、操作身份和时刻定位动作，`expectation` 约束事务内实例版本。
+    /// 参数说明：
+    /// - `management`：已经认证的管理主体、权限与操作原因上下文。
+    /// - `tenant`：必须与持久实例归属一致的租户身份。
+    /// - `saga_id`：本次管理动作定位的实例身份。
+    /// - `operation_id`：持久幂等管理操作标识，重放应保持动作和主体语义一致。
+    /// - `now_ms`：用于新补偿命令期限与裁决的 Unix 毫秒时刻。
+    /// - `expectation`：首次操作必须在事务内命中的实例与控制版本前置条件；已提交的相同操作重放优先识别。
     ///
-    /// 返回：提交后的状态；过期快照、权限、恢复前置条件或持久化失败返回错误。
+    /// 返回：首次操作通过权限、版本、ACTIVE 控制态及冻结计划门禁后，重开待补偿步骤并写命令 Outbox；无剩余步骤时验证完成后收敛。相同已提交操作返回当前状态，不再分配尝试；失败返回分类错误。加入外层事务仍需等待最终提交，提交失败可能结果未知。
     pub async fn retry_compensation_with_expectation(
         &self,
         management: &SagaManagementContext,
@@ -2166,9 +2209,15 @@ where
 
     /// 业务作用：在事务内命中调用方版本后重开 Unknown 解决周期，禁止旧快照发布新的查询命令。
     ///
-    /// 参数说明：管理上下文、实例、操作身份和时刻定位动作，`expectation` 约束事务内实例版本。
+    /// 参数说明：
+    /// - `management`：已经认证的管理主体、权限与操作原因上下文。
+    /// - `tenant`：必须与持久实例归属一致的租户身份。
+    /// - `saga_id`：本次管理动作定位的实例身份。
+    /// - `operation_id`：持久幂等管理操作标识，重放应保持动作和主体语义一致。
+    /// - `now_ms`：新解决预算与命令使用的 Unix 毫秒时刻。
+    /// - `expectation`：首次操作必须在事务内命中的实例与控制版本前置条件；已提交的相同操作重放优先识别。
     ///
-    /// 返回：提交后的状态；过期快照、权限、解决前置条件或持久化失败返回错误。
+    /// 返回：首次操作满足权限、版本、ACTIVE、人工介入和 Poll 未决效果门禁时，重开查询周期并写 timer 与 Outbox；相同操作重放返回当前状态。任何前置条件或持久化失败返回错误，加入外层事务不代表最终提交，提交阶段失败可能结果未知。
     pub async fn retry_resolution_with_expectation(
         &self,
         management: &SagaManagementContext,
@@ -2353,9 +2402,14 @@ where
 
     /// 业务作用：在事务内命中调用方版本后人工关闭自动化，避免旧快照终结已并发变化的实例。
     ///
-    /// 参数说明：管理上下文、租户、实例和操作身份定位动作，`expectation` 约束事务内实例版本。
+    /// 参数说明：
+    /// - `management`：已经认证的管理主体、权限与操作原因上下文。
+    /// - `tenant`：必须与持久实例归属一致的租户身份。
+    /// - `saga_id`：本次管理动作定位的实例身份。
+    /// - `operation_id`：持久幂等管理操作标识，重放应保持动作和主体语义一致。
+    /// - `expectation`：首次操作必须在事务内命中的实例与控制版本前置条件；已提交的相同操作重放优先识别。
     ///
-    /// 返回：关闭后或幂等重放状态；过期快照、权限、状态或持久化失败返回错误。
+    /// 返回：关闭能力已显式开放且权限、版本、控制态及人工介入条件满足时，将状态迁为 ManuallyClosed 并撤销实例 timer；相同操作重放返回当前状态。失败返回分类错误；加入外层事务须等最终提交，提交阶段失败可能结果未知。
     pub async fn manual_close_with_expectation(
         &self,
         management: &SagaManagementContext,
@@ -3871,11 +3925,12 @@ where
     /// 业务作用：把已处于 `COMPENSATING` 的实例收敛为 `COMPENSATED` 终态。
     ///
     /// 参数说明：
-    /// - `instance`: 迁入 `COMPENSATING` 前的实例快照（saga_id 取自此处）。
-    /// - `version`: 当前（`COMPENSATING`）实例版本。
-    /// - `cause_id`: 引发收敛的触发身份；派生定长 UUID 保持触发唯一键不冲突。
+    /// - `instance`：提供实例 ID 的既有快照，本方法只转交其身份。
+    /// - `version`：当前 Compensating 状态预期的实例版本。
+    /// - `trigger_kind`：引发本次收敛的事件、timer 或管理触发类别。
+    /// - `cause_id`：原始触发身份，用于派生本次收敛的唯一触发 ID。
     ///
-    /// 返回：收敛成功返回 `Ok`；CAS 冲突返回错误。
+    /// 返回：先按持久账本验证冻结补偿计划已经完成，再用派生触发身份 CAS 收敛并取消实例 timer；验证失败、冲突或持久化失败返回错误。本 helper 不自行开启或提交事务，调用方须保证整体事务边界。
     async fn converge_compensated(
         &self,
         instance: &SagaInstanceRow,
@@ -3890,11 +3945,12 @@ where
     /// 业务作用：`converge_compensated` 的按身份变体，供推进后没有完整快照的路径使用。
     ///
     /// 参数说明：
-    /// - `saga_id`: 实例身份。
-    /// - `version`: 当前（`COMPENSATING`）实例版本。
-    /// - `cause_id`: 引发收敛的触发身份。
+    /// - `saga_id`：待验证补偿完成并收敛的实例身份。
+    /// - `version`：当前 Compensating 状态预期的实例版本。
+    /// - `trigger_kind`：本次收敛的触发类别。
+    /// - `cause_id`：用于派生收敛触发 ID 的原始触发身份。
     ///
-    /// 返回：收敛成功返回 `Ok`；CAS 冲突返回错误。
+    /// 返回：先按持久账本验证冻结补偿计划已经完成，再用派生触发身份 CAS 收敛并取消实例 timer；验证失败、冲突或持久化失败返回错误。本 helper 不自行开启或提交事务，调用方须保证整体事务边界。
     async fn converge_compensated_at(
         &self,
         saga_id: &SagaId,
@@ -4006,15 +4062,16 @@ where
     /// 业务作用：以实例快照的既有状态为预期执行一次 CAS 推进。
     ///
     /// 参数说明：
-    /// - `instance`: 已提交实例快照（version/status 作为 CAS 预期）。
-    /// - `to`: 目标状态。
-    /// - `direction`: 推进后的方向。
-    /// - `current_step`: 推进后的当前步骤。
-    /// - `trigger_kind`/`trigger_id`: 触发身份。
-    /// - `failure_code`: 稳定失败码；为空保留既有值。
-    /// - `plan_version`: 冻结计划摘要；为空保留既有值。
+    /// - `instance`：提供实例身份、定义版本和 CAS 预期实例版本的快照。
+    /// - `to`：本次迁移希望到达的业务状态。
+    /// - `direction`：迁移后的执行或补偿方向。
+    /// - `current_step`：迁移后当前步骤，None 表示没有当前步骤。
+    /// - `trigger_kind`：参与状态迁移唯一身份的触发类别。
+    /// - `trigger_id`：用于拒绝重复推进的稳定触发 ID。
+    /// - `failure_code`：需要交给持久层保存的可选稳定失败码。
+    /// - `plan_version`：需要交给持久层保存的可选冻结补偿计划摘要。
     ///
-    /// 返回：推进后的实例版本；CAS 冲突或重复触发返回错误（事务回滚重新裁决）。
+    /// 返回：后端 CAS 被接受时返回新实例版本；重复触发、快照冲突或持久化失败返回错误。调用方负责所在事务的提交或回滚，本方法不单独确认最终持久提交。
     #[allow(clippy::too_many_arguments)]
     async fn advance(
         &self,
@@ -4043,10 +4100,18 @@ where
 
     /// 业务作用：`advance` 的显式 from 变体，供裁决入口已知快照状态的路径复用。
     ///
-    /// 参数说明：同 [`Orchestrator::advance`]，另有
-    /// - `from`: CAS 预期的当前状态。
+    /// 参数说明：
+    /// - `instance`：提供实例身份、定义版本和 CAS 预期实例版本的快照。
+    /// - `from`：CAS 预期的迁移前状态，可独立于传入快照的 status 指定。
+    /// - `to`：本次迁移希望到达的业务状态。
+    /// - `direction`：迁移后的执行或补偿方向。
+    /// - `current_step`：迁移后当前步骤，None 表示没有当前步骤。
+    /// - `trigger_kind`：参与状态迁移唯一身份的触发类别。
+    /// - `trigger_id`：用于拒绝重复推进的稳定触发 ID。
+    /// - `failure_code`：需要交给持久层保存的可选稳定失败码。
+    /// - `plan_version`：需要交给持久层保存的可选冻结补偿计划摘要。
     ///
-    /// 返回：推进后的实例版本；CAS 冲突或重复触发返回错误。
+    /// 返回：后端 CAS 被接受时返回新实例版本；重复触发、快照冲突或持久化失败返回错误。调用方负责所在事务的提交或回滚，本方法不单独确认最终持久提交。
     #[allow(clippy::too_many_arguments)]
     async fn advance_from(
         &self,
@@ -4464,7 +4529,9 @@ fn merge_deferred_projection(
 /// 返回：`Applied` 返回数据库确认的新实例版本；其余返回携带稳定原因的错误。
 fn ensure_applied(outcome: CasOutcome) -> anyhow::Result<u64> {
     match outcome {
-        CasOutcome::Applied { new_version } => Ok(new_version),
+        CasOutcome::Applied {
+            new_version,
+        } => Ok(new_version),
         CasOutcome::Conflict => Err(SagaConcurrencyError::StaleSnapshot.into()),
         CasOutcome::DuplicateTrigger => Err(SagaConcurrencyError::DuplicateTrigger.into()),
     }

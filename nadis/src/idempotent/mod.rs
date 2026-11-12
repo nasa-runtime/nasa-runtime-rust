@@ -98,10 +98,11 @@ impl RedisClient {
     /// 业务作用：按业务 nonce 原子自增 HASH 字段（+1）；窗口内重放只返回首次结果。
     ///
     /// 参数说明：
-    /// - `key`/`field`: 目标 HASH 键与字段。
+    /// - `key`：目标 Hash 键，参与账本键和槽位派生。
+    /// - `field`：计数字段名，其原始字节参与幂等身份。
     /// - `nonce`: 幂等标识，不能为空。
     ///
-    /// 返回：首次请求执行后的精确 int64；重复 nonce 返回首次值。
+    /// 返回：首次结算的精确整数；同一字段和 nonce 在窗口内重放返回首次值，布局或执行失败返回错误。
     pub async fn h_incr_idempotent(&self, key: &str, field: &str, nonce: &str) -> Result<i64> {
         self.h_incr_by_idempotent(key, field, 1, nonce).await
     }
@@ -109,10 +110,12 @@ impl RedisClient {
     /// 业务作用：按业务 nonce 原子自增 HASH 字段（+delta）；窗口内重放只返回首次结果。
     ///
     /// 参数说明：
-    /// - `key`/`field`/`delta`: 目标 HASH 键、字段与增量。
+    /// - `key`：目标 Hash 键，参与账本键和槽位派生。
+    /// - `field`：计数字段名，其原始字节参与幂等身份。
+    /// - `delta`：首次结算使用的有符号增量；重复 nonce 不会替换已结算的值。
     /// - `nonce`: 幂等标识，不能为空。
     ///
-    /// 返回：首次请求执行后的精确 int64；重复 nonce 返回首次值。
+    /// 返回：首次结算的精确整数；同一字段和 nonce 在窗口内重放返回首次值，布局或执行失败返回错误。
     pub async fn h_incr_by_idempotent(
         &self,
         key: &str,
@@ -135,10 +138,11 @@ impl RedisClient {
     /// 业务作用：按业务 nonce 原子自减 HASH 字段（-1）；窗口内重放只返回首次结果。
     ///
     /// 参数说明：
-    /// - `key`/`field`: 目标 HASH 键与字段。
+    /// - `key`：目标 Hash 键，参与账本键和槽位派生。
+    /// - `field`：计数字段名，其原始字节参与幂等身份。
     /// - `nonce`: 幂等标识，不能为空。
     ///
-    /// 返回：首次请求执行后的精确 int64；重复 nonce 返回首次值。
+    /// 返回：首次结算的精确整数；同一字段和 nonce 在窗口内重放返回首次值，布局或执行失败返回错误。
     pub async fn h_decr_idempotent(&self, key: &str, field: &str, nonce: &str) -> Result<i64> {
         self.h_decr_by_idempotent(key, field, 1, nonce).await
     }
@@ -146,7 +150,9 @@ impl RedisClient {
     /// 业务作用：按业务 nonce 原子自减 HASH 字段（-delta）；窗口内重放只返回首次结果。
     ///
     /// 参数说明：
-    /// - `key`/`field`/`delta`: 目标 HASH 键、字段与减量。
+    /// - `key`：目标 Hash 键，参与账本键和槽位派生。
+    /// - `field`：计数字段名，其原始字节参与幂等身份。
+    /// - `delta`：首次结算需要减去的有符号步长，负数表示增加。
     /// - `nonce`: 幂等标识，不能为空。
     ///
     /// 返回：首次请求执行后的精确 int64；重复 nonce 返回首次值；`i64::MIN` 减量越界返回错误。
@@ -172,8 +178,8 @@ impl RedisClient {
     /// 业务作用：按业务 nonce 原子对 ZSet member 增分；窗口内重放只返回首次结果。
     ///
     /// 参数说明：
-    /// - `key`/`member`: 目标 ZSet 键与成员；`member` 的命令字节必须与普通 `z_incr_by` 一致，
-    ///   与既有账本共享凭证时业务需保证同一编码字节。
+    /// - `key`：目标有序集合键，参与账本键和槽位派生。
+    /// - `member`：成员的单参数编码；须与普通 `z_incr_by` 及共享账本中的成员字节一致。
     /// - `delta`: 浮点增量。
     /// - `nonce`: 幂等标识，不能为空。
     ///

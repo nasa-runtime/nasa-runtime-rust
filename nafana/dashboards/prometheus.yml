@@ -1,15 +1,13 @@
-# nafana Prometheus scrape configuration.
+# nafana 应用指标的 Prometheus 抓取配置。
 #
-# Quick start:
-# 1. Copy this job into Prometheus, or use this file as a minimal standalone config.
-# 2. Change only the target host:port values to addresses reachable by Prometheus.
-# 3. Keep job_name and metrics_path unchanged when the application exposes the
-#    recommended root-level /metrics endpoint.
+# 接入步骤：
+# 1. 将此抓取任务加入现有 Prometheus 配置，或直接使用此文件启动独立实例。
+# 2. 将 target 的 host:port 改为 Prometheus 可以访问的应用地址。
+# 3. 应用使用根路径 /metrics 暴露指标时，保留 job_name 和 metrics_path。
 #
-# This ready-to-run sample assumes Prometheus runs in Docker and two independent
-# application processes listen on host ports 8080 and 8081. A native
-# Prometheus process should use 127.0.0.1 with the same ports instead.
-# Linux Docker users may need this compose setting:
+# 此示例假定 Prometheus 运行于 Docker，两个独立应用进程分别监听宿主机的 8080 和 8081。
+# Prometheus 直接运行于宿主机时，应改用 127.0.0.1，并保留对应应用端口。
+# Linux Docker 环境可能需要以下 compose 配置，使容器能够解析宿主机地址：
 # extra_hosts: ["host.docker.internal:host-gateway"]
 
 global:
@@ -27,13 +25,12 @@ scrape_configs:
 
     static_configs:
       - targets:
-          # Standard deployment only changes these host:port values.
+          # 各应用实例分别配置可达的 host:port；此列表决定实际抓取目标。
           - "host.docker.internal:8080"
           - "host.docker.internal:8081"
         labels:
           name: "nafana-app"
           env: "local"
 
-      # Add every additional application process to the same target list.
-      # Prometheus supplies a unique instance label from each target, and the
-      # Dashboard aggregates all selected instances as one cluster.
+      # 新增应用进程时将地址加入同一目标列表。
+      # Prometheus 按抓取地址生成 instance 标签；Dashboard 汇总所选实例的指标。

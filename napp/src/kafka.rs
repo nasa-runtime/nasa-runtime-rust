@@ -76,23 +76,24 @@ struct ReadyPartition {
 }
 
 impl ReadyRule {
-    /// 业务作用：校验规则不会形成永远无法满足的 Ready 条件。
+    /// 业务作用：拒绝结构上非法的消费组就绪规则，避免无效条件进入启动等待。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 参数合法时返回 `Ok(())`。
-    ///
-    /// # 错误
-    ///
-    /// 最小分区为零，或 topic 集合为空、含空值/重复项时返回稳定配置摘要。
+    /// 返回：参数满足当前规则的本地约束时成功；零分区下限、空或重复 topic、非法分区坐标返回固定原因。
+    /// 不查询 broker，也不证明订阅范围和当前分区数量能满足该规则。
     fn validate(&self) -> Result<(), &'static str> {
         match self {
             Self::Joined => Ok(()),
-            Self::Assigned { min_partitions: 0 } => {
-                Err("assigned readiness requires min_partitions greater than zero")
-            }
-            Self::Assigned { .. } => Ok(()),
-            Self::AssignedTopics { topics } => {
+            Self::Assigned {
+                min_partitions: 0,
+            } => Err("assigned readiness requires min_partitions greater than zero"),
+            Self::Assigned {
+                ..
+            } => Ok(()),
+            Self::AssignedTopics {
+                topics,
+            } => {
                 let mut unique = BTreeSet::new();
                 if topics.is_empty()
                     || topics.iter().any(|topic| topic.trim().is_empty())
@@ -103,7 +104,9 @@ impl ReadyRule {
                     Ok(())
                 }
             }
-            Self::AssignedPartitions { .. } => self.requirement().validate().map_err(|_| {
+            Self::AssignedPartitions {
+                ..
+            } => self.requirement().validate().map_err(|_| {
                 "assigned_partitions readiness requires non-empty unique valid coordinates"
             }),
         }
@@ -111,19 +114,23 @@ impl ReadyRule {
 
     /// 业务作用：投影为 nafka 启动期 broker Ready 要求。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 返回拥有型规则，供多个 group 共享同一绝对 deadline 并发等待。
+    /// 返回：复制 topic 或分区集合形成拥有型规则，供底层启动等待与运行期健康检查复用；不执行校验或 broker I/O。
     fn requirement(&self) -> nafka::ReadyRequirement {
         match self {
             Self::Joined => nafka::ReadyRequirement::Joined,
-            Self::Assigned { min_partitions } => nafka::ReadyRequirement::Assigned {
+            Self::Assigned {
+                min_partitions,
+            } => nafka::ReadyRequirement::Assigned {
                 min_partitions: *min_partitions,
             },
-            Self::AssignedTopics { topics } => {
-                nafka::ReadyRequirement::AssignedTopics(topics.clone())
-            }
-            Self::AssignedPartitions { partitions } => nafka::ReadyRequirement::AssignedPartitions(
+            Self::AssignedTopics {
+                topics,
+            } => nafka::ReadyRequirement::AssignedTopics(topics.clone()),
+            Self::AssignedPartitions {
+                partitions,
+            } => nafka::ReadyRequirement::AssignedPartitions(
                 partitions
                     .iter()
                     .map(|tp| nafka::Tp::new(tp.topic.clone(), tp.partition))
@@ -133,7 +140,11 @@ impl ReadyRule {
     }
 
     /// 业务作用：用数据面的统一门禁判断该消费组当前是否满足受管 Ready 规则。
-    /// 参数说明：health 为同一实际组的最新脱敏健康快照。
+    ///
+    /// 参数说明：
+    ///
+    /// - `health`：同一实际组的最新脱敏健康快照。
+    ///
     /// 返回：仅 Running 且分配事实满足规则时为 true；重试、保护和 rebalance 不因仍保留旧分配而被判为就绪。
     fn is_satisfied(&self, health: &nafka::GroupHealth) -> bool {
         // 容器不能独立放宽数据面门禁，否则本地仍有分配时会把重试或保护误报为可服务。
@@ -170,9 +181,9 @@ struct KafkaContainerOptions {
 impl Default for KafkaContainerOptions {
     /// 业务作用：返回 consumer 自动收集、500ms 健康轮询和 Joined Ready 的安全默认值。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 返回只影响 Application 编排、不改变 nafka 数据面默认值的配置。
+    /// 返回：只影响 Application 编排、不改变 nafka 数据面默认值的配置。
     fn default() -> Self {
         Self {
             admin_write: false,
@@ -188,9 +199,7 @@ impl KafkaContainerOptions {
     ///
     /// 参数说明：无。
     ///
-    /// # 返回
-    ///
-    /// 全部字段合法且与 consumer mode 一致时返回 `Ok(())`。
+    /// 返回：全部字段合法且与 consumer mode 一致时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -264,13 +273,11 @@ pub(crate) struct KafkaMetricsBridge {
 impl KafkaMetricsBridge {
     /// 业务作用：创建以 `default_sink` 为框架默认出口的桥。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `default_sink`:框架装配的统一 hub 适配器,恒接收 nafka 上报。
     ///
-    /// # 返回
-    ///
-    /// 新桥立即把指标转发到 `default_sink`;业务可再经 `install` 追加私有 sink。
+    /// 返回：新桥立即把指标转发到 `default_sink`;业务可再经 `install` 追加私有 sink。
     fn new(default_sink: Arc<dyn nafka::MetricsSink>) -> Self {
         Self {
             default_sink,
@@ -283,18 +290,17 @@ impl KafkaMetricsBridge {
 
     /// 业务作用：尝试安装本 client 唯一的真实指标 sink。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `sink`：业务提供的无阻塞、不可 panic 指标出口。
     ///
-    /// # 返回
-    ///
-    /// 首次安装且尚未封口时返回 true；重复或晚到安装返回 false。
+    /// 返回：首次安装且尚未封口时返回 true；重复或晚到安装返回 false。
     pub(crate) fn install(&self, sink: Arc<dyn nafka::MetricsSink>) -> bool {
         let mut state = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 指标来源在启动封口后必须稳定，拒绝替换已有出口或迟到安装，避免运行期混用不同观察责任。
         if state.sealed || state.sink.is_some() {
             return false;
         }
@@ -304,9 +310,9 @@ impl KafkaMetricsBridge {
 
     /// 业务作用：永久关闭指标安装入口，保留已安装 sink 继续接收运行期指标。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 本方法无返回值；重复封口为幂等操作。
+    /// 返回：在写锁内永久标记 sealed；重复调用保持原状，不等待正在执行的指标回调，也不关闭既有出口。
     pub(crate) fn seal(&self) {
         self.state
             .write()
@@ -316,9 +322,9 @@ impl KafkaMetricsBridge {
 
     /// 业务作用：克隆当前 sink，使业务回调不在 bridge 锁内执行。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 未安装时返回 None；已安装时返回共享 sink 的 Arc 副本。
+    /// 返回：未安装私有出口时为 None，已安装时克隆 Arc；封口不影响读取，不包含框架默认出口。
     fn sink(&self) -> Option<Arc<dyn nafka::MetricsSink>> {
         self.state
             .read()
@@ -329,13 +335,15 @@ impl KafkaMetricsBridge {
 }
 
 impl nafka::MetricsSink for KafkaMetricsBridge {
-    /// 业务作用：把 counter 转发给 UserHook 安装的 sink；未安装时安全丢弃。
+    /// 业务作用：将 counter 先交给框架默认出口，再按需同步转发给业务私有出口。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`：nafka 固定指标名。
     /// - `delta`：本次单调增量。
     /// - `labels`：nafka 提供的低基数借用标签。
+    ///
+    /// 返回：完成两次顺序回调；未安装私有出口时仍发送默认出口，不做后台排队或异常隔离，出口必须快速且不 panic。
     fn counter(&self, name: &'static str, delta: u64, labels: nafka::MetricLabels<'_>) {
         self.default_sink.counter(name, delta, labels);
         if let Some(sink) = self.sink() {
@@ -343,13 +351,16 @@ impl nafka::MetricsSink for KafkaMetricsBridge {
         }
     }
 
-    /// 业务作用：把 gauge 转发给 UserHook 安装的 sink；未安装时安全丢弃。
+    /// 业务作用：将 gauge 先交给框架默认出口，再同步交给可选的业务私有出口，保持观测来源一致。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`：nafka 固定指标名。
     /// - `value`：当前瞬时值。
     /// - `labels`：nafka 提供的低基数借用标签。
+    ///
+    /// 返回：已配置出口依次收到当前值；私有出口缺省不影响默认出口，回调失败不回滚已发送样本。
+    /// 桥不隔离 panic 或阻塞，两个出口不是原子提交。
     fn gauge(&self, name: &'static str, value: i64, labels: nafka::MetricLabels<'_>) {
         self.default_sink.gauge(name, value, labels);
         if let Some(sink) = self.sink() {
@@ -369,9 +380,9 @@ pub(crate) struct KafkaRuntimeState {
 impl KafkaRuntimeState {
     /// 业务作用：创建尚未发布 client 且定制入口开放的运行时状态。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 返回每个 Application 独占的一次性状态容器。
+    /// 返回：空发布槽及开放的定制队列，不构造 Kafka 客户端或发起 broker I/O。
     pub(crate) fn new() -> Self {
         Self {
             clients: OnceLock::new(),
@@ -381,13 +392,11 @@ impl KafkaRuntimeState {
 
     /// 业务作用：一次性发布完整有序 client 能力表。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `clients`：Start 已为每个条目激活 final shutdown action 的完整表。
     ///
-    /// # 返回
-    ///
-    /// 首次发布返回 `Ok(())`。
+    /// 返回：首次发布返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -409,13 +418,11 @@ impl KafkaRuntimeState {
 
     /// 业务作用：按稳定名称克隆一个私有能力根。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`：单 client 的 client_name 或多 client map key。
     ///
-    /// # 返回
-    ///
-    /// Start 已发布且名称存在时返回 Arc 副本，否则返回 None。
+    /// 返回：Start 已发布且名称存在时返回 Arc 副本，否则返回 None。
     pub(crate) fn client(&self, name: &str) -> Option<Arc<KafkaClientCapability>> {
         self.clients
             .get()
@@ -425,14 +432,12 @@ impl KafkaRuntimeState {
 
     /// 业务作用：在 UserHook 为目标 client 追加一次 consumer builder 定制。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`：已经发布的目标 client name。
     /// - `customize`：拥有业务依赖的一次性 builder 转换闭包。
     ///
-    /// # 返回
-    ///
-    /// 定制进入目标 client 有序队列时返回 `Ok(())`。
+    /// 返回：定制进入目标 client 有序队列时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -452,6 +457,7 @@ impl KafkaRuntimeState {
             .customizations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Ready 已取走闭包后不能再接受定制，否则新登记无法进入实际 consumer 目录。
         let Some(customizations) = slot.as_mut() else {
             return Err(kafka_error(
                 ApplicationPhase::Ready,
@@ -467,14 +473,12 @@ impl KafkaRuntimeState {
 
     /// 业务作用：为目标 client 安装一次真实指标 sink。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`：已经发布的目标 client name。
     /// - `sink`：业务提供的无阻塞共享指标出口。
     ///
-    /// # 返回
-    ///
-    /// 首次安装成功时返回 `Ok(())`。
+    /// 返回：首次安装成功时返回 `Ok(())`。
     ///
     /// # 错误
     ///
@@ -502,9 +506,10 @@ impl KafkaRuntimeState {
 
     /// 业务作用：取走全部 consumer 定制并永久关闭 UserHook 配置入口。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 首次调用返回按 client name 排序的完整队列；重复调用返回空表。
+    /// 返回：首次调用移交按 client name 排序、每个 client 内按登记顺序保存的闭包队列；重复调用为空。
+    /// 只关闭定制登记，不执行闭包，也不自动封口独立的指标安装入口。
     pub(crate) fn take_customizations(&self) -> BTreeMap<String, Vec<KafkaCustomization>> {
         self.customizations
             .lock()
@@ -525,9 +530,9 @@ pub(crate) struct KafkaComponent {
 impl KafkaComponent {
     /// 业务作用：创建尚未产生任何 Kafka 副作用的组件。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 返回可由 Runner 依次推进 Start、Prepare 和 Ready 的空组件。
+    /// 返回：可由 Runner 依次推进 Start、Prepare 和 Ready 的空组件。
     pub(crate) fn new() -> Self {
         Self {
             clients: BTreeMap::new(),
@@ -539,24 +544,30 @@ impl KafkaComponent {
 impl ApplicationComponent for KafkaComponent {
     /// 业务作用：返回稳定 Kafka 组件身份。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 始终返回 `ComponentId::Kafka`。
+    /// 返回：始终返回 `ComponentId::Kafka`。
     fn id(&self) -> ComponentId {
         ComponentId::Kafka
     }
 
     /// 业务作用：使用最终初始配置构造全部本地 client，并为每个成功 client 立即激活 final action。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供最终配置、共享 Application 和 Start 层 action 栈。
+    ///
+    /// 返回：启用来源全部登记后成功；显式关闭不创建客户端，非法配置或建连失败终止启动。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let configured = parse_kafka_clients(
                 context.application().config().value(),
                 ApplicationPhase::Start,
             )?;
+            // 显式禁用时不构造 producer、consumer 或指标运行态，引用缺失 client 仍会被拒绝。
+            if configured.is_empty() {
+                return Ok(());
+            }
             let application = context.application().clone();
             let runtime = application.kafka_runtime();
             let mut capabilities = BTreeMap::new();
@@ -662,9 +673,13 @@ impl ApplicationComponent for KafkaComponent {
 
     /// 业务作用：在初始化封口后启动 consumer、等待真实 group Ready 并创建运行期健康 monitor。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供 UserHook 后的 Application、共享启动 deadline 和 Ready 层 action 栈。
+    ///
+    /// 返回：已启动消费组满足就绪规则并完成初始健康发布时成功，有启用来源时留下待 Runner 接管的监控任务。
+    /// 禁用来源不创建任务；定制、规则、启动或等待失败返回错误，已启动的 owner 由登记的清理动作收口，不在本函数内统一回滚。
+    /// 各 client 使用同一绝对期限；producer-only 来源沿用 Prepare 的探针结果，就绪发布不保证随后分配不再变化。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let application = context.application().clone();
@@ -736,6 +751,7 @@ impl ApplicationComponent for KafkaComponent {
                         plan.groups = resolve_group_rules(name, &resolved_groups, &plan.container)?;
                     }
                     ConsumerMode::Disabled => {
+                        // 明确关闭消费时不能静默丢弃已登记处理器，拒绝矛盾配置而非忽略业务消费责任。
                         if customizations.contains_key(name) {
                             return Err(kafka_error(
                                 ApplicationPhase::Ready,
@@ -803,6 +819,10 @@ impl ApplicationComponent for KafkaComponent {
                 }
             }
 
+            // 没有启用的来源时不创建空健康循环；缺失 consumer 引用已经由准备与定制门禁拒绝。
+            if self.clients.is_empty() {
+                return Ok(());
+            }
             let monitor_clients = self
                 .clients
                 .iter()
@@ -822,9 +842,9 @@ impl ApplicationComponent for KafkaComponent {
 
     /// 业务作用：取出唯一 Kafka 健康 monitor，交由 Runner 按关键任务监督。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// Ready 成功后首次调用返回任务；重复调用返回 None。
+    /// 返回：存在启用来源且 Ready 成功后首次调用返回任务；显式关闭或重复调用返回 None。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.critical_task
             .take()
@@ -845,18 +865,21 @@ struct KafkaConsumersShutdown {
 impl ShutdownAction for KafkaConsumersShutdown {
     /// 业务作用：返回稳定 action 名称。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 名称不包含 client 或配置值。
+    /// 返回：名称不包含 client 或配置值。
     fn label(&self) -> &'static str {
         "kafka-consumers"
     }
 
     /// 业务作用：在共享全局 deadline 内并发排空全部已启动 consumer。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：Runner 提供的首次停机原因和绝对截止时刻。
+    ///
+    /// 返回：全部已启动 client 在同一期限内完成消费排空时成功；等待全部结果后按 client 名排序，返回首个失败来源。
+    /// 每个等待先撤销该 client 的就绪状态，本层不完成 producer/admin 最终关闭，取消也不恢复已撤销的就绪状态。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         let clients = self
             .clients
@@ -907,7 +930,9 @@ struct KafkaFinalShutdown {
 
 impl Drop for KafkaFinalShutdown {
     /// 业务作用：在最终清理责任交还宿主时永久撤销导出句柄的新准入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：立即关闭本地原子门，不等待客户端；即使清理失败或 action 被放弃也不会重开业务路由。
     fn drop(&mut self) {
         // 最终动作可能根本没得到执行预算；门禁必须由 action 所有权终结保证。
@@ -920,18 +945,21 @@ impl Drop for KafkaFinalShutdown {
 impl ShutdownAction for KafkaFinalShutdown {
     /// 业务作用：返回稳定 action 名称。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 名称不包含 client 或配置值。
+    /// 返回：名称不包含 client 或配置值。
     fn label(&self) -> &'static str {
         "kafka-final"
     }
 
     /// 业务作用：在全局剩余预算内完成本 client 的 lane/admin 最终关闭。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：Runner 提供的首次停机原因和绝对截止时刻。
+    ///
+    /// 返回：底层确认关闭完成时成功，超时或关闭失败保留带 client 归属的底层错误；不因失败延长期限或重新发送消息。
+    /// 导出句柄的永久关闭门由本 action 的析构保证；返回错误或等待被取消不等于全部 native 资源已退出。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             self.proxy
@@ -964,16 +992,15 @@ struct KafkaMonitorClient {
     groups: Vec<(String, ReadyRule)>,
 }
 
-/// 业务作用：按全部 client 的最小周期刷新动态 readiness，并把硬故障升级为关键任务失败。
+/// 业务作用：按每个 client 的到期时刻刷新动态 readiness，并把消费组硬故障升级为关键任务失败。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：用于区分运行期意外退出与 Runner 已先发布的主动 Stopping。
 /// - `clients`：Ready 冻结的全部 client、group 与规则。
 ///
-/// # 返回
-///
-/// Application 进入 Stopping 时正常返回；Crashed/意外 Stopped/健康查询失败时返回 Kafka 错误。
+/// 返回：观察到应用停止或失败状态时撤销就绪并正常退出；运行期消费组崩溃、停止或健康查询失败返回关键错误。
+/// producer-only 探针失败只标记不可用并继续探测，各 client 顺序检查；等待不监听取消，不承诺严格的刷新延迟上限。
 async fn run_kafka_monitor(
     application: Application,
     clients: Vec<KafkaMonitorClient>,
@@ -1083,14 +1110,12 @@ async fn run_kafka_monitor(
 
 /// 业务作用：在产生连接副作用前校验声明中的 `kafka`/`kafkas` 配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：已经合并、插值但尚未发布的完整配置候选树。
 /// - `phase`：启动或热刷新本轮校验所属阶段。
 ///
-/// # 返回
-///
-/// 配置可归一成非空有序 client 表时返回 `Ok(())`。
+/// 返回：配置可归一成有序 client 表或显式关闭时返回 `Ok(())`。
 ///
 /// # 错误
 ///
@@ -1104,14 +1129,12 @@ pub(crate) fn validate_kafka_sections(
 
 /// 业务作用：把单/多 client 配置根归一成唯一有序内部表征。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：包含 `kafka` 或 `kafkas` 的完整配置树。
 /// - `phase`：错误归因使用的生命周期阶段。
 ///
-/// # 返回
-///
-/// 返回按最终 client name 排序的非空配置表。
+/// 返回：启用时返回按最终 client name 排序的配置表；显式关闭时返回空表。
 ///
 /// # 错误
 ///
@@ -1130,6 +1153,28 @@ fn parse_kafka_clients(
             "kafka component requires config root `kafka` or `kafkas`",
         )),
         (Some(value), None) => {
+            if let Some(enabled) = value.get("enabled") {
+                let enabled = enabled
+                    .as_bool()
+                    .ok_or_else(|| kafka_error(phase, "kafka.enabled must be boolean"))?;
+                let mut fields = value
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| kafka_error(phase, "kafka must be an object"))?;
+                fields.remove("enabled");
+                if !enabled {
+                    // 不把无效 broker 或消费声明藏在关闭分支，重新启用必须给出完整来源。
+                    if !fields.is_empty() {
+                        return Err(kafka_error(phase, "disabled kafka accepts only enabled"));
+                    }
+                    return Ok(BTreeMap::new());
+                }
+                let client = parse_kafka_client(&Value::Object(fields), None, phase)?;
+                return Ok(BTreeMap::from([(
+                    client.config.client_name.clone(),
+                    client,
+                )]));
+            }
             let client = parse_kafka_client(value, None, phase)?;
             let mut clients = BTreeMap::new();
             clients.insert(client.config.client_name.clone(), client);
@@ -1166,15 +1211,13 @@ fn parse_kafka_clients(
 
 /// 业务作用：解析一个严格受管 client 节点并剥离 container 字段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`：单 client 的对象节点。
 /// - `authoritative_name`：多 client map key；存在时覆盖缺省 client_name 并拒绝显式不一致。
 /// - `phase`：错误归因使用的生命周期阶段。
 ///
-/// # 返回
-///
-/// 返回通过 KafkaConfig::validate 和容器规则校验的拥有型配置。
+/// 返回：通过 KafkaConfig::validate 和容器规则校验的拥有型配置。
 ///
 /// # 错误
 ///
@@ -1240,18 +1283,19 @@ fn parse_kafka_client(
     container
         .validate()
         .map_err(|message| kafka_error(phase, message))?;
-    Ok(KafkaClientConfig { config, container })
+    Ok(KafkaClientConfig {
+        config,
+        container,
+    })
 }
 
 /// 业务作用：校验所有静态属性 consumer 都指向已配置且允许消费的 client。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `clients`：Start 已构造的完整受管 client 表。
 ///
-/// # 返回
-///
-/// 每个收集项都能被唯一 client 接管时返回 `Ok(())`。
+/// 返回：每个收集项都能被唯一 client 接管时返回 `Ok(())`。
 ///
 /// # 错误
 ///
@@ -1284,15 +1328,13 @@ fn validate_collected_targets(
 
 /// 业务作用：为实际启动的 resolved group 冻结运行期 ReadyRule 列表。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `client_name`：只用于稳定错误归因的 client name。
 /// - `groups`：ConsumerRuntime 返回的有序 resolved group id 列表。
 /// - `container`：本 client 已校验的默认规则和 group override。
 ///
-/// # 返回
-///
-/// 返回与实际 group 一一对应的有序规则列表。
+/// 返回：与实际 group 一一对应的有序规则列表。
 ///
 /// # 错误
 ///
@@ -1332,13 +1374,11 @@ fn resolve_group_rules(
 
 /// 业务作用：计算严格早于 Application 全局时刻的 Kafka 子 deadline。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application_deadline`：Runner 为完整启动流程建立的绝对截止时刻。
 /// - `phase`：本次 Kafka 门禁所属的 Application 阶段。
 /// - `operation`：不含配置值的稳定操作名。
-///
-/// # 返回
 ///
 /// 返回：剩余时间足够时返回扣除固定诊断余量后的绝对时刻；预算不足时返回
 /// 归因到 `phase` 的 Kafka 启动错误。
@@ -1358,28 +1398,12 @@ fn kafka_startup_subdeadline(
     Ok(application_deadline - STARTUP_DIAGNOSTIC_RESERVE)
 }
 
-/// 业务作用：在共享子 deadline 内验证 producer-only client 的 broker metadata。
+/// 业务作用：整理 bootstrap 地址列表的展示文本，供 metadata 失败归因使用。
 ///
-/// # 参数
+/// 参数说明：
+/// - `bootstrap`：配置中的逗号分隔地址列表，调用方必须保证其中不含凭据或不宜公开的内容。
 ///
-/// - `client_name`：只用于稳定错误归因的 client name。
-/// - `proxy`：Start 已完成本地构造的目标 client。
-/// - `topic`：可选指定 topic；存在时必须可见且至少有一个分区。
-/// - `deadline`：全部 client 共用、严格早于 Application 全局时刻的绝对 deadline。
-///
-/// # 返回
-///
-/// metadata 请求成功且满足指定 topic 条件时返回 `Ok(())`。
-///
-/// # 错误
-///
-/// 请求失败、topic 不存在/无分区或 deadline 到期时返回带 client 归因的 Prepare 错误。
-/// 规范化 Kafka bootstrap 列表为安全展示形式:按**原顺序**去空白拼接 `host:port` 列表。
-/// Kafka bootstrap 不含 userinfo/SASL 凭据(凭据在独立配置项),故整串可安全进日志与错误;空则占位符。
-///
-/// # 参数
-///
-/// - `bootstrap`:配置里的原始 `bootstrap_servers`(逗号分隔 host:port)。
+/// 返回：按原顺序裁剪各项空白并去掉空项后的文本，空集合返回固定占位符；不解析地址、去重或执行脱敏。
 fn safe_bootstrap_endpoint(bootstrap: &str) -> String {
     let joined = bootstrap
         .split(',')
@@ -1396,18 +1420,18 @@ fn safe_bootstrap_endpoint(bootstrap: &str) -> String {
 
 /// 业务作用：对单个 client 执行**只读** broker metadata 探针:配了 `producer_probe_topic` 则验证该 topic
 /// 可见且至少一个分区,否则请求 cluster metadata。只读——不建 topic、不改配置、不提交 offset。
-/// 失败错误带 client 名、安全 bootstrap endpoint、`metadata` 阶段与底层 broker 根因。
+/// 失败错误携带 client 名、bootstrap 展示文本、metadata 阶段与底层 broker 根因；凭据应只放在独立安全配置中。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `client_name`:逻辑 client 名。
 /// - `proxy`:该 client 的 KafkaProxy(取 admin 连接与 bootstrap endpoint)。
 /// - `topic`:producer-only client 可选的指定探测 topic;consumer client 为 None,走 cluster metadata。
-/// - `deadline`:本次探针的绝对上限(严格早于 Application 启动 deadline)。
+/// - `deadline`：本次探针的绝对期限；启动期预留全局诊断余量，运行期由当前 client 的监控周期限定。
 /// - `phase`：探针失败应归因的当前生命周期阶段。
 ///
 /// 返回：metadata 满足配置合同时成功；超时、broker 失败或 topic 无分区时返回
-/// 归因到 `phase` 的错误。
+/// 归因到 `phase` 的错误。等待超时不证明底层 native 查询已经退出，也不保证之后仍能发布或消费消息。
 async fn probe_client_metadata(
     client_name: &str,
     proxy: &nafka::KafkaProxy,
@@ -1469,7 +1493,7 @@ async fn probe_client_metadata(
 /// 探针只读、无 owner 副作用,失败时无需回滚(尚未启动任何 consumer)。全部失败按 client 名**稳定排序**,
 /// 主错误只输出第一个(名序最小)以避免多源覆盖首因,其余以 `warn` 记录(仍稳定有序)。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `clients`:Start 已构造的全部 client 计划。
 /// - `deadline`:所有探针共享、严格早于 Application 启动 deadline 的子 deadline。
@@ -1527,12 +1551,15 @@ async fn probe_all_clients_metadata(
 /// assignment 分区数、`ready_assignment_epoch` 是否存在、脱敏 `last_error`——无需 librdkafka 旁路日志即可定位。
 /// 其它错误按通用摘要 + 类型化 source。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `client_name`:逻辑 client 名。
 /// - `groups`:该 client 的 (group, 规则) 列表,用于把 group id 映射回其 `ReadyRequirement`。
 /// - `budget_ms`:group ready 等待的大致预算毫秒(用于诊断 "before ~Xms")。
 /// - `error`:`await_groups_ready` 返回的底层错误。
+///
+/// 返回：组等待超时时按组名排序拼接最后健康事实，不保留原 source；其它错误保留类型化来源。
+/// 结果归属 Kafka Ready 阶段，仅整理已有快照，不重查 broker 或延长等待。
 fn group_ready_error(
     client_name: &str,
     groups: &[(String, ReadyRule)],
@@ -1595,13 +1622,18 @@ fn group_ready_error(
 
 /// 业务作用：把 `ReadyRequirement` 转成诊断用短名。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `requirement`:group 的就绪要求。
+///
+/// 返回：规则种类的稳定文本，Assigned 同时携带最小分区数；topic 与具体分区规则不展开目标集合。
+/// 本函数不验证规则、读取分配或判定当前是否就绪。
 fn describe_requirement(requirement: &nafka::ReadyRequirement) -> String {
     match requirement {
         nafka::ReadyRequirement::Joined => "joined".to_owned(),
-        nafka::ReadyRequirement::Assigned { min_partitions } => {
+        nafka::ReadyRequirement::Assigned {
+            min_partitions,
+        } => {
             format!("assigned>={min_partitions}")
         }
         nafka::ReadyRequirement::AssignedTopics(_) => "assigned_topics".to_owned(),
@@ -1611,29 +1643,25 @@ fn describe_requirement(requirement: &nafka::ReadyRequirement) -> String {
 
 /// 业务作用：创建没有底层 source 的 Kafka 组件错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：错误被观察到的 Application 生命周期阶段。
 /// - `message`：不包含 broker、凭据或业务负载的稳定摘要。
 ///
-/// # 返回
-///
-/// 返回 component 固定为 Kafka 的统一错误。
+/// 返回： component 固定为 Kafka 的统一错误。
 fn kafka_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Kafka, phase, message)
 }
 
 /// 业务作用：创建保留类型化底层 source 的 Kafka 组件错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：错误被观察到的 Application 生命周期阶段。
 /// - `message`：不复制底层配置值或消息正文的稳定摘要。
 /// - `source`：serde 或 nafka 返回的类型化根因。
 ///
-/// # 返回
-///
-/// 返回 component 固定为 Kafka 且保留 source 链的统一错误。
+/// 返回： component 固定为 Kafka 且保留 source 链的统一错误。
 fn kafka_source_error(
     phase: ApplicationPhase,
     message: impl Into<String>,

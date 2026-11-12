@@ -58,7 +58,7 @@ impl PostgresBindIndex {
 
     /// 业务作用: 把下一个 PostgreSQL prepared 占位符写入指定 SQL 缓冲区。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `sql`: 当前结构节点所属的 SQL 输出缓冲区。
     ///
     /// 返回: 新写入占位符的 1-based bind 序号。
@@ -71,7 +71,7 @@ impl PostgresBindIndex {
 
     /// 业务作用: 连续写入 PostgreSQL 列表 bind，占位符序号与同一渲染器的前后节点连续。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `sql`: 当前 SQL 输出缓冲区。
     /// - `len`: 列表元素数量；零长度会产生非法 `IN ()`，因此明确拒绝。
     ///
@@ -101,7 +101,7 @@ impl PostgresBindIndex {
 
 /// 业务作用: 从已选中的结构化节点渲染 PostgreSQL SQL 与 bind 总数。
 ///
-/// # 参数
+/// 参数说明：
 /// - `nodes`: 按最终执行顺序排列的文本、标量 bind 与列表 bind 节点。
 ///
 /// 返回: 规范化 SQL 和实际 bind 数量；空列表节点返回错误。
@@ -141,7 +141,9 @@ impl std::ops::Deref for PageRequest {
     type Target = PageRequestValues;
 
     /// 业务作用：保留 SQL 字段路径绑定的读取方式，禁止绕过校验直接修改分页值。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只读绑定值；不提供可变解引用。
     fn deref(&self) -> &Self::Target {
         &self.values
@@ -152,8 +154,10 @@ impl TryFrom<PageRequestValues> for PageRequest {
     type Error = anyhow::Error;
 
     /// 业务作用：将外部有符号分页输入转换为经过验证的执行参数。
+    ///
     /// 参数说明：
     /// - `values`：可能来自反序列化或业务计算的原始 limit/offset。
+    ///
     /// 返回：正 limit、非负 offset 才成功，不强加默认页大小上限。
     fn try_from(values: PageRequestValues) -> anyhow::Result<Self> {
         let page = Self {
@@ -166,8 +170,10 @@ impl TryFrom<PageRequestValues> for PageRequest {
 
 impl From<PageRequest> for PageRequestValues {
     /// 业务作用：按原有 limit/offset 结构序列化或复制分页值，不开放原对象的修改权限。
+    ///
     /// 参数说明：
     /// - `page`：已验证的分页参数。
+    ///
     /// 返回：独立的值副本，不改变原分页参数。
     fn from(page: PageRequest) -> Self {
         page.values
@@ -230,7 +236,9 @@ impl PageRequest {
     }
 
     /// 业务作用：统一确认分页绑定不会因非正 limit 或负 offset 改变查询边界。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：limit 大于零且 offset 非负时成功；不替业务选择最大页大小。
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -242,8 +250,10 @@ impl PageRequest {
     }
 
     /// 业务作用：在接收外部分页输入的业务边界执行调用方自己的最大页大小策略。
+    ///
     /// 参数说明：
     /// - `max_page_size`：业务允许的最大单页条数，必须大于零。
+    ///
     /// 返回：基本分页不变量成立且未超过业务上限时成功。
     pub fn validate_with_max_page_size(&self, max_page_size: u64) -> anyhow::Result<()> {
         self.validate()?;
@@ -259,9 +269,11 @@ impl PageRequest {
     }
 
     /// 业务作用：以一次验证完成偏移和条数更新，拒绝留下部分更新的分页状态。
+    ///
     /// 参数说明：
     /// - `offset`：新的非负偏移量。
     /// - `limit`：新的正读取条数。
+    ///
     /// 返回：成功后整体替换；零 limit 或 i64 溢出时保留原值。
     pub fn set_offset_limit(&mut self, offset: u64, limit: u64) -> anyhow::Result<()> {
         *self = Self::from_offset_limit(offset, limit)?;
@@ -301,7 +313,7 @@ impl<'a, T> Iterator for MapperBatchChunks<'a, T> {
 
 /// 业务作用: 按固定最大元素数拆分批量参数，不隐式改变事务边界。
 ///
-/// # 参数
+/// 参数说明：
 /// - `items`: 待处理业务对象切片。
 /// - `chunk_size`: 每批最大元素数，必须大于零。
 ///
@@ -360,7 +372,7 @@ pub struct OrderBy<F: MapperOrderField> {
 impl<F: MapperOrderField> OrderBy<F> {
     /// 业务作用: 创建白名单字段的升序排序项。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `field`: 业务定义的静态字段枚举。
     ///
     /// 返回: 可由 Mapper 渲染的升序项。
@@ -373,7 +385,7 @@ impl<F: MapperOrderField> OrderBy<F> {
 
     /// 业务作用: 创建白名单字段的降序排序项。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `field`: 业务定义的静态字段枚举。
     ///
     /// 返回: 可由 Mapper 渲染的降序项。
@@ -407,7 +419,7 @@ impl<F: MapperOrderField> OrderBy<F> {
 pub trait MapperOrderBy {
     /// 业务作用: 向输出写入不含 `ORDER BY` 前缀的安全排序片段。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `out`: 排序 SQL 输出缓冲区。
     ///
     /// 返回: 实际写入内容时为 `true`，空可选值为 `false`。
@@ -417,7 +429,7 @@ pub trait MapperOrderBy {
 impl<T: MapperOrderBy + ?Sized> MapperOrderBy for &T {
     /// 业务作用: 允许借用值复用原类型的排序渲染合同。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `out`: 排序 SQL 输出缓冲区。
     ///
     /// 返回: 底层实现的写入结果。
@@ -429,7 +441,7 @@ impl<T: MapperOrderBy + ?Sized> MapperOrderBy for &T {
 impl<T: MapperOrderBy> MapperOrderBy for Option<T> {
     /// 业务作用: 把 `None` 解释为不追加排序，把 `Some` 交给白名单实现。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `out`: 排序 SQL 输出缓冲区。
     ///
     /// 返回: `Some` 的渲染结果或 `false`。
@@ -444,7 +456,7 @@ impl<T: MapperOrderBy> MapperOrderBy for Option<T> {
 impl<F: MapperOrderField> MapperOrderBy for OrderBy<F> {
     /// 业务作用: 在运行期复验字段形状后渲染一个排序项。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `out`: 排序 SQL 输出缓冲区。
     ///
     /// 返回: 字段合法时写入字段和方向；非法实现返回错误。
@@ -461,7 +473,7 @@ impl<F: MapperOrderField> MapperOrderBy for OrderBy<F> {
 impl<F: MapperOrderField> MapperOrderBy for [OrderBy<F>] {
     /// 业务作用: 按业务声明顺序渲染多个白名单排序项。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `out`: 排序 SQL 输出缓冲区。
     ///
     /// 返回: 空切片为 `false`；非空时以逗号连接并返回 `true`。
@@ -482,7 +494,7 @@ impl<F: MapperOrderField> MapperOrderBy for [OrderBy<F>] {
 impl<F: MapperOrderField> MapperOrderBy for Vec<OrderBy<F>> {
     /// 业务作用: 渲染业务常用的可变长度白名单排序列表。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `out`: 排序 SQL 输出缓冲区。
     ///
     /// 返回: 委托切片实现得到的写入结果。
@@ -494,7 +506,7 @@ impl<F: MapperOrderField> MapperOrderBy for Vec<OrderBy<F>> {
 impl<F: MapperOrderField, const N: usize> MapperOrderBy for [OrderBy<F>; N] {
     /// 业务作用: 渲染固定长度的白名单排序数组。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `out`: 排序 SQL 输出缓冲区。
     ///
     /// 返回: 委托切片实现得到的写入结果。
@@ -514,7 +526,7 @@ pub trait MapperEnum: Copy + Sized + Send + Sync + 'static {
 
     /// 业务作用: 从数据库或 cache 的 ordinal 还原业务 enum。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: 外部持久状态读取到的整数序号。
     ///
     /// 返回: 已知序号对应 enum，未知值返回 `None`。
@@ -547,7 +559,7 @@ pub struct CacheArg {
 impl CacheArg {
     /// 业务作用: 把任意可序列化 bind 转换为稳定缓存身份材料。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `name`: 宏期确认的方法参数名。
     /// - `value`: prepared bind 对应的业务值。
     ///
@@ -574,7 +586,7 @@ impl CacheArg {
 
 /// 业务作用: 使用规范化 SQL 与有序 bind JSON hash 构造稳定查询缓存字段。
 ///
-/// # 参数
+/// 参数说明：
 /// - `normalized_sql`: 最终发送给数据库的 prepared SQL。
 /// - `args`: 按占位符顺序排列的 bind 参数。
 ///
@@ -591,7 +603,7 @@ pub fn cache_hash_key(normalized_sql: &str, args: &[CacheArg]) -> anyhow::Result
 
 /// 业务作用: 使用显式标量参数模板构造缓存字段，并保留最终 SQL 身份。
 ///
-/// # 参数
+/// 参数说明：
 /// - `normalized_sql`: 最终发送给数据库的 prepared SQL。
 /// - `suffix_template`: 只允许 `{param}` 引用标量参数的后缀模板。
 /// - `args`: 宏按 bind 顺序收集的参数。
@@ -629,7 +641,7 @@ pub fn cache_hash_key_with_suffix(
     Ok(format!("sql:{normalized_sql}:{suffix}"))
 }
 
-/// Mapper cache miss loader future。
+/// 查询缓存未命中后执行加载操作的异步结果。
 pub type MapperCacheLoadFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Vec<u8>>> + Send + 'a>>;
 
@@ -659,7 +671,7 @@ pub struct MapperCacheLoad {
 impl MapperCacheLoad {
     /// 业务作用: 构造首次读取即命中的缓存结果。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: 从 L2 cache 读取的原始 value。
     ///
     /// 返回: 标记为首次命中的缓存结果。
@@ -672,7 +684,7 @@ impl MapperCacheLoad {
 
     /// 业务作用: 构造等待同 key loader 完成后命中的缓存结果。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: 等待期间由其它调用写入的缓存 value。
     ///
     /// 返回: 标记为等待后命中的缓存结果。
@@ -685,7 +697,7 @@ impl MapperCacheLoad {
 
     /// 业务作用: 构造当前调用从数据库加载并写入缓存后的结果。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: loader 编码后的业务结果。
     ///
     /// 返回: 标记为当前调用已加载的缓存结果。
@@ -702,7 +714,7 @@ impl MapperCacheLoad {
 pub trait MapperL2Cache: Send + Sync + 'static {
     /// 业务作用: 读取一个 Mapper 查询缓存字段。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 包含 driver/datasource 的缓存 namespace。
     /// - `hash_key`: SQL 与 bind 派生的查询字段。
     ///
@@ -711,7 +723,7 @@ pub trait MapperL2Cache: Send + Sync + 'static {
 
     /// 业务作用: 写入一个已编码 Mapper 查询结果。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 缓存 namespace。
     /// - `hash_key`: 查询字段。
     /// - `value`: codec 编码后的业务结果。
@@ -728,7 +740,7 @@ pub trait MapperL2Cache: Send + Sync + 'static {
 
     /// 业务作用: 删除一个查询缓存字段。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 缓存 namespace。
     /// - `hash_key`: 需要删除的查询字段。
     ///
@@ -737,7 +749,7 @@ pub trait MapperL2Cache: Send + Sync + 'static {
 
     /// 业务作用: 清理一个 Mapper namespace 下的全部查询结果。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 需要整体失效的缓存 namespace。
     ///
     /// 返回: 缓存确认清理时成功。
@@ -745,7 +757,7 @@ pub trait MapperL2Cache: Send + Sync + 'static {
 
     /// 业务作用: 在未命中时执行一次数据库 loader 并写回编码结果。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 缓存 namespace。
     /// - `hash_key`: 查询字段。
     /// - `ttl_ms`: 写回 TTL。
@@ -775,7 +787,7 @@ pub trait MapperL2Cache: Send + Sync + 'static {
 
     /// 业务作用: 尽力清理多个缓存 namespace，并在全部尝试后返回首个错误。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `keys`: 需要失效的缓存 namespace 集合。
     ///
     /// 返回: 全部成功时为 `Ok`；否则返回首个实现错误。
@@ -828,7 +840,7 @@ pub enum MapperMetricKind {
 pub struct MapperMetric<'a> {
     /// 事件类型。
     pub kind: MapperMetricKind,
-    /// Mapper cache namespace。
+    /// Mapper 查询缓存的命名空间。
     pub mapper_key: &'a str,
     /// 查询字段。
     pub hash_key: Option<&'a str>,
@@ -842,7 +854,7 @@ pub struct MapperMetric<'a> {
 pub trait MapperMetrics: Send + Sync + 'static {
     /// 业务作用: 记录一条非阻塞 Mapper cache 指标。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `metric`: 宏执行路径产生的结构化事件。
     ///
     /// 返回: 无；实现不得让观测失败改变数据库结果。
@@ -853,7 +865,7 @@ pub trait MapperMetrics: Send + Sync + 'static {
 pub trait MapperCacheCodec: Send + Sync + 'static {
     /// 业务作用: 把查询结果 JSON value 编码为缓存 bytes。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: serde 转换后的业务结果。
     ///
     /// 返回: 可写入 cache 的 bytes 或编码错误。
@@ -861,7 +873,7 @@ pub trait MapperCacheCodec: Send + Sync + 'static {
 
     /// 业务作用: 把缓存 bytes 解码为查询结果 JSON value。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: cache 返回的原始 bytes。
     ///
     /// 返回: 可反序列化为业务类型的 JSON value 或解码错误。
@@ -869,7 +881,7 @@ pub trait MapperCacheCodec: Send + Sync + 'static {
 
     /// 业务作用: 指示成功读取的旧格式 value 是否应回写为当前格式。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `_bytes`: 已成功解码的缓存 bytes。
     ///
     /// 返回: 默认 `false`；迁移 codec 可按格式返回 `true`。
@@ -885,7 +897,7 @@ pub struct JsonMapperCacheCodec;
 impl MapperCacheCodec for JsonMapperCacheCodec {
     /// 业务作用: 使用 serde JSON 编码缓存 value。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: Mapper 查询结果 JSON value。
     ///
     /// 返回: JSON bytes 或 serde 错误。
@@ -895,7 +907,7 @@ impl MapperCacheCodec for JsonMapperCacheCodec {
 
     /// 业务作用: 使用 serde JSON 解码缓存 value。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: cache 保存的 JSON bytes。
     ///
     /// 返回: JSON value 或 serde 错误。
@@ -908,7 +920,7 @@ impl MapperCacheCodec for JsonMapperCacheCodec {
 pub trait MapperTypedCacheCodec<T>: Send + Sync + 'static {
     /// 业务作用: 直接编码具体查询返回类型。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: 查询结果。
     ///
     /// 返回: cache bytes 或 codec 错误。
@@ -916,7 +928,7 @@ pub trait MapperTypedCacheCodec<T>: Send + Sync + 'static {
 
     /// 业务作用: 直接从 cache bytes 解码具体查询返回类型。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: cache 原始 bytes。
     ///
     /// 返回: 业务查询类型或 codec 错误。
@@ -932,7 +944,7 @@ pub(crate) static DEFAULT_MAPPER_CACHE_CODEC: std::sync::RwLock<Option<Arc<dyn M
 
 /// 业务作用: 安装当前进程唯一的默认 Mapper 二级缓存。
 ///
-/// # 参数
+/// 参数说明：
 /// - `cache`: 业务提供的 cache 实现。
 ///
 /// 返回: 首次安装成功；重复安装返回错误。
@@ -962,7 +974,7 @@ pub fn default_l2_cache() -> Option<Arc<dyn MapperL2Cache>> {
 
 /// 业务作用: 安装当前进程唯一的 Mapper 指标出口。
 ///
-/// # 参数
+/// 参数说明：
 /// - `metrics`: 业务观测实现。
 ///
 /// 返回: 首次安装成功；重复安装返回错误。
@@ -992,7 +1004,7 @@ pub fn default_mapper_metrics() -> Option<Arc<dyn MapperMetrics>> {
 
 /// 业务作用: 安装当前进程唯一的默认 Mapper cache codec。
 ///
-/// # 参数
+/// 参数说明：
 /// - `codec`: 业务缓存值编解码器。
 ///
 /// 返回: 首次安装成功；重复安装返回错误。
@@ -1022,7 +1034,7 @@ pub fn default_mapper_cache_codec() -> Option<Arc<dyn MapperCacheCodec>> {
 
 /// 业务作用: 使用进程默认或 JSON codec 编码 Mapper 查询结果。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 可序列化查询结果。
 ///
 /// 返回: cache bytes 或序列化/codec 错误。
@@ -1033,7 +1045,7 @@ pub fn encode_cache_value<T: serde::Serialize + ?Sized>(value: &T) -> anyhow::Re
 
 /// 业务作用: 使用方法级、全局或默认 JSON codec 编码查询结果。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 可序列化查询结果。
 /// - `codec`: 方法级 codec，可为空。
 ///
@@ -1052,7 +1064,7 @@ pub fn encode_cache_value_with_codec<T: serde::Serialize + ?Sized>(
 
 /// 业务作用: 使用方法级、全局或默认 JSON codec 解码查询结果。
 ///
-/// # 参数
+/// 参数说明：
 /// - `bytes`: cache 原始 bytes。
 /// - `codec`: 方法级 codec，可为空。
 ///
@@ -1071,7 +1083,7 @@ pub fn decode_cache_value_with_codec<T: serde::de::DeserializeOwned>(
 
 /// 业务作用: 使用进程默认或 JSON codec 解码 Mapper 查询结果。
 ///
-/// # 参数
+/// 参数说明：
 /// - `bytes`: cache 返回的原始 bytes。
 ///
 /// 返回: 具体查询结果或解码错误。
@@ -1082,7 +1094,7 @@ pub fn decode_cache_value<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> anyho
 
 /// 业务作用: 使用强类型 codec 编码查询结果。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 具体查询结果。
 /// - `codec`: 方法级强类型 codec。
 ///
@@ -1096,7 +1108,7 @@ where
 
 /// 业务作用: 使用强类型 codec 解码查询结果。
 ///
-/// # 参数
+/// 参数说明：
 /// - `bytes`: cache 原始 bytes。
 /// - `codec`: 方法级强类型 codec。
 ///
@@ -1110,7 +1122,7 @@ where
 
 /// 业务作用: 判断命中的缓存 value 是否需要由当前 codec 回写。
 ///
-/// # 参数
+/// 参数说明：
 /// - `bytes`: 已成功解码的缓存 bytes。
 /// - `codec`: 方法级 codec，可为空。
 ///
@@ -1124,7 +1136,7 @@ pub fn cache_value_needs_rewrite(bytes: &[u8], codec: Option<&dyn MapperCacheCod
 
 /// 业务作用: 把 Mapper cache 指标交给已安装观测出口，未安装时静默跳过。
 ///
-/// # 参数
+/// 参数说明：
 /// - `metric`: 当前查询或缓存路径产生的结构化指标。
 ///
 /// 返回: 无；观测缺失不影响数据库业务结果。
@@ -1148,7 +1160,7 @@ pub fn assert_l2_cache_installed_for_cached_queries() -> anyhow::Result<()> {
 
 /// 业务作用: 根据 Mapper 元数据计算写操作提交后需要失效的全部缓存 namespace。
 ///
-/// # 参数
+/// 参数说明：
 /// - `source_key`: 发起清理的 Mapper namespace。
 /// - `flush_refs`: 是否展开正向与反向关联。
 ///
@@ -1172,7 +1184,7 @@ pub fn cache_clear_targets(source_key: &str, flush_refs: bool) -> Vec<String> {
 
 /// 业务作用: 向最终 SQL 追加经过白名单验证的完整 `ORDER BY` 子句。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 排序项、列表或可选排序项。
 /// - `sql`: 最终 SQL 输出缓冲区。
 ///
@@ -1194,7 +1206,7 @@ pub fn write_mapper_order_by_clause<T: MapperOrderBy + ?Sized>(
 
 /// 业务作用: 规范化结构化 Mapper SQL 外部空白，同时保持字面量、quoted identifier 与块注释内部内容。
 ///
-/// # 参数
+/// 参数说明：
 /// - `sql`: 宏按节点顺序构造的 prepared SQL。
 ///
 /// 返回: 可用于执行和缓存身份的稳定 SQL 文本。
@@ -1282,7 +1294,7 @@ pub fn normalize_sql_whitespace(sql: &str) -> String {
 
 /// 业务作用: 应用动态 SQL `trim/where/set` 的前后缀与 token 剥离规则。
 ///
-/// # 参数
+/// 参数说明：
 /// - `body`: 已展开动态节点的 SQL 片段。
 /// - `prefix`: 非空 body 前缀。
 /// - `suffix`: 非空 body 后缀。
@@ -1330,7 +1342,7 @@ pub fn apply_sql_trim(
 
 /// 业务作用: 校验排序字段仅由一到两段普通 identifier 组成。
 ///
-/// # 参数
+/// 参数说明：
 /// - `field`: `MapperOrderField` 实现返回的静态文本。
 ///
 /// 返回: 安全字段成功；表达式、引号或额外分段返回错误。
@@ -1345,7 +1357,7 @@ fn validate_order_field(field: &str) -> anyhow::Result<()> {
 
 /// 业务作用: 判断单段文本是否为普通 ASCII SQL identifier。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 字段名或表别名。
 ///
 /// 返回: 首字符与后续字符均满足安全白名单时为 `true`。
@@ -1360,7 +1372,7 @@ fn is_sql_ident(value: &str) -> bool {
 
 /// 业务作用: 按 SQL token 边界判断片段是否以指定 override 开头。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 已规范化 SQL 片段。
 /// - `token`: trim 配置提供的头部 token。
 ///
@@ -1377,7 +1389,7 @@ fn starts_with_sql_token(value: &str, token: &str) -> bool {
 
 /// 业务作用: 按 SQL token 边界判断片段是否以指定 override 结尾。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 已规范化 SQL 片段。
 /// - `token`: trim 配置提供的尾部 token。
 ///
@@ -1396,7 +1408,7 @@ fn ends_with_sql_token(value: &str, token: &str) -> bool {
 
 /// 业务作用: 判断字符是否能分隔两个 SQL token。
 ///
-/// # 参数
+/// 参数说明：
 /// - `ch`: token 相邻字符。
 ///
 /// 返回: 非 identifier 字符视为安全边界。

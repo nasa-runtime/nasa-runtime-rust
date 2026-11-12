@@ -27,14 +27,23 @@ const TERMINAL_ROOT_STATES: [&str; 4] = ["SUCCEEDED", "PARTIAL_FAILED", "FAILED"
 
 /// Fanout 监视器；持有连接、仓库、Fanout 数据模型、键模型与本地定义，驱动对账与看门狗。
 pub struct FanoutMonitor {
+    /// 当前 source 的客户端，供权威时间和到期根查询使用。
     client: Arc<RedisClient>,
+    /// 普通调度分片仓库，负责跨 slot 结果回填。
     repository: JobRepository,
+    /// Fanout 桶内状态仓库，所有写入仍由脚本复验观察证据。
     fanout: FanoutRepository,
+    /// 冻结的 source、命名空间及桶布局。
     keyspace: JobKeyspace,
+    /// 扫描、投递和恢复的有界运行参数。
     config: Arc<JobConfig>,
+    /// 当前 source 的执行器证据与兼容能力查询入口。
     registry: Arc<ExecutorRegistry>,
+    /// 按任务名登记的本地定义，供普通根终态回填。
     root_definitions: HashMap<String, JobDefinition>,
+    /// 按 Worker 名登记的本地定义，供分片租约恢复取得执行策略。
     worker_definitions: HashMap<String, JobDefinition>,
+    /// 受管运行时提供的指标容器，低层独立构造时缺省。
     metrics: Option<Arc<JobMetrics>>,
 }
 
@@ -42,10 +51,12 @@ impl FanoutMonitor {
     /// 业务作用：绑定连接、键模型与配置，创建 Fanout 监视器。
     ///
     /// 参数说明：
-    /// - `client`/`keyspace`/`config`: 连接、冻结键模型与已校验配置。
+    /// - `client`：当前 source 的 Redis 客户端。
+    /// - `keyspace`：与配置一致的冻结键布局。
+    /// - `config`：已由调用方校验的扫描、容量和恢复配置。
     /// - `registry`: 同一 source 的执行器注册表，用于失联证据与兼容能力快照。
     ///
-    /// 返回：可登记根定义并执行对账的监视器。
+    /// 返回：尚未登记定义、未关联指标的监视器；构造本身不执行 Redis I/O 或再次校验配置。
     pub fn new(
         client: Arc<RedisClient>,
         keyspace: JobKeyspace,
@@ -69,7 +80,12 @@ impl FanoutMonitor {
 
     /// 业务作用：为受管运行时创建共享同一 source 指标容器的 Fanout 监视器。
     ///
-    /// 参数说明：连接、布局、配置与 registry 同 `new`，`metrics` 属于同一 source generation。
+    /// 参数说明：
+    /// - `client`：当前 source 的 Redis 客户端。
+    /// - `keyspace`：与该 source 一致的冻结键布局。
+    /// - `config`：已通过启动门禁的运行配置。
+    /// - `registry`：同一 source 的执行器注册表。
+    /// - `metrics`：同一运行时 source 共享的进程内指标容器。
     ///
     /// 返回：看门狗推进时同步发布固定观测的监视器。
     pub(crate) fn new_with_metrics(
@@ -84,12 +100,12 @@ impl FanoutMonitor {
         monitor
     }
 
-    /// 业务作用：登记一个根任务定义，使对账终态回填时可按根任务名找到定义与串行队列。
+    /// 业务作用：把任务定义同时登记到根任务名和 Worker 能力索引，供终态回填及分片租约恢复使用。
     ///
     /// 参数说明：
-    /// - `definition`: 根任务定义。
+    /// - `definition`：已经通过计划合同校验的任务定义；同名项会覆盖本地旧值。
     ///
-    /// 返回：无返回值；定义名用于根回填，Worker 名用于 shard 租约恢复。
+    /// 返回：无；更新两个本地索引，不写入 Redis 或在此处解决定义冲突。
     pub fn register_definition(&mut self, definition: JobDefinition) {
         self.worker_definitions
             .insert(definition.worker_name().to_owned(), definition.clone());
@@ -155,9 +171,13 @@ impl FanoutMonitor {
             )
             .await?
         {
-            FinishFanoutRootOutcome::Ok { .. }
+            FinishFanoutRootOutcome::Ok {
+                ..
+            }
             | FinishFanoutRootOutcome::Adopted
-            | FinishFanoutRootOutcome::AlreadyCompleted { .. } => {}
+            | FinishFanoutRootOutcome::AlreadyCompleted {
+                ..
+            } => {}
             other => return Err(protocol(&format!("finish_fanout_root 回填拒绝: {other:?}"))),
         }
         // 回填后标记已对账，进入有界清理候选。
@@ -167,7 +187,8 @@ impl FanoutMonitor {
 
     /// 业务作用：推进删除收敛脚本返回的跨 slot Fanout 根，在关闭桶内新执行权后回填普通根。
     ///
-    /// 参数说明：`request` 携带普通根与 Fanout 桶的持久关联证据。
+    /// 参数说明：
+    /// - `request`：删除收敛记录提供的普通根身份、attempt 与 Fanout 关联证据，操作前必须与桶记录复验。
     ///
     /// 返回：桶不存在或已终态时完成普通根回填；桶未终态时发布一批协作式取消；定位冲突或 Redis 失败时返回错误。
     pub(crate) async fn drive_deleted_fanout(&self, request: &JobReapFanoutRequest) -> Result<()> {
@@ -216,7 +237,11 @@ impl FanoutMonitor {
 
     /// 业务作用：用删除收敛携带的任务名回填普通根，不依赖本节点仍保留对应定义对象。
     ///
-    /// 参数说明：`request` 定位普通根；`state`、`error_type` 与 `summary` 来自桶终态或缺桶结局。
+    /// 参数说明：
+    /// - `request`：已核对的普通根及 Fanout 关联坐标。
+    /// - `state`：桶终态，或者缺桶时采用的取消状态。
+    /// - `error_type`：持久错误类型，删除导致的取消使用 JOB_DELETED。
+    /// - `summary`：桶取消原因或缺桶结局摘要，原样交给完成脚本。
     ///
     /// 返回：回填成功、幂等采用或根已终态时成功；其它状态拒绝时返回协议错误。
     async fn finish_deleted_root(
@@ -239,9 +264,13 @@ impl FanoutMonitor {
             )
             .await?
         {
-            FinishFanoutRootOutcome::Ok { .. }
+            FinishFanoutRootOutcome::Ok {
+                ..
+            }
             | FinishFanoutRootOutcome::Adopted
-            | FinishFanoutRootOutcome::AlreadyCompleted { .. } => Ok(()),
+            | FinishFanoutRootOutcome::AlreadyCompleted {
+                ..
+            } => Ok(()),
             other => Err(protocol(&format!(
                 "删除收敛的 finish_fanout_root 回填拒绝: {other:?}"
             ))),
@@ -292,11 +321,15 @@ impl FanoutMonitor {
             };
             if let (Some(root), Some(shard)) = self.root_and_shard(&fanout_id, seq).await? {
                 match self.fanout.retry_receipt(&root, &shard).await? {
-                    FanoutReceiptRetryOutcome::Ok { .. } => {
+                    FanoutReceiptRetryOutcome::Ok {
+                        ..
+                    } => {
                         self.add_metric("redis_job_fanout_receipt_timeout_total", 1);
                         self.add_metric("redis_job_fanout_receipt_retry_total", 1);
                     }
-                    FanoutReceiptRetryOutcome::RetryExhausted { .. } => {
+                    FanoutReceiptRetryOutcome::RetryExhausted {
+                        ..
+                    } => {
                         self.add_metric("redis_job_fanout_receipt_timeout_total", 1);
                         self.handle_unavailable(&root, &shard, "RECEIPT_TIMEOUT")
                             .await?;
@@ -304,8 +337,10 @@ impl FanoutMonitor {
                     FanoutReceiptRetryOutcome::StaleAssignment => {
                         self.add_metric("redis_job_fanout_stale_assignment_total", 1);
                     }
-                    FanoutReceiptRetryOutcome::Stale | FanoutReceiptRetryOutcome::NotDue { .. } => {
-                    }
+                    FanoutReceiptRetryOutcome::Stale
+                    | FanoutReceiptRetryOutcome::NotDue {
+                        ..
+                    } => {}
                 }
             }
         }
@@ -316,15 +351,21 @@ impl FanoutMonitor {
             };
             if let (Some(root), Some(shard)) = self.root_and_shard(&fanout_id, seq).await? {
                 match self.fanout.promote_ready(&root, &shard).await? {
-                    FanoutReadyPromoteOutcome::Ok { .. } => {
+                    FanoutReadyPromoteOutcome::Ok {
+                        ..
+                    } => {
                         self.add_metric("redis_job_fanout_ready_wakeup_total", 1);
                     }
-                    FanoutReadyPromoteOutcome::CapacityExhausted { .. } => {
+                    FanoutReadyPromoteOutcome::CapacityExhausted {
+                        ..
+                    } => {
                         // 容量证据表明目标仍在线；先尝试切换兼容节点，避免把满载误判为失联并烧尽恢复配额。
                         self.add_metric("redis_job_fanout_ready_wakeup_total", 1);
                         self.handle_capacity_pressure(&root, &shard).await?;
                     }
-                    FanoutReadyPromoteOutcome::WakeupExhausted { .. } => {
+                    FanoutReadyPromoteOutcome::WakeupExhausted {
+                        ..
+                    } => {
                         self.add_metric("redis_job_fanout_ready_wakeup_total", 1);
                         self.handle_unavailable(&root, &shard, "START_TIMEOUT")
                             .await?;
@@ -332,8 +373,10 @@ impl FanoutMonitor {
                     FanoutReadyPromoteOutcome::StaleAssignment => {
                         self.add_metric("redis_job_fanout_stale_assignment_total", 1);
                     }
-                    FanoutReadyPromoteOutcome::Stale | FanoutReadyPromoteOutcome::NotDue { .. } => {
-                    }
+                    FanoutReadyPromoteOutcome::Stale
+                    | FanoutReadyPromoteOutcome::NotDue {
+                        ..
+                    } => {}
                 }
             }
         }
@@ -371,7 +414,7 @@ impl FanoutMonitor {
     /// 参数说明：
     /// - `fanout_id`: 看门狗索引给出的 Fanout 标识。
     ///
-    /// 返回：根不存在或已终态时幂等成功；任一权威读取或状态脚本失败时返回错误。
+    /// 返回：根不存在或已终态时幂等成功；运行中根的投递游标非法时在读取分片前拒绝，权威读取或状态脚本失败向上传递。
     async fn advance_root(&self, fanout_id: &str) -> Result<()> {
         let Some(root) = self.fanout.read_root(fanout_id).await? else {
             return Ok(());
@@ -396,6 +439,13 @@ impl FanoutMonitor {
             "COMMITTED" | "WAITING_CHILDREN" => {}
             _ => return Err(protocol("Fanout 根状态不属于封闭状态集合")),
         }
+        // 投递窗口必须落在已声明的分片范围内，畸形根不能触发越界读取、算术溢出或持久游标推进。
+        if root.shard_total < 0
+            || root.delivery_cursor < 0
+            || root.delivery_cursor > root.shard_total
+        {
+            return Err(protocol("Fanout 根投递游标超出分片范围"));
+        }
         if root.delivery_cursor < root.shard_total {
             let count = (root.shard_total - root.delivery_cursor)
                 .min(self.config.fanout_delivery_batch_size as i64)
@@ -414,7 +464,9 @@ impl FanoutMonitor {
                 .deliver_assignments(fanout_id, &shards, true)
                 .await?
             {
-                FanoutDeliverOutcome::Ok { .. } => {}
+                FanoutDeliverOutcome::Ok {
+                    ..
+                } => {}
                 FanoutDeliverOutcome::NotCommitted => {
                     return Err(protocol("Fanout 根投递时不再处于已提交状态"));
                 }
@@ -426,7 +478,8 @@ impl FanoutMonitor {
     /// 业务作用：对已确认无法由当前 assignment 启动的 shard 应用根冻结的失败策略。
     ///
     /// 参数说明：
-    /// - `root`/`shard`: 当前根与 assignment 的权威投影。
+    /// - `root`：本轮读取的根投影，提供冻结失败策略和 Worker 合同。
+    /// - `shard`：当前观察到的分片及 assignment，写脚本仍须复验代次。
     /// - `reason`: 进入收敛路径的稳定结果摘要。
     ///
     /// 返回：严格快照保持原 assignment；尽力模式聚合 SKIPPED；重分配模式切换兼容目标或进入等待能力状态。
@@ -438,6 +491,7 @@ impl FanoutMonitor {
     ) -> Result<()> {
         let policy = JobFanoutFailurePolicy::parse(&root.failure_policy)
             .ok_or_else(|| protocol("Fanout 根包含未知失败策略"))?;
+        // 严格快照保留原目标，通知失败不足以授权替换成员或跳过业务处理。
         if policy == JobFanoutFailurePolicy::StrictSnapshot {
             return Ok(());
         }
@@ -471,7 +525,10 @@ impl FanoutMonitor {
 
     /// 业务作用：在 CAS 撤销旧 inbox 与期限索引后切换 assignment，并只对成功切换的新代次建立投递。
     ///
-    /// 参数说明：`root`/`shard` 为旧 assignment；`target` 为空时持久进入等待兼容能力状态。
+    /// 参数说明：
+    /// - `root`：提供冻结失败策略和批次身份的根投影。
+    /// - `shard`：等待复验并撤销的旧 assignment 投影。
+    /// - `target`：选定的兼容执行器，缺省时请求进入等待兼容能力状态。
     ///
     /// 返回：竞争陈旧、执行中或达到上限均按幂等收敛；新 assignment 建立后完成持久投递。
     async fn reassign_and_deliver(
@@ -484,7 +541,7 @@ impl FanoutMonitor {
             .await
     }
 
-    /// 业务作用：按指定关闭模式 CAS 切换 Fanout shard assignment，并只为成功的新代次投递一次。
+    /// 业务作用：按指定模式 CAS 切换 Fanout shard assignment，切换成功后重新读取记录并推动持久投递。
     ///
     /// 参数说明：
     /// - `root`：当前 Fanout 根事实。
@@ -505,8 +562,11 @@ impl FanoutMonitor {
             .reassign_shard_mode(root, shard, target, mode)
             .await?
         {
-            FanoutReassignOutcome::Ok { .. } => {
+            FanoutReassignOutcome::Ok {
+                ..
+            } => {
                 self.add_metric("redis_job_fanout_reassign_total", 1);
+                // CAS 返回后仍可能有其它推进者，重读 assignment 并由投递脚本复验，不能用旧目标直接发出消息。
                 let reassigned = self
                     .fanout
                     .read_shard(&root.fanout_id, shard.seq)
@@ -517,7 +577,9 @@ impl FanoutMonitor {
                     .deliver_assignments(&root.fanout_id, &[reassigned], false)
                     .await?
                 {
-                    FanoutDeliverOutcome::Ok { .. } => Ok(()),
+                    FanoutDeliverOutcome::Ok {
+                        ..
+                    } => Ok(()),
                     FanoutDeliverOutcome::NotCommitted => {
                         Err(protocol("重分配投递时 Fanout 根不再处于已提交状态"))
                     }
@@ -535,8 +597,12 @@ impl FanoutMonitor {
                     .defer_ready_for_capacity_mode(shard, true)
                     .await?
                 {
-                    FanoutReadyDeferOutcome::Deferred { .. }
-                    | FanoutReadyDeferOutcome::CapacityExhausted { .. }
+                    FanoutReadyDeferOutcome::Deferred {
+                        ..
+                    }
+                    | FanoutReadyDeferOutcome::CapacityExhausted {
+                        ..
+                    }
                     | FanoutReadyDeferOutcome::Stale
                     | FanoutReadyDeferOutcome::StaleAssignment => Ok(()),
                 }
@@ -546,9 +612,10 @@ impl FanoutMonitor {
 
     /// 业务作用：轮转等待兼容能力的 shard，让后来加入的执行器能够以新 assignment 接管。
     ///
-    /// 参数说明：`root` 为本轮读取的非终态根投影。
+    /// 参数说明：
+    /// - `root`：本轮读取的非终态根投影，包含稳定分片总数、能力游标和冻结合同。
     ///
-    /// 返回：有界检查完成并 CAS 推进游标；合同冲突按当前无候选处理，其它 Redis 错误向上返回。
+    /// 返回：保留环形游标语义并有界检查后尝试 CAS 推进，竞争陈旧视为已有推进；合同冲突按无候选处理，其它 Redis 错误向上传递。
     async fn recover_capabilities(&self, root: &FanoutRoot) -> Result<()> {
         if root.shard_total <= 0 {
             return Ok(());
@@ -560,7 +627,9 @@ impl FanoutMonitor {
             .max(0);
         let candidates = self.compatible_members(root).await?;
         for offset in 0..count {
-            let seq = (start + offset).rem_euclid(root.shard_total);
+            // 加法在较宽整数中完成，靠近最大分片编号时仍按原环形次序访问而不溢出。
+            let seq = (i128::from(start) + i128::from(offset))
+                .rem_euclid(i128::from(root.shard_total)) as i64;
             let Some(shard) = self.fanout.read_shard(&root.fanout_id, seq).await? else {
                 continue;
             };
@@ -574,7 +643,8 @@ impl FanoutMonitor {
                 self.reassign_and_deliver(root, &shard, target).await?;
             }
         }
-        let next = (start + count).rem_euclid(root.shard_total);
+        let next =
+            (i128::from(start) + i128::from(count)).rem_euclid(i128::from(root.shard_total)) as i64;
         self.fanout
             .advance_capability_cursor(&root.fanout_id, root.capability_cursor, next)
             .await?;
@@ -583,7 +653,9 @@ impl FanoutMonitor {
 
     /// 业务作用：处理持续容量压力；可切换目标时改派，配额耗尽或无候选时开启新的容量等待窗口。
     ///
-    /// 参数说明：`root` 与 `shard` 为当前扫描得到的 Fanout 投影。
+    /// 参数说明：
+    /// - `root`：冻结 Worker 合同所在的根投影，供兼容候选查询使用。
+    /// - `shard`：持续容量压力对应的分片及 assignment，写入前仍须复验容量证据。
     ///
     /// 返回：改派或重新排队成功返回；状态、代次变化时忽略陈旧裁决，Redis 错误向上返回。
     async fn handle_capacity_pressure(&self, root: &FanoutRoot, shard: &FanoutShard) -> Result<()> {
@@ -604,13 +676,18 @@ impl FanoutMonitor {
                 Err(error) => Err(error),
             }
         } else {
+            // 无替代节点或切换预算已用尽不等同于目标失联，保留 assignment 并重开容量等待窗口。
             match self
                 .fanout
                 .defer_ready_for_capacity_mode(shard, true)
                 .await?
             {
-                FanoutReadyDeferOutcome::Deferred { .. }
-                | FanoutReadyDeferOutcome::CapacityExhausted { .. }
+                FanoutReadyDeferOutcome::Deferred {
+                    ..
+                }
+                | FanoutReadyDeferOutcome::CapacityExhausted {
+                    ..
+                }
                 | FanoutReadyDeferOutcome::Stale
                 | FanoutReadyDeferOutcome::StaleAssignment => Ok(()),
             }
@@ -619,9 +696,10 @@ impl FanoutMonitor {
 
     /// 业务作用：读取与根冻结合同精确兼容且已发布 Fanout Ready 的执行器候选。
     ///
-    /// 参数说明：`root` 提供 Worker、契约修订、Schema 与唯一 codec。
+    /// 参数说明：
+    /// - `root`：提供 Worker、合同修订、Schema 与本批次唯一 codec 的冻结投影。
     ///
-    /// 返回：兼容快照成员；合同冲突视为空集合，不把不兼容执行器选为新目标。
+    /// 返回：当前兼容快照成员；合同冲突视为空集合，查询错误向上传递；受管指标覆盖为此次候选数量。
     async fn compatible_members(&self, root: &FanoutRoot) -> Result<Vec<ExecutorMember>> {
         let members = match self
             .registry
@@ -645,11 +723,13 @@ impl FanoutMonitor {
         Ok(members)
     }
 
-    /// 业务作用：向受管 source 的固定指标全集累计值；独立低层使用时保持零开销。
+    /// 业务作用：向受管 source 累计固定指标；独立低层构造且未关联容器时跳过记录。
     ///
-    /// 参数说明：`name` 为固定 family，`delta` 为本轮非负增量。
+    /// 参数说明：
+    /// - `name`：固定指标全集内的名称，未知名称由容器忽略。
+    /// - `delta`：本轮增加的数量，负值按零处理。
     ///
-    /// 返回：无返回值。
+    /// 返回：无；只更新进程内观测，不向 Redis 写入状态。
     fn add_metric(&self, name: &'static str, delta: i64) {
         if let Some(metrics) = &self.metrics {
             metrics.add(name, delta);
@@ -659,9 +739,10 @@ impl FanoutMonitor {
     /// 业务作用：读取一个 Fanout 根与其某分片的投影，供分片级看门狗构造参数。
     ///
     /// 参数说明：
-    /// - `fanout_id`/`seq`: Fanout 标识与分片序号。
+    /// - `fanout_id`：看门狗索引指向的批次标识。
+    /// - `seq`：该批次内的稳定分片序号。
     ///
-    /// 返回：根与分片各自存在与否；任一缺失即视为陈旧证据由调用方跳过。
+    /// 返回：两个独立读取的可选投影，不构成同一时刻快照；缺失由调用方跳过，读取错误向上传递，写入仍须复验。
     #[allow(clippy::type_complexity)]
     async fn root_and_shard(
         &self,
@@ -681,7 +762,7 @@ impl FanoutMonitor {
     /// 参数说明：
     /// - `bucket`: 目标 Fanout 桶下标。
     ///
-    /// 返回：score 不晚于当前的根标识；扫描失败时向上返回错误。
+    /// 返回：score 不晚于 Redis 当前毫秒的根标识；时间分量非法或换算溢出时在扫描前拒绝，传输失败向上传递。
     async fn due_roots(&self, bucket: u32) -> Result<Vec<String>> {
         // 看门狗 ZSET score 为下一看门时刻；取不晚于当前时刻的到期根，成员即 fanoutId。
         let time = redis::cmd("TIME");
@@ -691,7 +772,15 @@ impl FanoutMonitor {
                 .await
                 .map_err(NasaRedisError::Redis)?
         };
-        let now = time_reply.0 * 1000 + time_reply.1 / 1000;
+        // 时间响应决定本轮推进资格，非法分量不能被截断或溢出后解释为另一个调度时刻。
+        if time_reply.0 < 0 || !(0..1_000_000).contains(&time_reply.1) {
+            return Err(protocol("Redis TIME 返回分量非法"));
+        }
+        let now = time_reply
+            .0
+            .checked_mul(1000)
+            .and_then(|millis| millis.checked_add(time_reply.1 / 1000))
+            .ok_or_else(|| protocol("Redis TIME 毫秒换算超出范围"))?;
         let mut cmd = redis::cmd("ZRANGEBYSCORE");
         cmd.arg(self.keyspace.fanout_roots_at(bucket))
             .arg("-inf")
@@ -718,7 +807,12 @@ fn parse_member(member: &str) -> Option<(String, i64)> {
     Some((fanout_id.to_owned(), seq))
 }
 
-/// 业务作用：构造 Job 协议错误。参数说明：`message` 摘要。返回：协议错误。
+/// 业务作用：把监视器遇到的封闭合同冲突交给运行时错误分类，不把拒绝解释为推进成功。
+///
+/// 参数说明：
+/// - `message`：由调用方提供的协议失败摘要，不能包含业务载荷或凭据。
+///
+/// 返回：Job 协议错误，仅构造值而不记录日志或改变 source 健康。
 fn protocol(message: &str) -> NasaRedisError {
     crate::job::JobError::Protocol(message.to_owned()).into()
 }

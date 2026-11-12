@@ -47,11 +47,13 @@ pub(crate) struct NativeState {
 
 impl NativeState {
     /// 业务作用：把权限与取消绑定到真实 SQLite handle，并让回调状态保活到原生析构。
+    ///
     /// 参数说明：
     /// - `connection`：尚未向业务发布的物理连接。
     /// - `busy_timeout`：单次锁等待允许的最大时长。
     /// - `source`：只保留弱引用，读取排空截止点而不延长来源生命周期。
     /// - `capacity`：由真实原生生命周期负责最终撤销的逻辑借用容量。
+    ///
     /// 返回：安装完成后的共享状态；失败不发布该连接。
     pub(crate) async fn install(
         connection: &mut SqliteConnection,
@@ -113,7 +115,7 @@ impl NativeState {
         let result = unsafe {
             ffi::sqlite3_trace_v2(
                 handle,
-                ffi::SQLITE_TRACE_PROFILE as u32,
+                ffi::SQLITE_TRACE_PROFILE,
                 Some(finish_statement),
                 Arc::as_ptr(&state) as *mut c_void,
             )
@@ -149,10 +151,12 @@ impl NativeState {
     }
 
     /// 业务作用：每次操作重置独立取消信号，防止旧查询的取消影响连接下一位使用者。
+    ///
     /// 参数说明：
     /// - `policy`：当前执行阶段允许的操作。
     /// - `deadline`：执行和消费共同遵守的绝对截止点。
     /// - `cancel`：当前操作的显式取消信号。
+    ///
     /// 返回：后续 prepare、锁等待和 VM 执行读取同一份规则。
     pub(crate) fn begin_operation(
         &self,
@@ -169,9 +173,11 @@ impl NativeState {
     }
 
     /// 业务作用：与空闲关闭决定互斥地接纳新借用，交接调用期限及真实连接上的逻辑容量。
+    ///
     /// 参数说明：
     /// - `deadline`：调用链固定的绝对截止点，不是 acquire 的局部等待期限。
     /// - `permit`：本次调用已经取得的逻辑容量凭证。
+    ///
     /// 返回：仍可接纳时完成交接；已开始关闭、状态失效或本次期限已过时交还凭证，不恢复旧连接。
     pub(crate) fn begin_lease(
         &self,
@@ -204,8 +210,10 @@ impl NativeState {
     }
 
     /// 业务作用：单独保留已确认事务的总期限，语句完成不能缩短或续期该事务。
+    ///
     /// 参数说明：
     /// - `deadline`：业务根入口的总截止点或迁移取得锁后的批次截止点；确认事务已结束时传 None。
+    ///
     /// 返回：空闲监督使用事务总期限，原生语句回调仍使用各自的操作预算。
     pub(crate) fn set_transaction_deadline(&self, deadline: Option<Instant>) {
         *self
@@ -215,7 +223,9 @@ impl NativeState {
     }
 
     /// 业务作用：让空闲监督及迁移调用方共用已固定的事务截止点，避免收据等待重新计时。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已确认事务的绝对期限；未建立或已确认结束时为 None。
     pub(crate) fn transaction_deadline(&self) -> Option<Instant> {
         *self
@@ -225,7 +235,9 @@ impl NativeState {
     }
 
     /// 业务作用：让原生回调以无 I/O 的方式读取当前操作是否应停止。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：业务来源失效、消费者空闲到期、操作预算终止或取消时为真；清理仍使用自己的预算。
     fn expired(&self) -> bool {
         let policy = self.policy.load(Ordering::Acquire);
@@ -246,7 +258,9 @@ impl NativeState {
     }
 
     /// 业务作用：让原生取消与结果交付共同读取来源隔离、排空期限和最终关闭状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：来源失效时为真；仅停止新接纳、仍在排空期限内的既有查询可以继续。
     pub(crate) fn business_expired(&self) -> bool {
         self.source.upgrade().is_none_or(|source| {
@@ -255,7 +269,9 @@ impl NativeState {
     }
 
     /// 业务作用：在命令之间原子决定到期关闭，避免与新借用的期限交接竞争。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：来源或消费资格失效、事务或借用期限结束时标记不可再接纳并返回真；未到期时保留原生责任。
     pub(crate) fn close_if_expired(&self) -> bool {
         let mut lease = self
@@ -285,11 +301,13 @@ impl NativeState {
 }
 
 /// 业务作用：在专有阻塞执行域中核验 SQL 的单语句、绑定和只读合同。
+///
 /// 参数说明：
 /// - `connection`：操作期间独占的 SQLx 连接。
 /// - `sql`：完整 SQL 文本。
 /// - `arguments`：本次实际绑定的值数量。
 /// - `policy`：业务读取、写入或框架执行阶段。
+///
 /// 返回：保留连接并返回实际写入可能性；不执行 SQL step。
 pub(crate) async fn validate(
     connection: &mut SqliteConnection,
@@ -362,8 +380,10 @@ pub(crate) async fn validate(
 }
 
 /// 业务作用：在 worker 不访问句柄时读取真实 autocommit 状态，识别引擎自行回滚。
+///
 /// 参数说明：
 /// - `connection`：待确认事务连续性的物理连接。
+///
 /// 返回：SQLite 当前未处于显式事务时为真。
 pub(crate) async fn autocommit(connection: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
     let mut handle = connection.lock_handle().await?;
@@ -371,18 +391,22 @@ pub(crate) async fn autocommit(connection: &mut SqliteConnection) -> Result<bool
 }
 
 /// 业务作用：原生连接释放应用函数时归还回调状态引用，物理文件责任由独立锚点管理。
+///
 /// 参数说明：
 /// - `data`：由 Arc::into_raw 唯一转交的状态引用。
+///
 /// 返回：释放引用，不执行数据库调用或跨 FFI 展开。
 unsafe extern "C" fn release_state(data: *mut c_void) {
     drop(unsafe { Arc::from_raw(data as *const NativeState) });
 }
 
 /// 业务作用：为连接析构保活提供不暴露内部状态的原生函数载体。
+///
 /// 参数说明：
 /// - `context`：SQLite 函数调用上下文。
 /// - `_count`：不接收业务参数。
 /// - `_values`：不接收业务值。
+///
 /// 返回：固定 NULL；普通业务 authorizer 拒绝调用本函数。
 unsafe extern "C" fn owner_function(
     context: *mut ffi::sqlite3_context,
@@ -393,17 +417,21 @@ unsafe extern "C" fn owner_function(
 }
 
 /// 业务作用：在原生 VM 合作式中断点执行当前操作的取消与预算门禁。
+///
 /// 参数说明：
 /// - `data`：连接持有的状态引用。
+///
 /// 返回：非零要求 SQLite 停止当前语句。
 unsafe extern "C" fn progress(data: *mut c_void) -> c_int {
     c_int::from(unsafe { &*(data as *const NativeState) }.expired())
 }
 
 /// 业务作用：让原生锁等待遵守同一操作截止点，避免 async timeout 后仍无限占锁。
+///
 /// 参数说明：
 /// - `data`：当前连接状态。
 /// - `attempt`：SQLite 已调用该 handler 的次数。
+///
 /// 返回：预算允许时短暂退避并重试，否则停止本次锁等待。
 unsafe extern "C" fn busy(data: *mut c_void, attempt: c_int) -> c_int {
     let state = unsafe { &*(data as *const NativeState) };
@@ -425,11 +453,13 @@ unsafe extern "C" fn busy(data: *mut c_void, attempt: c_int) -> c_int {
 }
 
 /// 业务作用：在原生语句完成、重置或结束执行时撤销临时 schema 检查权，防止迁移内的后续语句继承。
+///
 /// 参数说明：
 /// - `_event`：仅登记的语句完成事件。
 /// - `data`：由原生连接保活的权限状态。
 /// - `_statement`：本次结束执行的原生语句。
 /// - `_elapsed`：SQLite 提供的耗时，本入口不采集。
+///
 /// 返回：继续原生收尾，不执行 SQL 或改变事务结果。
 unsafe extern "C" fn finish_statement(
     _event: u32,
@@ -443,6 +473,7 @@ unsafe extern "C" fn finish_statement(
 }
 
 /// 业务作用：把编译期间的数据库操作限制到当前框架阶段，保护事务和迁移历史。
+///
 /// 参数说明：
 /// - `data`：连接持有的权限状态。
 /// - `action`：SQLite authorizer 操作代码。
@@ -450,6 +481,7 @@ unsafe extern "C" fn finish_statement(
 /// - `second`：操作所属对象或函数名称。
 /// - `_database`：SQLite 解析出的 schema。
 /// - `_trigger`：触发此操作的 trigger 名称。
+///
 /// 返回：允许或整体拒绝，不使用静默忽略改写 SQL。
 unsafe extern "C" fn authorize(
     data: *mut c_void,
@@ -542,8 +574,10 @@ unsafe extern "C" fn authorize(
 }
 
 /// 业务作用：输出不包含路径或绑定内容的执行边界错误。
+///
 /// 参数说明：
 /// - `message`：框架固定的失败摘要。
+///
 /// 返回：可由 SQLx 查询 API 传播的协议错误。
 pub(crate) fn protocol(message: &str) -> sqlx::Error {
     sqlx::Error::Protocol(message.to_owned())

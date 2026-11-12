@@ -33,7 +33,7 @@ pub(crate) struct DltRecord {
 impl DltJob {
     /// 业务作用：构造单记录任务并计算保留字节。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标死信 topic。
     /// - `payload`: 原始 payload。
@@ -44,6 +44,8 @@ impl DltJob {
     /// # 错误
     ///
     /// retained bytes 超过 semaphore 可表达范围时返回配置错误。
+    ///
+    /// 返回：拥有原始记录并计入来源头预留字节的任务；此时尚未取得准入额度，也不会向 broker 投递。
     #[allow(dead_code)]
     pub(crate) fn new(
         topic: String,
@@ -63,14 +65,17 @@ impl DltJob {
 
     /// 业务作用：构造连续失败 run 的单个有界任务。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `records`: 按来源 offset 顺序排列的非空死信记录。
     ///
     /// # 错误
     ///
     /// 输入为空、累计 retained bytes 溢出或超过 semaphore 表达范围时返回错误。
+    ///
+    /// 返回：保留输入顺序的拥有型任务；计量包含 key、payload、全部头和每记录的来源头上界，不包含 topic 或分配器开销。
     pub(crate) fn from_records(records: Vec<DltRecord>) -> Result<Self> {
+        // 空失败单元没有可归属的来源记录，不能取得或释放后续提交责任。
         if records.is_empty() {
             return Err(NafkaError::Lifecycle("DLT job 不能是空 run".into()));
         }
@@ -117,7 +122,7 @@ pub(crate) struct DltDispatcher {
     jobs: Arc<Semaphore>,
     /// job semaphore 的冻结总容量。
     job_capacity: usize,
-    /// waiting + in-flight retained bytes permit。
+    /// 覆盖等待与实际交付阶段的保留字节额度，重试期间不归还。
     bytes: Arc<Semaphore>,
     /// 单 job 请求前的显式字节上限，避免 acquire_many 永久等待。
     byte_capacity: u32,
@@ -131,13 +136,18 @@ pub(crate) struct DltDispatcher {
 
 /// 源级实际任务责任；失权只撤销新发送，任务退出才归还。
 pub(crate) struct DltWorkerGuard {
+    /// 归还任务计数及对应观测值的源级 dispatcher。
     dispatcher: DltDispatcher,
+    /// 任务所属消费组，用于退出时归还该组责任并清除空计数项。
     group: String,
 }
 
 impl Drop for DltWorkerGuard {
     /// 业务作用：在死信任务及完成通知退出后归还源级关闭责任。
-    /// 参数说明：无。返回：实际任务数减少一次，来源是否提交由 owner 独立裁决。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：实际任务数减少一次，来源是否提交由 owner 独立裁决。
     fn drop(&mut self) {
         self.dispatcher
             .workers
@@ -170,15 +180,22 @@ pub(crate) struct DltEnvelope {
 
 /// 原文复制前取得的记录与字节责任，只有实际大小通过复验才能转成待交付信封。
 pub(crate) struct DltReservation {
+    /// 已预留的记录数，物化信封必须与其完全一致。
     records: usize,
+    /// 已预留的字节上界，物化信封只能缩小该预算。
     bytes: usize,
+    /// 在物化失败或信封退出时自动归还的记录额度。
     record_permit: OwnedSemaphorePermit,
+    /// 与记录额度共同转入信封的字节责任。
     byte_permit: OwnedSemaphorePermit,
 }
 
 impl DltReservation {
     /// 业务作用：把已预留责任与随后构造的信封绑定，阻止估算不足绕过字节边界。
-    /// 参数说明：job 为取得额度之后物化的原文与来源证据。
+    ///
+    /// 参数说明：
+    /// - `job`：job 为取得额度之后物化的原文与来源证据。
+    ///
     /// 返回：尺寸与记录数匹配时交付信封；不匹配时归还额度并保留来源未提交责任。
     pub(crate) fn attach(self, job: DltJob) -> Result<DltEnvelope> {
         if job.records.len() != self.records || job.retained_bytes as usize > self.bytes {
@@ -195,17 +212,19 @@ impl DltReservation {
 impl DltDispatcher {
     /// 业务作用：用冻结配置与 lane 构造 dispatcher。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `owner`: 所属源的共享内部责任。
     /// - `lane`: 预先解析的固定 DLT lane。
-    /// - `job_capacity`: 全 pipeline 已准入的最大记录数。
-    /// - `byte_capacity`: 全 pipeline 最大保留字节。
-    /// - `max_in_flight`: 最大并行 delivery 数。
+    /// - `job_capacity`：全 pipeline 最大记录数，须已通过配置的非零及 semaphore 上限校验。
+    /// - `byte_capacity`：全 pipeline 最大保留字节，须已满足 semaphore 上限及配置容量关系。
+    /// - `max_in_flight`：最大并行交付任务数，须已通过配置的非零及 semaphore 上限校验。
     ///
     /// # 错误
     ///
     /// 字节容量超过 semaphore 表达范围时返回配置错误。
+    ///
+    /// 返回：带独立记录、字节和并行额度的 dispatcher；超过 u32 的字节容量返回 Config，不启动任务或连接。
     pub(crate) fn new(
         owner: &Arc<crate::KafkaProxyInner>,
         lane: ProducerLane,
@@ -230,7 +249,11 @@ impl DltDispatcher {
     }
 
     /// 业务作用：在任务交给执行器前登记跨失权存活的实际责任。
-    /// 参数说明：group 为原始消费组。返回：随任务退出释放的凭证，后续 owner 表移除不影响计数。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为原始消费组。
+    ///
+    /// 返回：随任务退出释放的凭证，后续 owner 表移除不影响计数。
     pub(crate) fn worker(&self, group: &str) -> DltWorkerGuard {
         self.workers
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -249,7 +272,9 @@ impl DltDispatcher {
         }
     }
     /// 业务作用：将旧分配仍存活的死信任务纳入全源关闭诊断。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：实际任务数、信封记录数和字节数，观测不会归还额度。
     pub(crate) fn close_usage(&self) -> (usize, usize, usize) {
         let (records, bytes) = self.queue_usage();
@@ -261,7 +286,10 @@ impl DltDispatcher {
     }
 
     /// 业务作用：等待当前源全部死信任务实际退出，覆盖旧分配遗留的原生发送。
-    /// 参数说明：deadline 为消费与其它资源共用的单调截止时刻。
+    ///
+    /// 参数说明：
+    /// - `deadline`：deadline 为消费与其它资源共用的单调截止时刻。
+    ///
     /// 返回：任务与信封全部归还才成功；超时保留责任并报告当前占用。
     pub(crate) async fn await_idle(&self, deadline: std::time::Instant) -> Result<()> {
         loop {
@@ -283,7 +311,9 @@ impl DltDispatcher {
     }
 
     /// 业务作用：返回源 DLT pipeline 已准入的记录数与完整信封字节。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：覆盖等待交付、实际投递、完成与重试的占用，不把多记录批折成一条。
     pub(crate) fn queue_usage(&self) -> (usize, usize) {
         (
@@ -294,7 +324,11 @@ impl DltDispatcher {
     }
 
     /// 业务作用：在复制原文之前同时预留源级 DLT 记录数和保守字节上界。
-    /// 参数说明：records 为记录数，retained 为完整信封的保守计量。
+    ///
+    /// 参数说明：
+    /// - `records`：records 为记录数。
+    /// - `retained`：retained 为完整信封的保守计量。
+    ///
     /// 返回：有额度时返回实际责任，暂时不足时为 None；空池也无法接纳时明确返回配置错误。
     pub(crate) fn try_reserve(
         &self,
@@ -335,14 +369,21 @@ impl DltDispatcher {
     }
 
     /// 业务作用：等待意图只在有希望取得额度时重新取入原坐标，避免反复复制或空转。
-    /// 参数说明：retained 为先前已经验证可由空池容纳的单记录字节上界。
+    ///
+    /// 参数说明：
+    /// - `retained`：retained 为先前已经验证可由空池容纳的单记录字节上界。
+    ///
     /// 返回：当前有余量的提示，重新取入时仍须原子预留。
     pub(crate) fn can_reserve(&self, retained: usize) -> bool {
         self.jobs.available_permits() > 0 && self.bytes.available_permits() >= retained
     }
 
     /// 业务作用：在源级并行上限内尝试交付信封，停止后不再发送后继记录。
-    /// 参数说明：envelope 为持有记录与字节额度、可跨重试保留的信封；stop_requested 汇合源停止与任务失权。
+    ///
+    /// 参数说明：
+    /// - `envelope`：envelope 为持有记录与字节额度、可跨重试保留的信封。
+    /// - `stop_requested`：stop_requested 汇合源停止与任务失权。
+    ///
     /// 返回：全部记录确认才成功；停止、额度关闭或交付失败返回错误，已发送请求仍等待实际终态。
     pub(crate) async fn deliver(
         &self,
@@ -358,7 +399,7 @@ impl DltDispatcher {
             }
             tokio::select! {
                 acquired = &mut permit => break acquired.map_err(|_| NafkaError::Lifecycle("DLT in-flight permit 已关闭".into()))?,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {},
             }
         };
         for record in &envelope.job.records {
@@ -402,7 +443,11 @@ impl DltDispatcher {
 }
 
 /// 业务作用：拒绝会因压缩或立即删除丢失失败历史的DLT目标。
-/// 参数说明：configs为broker返回的有效topic配置。返回：仅delete且时间、容量保留值为正或-1时通过；缺失、隐藏和非法配置拒绝，不修改broker。
+///
+/// 参数说明：
+/// - `configs`：configs为broker返回的有效topic配置。
+///
+/// 返回：仅delete且时间、容量保留值为正或-1时通过；缺失、隐藏和非法配置拒绝，不修改broker。
 pub(crate) fn validate_retention(
     configs: &std::collections::BTreeMap<String, Option<String>>,
 ) -> Result<()> {

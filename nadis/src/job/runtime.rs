@@ -1,7 +1,7 @@
 //! 运行时编排：把执行器注册、心跳、调度扫描、Dispatch 消费与可见性提升组合成受监督的后台任务集合。
 //!
-//! 启动时登记本节点全部 Worker 能力；每个活跃调度分片一个循环，依次扫描触发、消费执行与提升可见成员；
-//! 心跳循环单独续期存活。停机先停止接受新工作、等待各循环退出，再注销本执行器，避免半注销状态进入 Fanout 快照。
+//! 启动时登记执行器及 FANOUT_ONLY 能力；每个活跃调度分片分别运行扫描恢复和阻塞消费循环，
+//! 心跳、Fanout 对账、订阅与完成记录回收独立推进。停机先关闭准入，等待退出，再注销执行器。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,15 +29,22 @@ use crate::job::registry::{
 use crate::job::repository::JobRepository;
 use crate::job::scanner::JobScanner;
 
+/// 一个滑动失败窗口内最多安排的循环重启次数。
 const SUPERVISOR_MAX_RESTARTS: usize = 5;
+/// 非心跳循环统计失败的滑动时间窗口。
 const SUPERVISOR_RESTART_WINDOW: Duration = Duration::from_secs(60);
+/// 可恢复失败第一次重试前的退避基值。
 const SUPERVISOR_BACKOFF_BASE: Duration = Duration::from_millis(100);
+/// 指数退避的单次上限，不替代执行器存活截止。
 const SUPERVISOR_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 /// 单个循环实例的有界重启预算；失败窗口和退避只存在本地，不进入持久调度协议。
 struct LoopRestartBudget {
+    /// 尚未离开滑动窗口的失败时刻，限制持续抖动产生的重启频率。
     failures: VecDeque<std::time::Instant>,
+    /// 自上次成功推进以来连续失败次数，用于确定退避级别。
     consecutive: u32,
+    /// 当前循环是否已发布恢复中状态，避免重复增加健康账目的失败数。
     recovering: bool,
 }
 
@@ -98,14 +105,19 @@ impl LoopRestartBudget {
 
 /// 心跳权威的本地保守截止与跨调用恢复状态；截止只由服务端成功回包推进。
 struct HeartbeatAuthority {
+    /// 同时保护已确认期限、修订及恢复状态，避免读取不一致的权威组合。
     state: std::sync::Mutex<HeartbeatAuthorityState>,
 }
 
 /// 业务作用：保存心跳成功确认的本地保守截止、服务端 revision 与连续恢复状态。
 struct HeartbeatAuthorityState {
+    /// 最后确认的存活窗口折算出的本地单调截止。
     deadline: Instant,
+    /// 服务端已确认修订，后续逻辑心跳据此校验连续性。
     heartbeat_revision: i64,
+    /// 当前恢复过程的连续传输失败次数，用于有界退避。
     consecutive_failures: u32,
+    /// 是否正处于传输恢复窗口，决定何时清除 Degraded 事实。
     recovering: bool,
 }
 
@@ -130,7 +142,8 @@ impl HeartbeatAuthority {
 
     /// 业务作用：读取距离最后一次已确认执行器过期时刻的剩余本地预算。
     ///
-    /// 参数说明：`now` 为调用方同一单调时钟的当前时刻。
+    /// 参数说明：
+    /// - `now`：调用方使用同一单调时钟取得的当前时刻。
     ///
     /// 返回：截止已到时为零，否则返回保守剩余时间。
     fn remaining(&self, now: Instant) -> Duration {
@@ -153,7 +166,7 @@ impl HeartbeatAuthority {
             .heartbeat_revision
     }
 
-    /// 业务作用：用成功心跳的 Redis 权威时刻推进本地截止，并结束当前传输恢复窗口。
+    /// 业务作用：仅在原权威窗口仍有效时采用成功心跳，过期窗口不因迟到回包重新开放。
     ///
     /// 参数说明：
     /// - `attempt_started`：发起 Redis 命令前的本地单调时刻，用于给网络往返留出保守余量。
@@ -161,7 +174,8 @@ impl HeartbeatAuthority {
     /// - `expire_at`：脚本确认的新执行器过期毫秒时刻。
     /// - `heartbeat_revision`：脚本确认的新心跳修订号。
     ///
-    /// 返回：此前处于传输恢复态时为真，调用方据此发布 recovered 状态。
+    /// 返回：原窗口有效且此前处于恢复态时为真；原窗口已过期时保留全部状态并返回假。
+    /// 调用方仍须复验更新后的剩余期限，不能把假值单独解释为心跳被采用。
     fn succeeded(
         &self,
         attempt_started: Instant,
@@ -173,6 +187,10 @@ impl HeartbeatAuthority {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // timeout 不能保证成功 Future 一定在旧截止前被处理；先在锁内复验，禁止先覆盖旧证据再判定。
+        if state.deadline <= Instant::now() {
+            return false;
+        }
         state.deadline = conservative_authority_deadline(attempt_started, redis_now, expire_at);
         state.heartbeat_revision = heartbeat_revision;
         state.consecutive_failures = 0;
@@ -238,7 +256,9 @@ enum HeartbeatStateIntent {
 /// 业务作用：把本地 Fanout 准入状态与本次心跳意图绑定，确保二者只能在线性化锁内解释。
 #[derive(Clone, Copy)]
 struct HeartbeatStateRequest<'a> {
+    /// 与当前 source 共享的 Fanout 接纳状态，只在取得发送权后解释。
     fanout_ready: &'a AtomicBool,
+    /// 当前调用的状态意图，区分周期心跳、保护态及订阅恢复。
     intent: HeartbeatStateIntent,
 }
 
@@ -390,9 +410,11 @@ async fn heartbeat_with_authority(
 
 /// 业务作用：等待扫描周期或监督退避，同时让 source 取消立即打断等待。
 ///
-/// 参数说明：`stop` 为当前 source 的取消令牌，`delay` 为本轮等待时长。
+/// 参数说明：
+/// - `stop`：当前 source 的不可逆取消令牌。
+/// - `delay`：扫描周期或本轮退避需要等待的时长。
 ///
-/// 返回：完整等到时限为 true；source 已取消为 false。
+/// 返回：等待分支完成时为真，取消分支被选择时为假；同时就绪不保证优先取消，调用方仍须复验停止状态。
 async fn wait_backoff(stop: &CancellationToken, delay: Duration) -> bool {
     tokio::select! {
         _ = stop.cancelled() => false,
@@ -400,18 +422,19 @@ async fn wait_backoff(stop: &CancellationToken, delay: Duration) -> bool {
     }
 }
 
-/// 业务作用：把可恢复循环错误归入健康快照允许公开的封闭原因，不泄露 endpoint 或业务字段。
-///
-/// 参数说明：`error` 为本代循环返回的内部错误。
-///
-/// 返回：稳定、低基数的恢复原因。
-/// 运行时构建器：收集连接、配置、启动代次与本地 (定义, Handler) 登记，启动时组装后台任务。
+/// 业务作用：收集连接、配置、启动身份及本地定义和处理器，启动时组装受监督的任务集合。
 pub struct RedisJobRuntime {
+    /// 当前 source 的共享 Redis 客户端，按角色提供独立连接。
     client: Arc<RedisClient>,
+    /// 启动后不可改变的 source 身份与键布局。
     keyspace: JobKeyspace,
+    /// 已校验的容量、租约和后台循环配置。
     config: Arc<JobConfig>,
+    /// 本次进程启动标识，用于隔离执行器登记代次。
     startup_id: String,
+    /// 尚未装配到各调度和消费入口的本地定义及处理器。
     registrations: Vec<(JobDefinition, Arc<dyn JobHandler>)>,
+    /// 同一 source 共享的固定指标集合。
     metrics: Arc<JobMetrics>,
 }
 
@@ -419,7 +442,9 @@ impl RedisJobRuntime {
     /// 业务作用：以连接、键模型、配置与本次启动代次创建运行时构建器。
     ///
     /// 参数说明：
-    /// - `client`/`keyspace`/`config`: 连接、冻结键模型与已校验配置。
+    /// - `client`：当前 source 的共享客户端，负责不同角色连接。
+    /// - `keyspace`：已冻结的 source 身份、命名空间及分片布局。
+    /// - `config`：调用方已完成校验的 Job 运行约束。
     /// - `startup_id`: 本次进程启动的唯一标识，参与执行器身份。
     ///
     /// 返回：尚未启动的运行时构建器。
@@ -461,11 +486,12 @@ impl RedisJobRuntime {
         self.metrics.add("redis_job_definition_conflict_total", 1);
     }
 
-    /// 业务作用：登记本节点执行器与全部定义，仅为 FANOUT_ONLY 发布能力，再按活跃分片启动后台循环与心跳。
+    /// 业务作用：先确认订阅，再登记执行器及 FANOUT_ONLY 能力，最后装配本地定义并启动受监督循环。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：注册成功后返回可停机的运行时句柄；执行器身份非法或能力登记被拒时返回错误。
+    /// 返回：启动成功后转交后台任务和停机责任；身份、订阅或登记失败返回错误，
+    /// 登记失败会关闭本地准入并尝试注销，外部清理失败时仍返回原始启动错误。
     pub(crate) async fn start(self) -> Result<SourceRunningJobRuntime> {
         if self.registrations.is_empty() {
             return Err(crate::job::JobError::Config(
@@ -668,7 +694,9 @@ impl RedisJobRuntime {
                             )
                             .await
                             {
-                                Ok(Some(HeartbeatOutcome::Ok { .. })) => {}
+                                Ok(Some(HeartbeatOutcome::Ok {
+                                    ..
+                                })) => {}
                                 Ok(Some(HeartbeatOutcome::NotFound)) => {
                                     let authority = crate::error::NasaRedisError::from(
                                         crate::job::JobError::ExecutionStopped(
@@ -717,7 +745,9 @@ impl RedisJobRuntime {
                                         )
                                         .await
                                         {
-                                            Ok(Some(HeartbeatOutcome::Ok { .. })) => {
+                                            Ok(Some(HeartbeatOutcome::Ok {
+                                                ..
+                                            })) => {
                                                 let _ = budget.succeeded();
                                                 health.recovered(JobSupervisorLoop::Subscription);
                                                 metrics.set(
@@ -803,7 +833,9 @@ impl RedisJobRuntime {
                         )
                         .await?
                         {
-                            Some(HeartbeatOutcome::Ok { .. }) => {}
+                            Some(HeartbeatOutcome::Ok {
+                                ..
+                            }) => {}
                             Some(HeartbeatOutcome::NotFound) => {
                                 return Err(crate::job::JobError::ExecutionStopped(
                                     "RedisJob executor 主记录已失效，当前 source 不再具备续期权威"
@@ -1142,20 +1174,34 @@ impl RedisJobRuntime {
 
 /// 运行中的运行时句柄；停机时先停各循环再注销执行器。
 pub(crate) struct SourceRunningJobRuntime {
+    /// 整个 source 的不可逆停止信号，供循环和恢复过程共同复验。
     stop: CancellationToken,
+    /// 必须逐个等待退出的监督任务，取消请求不等于已经结束。
     handles: Vec<tokio::task::JoinHandle<Result<()>>>,
+    /// 当前执行器登记与全部已尝试能力的撤销入口。
     registry: Arc<ExecutorRegistry>,
+    /// 普通任务的消费与执行入口，停机负责关闭其阻塞连接。
     dispatcher: Arc<JobDispatcher>,
+    /// Fanout 订阅及在途分片处理器，停机须等待其执行权威释放。
     fanout_dispatcher: Arc<FanoutDispatcher>,
+    /// Fanout 快照接纳门禁，与心跳发布和停止信号共同约束恢复。
     fanout_ready: Arc<AtomicBool>,
+    /// 串行化周期、恢复和停机心跳，防止旧状态覆盖新状态。
     heartbeat_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 与当前 source 绑定的 Fanout 查询和控制仓库。
     fanout_repository: FanoutRepository,
+    /// 生命周期及监督循环共用的健康和准入账目。
     health: Arc<SourceHealth>,
+    /// 本次启动的执行器完整身份。
     executor_id: String,
 }
 
 impl SourceRunningJobRuntime {
-    /// 业务作用：返回本进程执行器身份，供观测与外部关联。参数说明: 无。返回：执行器身份。
+    /// 业务作用：提供当前 source 本次启动的执行器身份，供观测和控制面关联登记记录。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用本次启动的完整执行器身份，不重新读取注册表。
     pub(crate) fn executor_id(&self) -> &str {
         &self.executor_id
     }
@@ -1191,7 +1237,7 @@ impl SourceRunningJobRuntime {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：无返回值；调用后 scanner、dispatcher 与监视器不会开启下一轮领取。
+    /// 返回：同步关闭健康准入、取消循环并关闭阻塞连接；已在执行的调用仍需由停机阶段等待退出。
     pub(crate) fn stop_accepting(&self) {
         self.health.stop_accepting();
         // 取消令牌是不可逆终态；先发布它，再压低 ready，任何并发恢复分支复验后都只能保持关闭。
@@ -1218,7 +1264,9 @@ impl SourceRunningJobRuntime {
             .heartbeat(JobExecutorState::Draining, inflight)
             .await?
         {
-            HeartbeatOutcome::Ok { .. } => Ok(()),
+            HeartbeatOutcome::Ok {
+                ..
+            } => Ok(()),
             HeartbeatOutcome::NotFound => Err(crate::job::JobError::ExecutionStopped(
                 "RedisJob drain 前 executor 主记录已失效".to_owned(),
             )
@@ -1226,80 +1274,94 @@ impl SourceRunningJobRuntime {
         }
     }
 
-    /// 业务作用：等待已停止准入的 source 循环退出并注销执行器，超过统一截止时终止本地任务以停止续期。
+    /// 业务作用：关闭准入并等待 source 任务退出后注销执行器；截止后请求取消，仍等待任务实际结束以释放权威。
     ///
     /// 参数说明：
     /// - `deadline`: 全量停机共享的绝对截止时刻。
     ///
-    /// 返回：循环与注销在截止前完成时成功；超时或注销失败返回错误。
+    /// 返回：循环、在途处理与注销均成功时完成；任一步失败保留首个错误并继续处理其余退出责任。
+    /// 不配合取消的任务可能使实际返回晚于截止，不能把已提交取消视为退出证明。
+    /// 首次轮询关闭准入并移交清理后，取消等待不会撤销任务；无 Tokio 上下文或执行器关闭时返回未完成错误。
     pub(crate) async fn shutdown(mut self, deadline: tokio::time::Instant) -> Result<()> {
-        // 先置停止标志并等待各循环退出，确保不再有循环在注销后继续消费或提升。
-        self.stop.cancel();
-        self.fanout_ready.store(false, Ordering::Release);
-        self.health.stop_accepting();
-        // shutdown 也独立执行关闭，覆盖调用方未先经过 stop_accepting 的底层运行时用法。
-        self.dispatcher.close_blocking_lanes();
-        let mut first_error = None;
-        match tokio::time::timeout_at(deadline, self.publish_draining()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => first_error = Some(error),
-            Err(_) => {
-                first_error = Some(
-                    crate::job::JobError::ShutdownDeadline(
-                        "RedisJob executor 未在停机截止前发布 Draining".to_owned(),
-                    )
-                    .into(),
-                );
-            }
-        }
-        for mut handle in self.handles.drain(..) {
-            match tokio::time::timeout_at(deadline, &mut handle).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(error))) if first_error.is_none() => first_error = Some(error),
-                Ok(Err(join_error)) if first_error.is_none() => {
-                    first_error = Some(
-                        crate::job::JobError::ExecutionUnknown(format!(
-                            "RedisJob source 后台任务异常退出: {join_error}"
-                        ))
-                        .into(),
-                    );
-                }
-                Err(_) => {
-                    // 截止后终止本地循环并停止续期；其余 handle 仍逐一处理，不能让一个超时遮蔽其它 source 的收口。
-                    handle.abort();
-                    // abort 只提交取消；必须等待 JoinHandle 封闭，才能证明 future 内的权威守卫和连接句柄已析构。
-                    let _ = handle.await;
-                    if first_error.is_none() {
+        // 独立入口也必须先关闭全部准入，不能依赖上层已调用 stop_accepting；派发失败时同样保持不可逆关闭。
+        self.stop_accepting();
+        let executor = tokio::runtime::Handle::try_current().map_err(|_| {
+            crate::job::JobError::ExecutionStopped(
+                "RedisJob source 清理需要 Tokio 执行上下文，已关闭准入".to_owned(),
+            )
+        })?;
+        // 监督句柄和注销入口由同一清理任务持有；外层 Future 只等待结果，取消它不会将 JoinHandle 直接丢弃。
+        executor
+            .spawn(async move {
+                let mut first_error = None;
+                match tokio::time::timeout_at(deadline, self.publish_draining()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => first_error = Some(error),
+                    Err(_) => {
                         first_error = Some(
                             crate::job::JobError::ShutdownDeadline(
-                                "RedisJob source 未在停机截止前收口，已停止本地续期".to_owned(),
+                                "RedisJob executor 未在停机截止前发布 Draining".to_owned(),
                             )
                             .into(),
                         );
                     }
                 }
-                _ => {}
-            }
-        }
-        // Pub/Sub 循环退出后再等待已接纳 Fanout Handler，避免 executor 注销后仍续租或提交旧 assignment。
-        if let Err(error) = self.fanout_dispatcher.shutdown(deadline).await {
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
-        }
-        match tokio::time::timeout_at(deadline, self.registry.unregister()).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
-            Err(_) if first_error.is_none() => {
-                first_error = Some(
-                    crate::job::JobError::ShutdownDeadline(
-                        "RedisJob executor 注销超过停机截止".to_owned(),
-                    )
-                    .into(),
-                );
-            }
-            _ => {}
-        }
-        first_error.map_or(Ok(()), Err)
+                for mut handle in self.handles.drain(..) {
+                    match tokio::time::timeout_at(deadline, &mut handle).await {
+                        Ok(Ok(Ok(()))) => {}
+                        Ok(Ok(Err(error))) if first_error.is_none() => first_error = Some(error),
+                        Ok(Err(join_error)) if first_error.is_none() => {
+                            first_error = Some(
+                                crate::job::JobError::ExecutionUnknown(format!(
+                                    "RedisJob source 后台任务异常退出: {join_error}"
+                                ))
+                                .into(),
+                            );
+                        }
+                        Err(_) => {
+                            // 截止后终止本地循环并停止续期；其余 handle 仍逐一处理，不能让一个超时遮蔽其它 source 的收口。
+                            handle.abort();
+                            // abort 只提交取消；必须等待 JoinHandle 封闭，才能证明 future 内的权威守卫和连接句柄已析构。
+                            let _ = handle.await;
+                            if first_error.is_none() {
+                                first_error = Some(
+                                    crate::job::JobError::ShutdownDeadline(
+                                        "RedisJob source 未在停机截止前收口，已停止本地续期"
+                                            .to_owned(),
+                                    )
+                                    .into(),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Pub/Sub 循环退出后再等待已接纳 Fanout Handler，避免 executor 注销后仍续租或提交旧 assignment。
+                if let Err(error) = self.fanout_dispatcher.shutdown(deadline).await {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                match tokio::time::timeout_at(deadline, self.registry.unregister()).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
+                    Err(_) if first_error.is_none() => {
+                        first_error = Some(
+                            crate::job::JobError::ShutdownDeadline(
+                                "RedisJob executor 注销超过停机截止".to_owned(),
+                            )
+                            .into(),
+                        );
+                    }
+                    _ => {}
+                }
+                first_error.map_or(Ok(()), Err)
+            })
+            .await
+            .map_err(|_| {
+                crate::job::JobError::ExecutionUnknown(
+                    "RedisJob source 清理任务退出，无法确认完整收口".to_owned(),
+                )
+            })?
     }
 }

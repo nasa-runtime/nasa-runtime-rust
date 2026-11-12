@@ -5,17 +5,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 一次实际调用的责任；逻辑超时只撤销确认权限，实际闭包退出之前不释放调度名额。
 pub(super) struct HandlerWorker {
+    /// 与手动确认槽共享的单向权限门，撤销后不随调用完成重新开放。
     authority: Arc<AtomicBool>,
+    /// 包含排队和解码阶段的执行预算起点。
     started: Instant,
+    /// 非零配置对应的总调用限时，None 表示不设置该限时。
     timeout: Option<Duration>,
+    /// 实际闭包及其资源退出的票据，交回一次后取空。
     ticket: Option<crate::consumer::worker::WorkerTicket<InvocationOutcome>>,
 }
 
 impl HandlerWorker {
     /// 业务作用：让自定义解码和 single/batch 业务在同一持久 worker 内共用准入预算，保留非 Send future 兼容。
     ///
-    /// 参数说明：`runtime`、`route` 为冻结资源；`records` 为本次连续原始输入；
-    /// `ambient` 为消费链路上下文；`span` 为本次调用的结构化追踪作用域；permit 为已取得的组执行额度。
+    /// 参数说明：
+    /// - `runtime`：所属 owner 的共享执行池、源停止门及冻结限时配置。
+    /// - `route`：当前连续输入对应的类型化消费者，解码与回调均使用同一冻结路由。
+    /// - `records`：`records` 为本次连续原始输入。
+    /// - `ambient`：`ambient` 为消费链路上下文。
+    /// - `span`：`span` 为本次调用的结构化追踪作用域。
+    /// - `permit`：permit 为已取得的组执行额度。
+    ///
     /// 返回：拥有实际退出责任的 worker；执行额度或线程不可用时不执行业务并返回致命结果。
     pub fn spawn(
         runtime: &Arc<OwnerRuntime>,
@@ -82,7 +92,9 @@ impl HandlerWorker {
                         ));
                     }
                     if !failures.is_empty() {
-                        return InvocationOutcome::DecodeFailed { failures };
+                        return InvocationOutcome::DecodeFailed {
+                            failures,
+                        };
                     }
                     invoke_typed_handler(&task_runtime, &route, decoded, ambient, deadline)
                 })
@@ -98,7 +110,9 @@ impl HandlerWorker {
 
     /// 业务作用：把 owner 的失权、停止或总超时事实传播给所有手动确认槽。
     ///
-    /// 参数说明：`authorized` 表示当前窗口仍拥有消费权威。
+    /// 参数说明：
+    /// - `authorized`：`authorized` 表示当前窗口仍拥有消费权威。
+    ///
     /// 返回：无；确认权限只能撤销，实际执行名额仍由完成票据持有。
     pub fn fence(&self, authorized: bool) {
         if !authorized
@@ -113,6 +127,7 @@ impl HandlerWorker {
     /// 业务作用：确认业务闭包已经实际返回，防止把逻辑超时当作执行完成。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：仅实际调用及其捕获资源退出时为 true；池线程可以继续服务后继调用。
     pub fn is_finished(&self) -> bool {
         self.ticket.as_ref().expect("调用尚未交回").is_finished()
@@ -121,6 +136,7 @@ impl HandlerWorker {
     /// 业务作用：收回实际调用责任，拒绝超过准入总预算的迟到成功。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：业务结论、超时失败或业务异常；确认权限在返回前永久关闭。
     pub fn finish(mut self) -> InvocationOutcome {
         self.authority.store(false, Ordering::Release);
@@ -141,7 +157,9 @@ impl HandlerWorker {
 
 impl Drop for HandlerWorker {
     /// 业务作用：owner 异常展开窗口时立即撤销旧调用的确认权限。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：旧 Ack 不再有效；实际执行仍由线程池保留，不能凭票据析构报告停止。
     fn drop(&mut self) {
         self.authority.store(false, Ordering::Release);
@@ -150,7 +168,10 @@ impl Drop for HandlerWorker {
 
 /// 业务作用：在每次派发前复验用户暂停，防止预取窗口越过已接受的暂停命令。
 ///
-/// 参数说明：`health` 为共享快照；`tp` 为即将派发的分区。
+/// 参数说明：
+/// - `health`：`health` 为共享快照。
+/// - `tp`：`tp` 为即将派发的分区。
+///
 /// 返回：存在 User 原因时为 true；框架保护原因由各自责任状态机解除。
 pub(super) fn user_paused(health: &Arc<RwLock<GroupHealth>>, tp: &Tp) -> bool {
     health

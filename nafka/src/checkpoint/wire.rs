@@ -8,7 +8,10 @@ pub(super) const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAGIC: &[u8; 8] = b"NSKCP001";
 
 /// 业务作用：生成与 Java 共用的完整 checkpoint 文件，写入前复验全部输入。
-/// 参数说明：checkpoint 为待持久化快照。
+///
+/// 参数说明：
+/// - `checkpoint`：checkpoint 为待持久化快照。
+///
 /// 返回：大端正文及 SHA-256，超限或非法内容拒绝。
 pub(super) fn encode(checkpoint: &ReplayCheckpoint) -> CheckpointResult<Vec<u8>> {
     checkpoint.validate()?;
@@ -43,7 +46,10 @@ pub(super) fn encode(checkpoint: &ReplayCheckpoint) -> CheckpointResult<Vec<u8>>
 }
 
 /// 业务作用：拒绝无法作为恢复依据的损坏、截断、错序及越界文件。
-/// 参数说明：bytes 为完整有界文件内容。
+///
+/// 参数说明：
+/// - `bytes`：bytes 为完整有界文件内容。
+///
 /// 返回：严格验证后的快照，不接受额外尾随字节。
 pub(super) fn decode(bytes: &[u8]) -> CheckpointResult<ReplayCheckpoint> {
     if bytes.len() > MAX_BYTES || bytes.len() < 8 + 2 + 1 + 32 + 16 + 4 + 32 {
@@ -92,7 +98,10 @@ pub(super) fn decode(bytes: &[u8]) -> CheckpointResult<ReplayCheckpoint> {
 }
 
 /// 业务作用：以无路径含义的摘要命名稳定任务文件。
-/// 参数说明：task_id 为任务 ID。
+///
+/// 参数说明：
+/// - `task_id`：task_id 为任务 ID。
+///
 /// 返回：通过身份校验后的 SHA-256 小写十六进制。
 pub(super) fn key(task_id: &str) -> CheckpointResult<String> {
     super::validate_task(task_id)?;
@@ -100,14 +109,21 @@ pub(super) fn key(task_id: &str) -> CheckpointResult<String> {
 }
 
 /// 业务作用：以固定字母表表达协议摘要，避免平台格式差异。
-/// 参数说明：bytes 为摘要。
+///
+/// 参数说明：
+/// - `bytes`：bytes 为摘要。
+///
 /// 返回：每字节两位的小写十六进制。
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// 业务作用：写入已经校验的有界 ASCII 身份。
-/// 参数说明：output 为正文缓冲，value 为任务名或 topic。
+///
+/// 参数说明：
+/// - `output`：output 为正文缓冲。
+/// - `value`：value 为任务名或 topic。
+///
 /// 返回：追加大端 u16 长度与原文字节。
 fn text(output: &mut Vec<u8>, value: &str) {
     output.extend_from_slice(&(value.len() as u16).to_be_bytes());
@@ -115,7 +131,11 @@ fn text(output: &mut Vec<u8>, value: &str) {
 }
 
 /// 业务作用：在分配字符串前检查长度并拒绝截断或非 ASCII 身份。
-/// 参数说明：input 为有界正文，limit 为对应身份上限。
+///
+/// 参数说明：
+/// - `input`：input 为有界正文。
+/// - `limit`：limit 为对应身份上限。
+///
 /// 返回：完整文本，否则为损坏分类。
 fn read_text(input: &mut Cursor<&[u8]>, limit: usize) -> CheckpointResult<String> {
     let length = u16::from_be_bytes(read(input)?) as usize;
@@ -133,7 +153,10 @@ fn read_text(input: &mut Cursor<&[u8]>, limit: usize) -> CheckpointResult<String
 }
 
 /// 业务作用：完整读取固定宽度协议字段，短读不能补零成为合法坐标。
-/// 参数说明：input 为正文游标，N 为协议字段宽度。
+///
+/// 参数说明：
+/// - `input`：input 为正文游标。
+///
 /// 返回：完整字段字节，截断则拒绝。
 fn read<const N: usize>(input: &mut Cursor<&[u8]>) -> CheckpointResult<[u8; N]> {
     let mut bytes = [0; N];

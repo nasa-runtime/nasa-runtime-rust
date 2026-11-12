@@ -17,13 +17,26 @@ use tracing::{Instrument, instrument};
 
 #[derive(Clone)]
 pub(crate) struct ConfigWorker {
+    /// 配置目录、作用域、缓存与启动策略的客户端参数。
     pub(crate) client_props: ClientProps,
+    /// 查询、发布、删除及监听请求共用的认证连接入口。
     remote_client: Arc<NacosGrpcClient>,
+    /// 配置原始内容和运行期监听状态的缓存。
     unified_cache: Arc<Cache<CacheData>>,
+    /// 顺序应用于请求与响应的共享过滤器列表。
     config_filters: Arc<Vec<Box<dyn ConfigFilter>>>,
 }
 
 impl ConfigWorker {
+    /// 业务作用：装配配置缓存、认证连接和变化刷新任务，使查询、发布与监听共用同一客户端。
+    ///
+    /// 参数说明：
+    /// - `client_props`：目录、命名空间、缓存路径和启动策略等配置。
+    /// - `auth_plugin`：登录及请求身份生成插件。
+    /// - `config_filters`：按提供顺序执行的请求与响应过滤器。
+    /// - `client_id`：连接和认证任务使用的实例诊断标识。
+    ///
+    /// 返回：目录及连接装配成功后返回工作器；相关失败向上传递，应急策略只放宽首次连接探测。成功后启动变化消费和周期监听任务，不等待所有配置同步完成。
     pub(crate) async fn new(
         client_props: ClientProps,
         auth_plugin: Arc<dyn AuthPlugin>,
@@ -31,7 +44,7 @@ impl ConfigWorker {
         client_id: String,
     ) -> crate::api::error::Result<Self> {
         let cache_ns = client_props.get_namespace_default_if_empty();
-        // Create unified cache using the Cache framework with CacheData directly
+        // 缓存作用域先按缺省命名空间归一，持久化内容不包含运行时监听器与过滤器。
         let unified_cache: Cache<CacheData> = CacheBuilder::config(cache_ns)
             .load_cache_at_start(client_props.get_config_load_cache_at_start())
             .disk_store(client_props.get_cache_dir())
@@ -40,7 +53,7 @@ impl ConfigWorker {
         let unified_cache = Arc::new(unified_cache);
         let config_filters = Arc::new(config_filters);
 
-        // group_key: String
+        // 变化队列只传配置身份，正文通过后续查询取得，避免将推送当作可信内容。
         let (notify_change_tx, notify_change_rx) = tokio::sync::mpsc::channel(16);
         let notify_change_tx_clone = notify_change_tx.clone();
 
@@ -65,7 +78,9 @@ impl ConfigWorker {
             )
             .add_labels(client_props.get_labels())
             .register_server_request_handler::<ConfigChangeNotifyRequest>(Arc::new(
-                ConfigChangeNotifyHandler { notify_change_tx },
+                ConfigChangeNotifyHandler {
+                    notify_change_tx,
+                },
             ))
             .auth_plugin(auth_plugin)
             .auth_context(client_props.get_auth_context())
@@ -75,7 +90,7 @@ impl ConfigWorker {
             .await?;
 
         let remote_client = Arc::new(remote_client);
-        // todo Event/Subscriber instead of mpsc Sender/Receiver
+        // 客户端装配成功后启动变化消费，再启动周期摘要比较，统一汇入同一刷新队列。
         crate::common::executor::spawn(Self::notify_change_to_cache_data(
             Arc::clone(&remote_client),
             Arc::clone(&unified_cache),
@@ -98,6 +113,13 @@ impl ConfigWorker {
 }
 
 impl ConfigWorker {
+    /// 业务作用：优先读取具有正文和摘要的缓存快照，否则从服务端查询，并执行响应过滤链。
+    ///
+    /// 参数说明：
+    /// - `data_id`：配置标识，与当前命名空间及分组共同定位缓存和远端配置。
+    /// - `group`：配置分组，调用方负责缺省值归一。
+    ///
+    /// 返回：经过过滤的配置响应；远端查询失败返回错误。缓存命中不重新验证新鲜度，远端成功响应缺少正文、类型或摘要时可能 panic，直接查询不填充缓存。
     #[instrument(skip_all)]
     pub(crate) async fn get_config(
         &self,
@@ -107,7 +129,7 @@ impl ConfigWorker {
         let namespace = self.client_props.get_namespace();
         let group_key = util::group_key(&data_id, &group, &namespace);
 
-        // Try to get config from cache first (if cache exists and content is complete)
+        // 先复制独立快照并释放缓存守卫，再等待可能访问外部资源的响应过滤器。
         let cached_snapshot = self.unified_cache.get(&group_key).and_then(|r| {
             if !r.content.is_empty() && !r.md5.is_empty() {
                 Some(r.resp_snapshot())
@@ -120,7 +142,7 @@ impl ConfigWorker {
             return Ok(CacheData::filtered_response(snapshot).await);
         }
 
-        // Cache miss or incomplete content, fetch from server
+        // 正文或摘要为空时不能采用当前缓存路径，转为查询；合法空正文也会走此分支。
         let config_resp = Self::get_config_inner_async(
             self.remote_client.clone(),
             data_id.clone(),
@@ -129,7 +151,7 @@ impl ConfigWorker {
         )
         .await?;
 
-        // invoke config_filter
+        // 远端正文按注册顺序过滤，但类型和摘要仍沿用服务端原值。
         let mut conf_resp = ConfigResp::new(
             data_id,
             group,
@@ -157,6 +179,15 @@ impl ConfigWorker {
         ))
     }
 
+    /// 业务作用：经请求过滤链发布配置正文，不附加独立 CAS 或灰度条件。
+    ///
+    /// 参数说明：
+    /// - `data_id`：待发布配置标识。
+    /// - `group`：配置分组。
+    /// - `content`：待过滤及提交的正文。
+    /// - `content_type`：可选正文格式，省略时由服务端按其规则处理。
+    ///
+    /// 返回：远端业务结果成功时为真，否则返回传输或业务错误；不直接更新本地缓存或等待监听回调。
     #[instrument(skip_all)]
     pub(crate) async fn publish_config(
         &self,
@@ -169,6 +200,16 @@ impl ConfigWorker {
             .await
     }
 
+    /// 业务作用：以旧内容摘要为条件发布配置，交由服务端裁决并发修改冲突。
+    ///
+    /// 参数说明：
+    /// - `data_id`：待发布配置标识。
+    /// - `group`：配置分组。
+    /// - `content`：待过滤和发布的新正文。
+    /// - `content_type`：可选正文格式。
+    /// - `cas_md5`：服务端必须匹配的旧内容摘要，过滤后仍原样提交。
+    ///
+    /// 返回：远端接受条件写入时为真，传输失败或业务拒绝返回错误，不以本地缓存替代条件校验。
     #[instrument(skip_all)]
     pub(crate) async fn publish_config_cas(
         &self,
@@ -190,6 +231,16 @@ impl ConfigWorker {
         .await
     }
 
+    /// 业务作用：向指定灰度接收范围发布配置，正文仍经过统一请求过滤链。
+    ///
+    /// 参数说明：
+    /// - `data_id`：待发布配置标识。
+    /// - `group`：配置分组。
+    /// - `content`：待发布正文。
+    /// - `content_type`：可选正文格式。
+    /// - `beta_ips`：服务端识别的灰度地址文本，此处不解析或验证地址集合。
+    ///
+    /// 返回：远端业务成功时为真，否则返回错误；不在本地执行灰度筛选或更新订阅集合。
     #[instrument(skip_all)]
     pub(crate) async fn publish_config_beta(
         &self,
@@ -211,6 +262,17 @@ impl ConfigWorker {
         .await
     }
 
+    /// 业务作用：携带自定义扩展参数发布配置，同时保留专用参数的优先级。
+    ///
+    /// 参数说明：
+    /// - `data_id`：待发布配置标识。
+    /// - `group`：配置分组。
+    /// - `content`：待过滤的正文。
+    /// - `content_type`：显式正文格式，存在时覆盖扩展参数同名值。
+    /// - `cas_md5`：独立 CAS 条件，省略时不设置该条件。
+    /// - `params`：自定义扩展键值；加密密钥字段最终由过滤结果覆盖。
+    ///
+    /// 返回：远端业务成功时为真，传输或业务失败返回错误，不保证扩展参数均被服务端支持。
     #[instrument(skip_all)]
     pub(crate) async fn publish_config_param(
         &self,
@@ -233,7 +295,18 @@ impl ConfigWorker {
         .await
     }
 
-    /// Internal implementation for all publish_config variants.
+    /// 业务作用：汇总发布路径，先顺序执行请求过滤器，再提交过滤后的配置身份及正文。
+    ///
+    /// 参数说明：
+    /// - `data_id`：初始配置标识，过滤器可调整。
+    /// - `group`：初始配置分组，过滤器可调整。
+    /// - `content`：初始正文，允许过滤器加密或转换。
+    /// - `content_type`：独立正文格式设置，不由请求过滤对象修改。
+    /// - `cas_md5`：独立旧内容摘要条件，原样交给发送层。
+    /// - `beta_ips`：可选灰度地址文本。
+    /// - `params`：可选扩展参数集合。
+    ///
+    /// 返回：远端发布结果；过滤器没有独立错误返回通道，异常或等待由其实现决定。发送失败不回滚过滤器副作用。
     #[allow(clippy::too_many_arguments)]
     async fn publish_config_inner(
         &self,
@@ -267,6 +340,13 @@ impl ConfigWorker {
         .await
     }
 
+    /// 业务作用：在当前命名空间内请求删除指定配置。
+    ///
+    /// 参数说明：
+    /// - `data_id`：待删除配置标识。
+    /// - `group`：配置分组。
+    ///
+    /// 返回：远端业务成功时为真，失败返回错误；此入口不执行过滤器、不移除本地缓存或监听器。
     #[instrument(skip_all)]
     pub(crate) async fn remove_config(
         &self,
@@ -277,7 +357,14 @@ impl ConfigWorker {
         Self::remove_config_inner_async(self.remote_client.clone(), data_id, group, namespace).await
     }
 
-    /// Add listener.
+    /// 业务作用：为配置建立本地缓存和变更接收者，首次发现配置时尝试读取并异步建立远端监听。
+    ///
+    /// 参数说明：
+    /// - `data_id`：待监听配置标识。
+    /// - `group`：配置分组。
+    /// - `listener`：按 Arc 实例身份去重的本地接收者。
+    ///
+    /// 返回：尝试加入本地监听后结束；首次查询失败仅记录，异步订阅不等待结果。首次填充不立即通知，已有缓存直接加监听，远端就绪与持久化完成不由此保证。
     #[instrument(skip_all)]
     pub(crate) async fn add_listener(
         &self,
@@ -292,7 +379,7 @@ impl ConfigWorker {
             let mut cache_data =
                 CacheData::new(self.config_filters.clone(), data_id, group, namespace);
 
-            // listen immediately upon initialization
+            // 先尝试建立内容摘要基线；查询失败仍保留待监听项，允许后续周期比较获取内容。
             let config_resp = Self::get_config_inner_async(
                 self.remote_client.clone(),
                 cache_data.data_id.clone(),
@@ -328,16 +415,23 @@ impl ConfigWorker {
                 }
                 .in_current_span(),
             );
-            // Save to unified cache (will persist to disk)
+            // 先发布本地缓存并交给缓存组件安排持久化，不等待磁盘完成再添加接收者。
             self.unified_cache.insert(group_key.clone(), cache_data);
         }
-        // Add listener to existing cache data
+        // 接收者按实例身份加入当前缓存；并发初始化不由本方法提供整体互斥。
         if let Some(mut cache_ref_mut) = self.unified_cache.get_mut(&group_key) {
             cache_ref_mut.add_listener(listener);
         }
     }
 
-    /// Remove listener.
+    /// 业务作用：从指定配置的本地通知集合中移除一个接收者。
+    ///
+    /// 参数说明：
+    /// - `data_id`：监听配置标识。
+    /// - `group`：配置分组。
+    /// - `listener`：原注册的 Arc 实例，只有实例身份匹配才移除。
+    ///
+    /// 返回：缓存和接收者存在时移除，否则保持原状；不取消远端订阅、删除缓存或中断已安排的通知任务。
     #[instrument(skip_all)]
     pub(crate) async fn remove_listener(
         &self,
@@ -355,7 +449,14 @@ impl ConfigWorker {
 }
 
 impl ConfigWorker {
-    /// List-Watch, list ensure cache-data newest.
+    /// 业务作用：周期提交全部缓存配置的摘要，补充推送之外的变化检测并安排重新查询。
+    ///
+    /// 参数说明：
+    /// - `remote_client`：发送批量监听请求的共享客户端。
+    /// - `unified_cache`：提供本轮配置身份及摘要快照的缓存。
+    /// - `notify_change_tx`：变化身份的有界刷新队列，满时等待容量。
+    ///
+    /// 返回：持续循环，每轮完成后等待六十秒；只有成功业务响应中的变化列表进入队列。无监听器的缓存仍参与比较，当前方法没有独立停止信号。
     #[instrument(skip_all)]
     async fn list_ensure_cache_data_newest(
         remote_client: Arc<NacosGrpcClient>,
@@ -365,11 +466,10 @@ impl ConfigWorker {
         tracing::info!("list_ensure_cache_data_newest started");
         loop {
             tracing::debug!("list_ensure_cache_data_newest refreshing");
-            // todo invoke remove_listener with ConfigBatchListenClientRequest::new(false) when is_empty(),
-            //  and then remove cache_data from unified_cache.
+            // 目录以缓存为准，本地接收者为空不会在此自动取消远端监听或删除配置。
             let mut listen_context_vec = Vec::with_capacity(6);
             {
-                // Use foreach to iterate over all cached configs
+                // 只在同步遍历中复制身份和摘要，网络请求不持有缓存分片守卫。
                 unified_cache.for_each(|_key, c| {
                     listen_context_vec.push(ConfigListenContext::new(
                         c.data_id.clone(),
@@ -394,7 +494,7 @@ impl ConfigWorker {
                     && let Some(change_context_vec) = resp.changed_configs
                 {
                     for context in change_context_vec {
-                        // notify config change
+                        // 摘要比较仅表明需要重新读取，不把响应中的身份当作配置正文。
                         let group_key =
                             util::group_key(&context.data_id, &context.group, &context.namespace);
                         let _ = notify_change_tx.send(group_key).await;
@@ -407,8 +507,13 @@ impl ConfigWorker {
         }
     }
 
-    /// Synchronously fill fields from the response; returns whether listeners should
-    /// be notified (the first fill during initialization does not notify).
+    /// 业务作用：同步覆盖缓存中的服务端内容及元数据，并区分首次基线建立和后续变化。
+    ///
+    /// 参数说明：
+    /// - `cache_data`：待更新缓存，此函数不跨异步等待持有它。
+    /// - `config_resp`：成功读取的协议响应，正文、类型和摘要必须存在。
+    ///
+    /// 返回：首次填充清除 initializing 并返回假，后续填充返回真供通知流程判断摘要；必需字段缺失会 panic，之前已赋值字段不会回滚。
     fn fill_data(cache_data: &mut CacheData, config_resp: ConfigQueryResponse) -> bool {
         cache_data.content_type = config_resp
             .content_type
@@ -417,10 +522,16 @@ impl ConfigWorker {
             .content
             .expect("Config content missing in response");
         cache_data.md5 = config_resp.md5.expect("Config md5 missing in response");
-        // Compatibility None < 2.1.0
+        // 对端省略加密密钥字段时使用空串，保持未加密配置的读取合同。
         cache_data.encrypted_data_key = config_resp.encrypted_data_key.unwrap_or_default();
         cache_data.last_modified = config_resp.last_modified;
-        tracing::info!("fill_data, cache_data={}", cache_data);
+        // 配置正文与加密密钥可能包含秘密，只记录规模和状态，不展开缓存展示文本。
+        tracing::info!(
+            content_bytes = cache_data.content.len(),
+            encrypted = !cache_data.encrypted_data_key.is_empty(),
+            initializing = cache_data.initializing,
+            "Nacos 配置缓存内容已填充"
+        );
         if cache_data.initializing {
             cache_data.initializing = false;
             false
@@ -429,14 +540,28 @@ impl ConfigWorker {
         }
     }
 
+    /// 业务作用：填充独立缓存对象，首次基线之后才进入过滤和监听通知流程。
+    ///
+    /// 参数说明：
+    /// - `cache_data`：调用方独占的缓存对象，不能是跨等待持有的缓存分片守卫。
+    /// - `config_resp`：必须包含正文、类型和摘要的服务端响应。
+    ///
+    /// 返回：填充并按需安排通知后结束，不等待接收者回调；缺少必需字段会 panic，过滤器行为由其实现决定。
     async fn fill_data_and_notify(cache_data: &mut CacheData, config_resp: ConfigQueryResponse) {
         if Self::fill_data(cache_data, config_resp) {
-            // check md5 and then notify
+            // 首次基线不触发变更通知，后续通知再按各接收者已安排的摘要去重。
             cache_data.notify_listener().await;
         }
     }
 
-    /// Notify change to cache_data.
+    /// 业务作用：串行消费配置变化身份，查询最新正文并在释放缓存守卫后执行过滤与通知。
+    ///
+    /// 参数说明：
+    /// - `remote_client`：远端配置读取入口。
+    /// - `unified_cache`：需要更新的缓存，身份不存在时忽略该通知。
+    /// - `notify_change_rx`：来自服务端推送和周期比较的变化队列。
+    ///
+    /// 返回：所有发送端关闭后退出；查询失败保留旧缓存。成功查询先更新缓存，再复制响应快照供异步过滤，最终通知不等待业务回调完成。
     #[instrument(skip_all)]
     async fn notify_change_to_cache_data(
         remote_client: Arc<NacosGrpcClient>,
@@ -452,13 +577,12 @@ impl ConfigWorker {
                     break;
                 }
                 Some(group_key) => {
-                    // A DashMap guard must never live across an .await: the suspended
-                    // future would hold the shard lock indefinitely and freeze the
-                    // single-worker SDK runtime.
+                    // 查询和过滤可能等待外部动作，先复制身份并释放分片守卫，防止持锁等待阻塞缓存访问。
                     let snapshot = unified_cache
                         .get(&group_key)
                         .map(|r| (r.data_id.clone(), r.group.clone(), r.namespace.clone()));
                     let Some((data_id, group, namespace)) = snapshot else {
+                        // 配置已不在本地目录时不查询任意远端身份，等待后续明确的监听注册。
                         continue;
                     };
 
@@ -480,6 +604,7 @@ impl ConfigWorker {
                                 None => false,
                             };
                             if should_notify {
+                                // 缓存写入先结束，再取独立快照过滤；异步边界不携带分片守卫。
                                 let snapshot =
                                     unified_cache.get(&group_key).map(|r| r.resp_snapshot());
                                 if let Some(snapshot) = snapshot {
@@ -491,6 +616,7 @@ impl ConfigWorker {
                             }
                         }
                         Err(e) => {
+                            // 查询失败不能用不完整结果覆盖旧内容，保留缓存等待后续变化或周期重查。
                             tracing::error!("get_config_inner_async, config_resp err={e:?}");
                         }
                     }
@@ -501,6 +627,15 @@ impl ConfigWorker {
 }
 
 impl ConfigWorker {
+    /// 业务作用：读取远端配置并把协议失败归类为不存在、查询冲突或其它业务错误。
+    ///
+    /// 参数说明：
+    /// - `remote_client`：已经装配认证与连接策略的客户端。
+    /// - `data_id`：配置标识。
+    /// - `group`：配置分组。
+    /// - `namespace`：配置所属命名空间。
+    ///
+    /// 返回：业务结果码成功时移交原响应，不检查可选正文是否齐全；传输、解码及业务拒绝返回对应错误，不过滤内容或更新缓存。
     async fn get_config_inner_async(
         remote_client: Arc<NacosGrpcClient>,
         data_id: String,
@@ -526,6 +661,21 @@ impl ConfigWorker {
         }
     }
 
+    /// 业务作用：组装最终发布参数并提交配置，以远端业务结果判断发布是否被接受。
+    ///
+    /// 参数说明：
+    /// - `remote_client`：负责身份和传输的共享客户端。
+    /// - `data_id`：经过请求过滤后的配置标识。
+    /// - `group`：经过请求过滤后的分组。
+    /// - `namespace`：经过请求过滤后的命名空间。
+    /// - `content`：经过请求过滤后的正文。
+    /// - `content_type`：显式正文格式，存在时覆盖扩展字段同名值。
+    /// - `encrypted_data_key`：过滤结果中的密钥材料，始终覆盖扩展字段同名值。
+    /// - `cas_md5`：可选条件写入摘要，独立于扩展参数。
+    /// - `beta_ips`：显式灰度范围，存在时覆盖扩展字段同名值。
+    /// - `params`：优先级较低的自定义扩展参数。
+    ///
+    /// 返回：远端业务成功时为真，传输、解码或业务拒绝返回错误；不等待配置传播或更新本地快照。
     #[allow(clippy::too_many_arguments)]
     async fn publish_config_inner_async(
         remote_client: Arc<NacosGrpcClient>,
@@ -542,7 +692,7 @@ impl ConfigWorker {
         let mut req =
             ConfigPublishRequest::new(data_id, group, namespace, content).cas_md5(cas_md5);
 
-        // Customize parameters have low priority
+        // 先写扩展参数，再覆盖专用参数，防止自定义同名字段替换过滤器确定的加密材料。
         if let Some(params) = params {
             req.add_addition_params(params);
         }
@@ -566,6 +716,15 @@ impl ConfigWorker {
         crate::common::error::handle_response(&resp, "publish_config").map(|_| true)
     }
 
+    /// 业务作用：发送配置删除请求并检查远端业务结果，避免把传输成功当作删除成功。
+    ///
+    /// 参数说明：
+    /// - `remote_client`：负责认证与发送的共享客户端。
+    /// - `data_id`：待删除配置标识。
+    /// - `group`：配置分组。
+    /// - `namespace`：配置所属命名空间。
+    ///
+    /// 返回：业务成功时为真，传输、解码或业务失败返回错误；不删除本地缓存或取消监听。
     async fn remove_config_inner_async(
         remote_client: Arc<NacosGrpcClient>,
         data_id: String,

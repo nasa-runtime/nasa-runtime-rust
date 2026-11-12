@@ -29,7 +29,9 @@ pub struct Limits {
 
 impl Default for Limits {
     /// 业务作用：为连接、后台工作与被持有的快照设置有限容量。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有限制均为正值的默认容量。
     fn default() -> Self {
         Self {
@@ -48,7 +50,9 @@ impl Default for Limits {
 
 impl Limits {
     /// 业务作用：拒绝无法执行或可能溢出的容量设置。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：合法容量可构造资源池；零容量和异常大容量返回配置错误。
     pub fn validate(&self) -> Result<()> {
         for value in [
@@ -112,7 +116,9 @@ pub struct ConnectionPolicy {
 
 impl Default for ConnectionPolicy {
     /// 业务作用：默认要求连接可用，并在查询异常时停止使用旧证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：操作、轮询、证据年龄与空闲回收的有限预算。
     fn default() -> Self {
         Self {
@@ -130,7 +136,9 @@ impl Default for ConnectionPolicy {
 
 impl ConnectionPolicy {
     /// 业务作用：校验一次操作与观察周期能否落在证据有效期内。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：预算不合理时在任何网络活动之前拒绝配置。
     pub fn validate(&self) -> Result<()> {
         for value in [
@@ -173,7 +181,9 @@ pub struct RegistrationPolicy {
 
 impl Default for RegistrationPolicy {
     /// 业务作用：区分首次发布确认与运行期整体就绪影响。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：首次必须确认、运行期默认降级的注册策略。
     fn default() -> Self {
         Self {
@@ -188,7 +198,10 @@ impl Default for RegistrationPolicy {
 
 impl RegistrationPolicy {
     /// 业务作用：保证回查与注销不会使用无界或相互矛盾的期限。
-    /// 参数说明：`connection` 提供一次请求的最大预算。
+    ///
+    /// 参数说明：
+    /// - `connection`：提供一次请求的最大预算。
+    ///
     /// 返回：合法策略可用于冻结计划；不合法策略拒绝发布。
     pub fn validate(&self, connection: &ConnectionPolicy) -> Result<()> {
         if self.monitor_interval_ms == 0
@@ -205,7 +218,10 @@ impl RegistrationPolicy {
 }
 
 /// 业务作用：约束本地连接及注册标识，避免含混引用与无界诊断维度。
-/// 参数说明：`name` 是宿主提供的本地标识，不是后端服务名。
+///
+/// 参数说明：
+/// - `name`：是宿主提供的本地标识，不是后端服务名。
+///
 /// 返回：符合有限 ASCII 名称规则时成功。
 pub fn validate_name(name: &str) -> Result<()> {
     let bytes = name.as_bytes();
@@ -222,7 +238,10 @@ pub fn validate_name(name: &str) -> Result<()> {
 }
 
 /// 业务作用：统一生成不含配置原文的预检错误。
-/// 参数说明：`reason` 是固定诊断原因。
+///
+/// 参数说明：
+/// - `reason`：是固定诊断原因。
+///
 /// 返回：调用方可安全展示的配置错误。
 pub(crate) fn invalid(reason: &'static str) -> DiscoveryError {
     DiscoveryError::new(ErrorCode::InvalidConfig, reason)

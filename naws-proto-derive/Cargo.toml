@@ -4,7 +4,7 @@ name = "naws-proto-derive"
 version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "#[derive(ProtocolBytes)] —— 从 proto 手写 codec 提炼的派生宏(VARINT_TLV + BITPACK_TLV)。"
+description = "ProtocolBytes 派生宏：显式字段 tag、通用运行时路径与四种编码模式"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -20,3 +20,4 @@ proc-macro = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+proc-macro-crate = "3"

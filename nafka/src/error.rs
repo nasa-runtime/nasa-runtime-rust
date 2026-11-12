@@ -14,6 +14,11 @@ pub enum ProducerQueue {
 
 impl std::fmt::Display for ProducerQueue {
     /// 业务作用：输出稳定的低基数队列域名称，供错误文本与指标标签复用。
+    ///
+    /// 参数说明：
+    /// - `formatter`：调用方提供的格式化输出目标。
+    ///
+    /// 返回：写入固定容量类别名；仅输出目标自身失败时返回格式化错误，不包含消息或连接信息。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DeliveryObserver => formatter.write_str("delivery-observer"),
@@ -224,7 +229,9 @@ pub enum NafkaError {
     },
 
     /// owner 已退出，但旧分配的死信任务尚未归还实际责任；重复停止继续等待。
-    #[error("死信关闭超时，活动任务={active_tasks}，保留记录={retained_records}，保留字节={retained_bytes}")]
+    #[error(
+        "死信关闭超时，活动任务={active_tasks}，保留记录={retained_records}，保留字节={retained_bytes}"
+    )]
     DltShutdownTimeout {
         /// 尚未退出的实际异步任务，包括旧分配失权后的发送。
         active_tasks: usize,

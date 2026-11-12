@@ -134,14 +134,14 @@ impl ParticipantCommandTrust {
         })
     }
 
-    /// 业务作用：为动态 Catalog 参与方构造按 workflow/version 限定的 Orchestrator 授权边。
+    /// 业务作用：为动态 Catalog 参与方构造按 workflow/version 限定的 Orchestrator 授权边。 participant 只发布自身 capability，不持有完整流程 seal；命令仍需通过 transport 身份认证、 envelope 派生复验与宏生成的精确步骤门禁，完整 digest 由 Orchestrator 的持久实例权威负责。
     ///
-    /// participant 只发布自身 capability，不持有完整流程 seal；命令仍需通过 transport 身份认证、
-    /// envelope 派生复验与宏生成的精确步骤门禁，完整 digest 由 Orchestrator 的持久实例权威负责。
+    /// 参数说明：
+    /// - `producer`：允许协调该能力的服务身份。
+    /// - `workflow`：本地能力支持的工作流名。
+    /// - `definition_version`：本地能力支持的定义版本。
     ///
-    /// 参数说明：`producer` 是获准协调者，`workflow` 与 `definition_version` 是本地 handler 支持范围。
-    ///
-    /// 返回：不依赖完整 workflow projection 的受限信任边。
+    /// 返回：返回限制 producer、workflow 和定义版本且不绑定摘要的信任边，不执行 transport 认证或读取 Catalog；后续门禁仍需验证步骤与持久定义权威。
     pub fn for_definition_version(
         producer: ServiceIdentity,
         workflow: WorkflowName,
@@ -216,7 +216,10 @@ where
 
     /// 业务作用：把已验证的参与方配置与完整后端组合为唯一运行句柄。
     ///
-    /// 参数说明：`consumer` 是 Inbox 去重命名空间，`command_trust` 是授权投影，`backend` 绑定同源持久角色。
+    /// 参数说明：
+    /// - `consumer`：是 Inbox 去重命名空间
+    /// - `command_trust`：是授权投影
+    /// - `backend`：绑定同源持久角色。
     ///
     /// 返回：边界均合法时返回运行时；任一身份或投影冲突时在 I/O 前拒绝。
     pub fn build(
@@ -446,7 +449,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Succeeded))
                         }
-                        Ok(SagaOutcome::Rejected { code }) => {
+                        Ok(SagaOutcome::Rejected {
+                            code,
+                        }) => {
                             // 确定性拒绝是可提交结论:拒绝事实与 Inbox、结果事件原子提交。
                             self.backend
                                 .store()
@@ -466,7 +471,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Rejected))
                         }
-                        Ok(SagaOutcome::Unknown { code }) => {
+                        Ok(SagaOutcome::Unknown {
+                            code,
+                        }) => {
                             if allow_unknown {
                                 self.backend
                                     .store()
@@ -507,7 +514,9 @@ where
                                 Ok(ParticipantHandled::Executed(StepAttemptStatus::Halted))
                             }
                         }
-                        Ok(SagaOutcome::Halted { code }) => {
+                        Ok(SagaOutcome::Halted {
+                            code,
+                        }) => {
                             self.backend
                                 .store()
                                 .settle_execute(
@@ -527,7 +536,9 @@ where
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Halted))
                         }
                         // 本次尝试没有可提交结论:回滚全部本地写并保留输入消息重投。
-                        Err(SagaExecutionError::Retryable { code }) => {
+                        Err(SagaExecutionError::Retryable {
+                            code,
+                        }) => {
                             anyhow::bail!("retryable execution error: {code}")
                         }
                     }
@@ -741,7 +752,9 @@ where
                                 .await?;
                             Ok(ParticipantHandled::Executed(status))
                         }
-                        Err(SagaExecutionError::Retryable { code }) => {
+                        Err(SagaExecutionError::Retryable {
+                            code,
+                        }) => {
                             // 未获真实裁决时回滚 PENDING gate、Inbox 与所有业务写，让同一
                             // command 保持可重投；绝不能把调用失败当作取消成功。
                             anyhow::bail!("retryable external cancel error: {code}")
@@ -885,7 +898,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Succeeded))
                         }
-                        Ok(CompensationOutcome::Unknown { code }) => {
+                        Ok(CompensationOutcome::Unknown {
+                            code,
+                        }) => {
                             self.backend
                                 .store()
                                 .settle_compensation(
@@ -904,7 +919,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Unknown))
                         }
-                        Ok(CompensationOutcome::Halted { code }) => {
+                        Ok(CompensationOutcome::Halted {
+                            code,
+                        }) => {
                             self.backend
                                 .store()
                                 .settle_compensation(
@@ -923,7 +940,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Halted))
                         }
-                        Err(SagaExecutionError::Retryable { code }) => {
+                        Err(SagaExecutionError::Retryable {
+                            code,
+                        }) => {
                             anyhow::bail!("retryable compensation error: {code}")
                         }
                     }
@@ -1015,7 +1034,10 @@ where
                 )
                 .await?
             {
-                ResolutionAdmission::AlreadySettled { status, .. } => {
+                ResolutionAdmission::AlreadySettled {
+                    status,
+                    ..
+                } => {
                     let attempt_status = resolution_to_attempt_status(status)?;
                     self.emit_result(receipt_trace, envelope, attempt_status, None, None)
                         .await?;
@@ -1067,7 +1089,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Succeeded))
                         }
-                        Ok(SagaOutcome::Rejected { code }) => {
+                        Ok(SagaOutcome::Rejected {
+                            code,
+                        }) => {
                             // Rejected 只能由 handler 在排除迟到生效后给出；本层原样可靠提交，
                             // 不把普通“查无记录”自行升级成确定拒绝。
                             self.backend
@@ -1089,7 +1113,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Rejected))
                         }
-                        Ok(SagaOutcome::Unknown { code }) => {
+                        Ok(SagaOutcome::Unknown {
+                            code,
+                        }) => {
                             self.backend
                                 .store()
                                 .settle_resolution(
@@ -1109,7 +1135,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Unknown))
                         }
-                        Ok(SagaOutcome::Halted { code }) => {
+                        Ok(SagaOutcome::Halted {
+                            code,
+                        }) => {
                             self.backend
                                 .store()
                                 .settle_resolution(
@@ -1129,7 +1157,9 @@ where
                             .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Halted))
                         }
-                        Err(SagaExecutionError::Retryable { code }) => {
+                        Err(SagaExecutionError::Retryable {
+                            code,
+                        }) => {
                             // 没有裁决时回滚 Inbox 与 PENDING 写入，原 command 保持可重投。
                             anyhow::bail!("retryable resolution error: {code}")
                         }
@@ -1489,10 +1519,12 @@ fn external_cancel_result(
         CancelOutcome::AlreadyTerminal(terminal) => {
             let (forward, reason) = match terminal {
                 TerminalForwardOutcome::Succeeded => (StepForwardStatus::Succeeded, None),
-                TerminalForwardOutcome::Rejected { code } => {
-                    (StepForwardStatus::Rejected, Some(code))
-                }
-                TerminalForwardOutcome::Halted { code } => (StepForwardStatus::Halted, Some(code)),
+                TerminalForwardOutcome::Rejected {
+                    code,
+                } => (StepForwardStatus::Rejected, Some(code)),
+                TerminalForwardOutcome::Halted {
+                    code,
+                } => (StepForwardStatus::Halted, Some(code)),
             };
             (
                 forward,
@@ -1502,7 +1534,9 @@ fn external_cancel_result(
                 reason,
             )
         }
-        CancelOutcome::ResolutionPending { code } => (
+        CancelOutcome::ResolutionPending {
+            code,
+        } => (
             StepForwardStatus::Unknown,
             StepCancelStatus::ResolutionPending,
             StepAttemptStatus::ResolutionPending,

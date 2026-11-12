@@ -38,7 +38,9 @@ macro_rules! policy {
         pub struct $patch { $($(#[$fmeta])* #[serde(skip_serializing_if = "Option::is_none")] pub $field: Option<$ty>),* }
         impl $name {
             /// 业务作用：仅覆盖显式叶子，空子树保持上层业务策略。
-            /// 参数说明：`patch` 为下层声明的可选叶子。
+            /// 参数说明：
+            /// - `patch`：下层声明的可选配置叶子，仅覆盖明确提供的字段。
+            ///
             /// 返回：更新当前策略，不重新套用全局默认。
             pub fn apply(&mut self, patch: &$patch) { $(if let Some(value) = &patch.$field { self.$field = value.clone(); })* }
         }
@@ -84,7 +86,10 @@ policy!(
 
 impl SlowPolicy {
     /// 业务作用：为慢 SQL 指标、日志与通知使用同一原始时长门禁，防止出口间边界不一致。
-    /// 参数说明：`duration` 为数据库客户端活跃时长，不含连接等待、缓存或 Stream 消费者停顿。
+    ///
+    /// 参数说明：
+    /// - `duration`：为数据库客户端活跃时长，不含连接等待、缓存或 Stream 消费者停顿。
+    ///
     /// 返回：时长达到或超过配置阈值时为真；直接比较 Duration，不截断为整数毫秒。
     pub fn is_slow(&self, duration: std::time::Duration) -> bool {
         duration >= std::time::Duration::from_millis(self.threshold_ms)
@@ -175,7 +180,10 @@ pub struct Alerts {
 }
 
 /// 业务作用：让执行错误告警的空对象和缺省父级继承同一组错误级别默认值。
-/// 参数说明：`deserializer` 提供显式声明的告警对象。
+///
+/// 参数说明：
+/// - `deserializer`：提供显式声明的告警对象。
+///
 /// 返回：在错误默认值上逐叶覆盖的策略；未知字段仍由严格 patch 拒绝。
 fn deserialize_execution_alert<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -191,7 +199,9 @@ fn deserialize_execution_alert<'de, D: serde::Deserializer<'de>>(
 }
 impl Default for Alerts {
     /// 业务作用：关闭全部离散通知，同时保留各事件独立的默认严重度与冷却预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：没有 provider 引用、不创建队列的策略。
     fn default() -> Self {
         Self {
@@ -283,10 +293,14 @@ pub struct MetricsPolicy {
 }
 impl Default for MetricsPolicy {
     /// 业务作用：默认统计准确行数，同时始终保持基础调用与时长采集。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：启用行数附加指标的策略。
     fn default() -> Self {
-        Self { record_rows: true }
+        Self {
+            record_rows: true,
+        }
     }
 }
 
@@ -326,7 +340,10 @@ pub struct ObservabilitySettings {
 
 impl SqlConfig {
     /// 业务作用：从 SQL 子树解析严格递归配置，在产生 I/O 前拒绝未知字段与显式空值。
-    /// 参数说明：`value` 为可缺省的 sql 子树。
+    ///
+    /// 参数说明：
+    /// - `value`：为可缺省的 sql 子树。
+    ///
     /// 返回：完整策略；错误只含配置合同，不回显用户输入。
     pub fn parse(value: Option<&serde_json::Value>) -> Result<Self, &'static str> {
         let Some(value) = value else {
@@ -341,7 +358,11 @@ impl SqlConfig {
 }
 
 /// 业务作用：协调逐源 SQLx 事件开关与进程日志过滤器，保留未配置 console 时的旧指令入口。
-/// 参数说明：`root` 为完整配置树，`datasource` 为待构造连接的目录名称。
+///
+/// 参数说明：
+/// - `root`：为完整配置树
+/// - `datasource`：为待构造连接的目录名称。
+///
 /// 返回：该源应产生的语句级别；None 表示连接不产生逐条 SQL 事件。
 pub fn statement_level(
     root: &serde_json::Value,
@@ -357,7 +378,10 @@ pub fn statement_level(
 }
 
 /// 业务作用：派生容纳所有已启用数据源语句的进程过滤指令，并拒绝双入口冲突。
-/// 参数说明：`root` 为完整启动或候选配置。
+///
+/// 参数说明：
+/// - `root`：为完整启动或候选配置。
+///
 /// 返回：固定 target 指令；未启用 console 时显式关闭受管语句 target。
 pub fn console_directive(root: &serde_json::Value) -> Result<String, &'static str> {
     let settings = SqlConfig::parse(root.get("sql"))?.observability;
@@ -391,7 +415,10 @@ pub fn console_directive(root: &serde_json::Value) -> Result<String, &'static st
 }
 
 /// 业务作用：识别业务是否选择了 console 配置入口，避免默认树遮蔽兼容指令。
-/// 参数说明：`root` 为尚未补齐默认值的配置树。
+///
+/// 参数说明：
+/// - `root`：为尚未补齐默认值的配置树。
+///
 /// 返回：全局或任一数据源出现 console 子树时为真。
 fn console_is_explicit(root: &serde_json::Value) -> bool {
     let Some(settings) = root.pointer("/sql/observability") else {
@@ -409,7 +436,10 @@ fn console_is_explicit(root: &serde_json::Value) -> bool {
 }
 
 /// 业务作用：只识别旧配置中精确 SQLx target 的 debug/trace 指令，不扩大其它日志目标。
-/// 参数说明：`root` 为原始配置树。
+///
+/// 参数说明：
+/// - `root`：为原始配置树。
+///
 /// 返回：最后一项受支持的兼容级别；其它级别不启用逐条输出。
 fn legacy_statement_level(root: &serde_json::Value) -> Option<LogLevel> {
     root.pointer("/log/level")
@@ -425,7 +455,10 @@ fn legacy_statement_level(root: &serde_json::Value) -> Option<LogLevel> {
 }
 
 /// 业务作用：统一拒绝把 null 当作缺省或覆盖重置，保留字段省略的唯一默认语义。
-/// 参数说明：`value` 为尚未反序列化的观测配置子树。
+///
+/// 参数说明：
+/// - `value`：为尚未反序列化的观测配置子树。
+///
 /// 返回：无 null 时成功；显式 null 返回固定配置错误。
 pub fn reject_null(value: &serde_json::Value) -> Result<(), &'static str> {
     match value {
@@ -438,7 +471,11 @@ pub fn reject_null(value: &serde_json::Value) -> Result<(), &'static str> {
 
 impl ObservabilitySettings {
     /// 业务作用：按 global、datasource、method 逐叶组合冻结策略。
-    /// 参数说明：`datasource` 是目录名称，`method` 是可选完整静态方法身份。
+    ///
+    /// 参数说明：
+    /// - `datasource`：是目录名称
+    /// - `method`：是可选完整静态方法身份。
+    ///
     /// 返回：脱敏有效视图；空覆盖不重置继承值。
     pub fn effective(&self, datasource: &str, method: Option<&str>) -> EffectivePolicy {
         let mut out = EffectivePolicy {
@@ -476,7 +513,9 @@ impl ObservabilitySettings {
     }
 
     /// 业务作用：在编译策略前验证阈值、字符上限、事件级别与通知预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：各层合并后合法时成功；目录存在性由宿主针对最终目录校验。
     pub fn validate(&self) -> Result<(), &'static str> {
         self.effective("", None).validate()?;
@@ -507,7 +546,9 @@ impl ObservabilitySettings {
 
 impl EffectivePolicy {
     /// 业务作用：确认继承后的实际策略可以安全用于有界日志和非阻塞告警。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部值合法时成功；不执行凭据解析或网络动作。
     pub fn validate(&self) -> Result<(), &'static str> {
         use LogLevel::*;
@@ -569,7 +610,10 @@ impl EffectivePolicy {
 }
 
 /// 业务作用：将 provider 名限制为启动时可冻结的低基数标识。
-/// 参数说明：`name` 为配置中的 provider 引用。
+///
+/// 参数说明：
+/// - `name`：为配置中的 provider 引用。
+///
 /// 返回：长度与 ASCII 字符均符合合同则为真。
 pub fn valid_provider_id(name: &str) -> bool {
     (1..=64).contains(&name.len())

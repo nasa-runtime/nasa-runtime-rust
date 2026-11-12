@@ -55,7 +55,8 @@ impl DatabaseCapabilities {
 
     /// 业务作用：把一个已经编入的 typed driver 加入能力集合。
     ///
-    /// 参数说明：`driver` 是由对应 Cargo feature 实际编入的后端。
+    /// 参数说明：
+    /// - `driver`：是由对应 Cargo feature 实际编入的后端。
     ///
     /// 返回：包含原集合和指定 driver 的新集合。
     pub const fn with(self, driver: DatabaseDriver) -> Self {
@@ -69,7 +70,8 @@ impl DatabaseCapabilities {
 
     /// 业务作用：复验配置声明的 driver 是否已经编入当前运行产物。
     ///
-    /// 参数说明：`driver` 是配置边界解析出的后端。
+    /// 参数说明：
+    /// - `driver`：是配置边界解析出的后端。
     ///
     /// 返回：对应 typed runtime 存在时返回真。
     pub const fn contains(self, driver: DatabaseDriver) -> bool {
@@ -85,7 +87,8 @@ impl DatabaseCapabilities {
 impl std::fmt::Display for DatabaseDriver {
     /// 业务作用：输出稳定、低基数的 driver 名称。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：名称写入成功时返回 `Ok`，否则返回格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -118,7 +121,8 @@ pub struct DatasourceRef(Arc<str>);
 impl DatasourceRef {
     /// 业务作用：以既有兼容签名校验并固定一个 datasource qualifier。
     ///
-    /// 参数说明：`name` 是配置边界或业务计划给出的数据源名。
+    /// 参数说明：
+    /// - `name`：是配置边界或业务计划给出的数据源名。
     ///
     /// 返回：名称符合有界 canonical 合同时返回拥有型引用；失败时在 anyhow 错误链保留具名原因。
     pub fn new(name: impl AsRef<str>) -> anyhow::Result<Self> {
@@ -127,7 +131,8 @@ impl DatasourceRef {
 
     /// 业务作用：为 checked 配置与事务入口校验 datasource qualifier 并保留结构化失败分类。
     ///
-    /// 参数说明：`name` 是配置边界或业务计划给出的数据源名。
+    /// 参数说明：
+    /// - `name`：是配置边界或业务计划给出的数据源名。
     ///
     /// 返回：名称符合有界 canonical 合同时返回拥有型引用，否则返回 [`DatasourceNameError`]。
     pub fn try_new(name: impl AsRef<str>) -> Result<Self, DatasourceNameError> {
@@ -180,7 +185,8 @@ impl AsRef<str> for DatasourceRef {
 impl std::fmt::Display for DatasourceRef {
     /// 业务作用：输出不含连接信息的 datasource qualifier。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：名称写入成功时返回 `Ok`，否则返回格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -190,7 +196,8 @@ impl std::fmt::Display for DatasourceRef {
 
 /// 业务作用：校验 datasource 名称可安全用于配置键、指标 label 与诊断字段。
 ///
-/// 参数说明：`name` 是待校验的 qualifier。
+/// 参数说明：
+/// - `name`：是待校验的 qualifier。
 ///
 /// 返回：名称合法时返回 `Ok`，否则返回不包含输入内容的稳定分类。
 pub fn validate_datasource_name(name: &str) -> Result<(), DatasourceNameError> {
@@ -236,7 +243,8 @@ pub struct DataSourcePoolConfig {
 impl std::fmt::Debug for DataSourcePoolConfig {
     /// 业务作用：输出不含用户名和口令的池配置诊断视图。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：脱敏字段写入成功时返回 `Ok`，否则返回格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -309,7 +317,8 @@ impl DataSourcePoolConfig {
 
 /// 业务作用：去掉 URL 中的 userinfo，同时保留 scheme 供 Debug 识别 driver。
 ///
-/// 参数说明：`url` 是可能包含凭据的数据库连接串。
+/// 参数说明：
+/// - `url`：是可能包含凭据的数据库连接串。
 ///
 /// 返回：不包含用户名和口令的字符串；scheme 或 endpoint 无法安全识别时返回固定占位符。
 pub fn redact_url(url: &str) -> String {
@@ -337,7 +346,8 @@ pub fn redact_url(url: &str) -> String {
 
 /// 业务作用：生成不包含 scheme、用户信息和连接参数的数据库 endpoint。
 ///
-/// 参数说明：`url` 是 driver 已校验或即将校验的连接串。
+/// 参数说明：
+/// - `url`：是 driver 已校验或即将校验的连接串。
 ///
 /// 返回：可用于脱敏诊断的 endpoint；格式不完整时返回固定占位符。
 pub fn redacted_endpoint(url: &str) -> String {
@@ -418,7 +428,8 @@ impl ManagedRegistryOwner {
 
     /// 业务作用：比较两个 owner 是否代表同一次 Application 启动。
     ///
-    /// 参数说明：`other` 是待复验的 owner。
+    /// 参数说明：
+    /// - `other`：是待复验的 owner。
     ///
     /// 返回：底层身份相同时返回真。
     pub fn ptr_eq(&self, other: &Self) -> bool {
@@ -458,7 +469,8 @@ impl Default for ManagedRegistryOwner {
 impl std::fmt::Debug for ManagedRegistryOwner {
     /// 业务作用：输出不包含连接资源的 owner 诊断视图。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：诊断编号写入成功时返回 `Ok`。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -755,7 +767,8 @@ pub enum TxEntryError<E> {
 impl<E: std::fmt::Display> std::fmt::Display for TxEntryError<E> {
     /// 业务作用：输出 checked 事务入口的脱敏失败阶段和稳定原因。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：分类写入成功时返回 `Ok`，否则返回格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -784,19 +797,31 @@ pub enum CommitOutcome {
 impl<E: std::fmt::Display> std::fmt::Display for TxRunError<E> {
     /// 业务作用：输出不含 SQL、连接串和 payload 的事务失败分类。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：分类写入成功时返回 `Ok`，否则返回格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Rollback(error) => write!(formatter, "transaction rolled back: {error}"),
-            Self::RollbackOnly { reason } => {
+            Self::RollbackOnly {
+                reason,
+            } => {
                 write!(formatter, "transaction was rollback-only: {reason}")
             }
-            Self::CommitRejected { reason } => write!(formatter, "commit rejected: {reason}"),
-            Self::CommitUncertain { reason } => write!(formatter, "commit uncertain: {reason}"),
-            Self::RollbackFailed { reason, .. } => write!(formatter, "rollback failed: {reason}"),
-            Self::Infrastructure { reason } => {
+            Self::CommitRejected {
+                reason,
+            } => write!(formatter, "commit rejected: {reason}"),
+            Self::CommitUncertain {
+                reason,
+            } => write!(formatter, "commit uncertain: {reason}"),
+            Self::RollbackFailed {
+                reason,
+                ..
+            } => write!(formatter, "rollback failed: {reason}"),
+            Self::Infrastructure {
+                reason,
+            } => {
                 write!(formatter, "transaction infrastructure failed: {reason}")
             }
         }
@@ -830,12 +855,16 @@ pub fn current_driver() -> Option<DatabaseDriver> {
 
 /// 业务作用：在执行 SQL 或进入 driver 事务前拒绝跨 driver 复用。
 ///
-/// 参数说明：`requested` 是本次 typed 入口对应的 driver。
+/// 参数说明：
+/// - `requested`：是本次 typed 入口对应的 driver。
 ///
 /// 返回：当前无哨兵或 driver 一致时成功；错配时返回两侧身份。
 pub fn ensure_driver(requested: DatabaseDriver) -> Result<(), DriverScopeError> {
     match current_driver() {
-        Some(active) if active != requested => Err(DriverScopeError { active, requested }),
+        Some(active) if active != requested => Err(DriverScopeError {
+            active,
+            requested,
+        }),
         _ => Ok(()),
     }
 }
@@ -966,16 +995,19 @@ pub enum RegistryModeSnapshot {
 
 /// 业务作用：在唯一协调锁内组合 core 模式与 driver typed registry 的状态变化。
 ///
-/// 参数说明：`operation` 必须只获取当前 driver 的 registry 锁，并保持 core → driver 的锁顺序。
+/// 参数说明：
+/// - `operation`：只获取当前 driver registry 锁并遵守锁顺序的同步协调操作。
 ///
-/// 返回：原样返回闭包结果；协调锁 poison 时取回内部状态继续执行。
+/// 返回：先在锁中 sanitize 协调状态，再原样返回闭包结果；锁 poison 时取回内部状态。闭包在持锁期间运行，须保持 core 到 driver 的锁顺序且不得重入本函数。
 #[doc(hidden)]
 pub fn coordinate<T>(operation: impl FnOnce(&mut RegistryCoordinator<'_>) -> T) -> T {
     let mut state = REGISTRY_STATE
         .get_or_init(|| Mutex::new(RegistryState::default()))
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut coordinator = RegistryCoordinator { state: &mut state };
+    let mut coordinator = RegistryCoordinator {
+        state: &mut state,
+    };
     coordinator.sanitize();
     operation(&mut coordinator)
 }
@@ -1001,9 +1033,10 @@ impl RegistryCoordinator<'_> {
             } if owner.upgrade().is_none() => {
                 self.state.mode = RegistryMode::Empty;
             }
-            RegistryMode::Managed { owner, catalog }
-                if owner.upgrade().is_none() && catalog.upgrade().is_none() =>
-            {
+            RegistryMode::Managed {
+                owner,
+                catalog,
+            } if owner.upgrade().is_none() && catalog.upgrade().is_none() => {
                 self.state.mode = RegistryMode::Empty;
             }
             _ => {}
@@ -1051,15 +1084,19 @@ impl RegistryCoordinator<'_> {
                     }
                 }
             }
-            RegistryMode::Bootstrapping { .. } | RegistryMode::Managed { .. } => {
-                Err(RegistryCoordinationError::ManagedModeConflict)
+            RegistryMode::Bootstrapping {
+                ..
             }
+            | RegistryMode::Managed {
+                ..
+            } => Err(RegistryCoordinationError::ManagedModeConflict),
         }
     }
 
     /// 业务作用：在 driver 已确认本地 standalone 表为空后释放进程模式。
     ///
-    /// 参数说明：`driver` 是刚完成精确清理的 typed driver。
+    /// 参数说明：
+    /// - `driver`：是刚完成精确清理的 typed driver。
     ///
     /// 返回：模式属于该 driver 时成功；另一 driver 或受管状态返回冲突。
     pub fn release_standalone(
@@ -1079,7 +1116,8 @@ impl RegistryCoordinator<'_> {
                 let owner_alive = owner.upgrade().is_some();
                 if owner_alive {
                     if let RegistryMode::Bootstrapping {
-                        deferred_driver, ..
+                        deferred_driver,
+                        ..
                     } = &mut self.state.mode
                     {
                         *deferred_driver = None;
@@ -1144,9 +1182,9 @@ impl RegistryCoordinator<'_> {
                     kind: BootstrapKind::Configured,
                 })
             }
-            RegistryMode::Bootstrapping { .. } => {
-                Err(RegistryCoordinationError::PublicAdoptDuringBootstrap)
-            }
+            RegistryMode::Bootstrapping {
+                ..
+            } => Err(RegistryCoordinationError::PublicAdoptDuringBootstrap),
             _ => Err(RegistryCoordinationError::RegistryOccupied),
         }
     }
@@ -1193,7 +1231,8 @@ impl RegistryCoordinator<'_> {
 
     /// 业务作用：复验 typed registry 安装者持有当前 Bootstrapping owner token。
     ///
-    /// 参数说明：`token` 是 driver crate 收到的安装凭据。
+    /// 参数说明：
+    /// - `token`：是 driver crate 收到的安装凭据。
     ///
     /// 返回：owner 与启动类型同时匹配时成功；错配时不得修改 driver 本地槽。
     pub fn verify_installation_token(
@@ -1278,7 +1317,8 @@ impl RegistryCoordinator<'_> {
 
     /// 业务作用：按 owner 封口并撤销当前 managed catalog，阻止旧 Application 清理新实例。
     ///
-    /// 参数说明：`owner` 是正在逆序停机的 Application owner。
+    /// 参数说明：
+    /// - `owner`：是正在逆序停机的 Application owner。
     ///
     /// 返回：owner 命中时撤销；不命中时保持现有权威并返回错误。
     pub fn clear_managed(
@@ -1326,7 +1366,8 @@ impl RegistryCoordinator<'_> {
                 ..
             } if *active == driver => {
                 if let RegistryMode::Bootstrapping {
-                    deferred_driver, ..
+                    deferred_driver,
+                    ..
                 } = &mut self.state.mode
                 {
                     *deferred_driver = None;
@@ -1339,7 +1380,8 @@ impl RegistryCoordinator<'_> {
 
     /// 业务作用：在本轮 typed 资源全部清空后释放 Bootstrapping 占用。
     ///
-    /// 参数说明：`token` 是待撤销启动的 owner token。
+    /// 参数说明：
+    /// - `token`：是待撤销启动的 owner token。
     ///
     /// 返回：owner 匹配且没有 deferred 资源时回到 Empty；否则保留模式。
     pub fn abort_bootstrap(
@@ -1352,7 +1394,9 @@ impl RegistryCoordinator<'_> {
                 deferred_driver: Some(_),
                 ..
             } => Err(RegistryCoordinationError::DeferredResourcesRemain),
-            RegistryMode::Bootstrapping { .. } => {
+            RegistryMode::Bootstrapping {
+                ..
+            } => {
                 self.state.mode = RegistryMode::Empty;
                 Ok(())
             }
@@ -1380,13 +1424,16 @@ impl RegistryCoordinator<'_> {
                     deferred_driver: *deferred_driver,
                 },
             },
-            RegistryMode::Managed { .. } => RegistryModeSnapshot::Managed,
+            RegistryMode::Managed {
+                ..
+            } => RegistryModeSnapshot::Managed,
         }
     }
 
     /// 业务作用：复验 token 仍代表当前 Bootstrapping owner 与引导类型，阻止旧实例越权迁移状态。
     ///
-    /// 参数说明：`token` 是 typed driver 收到的安装凭据。
+    /// 参数说明：
+    /// - `token`：是 typed driver 收到的安装凭据。
     ///
     /// 返回：owner Arc 身份与 kind 同时匹配时成功；其它状态返回 owner mismatch。
     fn verify_bootstrap_owner(
@@ -1394,7 +1441,11 @@ impl RegistryCoordinator<'_> {
         token: &ManagedInstallationToken,
     ) -> Result<(), RegistryCoordinationError> {
         match &self.state.mode {
-            RegistryMode::Bootstrapping { owner, kind, .. } => {
+            RegistryMode::Bootstrapping {
+                owner,
+                kind,
+                ..
+            } => {
                 let Some(active) = owner.upgrade() else {
                     return Err(RegistryCoordinationError::OwnerMismatch);
                 };
@@ -1420,7 +1471,8 @@ pub fn registry_mode() -> RegistryModeSnapshot {
 
 /// 业务作用：为 Application 领取唯一 owner 并进入配置建池或延后 default 的启动模式。
 ///
-/// 参数说明：`kind` 指明 datasource 来自冻结配置还是 UserHook。
+/// 参数说明：
+/// - `kind`：指明 datasource 来自冻结配置还是 UserHook。
 ///
 /// 返回：进程入口为空时返回 owner 与同身份 token；已有资源时不改变当前权威。
 pub fn begin_managed_bootstrap(
@@ -1461,7 +1513,8 @@ pub fn open_managed_catalog(
 
 /// 业务作用：在 driver 资源已封口后按 owner 撤销 managed catalog。
 ///
-/// 参数说明：`owner` 是正在停机的 Application owner。
+/// 参数说明：
+/// - `owner`：是正在停机的 Application owner。
 ///
 /// 返回：owner 命中时撤销；旧 owner 或非 Managed 模式返回错误且不影响新实例。
 pub fn clear_managed_catalog(
@@ -1472,7 +1525,8 @@ pub fn clear_managed_catalog(
 
 /// 业务作用：在 typed 资源尚未发布或已经清空时释放 Bootstrapping。
 ///
-/// 参数说明：`token` 是待撤销启动的 owner token。
+/// 参数说明：
+/// - `token`：是待撤销启动的 owner token。
 ///
 /// 返回：没有延后资源时回到 Empty；仍有资源时拒绝，要求先由对应 driver 精确清理。
 pub fn abort_managed_bootstrap(
@@ -1508,7 +1562,9 @@ pub fn resolve_datasource(
             // 才能完成 schema 自举与运行时装配，命名库、另一 driver 和其它引导模式仍保持不可读。
             DatasourceRef::new(datasource).map_err(|_| DataSourceLookupError::InvalidName)
         }
-        RegistryMode::Bootstrapping { .. } => Err(DataSourceLookupError::RegistryUnavailable),
+        RegistryMode::Bootstrapping {
+            ..
+        } => Err(DataSourceLookupError::RegistryUnavailable),
         RegistryMode::Standalone(actual) if *actual == expected => {
             DatasourceRef::new(datasource).map_err(|_| DataSourceLookupError::InvalidName)
         }
@@ -1521,7 +1577,10 @@ pub fn resolve_datasource(
                 actual: *actual,
             })
         }
-        RegistryMode::Managed { catalog, .. } => catalog
+        RegistryMode::Managed {
+            catalog,
+            ..
+        } => catalog
             .upgrade()
             .ok_or(DataSourceLookupError::RegistryUnavailable)?
             .resolve(datasource, expected),
@@ -1535,7 +1594,10 @@ pub fn resolve_datasource(
 /// 返回：Managed 且 catalog owner 仍存活时返回同一 Arc；其它模式返回不可用。
 pub fn managed_catalog() -> Result<Arc<DataSourceCatalog>, DataSourceLookupError> {
     coordinate(|coordinator| match &coordinator.state.mode {
-        RegistryMode::Managed { catalog, .. } => catalog
+        RegistryMode::Managed {
+            catalog,
+            ..
+        } => catalog
             .upgrade()
             .ok_or(DataSourceLookupError::RegistryUnavailable)
             .and_then(|catalog| match catalog.lifecycle.load(Ordering::Acquire) {

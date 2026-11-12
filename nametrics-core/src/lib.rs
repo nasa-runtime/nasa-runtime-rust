@@ -49,7 +49,11 @@ pub enum MetricKind {
 }
 
 impl MetricKind {
-    /// 业务作用：Prometheus `# TYPE` 行使用的类型名。
+    /// 业务作用：为指标类型生成 Prometheus TYPE 声明中的固定名称。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：计数器、瞬时值和分桶指标分别返回 counter、gauge 和 histogram，不产生采集副作用。
     fn prometheus_type(self) -> &'static str {
         match self {
             MetricKind::Counter => "counter",
@@ -223,7 +227,12 @@ impl SampleRejectionCounters {
 }
 
 impl MetricDescriptor {
-    /// 业务作用：两个同名 descriptor 是否语义一致(kind/unit/help/label_names/histogram_bounds 全相同)。
+    /// 业务作用：比较两个同名指标描述的采集与导出语义。
+    ///
+    /// 参数说明：
+    /// - `other`：待比较的同名指标描述，名称由调用方另行匹配。
+    ///
+    /// 返回：kind、unit、help、有序 label_names 和 histogram_bounds 全部相等时返回 true；不在此比较名称。
     fn semantically_eq(&self, other: &MetricDescriptor) -> bool {
         self.kind == other.kind
             && self.unit == other.unit
@@ -235,11 +244,32 @@ impl MetricDescriptor {
 
 /// 领域 crate 记录指标的入口。`napp` 持有唯一 `MetricHub` 实例并实现本 trait。
 pub trait MetricRecorder: Send + Sync {
-    /// 业务作用：计数器累加 `delta`。
+    /// 业务作用：按领域提供的描述和 label 值累加计数器。
+    ///
+    /// 参数说明：
+    /// - `descriptor`：决定 family、类型及有序 label 合同的静态描述。
+    /// - `delta`：本次非负增量。
+    /// - `labels`：与描述中 label_names 顺序对应的业务 label 值。
+    ///
+    /// 返回：无返回值；接纳、拒绝及诊断由记录器实现负责，调用不提供持久化或导出完成确认。
     fn counter(&self, descriptor: &'static MetricDescriptor, delta: u64, labels: &[&str]);
-    /// 业务作用：设置 gauge 为 `value`。
+    /// 业务作用：按领域提供的描述和 label 值设置瞬时值。
+    ///
+    /// 参数说明：
+    /// - `descriptor`：决定 family、类型及有序 label 合同的静态描述。
+    /// - `value`：本次要记录的瞬时数值。
+    /// - `labels`：与描述中 label_names 顺序对应的业务 label 值。
+    ///
+    /// 返回：无返回值；接纳、拒绝及诊断由记录器实现负责，调用不提供持久化或导出完成确认。
     fn gauge(&self, descriptor: &'static MetricDescriptor, value: f64, labels: &[&str]);
-    /// 业务作用：记录一次 histogram 观测 `value`。
+    /// 业务作用：按领域提供的描述和 label 值记录一次分桶观测。
+    ///
+    /// 参数说明：
+    /// - `descriptor`：决定 family、类型及有序 label 合同的静态描述。
+    /// - `value`：本次待归入描述所声明桶的观测值。
+    /// - `labels`：与描述中 label_names 顺序对应的业务 label 值。
+    ///
+    /// 返回：无返回值；接纳、拒绝及诊断由记录器实现负责，调用不提供持久化或导出完成确认。
     fn histogram(&self, descriptor: &'static MetricDescriptor, value: f64, labels: &[&str]);
 }
 
@@ -415,7 +445,8 @@ impl MetricHub {
     /// 只进入 `render_prometheus` 回落路径。原生渲染循环跳过文本旧源声明的族名，避免重复
     /// HELP/TYPE。
     ///
-    /// 参数说明：`source` 为拥有独立 family 的兼容指标源。
+    /// 参数说明：
+    /// - `source`：为拥有独立 family 的兼容指标源。
     ///
     /// 返回：目录无冲突时登记；结构化快照只使用全进程预留之外的动态余量，超额样本在导出时拒绝。
     ///
@@ -613,12 +644,14 @@ impl MetricHub {
             .is_some_and(|registered| registered.semantically_eq(descriptor))
     }
 
-    /// 业务作用：在原生 cell 写锁内核对并占用完整公开序列预算，histogram 不能只按一个 cell 计费。
-    /// 参数说明：
-    /// - `cells/key`: 已锁定的存量与本次 label 组合。
-    /// - `descriptor`: 决定本次创建需要占用的完整展开序列数。
+    /// 业务作用：在原生 cell 写锁保护下检查并预占新样本完整导出序列预算。
     ///
-    /// 返回：存量更新不再占用；新组合容量不足时拒绝且不改变占用。
+    /// 参数说明：
+    /// - `cells`：调用方已持写锁的当前原生样本表。
+    /// - `key`：本次 family 名称和有序 label 值组合。
+    /// - `descriptor`：决定新 cell 所需导出序列数的指标定义。
+    ///
+    /// 返回：已存在组合直接允许；新组合及预留总数不超过硬上限时先增加原生占用并返回 true。溢出或容量不足返回 false，不修改占用；实际 cell 插入由调用方在同一锁范围完成。
     fn can_insert_cell(
         &self,
         cells: &BTreeMap<(&'static str, Vec<String>), Cell>,
@@ -646,7 +679,13 @@ impl MetricHub {
         true
     }
 
-    /// 业务作用：将 descriptor 名与借用 label 值固化为 hub 的有序 cell key。
+    /// 业务作用：将指标名称与借用的有序 label 值固化为样本表键。
+    ///
+    /// 参数说明：
+    /// - `descriptor`：提供静态 family 名称的指标定义。
+    /// - `labels`：与描述声明顺序一致的 label 值。
+    ///
+    /// 返回：返回静态名称和拥有内容的 label 值向量，不检查形状、长度或登记资格。
     fn key(descriptor: &MetricDescriptor, labels: &[&str]) -> (&'static str, Vec<String>) {
         (
             descriptor.name,
@@ -894,7 +933,10 @@ impl MetricHub {
 }
 
 /// 业务作用：计算 descriptor 的一个 label 组合占用的公开序列数。
-/// 参数说明：`descriptor` 为已校验的静态指标语义。
+///
+/// 参数说明：
+/// - `descriptor`：为已校验的静态指标语义。
+///
 /// 返回：普通样本占一条，histogram 包括所有有限桶、+Inf、sum 和 count。
 fn descriptor_series(descriptor: &MetricDescriptor) -> usize {
     if descriptor.kind == MetricKind::Histogram {
@@ -905,11 +947,17 @@ fn descriptor_series(descriptor: &MetricDescriptor) -> usize {
 }
 
 /// 业务作用：按实际样本结构核算出口容量。
-/// 参数说明：`sample` 为已经过 descriptor 校验的完整样本。
+///
+/// 参数说明：
+/// - `sample`：为已经过 descriptor 校验的完整样本。
+///
 /// 返回：与 Prometheus 展开结果一致的序列数。
 fn sample_series(sample: &MetricSample) -> usize {
     match &sample.value {
-        MetricValue::Histogram { bounds, .. } => bounds.len() + 3,
+        MetricValue::Histogram {
+            bounds,
+            ..
+        } => bounds.len() + 3,
         _ => 1,
     }
 }
@@ -968,7 +1016,11 @@ fn validate_sample(
 }
 
 impl Default for MetricHub {
-    /// 业务作用：创建空指标目录与样本存储。
+    /// 业务作用：构造预留内部拒绝指标的进程指标目录。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与 new 相同，返回含内部描述和预算预留、尚无业务源和原生样本的独立目录。
     fn default() -> Self {
         Self::new()
     }
@@ -1112,7 +1164,12 @@ impl MetricRecorder for MetricHub {
     }
 }
 
-/// 业务作用：校验 Prometheus descriptor 结构。错误沿用 `MetricConflict` 以保持现有 API，但注册不会产生副作用。
+/// 业务作用：在登记前检查指标名、label 定义与分桶边界的结构合法性。
+///
+/// 参数说明：
+/// - `descriptor`：待登记的静态指标定义。
+///
+/// 返回：名称、单行非空说明、唯一合法 label 和与类型相符的桶定义有效时成功；非法时返回包含 family 名称的 MetricConflict，不修改目录。直方图边界须非空、有限且严格递增。
 fn validate_descriptor(descriptor: &'static MetricDescriptor) -> Result<(), MetricConflict> {
     let valid_name = |name: &str| {
         let mut bytes = name.bytes();
@@ -1190,6 +1247,7 @@ pub struct MetricFamilySnapshot {
 
 impl MetricSample {
     /// 业务作用：将样本直接追加到 Prometheus 文本缓冲区，避免为每行标签建立临时字符串集合。
+    ///
     /// 参数说明：
     /// - `output`: 接收不含 HELP/TYPE 的完整样本行，原有内容保留。
     ///
@@ -1237,6 +1295,7 @@ impl MetricSample {
     }
 
     /// 业务作用：按样本标签和附加标签的既定顺序编码集合，不分配逐标签中间结果。
+    ///
     /// 参数说明：
     /// - `output`: 接收标签集合的文本缓冲区。
     /// - `extra`: 追加在样本标签之后的标签，如直方图的 `le`。
@@ -1267,6 +1326,7 @@ impl MetricSample {
 }
 
 /// 业务作用：直接追加符合 Prometheus 文本协议的标签值，防止引号、反斜杠或换行改变样本结构。
+///
 /// 参数说明：
 /// - `output`: 接收已转义标签值的文本缓冲区。
 /// - `value`: 原始 UTF-8 标签值，不包含外围引号。

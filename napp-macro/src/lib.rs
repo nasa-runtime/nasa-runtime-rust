@@ -141,8 +141,9 @@ use syn::{
 /// # 声明顺序：与业务书写顺序无关
 ///
 /// **业务侧不需要按启动顺序书写组件字符串**：宏接受任意顺序,内部按唯一的规范启动顺序
-/// （`CANONICAL_COMPONENT_ORDER`：log → nacos-config → telemetry → db → redis → cache →
-/// partition → saga → kafka → outbox → redis-job → grpc → auth → web → ws → nacos-discovery/discovery → scheduling）自动规范化后再生成组件列表。因此
+/// （由 `CANONICAL_COMPONENT_ORDER` 定义）：
+/// `log → nacos-config → telemetry → db → redis → cache → partition → saga → kafka → outbox → redis-job → grpc → auth → web → ws → nacos-discovery → discovery → scheduling`。
+/// 宏先规范化再生成组件列表，因此
 /// `#[application("web", "log", "kafka")]` 与 `#[application("log", "kafka", "web")]` 完全等价,
 /// 都按 log → kafka → web 启动、严格反序停机。宏拒绝未知组件名、重复声明，以及同时声明新旧发现组件。
 ///
@@ -234,7 +235,7 @@ pub fn application(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// #[nasa::initializer(order = 200, requires = ["schema"])]
 /// impl nasa::application::Initialization for OrderCacheInitialization {
-///     // 实现 before / initialize / after 中实际需要的阶段。
+///     // 根据需要实现 `before`、`initialize` 和 `after` 方法。
 /// }
 /// ```
 ///
@@ -255,9 +256,11 @@ pub fn initializer(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// 业务作用：把异步业务函数转换为静态 RedisJob 定义与 Handler descriptor，受管组件会自动收集。
 ///
-/// 参数说明：`attr` 为调度、source 与 Worker 合同，`item` 为无 receiver、无泛型的异步函数。
+/// 参数说明：
+/// - `attr`：source、worker、调度、并发、重试和 payload 合同属性。
+/// - `item`：待登记的无 receiver、无泛型异步业务函数 token。
 ///
-/// 返回：声明与函数签名合法时生成静态登记项；未知属性、冲突调度或重复注入返回编译错误。
+/// 返回：声明与签名合法时生成业务函数、静态定义 factory 与 handler 登记；解析或合同违规生成编译错误，不在展开时连接 Redis 或启动任务。
 #[proc_macro_attribute]
 pub fn redis_job(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
@@ -302,7 +305,9 @@ enum RedisJobParameter {
 
 /// 业务作用：校验 RedisJob 函数并生成与编程式 plan 共用的静态 descriptor。
 ///
-/// 参数说明：`metas` 为属性项，`function` 为业务异步函数语法树。
+/// 参数说明：
+/// - `metas`：为属性项
+/// - `function`：为业务异步函数语法树。
 ///
 /// 返回：合同合法时返回函数、Handler 适配器与 linkme 描述；否则返回定位到声明处的错误。
 fn expand_redis_job(
@@ -526,7 +531,9 @@ fn expand_redis_job(
             impl #runtime::__private::nadis::job::JobHandler for __NasaRedisJobHandler {
                 /// 业务作用：把已取得执行权的冻结上下文适配到静态业务函数，并统一归一化返回值。
                 ///
-                /// 参数说明：`execution` 为当前 attempt 的身份、payload 与副作用门禁。
+                /// 参数说明：
+                /// - `execution`：当前 attempt 的身份、payload 与副作用门禁。
+                ///
                 ///
                 /// 返回：业务 future 完成后得到可提交的封闭 Job 结果。
                 fn handle<'a>(
@@ -548,7 +555,9 @@ fn expand_redis_job(
 
             /// 业务作用：构造静态任务定义与 Handler，使宏声明进入核心 plan 的同一冻结门禁。
             ///
-            /// 参数说明：`application` 仅在业务签名声明 Application 时注入。
+            /// 参数说明：
+            /// - `application`：宿主启动句柄，仅在业务签名声明 Application 时由 handler 保留。
+            ///
             ///
             /// 返回：定义合法时返回类型擦除登记；合同字段非法时拒绝 Prepare。
             fn __nasa_redis_job_factory(
@@ -585,7 +594,8 @@ fn expand_redis_job(
 
 /// 业务作用：只按无歧义的框架类型路径识别注入，其余唯一类型作为业务 payload。
 ///
-/// 参数说明：`ty` 为业务函数的拥有式参数类型。
+/// 参数说明：
+/// - `ty`：为业务函数的拥有式参数类型。
 ///
 /// 返回：Application、JobContext 或 payload 三类之一。
 fn classify_redis_job_parameter(ty: &Type) -> RedisJobParameter {
@@ -620,7 +630,8 @@ fn classify_redis_job_parameter(ty: &Type) -> RedisJobParameter {
 
 /// 业务作用：解析 RedisJob 属性键并拒绝重复、未知或非字面量输入。
 ///
-/// 参数说明：`metas` 为属性内按源码顺序出现的项。
+/// 参数说明：
+/// - `metas`：为属性内按源码顺序出现的项。
 ///
 /// 返回：完整宏期参数；合同非法时返回编译错误。
 fn parse_redis_job_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<RedisJobArgs> {
@@ -707,7 +718,8 @@ fn parse_redis_job_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<Redi
 
 /// 业务作用：在生成 descriptor 前拒绝字面量可确定的 schedule、触发类型、codec 与正数边界冲突。
 ///
-/// 参数说明：`args` 为已经完成类型解析的宏属性。
+/// 参数说明：
+/// - `args`：为已经完成类型解析的宏属性。
 ///
 /// 返回：静态合同自洽时成功；需要运行期 Cron/名称语义的部分仍交核心 builder 复验。
 fn validate_redis_job_args(args: &RedisJobArgs) -> syn::Result<()> {
@@ -762,7 +774,9 @@ fn validate_redis_job_args(args: &RedisJobArgs) -> syn::Result<()> {
 
 /// 业务作用：读取 RedisJob 字符串字面量。
 ///
-/// 参数说明：`expression` 为属性值，`field` 为诊断字段名。
+/// 参数说明：
+/// - `expression`：为属性值
+/// - `field`：为诊断字段名。
 ///
 /// 返回：字符串字面量；其它表达式返回编译错误。
 fn parse_job_string(expression: &Expr, field: &str) -> syn::Result<LitStr> {
@@ -783,7 +797,9 @@ fn parse_job_string(expression: &Expr, field: &str) -> syn::Result<LitStr> {
 
 /// 业务作用：读取 RedisJob 非负整数字面量并保留原始跨度用于生成代码。
 ///
-/// 参数说明：`expression` 为属性值，`field` 为诊断字段名。
+/// 参数说明：
+/// - `expression`：为属性值
+/// - `field`：为诊断字段名。
 ///
 /// 返回：整数字面量；负数或其它表达式返回编译错误。
 fn parse_job_integer(expression: &Expr, field: &str) -> syn::Result<syn::LitInt> {
@@ -804,9 +820,11 @@ fn parse_job_integer(expression: &Expr, field: &str) -> syn::Result<syn::LitInt>
 
 /// 业务作用：把已解析属性转换为 JobDefinitionBuilder 调用并校验封闭枚举文本。
 ///
-/// 参数说明：`args` 为宏期完整属性。
+/// 参数说明：
+/// - `args`：已完成字面量解析的 RedisJob 属性。
+/// - `runtime`：生成 builder、枚举和启动错误所需的运行时根路径。
 ///
-/// 返回：按稳定顺序排列的 builder 语句；未知枚举值返回编译错误。
+/// 返回：返回按固定顺序生成的 builder 语句；未知枚举值或无 cron 的 zone 返回编译错误。cron 文本和完整定义约束继续由生成 factory 在启动期校验，本方法不构造运行时任务。
 fn redis_job_builder_steps(
     args: &RedisJobArgs,
     runtime: &TokenStream2,
@@ -1815,7 +1833,10 @@ fn component_feature_module(name: &str) -> syn::Result<syn::Ident> {
 }
 
 /// 业务作用：同时接受组件声明和启动前配置工厂，拒绝未知或重复策略参数。
-/// 参数说明：`arguments` 是宏属性中的表达式列表。
+///
+/// 参数说明：
+/// - `arguments`：是宏属性中的表达式列表。
+///
 /// 返回：组件字符串与可选工厂路径；业务表达式不会在宏中执行。
 fn parse_application_arguments(
     arguments: Punctuated<Expr, Token![,]>,

@@ -19,7 +19,10 @@ pub(crate) struct SagaSecuritySnapshot {
 
 impl std::fmt::Debug for SagaSecuritySnapshot {
     /// 业务作用：只暴露配置代次，避免日志泄露 key 或信任边材料。
-    /// 参数说明：`formatter` 是日志格式化目标。
+    ///
+    /// 参数说明：
+    /// - `formatter`：`formatter` 是日志格式化目标。
+    ///
     /// 返回：不包含任何凭据的结构摘要。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -44,7 +47,10 @@ pub(super) struct SagaSecurityState {
 
 impl SagaSecurityState {
     /// 业务作用：复用本应用唯一的凭据资源目录，不为每个协议客户端建立独立发布点。
-    /// 参数说明：`application` 提供当前配置存储与 Saga 资源生命周期。
+    ///
+    /// 参数说明：
+    /// - `application`：`application` 提供当前配置存储与 Saga 资源生命周期。
+    ///
     /// 返回：重叠窗口合法时返回共享资源目录；非法窗口拒绝装配。
     pub(super) fn for_application(application: &Application) -> ApplicationResult<Arc<Self>> {
         if let Some(state) = application.saga_runtime().security.get() {
@@ -86,7 +92,9 @@ impl SagaSecurityState {
     }
 
     /// 业务作用：取得一次请求固定使用的完整安全快照。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：配置已发布的同代资源；首次轮换前使用装配时校验过的初始快照。
     pub(super) fn current(&self) -> Arc<SagaSecuritySnapshot> {
         self.config.load().saga_security().unwrap_or_else(|| {
@@ -98,7 +106,10 @@ impl SagaSecurityState {
     }
 
     /// 业务作用：登记并校验 HMAC 资源引用，所有克隆认证器随后读取同一个配置快照。
-    /// 参数说明：`reference` 是受信配置中固定的 secret 引用。
+    ///
+    /// 参数说明：
+    /// - `reference`：`reference` 是受信配置中固定的 secret 引用。
+    ///
     /// 返回：已登记引用的动态认证器；材料缺失或非法时拒绝装配。
     fn http_authenticator(
         self: &Arc<Self>,
@@ -147,7 +158,10 @@ impl SagaSecurityState {
     }
 
     /// 业务作用：在发布前校验全部已登记资源并构造新旧 HMAC 重叠窗口，任何失败保留原快照。
-    /// 参数说明：`candidate` 是未发布的完整 secret 候选。
+    ///
+    /// 参数说明：
+    /// - `candidate`：`candidate` 是未发布的完整 secret 候选。
+    ///
     /// 返回：所有资源都能构建时返回完整安全快照；任一引用删除、编码非法或历史窗口越界时拒绝整帧。
     #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
     fn prepare(
@@ -245,7 +259,12 @@ struct GrpcClientSnapshot {
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl GrpcClientSnapshot {
     /// 业务作用：预构造各旧 CA 到期边界对应的 TLS 材料，保证请求线程只做不可变快照选择。
-    /// 参数说明：`material` 是新候选，`previous` 为当前已提交资源，`overlap` 为旧信任根最长保留窗口。
+    ///
+    /// 参数说明：
+    /// - `material`：`material` 是新候选。
+    /// - `previous`：`previous` 为当前已提交资源。
+    /// - `overlap`：`overlap` 为旧信任根最长保留窗口。
+    ///
     /// 返回：证书、密钥和所有信任组合都合法时返回候选；authority 漂移或历史窗口超过八份时拒绝。
     fn prepare(
         material: ManagedGrpcCredentialMaterial,
@@ -302,7 +321,9 @@ impl GrpcClientSnapshot {
     }
 
     /// 业务作用：根据单调时钟选择仍获准使用的 CA 集合，禁止旧连接池越过信任根到期边界复用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同一有效窗口复用同一材料 Arc；窗口改变时返回另一 Arc，连接池据此重新握手。
     fn active(&self) -> Arc<ManagedGrpcCredentialMaterial> {
         let now = Instant::now();
@@ -324,7 +345,9 @@ struct GrpcCredentialSource {
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl grpc_target::GrpcCredentialSource for GrpcCredentialSource {
     /// 业务作用：为下一次 RPC 读取同代 mTLS 材料，旧 CA 到期时触发连接池替换。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前安全快照中的合法材料；准备门禁保证固定引用始终存在。
     fn credential(&self) -> Arc<ManagedGrpcCredentialMaterial> {
         self.state
@@ -337,7 +360,11 @@ impl grpc_target::GrpcCredentialSource for GrpcCredentialSource {
 }
 
 /// 业务作用：从专用 secret 快照解析 mTLS JSON，错误信息不携带证书或私钥。
-/// 参数说明：`snapshot` 为同代秘密材料，`reference` 是固定出站凭据引用。
+///
+/// 参数说明：
+/// - `snapshot`：`snapshot` 为同代秘密材料。
+/// - `reference`：`reference` 是固定出站凭据引用。
+///
 /// 返回：完整结构合法时返回尚需 TLS 准备的材料；缺失或非法 JSON 拒绝候选。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 fn parse_grpc_credential(
@@ -359,7 +386,11 @@ fn parse_grpc_credential(
 }
 
 /// 业务作用：为全部 gRPC client/result/command/Registry 入口登记可原子轮换的出站凭据。
-/// 参数说明：`application` 提供配置发布点，`reference` 为受信配置中的 mTLS secret 引用。
+///
+/// 参数说明：
+/// - `application`：`application` 提供配置发布点。
+/// - `reference`：`reference` 为受信配置中的 mTLS secret 引用。
+///
 /// 返回：携带同代材料来源的目标配置；证书、私钥或 CA 不能准备时拒绝 Ready。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 pub(super) fn grpc_credential(
@@ -410,7 +441,9 @@ struct HttpCredentialSource {
 
 impl nasaga_runtime::SagaHttpCredentialSource for HttpCredentialSource {
     /// 业务作用：让既有入站和出站句柄在下一次认证时读取最新已提交材料。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定引用对应的当前与重叠期旧凭据；配置准备阶段保证该引用永不缺失。
     fn credentials(&self) -> Arc<nasaga_runtime::SagaHttpCredentials> {
         self.state
@@ -423,7 +456,11 @@ impl nasaga_runtime::SagaHttpCredentialSource for HttpCredentialSource {
 }
 
 /// 业务作用：只从 secret 专用快照读取规范编码，错误不包含引用值或凭据正文。
-/// 参数说明：`snapshot` 是已解析的秘密材料集合，`reference` 是配置选择的信任边。
+///
+/// 参数说明：
+/// - `snapshot`：`snapshot` 是已解析的秘密材料集合。
+/// - `reference`：`reference` 是配置选择的信任边。
+///
 /// 返回：存在且为 UTF-8 时返回借用字符串；缺失或非法编码返回脱敏错误。
 fn http_key<'a>(
     snapshot: &'a nasecret::SecretSnapshot,
@@ -444,7 +481,11 @@ fn http_key<'a>(
 }
 
 /// 业务作用：为框架所有 HMAC 入站与出站边建立同代动态凭据来源。
-/// 参数说明：`application` 提供统一安全资源，`reference` 为固定 secret 引用。
+///
+/// 参数说明：
+/// - `application`：`application` 提供统一安全资源。
+/// - `reference`：`reference` 为固定 secret 引用。
+///
 /// 返回：完整认证器；非法资源在 Ready 前拒绝。
 pub(super) fn http_authenticator(
     application: &Application,
@@ -454,7 +495,11 @@ pub(super) fn http_authenticator(
 }
 
 /// 业务作用：只准备候选 secret 对应的 Saga 安全资源，不要求预先构造应用状态表。
-/// 参数说明：`application` 为现有资源目录；`secrets` 为同代候选 secret。
+///
+/// 参数说明：
+/// - `application`：`application` 为现有资源目录。
+/// - `secrets`：`secrets` 为同代候选 secret。
+///
 /// 返回：已装配 Saga 时返回准备好的材料；未启用时为空；任一材料失败拒绝候选。
 #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
 pub(crate) fn prepare_security_materials(
@@ -478,7 +523,9 @@ pub(crate) struct ManagedGrpcTlsSource {
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl nagrpc::GrpcTlsAcceptorSource for ManagedGrpcTlsSource {
     /// 业务作用：为一次新握手选择已经完成校验的当前 TLS 资源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前或有界重叠窗口内的握手器；请求不解析 PEM 或读取独立 secret。
     fn acceptor(&self) -> nagrpc::GrpcTlsAcceptor {
         self.state
@@ -493,7 +540,9 @@ impl nagrpc::GrpcTlsAcceptorSource for ManagedGrpcTlsSource {
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl ManagedGrpcTlsSource {
     /// 业务作用：把当前握手证书的到期事实提供给 readiness 和指标。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前已提交服务端证书链最早到期的 Unix 秒。
     pub(crate) fn expiry_timestamp(&self) -> u64 {
         self.state
@@ -506,7 +555,11 @@ impl ManagedGrpcTlsSource {
 }
 
 /// 业务作用：在 listener 开放前登记完整 TLS 资源，后续配置候选必须同时通过全部 Saga 凭据校验。
-/// 参数说明：`application` 提供统一发布点，`plan` 固定 listener 的秘密引用与证书时间政策。
+///
+/// 参数说明：
+/// - `application`：`application` 提供统一发布点。
+/// - `plan`：`plan` 固定 listener 的秘密引用与证书时间政策。
+///
 /// 返回：Saga 已装配时返回可热切换 TLS 来源，未装配时返回空值；重复或晚于首次发布的装配拒绝。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 pub(crate) fn grpc_tls_source(
@@ -537,7 +590,9 @@ pub(crate) fn grpc_tls_source(
         ..(**initial).clone()
     });
     drop(initial);
-    Ok(Some(Arc::new(ManagedGrpcTlsSource { state })))
+    Ok(Some(Arc::new(ManagedGrpcTlsSource {
+        state,
+    })))
 }
 
 /// 业务作用：将证书身份的信任窗口同时约束于轮换截止时刻和证书真实到期时刻。
@@ -550,7 +605,13 @@ struct PeerCertificateSnapshot {
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl PeerCertificateSnapshot {
     /// 业务作用：从同代 PEM 派生 principal，并保留尚未到期的旧身份以支持滚动轮换。
-    /// 参数说明：`secrets` 为完整候选，`reference` 是证书引用，`previous` 为已提交资源，`overlap` 限制旧身份寿命。
+    ///
+    /// 参数说明：
+    /// - `secrets`：`secrets` 为完整候选。
+    /// - `reference`：`reference` 是证书引用。
+    /// - `previous`：`previous` 为已提交资源。
+    /// - `overlap`：`overlap` 限制旧身份寿命。
+    ///
     /// 返回：证书时间和用途合法时返回有界身份集合；材料非法或超过八个旧身份时拒绝。
     fn prepare(
         secrets: &nasecret::SecretSnapshot,
@@ -632,7 +693,10 @@ impl PeerCertificateSnapshot {
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl SagaSecuritySnapshot {
     /// 业务作用：在一个安全快照内展开静态指纹或受管证书引用，供入站认证和 Catalog 共享信任事实。
-    /// 参数说明：`binding` 是经校验的指纹或 secret 证书定位符。
+    ///
+    /// 参数说明：
+    /// - `binding`：`binding` 是经校验的指纹或 secret 证书定位符。
+    ///
     /// 返回：只包含当前仍有效的证书身份；缺失引用返回空集合使调用方拒绝。
     pub(super) fn peer_principals(&self, binding: &str) -> Vec<String> {
         let Some(reference) = binding.strip_prefix("secret://") else {
@@ -652,7 +716,9 @@ impl SagaSecuritySnapshot {
     }
 
     /// 业务作用：在发布前拒绝同一认证表内证书轮换造成的身份碰撞，避免凭据得到另一主体的权限。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有固定认证表中的有效身份均唯一时成功，否则整帧候选不发布。
     fn validate_peer_policies(&self) -> ApplicationResult<()> {
         for policy in &self.peer_policies {
@@ -683,7 +749,11 @@ pub(super) struct GrpcPeerBindings<T> {
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 impl<T: Clone> GrpcPeerBindings<T> {
     /// 业务作用：在开放 gRPC 服务前登记所有证书引用，并冻结 principal 到业务权限的关系。
-    /// 参数说明：`application` 提供安全发布点，`configured` 绑定指纹或证书引用到不可变业务授权。
+    ///
+    /// 参数说明：
+    /// - `application`：`application` 提供安全发布点。
+    /// - `configured`：`configured` 绑定指纹或证书引用到不可变业务授权。
+    ///
     /// 返回：全部材料和唯一性门禁通过时返回动态认证表；非法或晚于首次发布的装配拒绝。
     pub(super) fn new(
         application: &Application,
@@ -723,11 +793,17 @@ impl<T: Clone> GrpcPeerBindings<T> {
         prepared.validate_peer_policies()?;
         *initial = Arc::new(prepared);
         drop(initial);
-        Ok(Self { configured, state })
+        Ok(Self {
+            configured,
+            state,
+        })
     }
 
     /// 业务作用：每次 RPC 重新判断证书身份是否仍获准使用，已有 TLS 连接不能越过轮换截止时刻。
-    /// 参数说明：`principal` 来自 listener 校验过的叶证书指纹。
+    ///
+    /// 参数说明：
+    /// - `principal`：`principal` 来自 listener 校验过的叶证书指纹。
+    ///
     /// 返回：精确且唯一命中时复制固定业务授权；过期、未知或歧义身份均返回空值。
     pub(super) fn get(&self, principal: &str) -> Option<T> {
         let snapshot = self.state.current();
@@ -745,7 +821,9 @@ impl<T: Clone> GrpcPeerBindings<T> {
     }
 
     /// 业务作用：校验装配角色是否包含要求的逻辑服务，不依赖某一代证书指纹。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已冻结授权值的借用迭代器，不包含证书或私钥。
     pub(super) fn values(&self) -> impl Iterator<Item = &T> {
         self.configured.values()
@@ -761,7 +839,11 @@ pub(super) struct CapabilityResultSource {
 
 impl CapabilityResultSource {
     /// 业务作用：为 HTTP 或 gRPC Registry 续租计划绑定所选数据面的真实结果凭据。
-    /// 参数说明：`application` 提供统一资源目录，`settings` 固定数据面协议及信任边。
+    ///
+    /// 参数说明：
+    /// - `application`：`application` 提供统一资源目录。
+    /// - `settings`：`settings` 固定数据面协议及信任边。
+    ///
     /// 返回：已知数据面对应的固定来源；缺少 HTTP/gRPC 凭据时拒绝装配。
     pub(super) fn new(
         application: &Application,
@@ -814,7 +896,10 @@ impl CapabilityResultSource {
     }
 
     /// 业务作用：让本批 capability 与当前出站结果凭据一致，变化交由 Catalog 分配新的 route generation。
-    /// 参数说明：`descriptors` 是本副本待续租的完整能力集合。
+    ///
+    /// 参数说明：
+    /// - `descriptors`：`descriptors` 是本副本待续租的完整能力集合。
+    ///
     /// 返回：HTTP/gRPC 全批摘要更新成功；缺失材料或证书失效拒绝续租，其它数据面保持已有后端合同。
     pub(super) fn refresh(
         &self,

@@ -61,7 +61,12 @@ pub struct Principal {
 }
 
 impl Principal {
-    /// 业务作用：用 scope 列表构造。
+    /// 业务作用：构造仅携带已授予权限集合的主体，供按 scope 裁决的调用路径使用。
+    ///
+    /// 参数说明：
+    /// - `scopes`：调用方已验证的权限名称集合，重复名称合并，不自动规范化或校验内容。
+    ///
+    /// 返回：身份与租户字段均为空的主体；本方法不执行认证，也不授予集合之外的权限。
     pub fn with_scopes<I, S>(scopes: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -74,6 +79,11 @@ impl Principal {
     }
 
     /// 业务作用：返回可用于安全命名空间的认证身份：优先 `sub`，否则 `client_id`。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：首个非空白身份的原始字符串借用；两者缺失或仅含空白时返回 `None`。
+    /// 不裁剪身份值、不重新验签，字段来源必须已由认证层验证。
     pub fn authenticated_identity(&self) -> Option<&str> {
         self.subject
             .as_deref()
@@ -143,7 +153,7 @@ impl UnmatchedRoutePolicy {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：`permit` / `observe` / `deny`。
+    /// 返回：与当前策略对应的稳定名称 `permit`、`observe` 或 `deny`，不执行权限裁决。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Permit => "permit",
@@ -231,7 +241,9 @@ impl PolicySet {
             }
             map.insert(policy.route_id.clone(), policy);
         }
-        Ok(Self { policies: map })
+        Ok(Self {
+            policies: map,
+        })
     }
 
     /// 业务作用：只对显式存在的 route policy 执行 scope 裁决，不处理未命中缺省。

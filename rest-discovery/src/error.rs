@@ -156,7 +156,10 @@ pub enum RestDiscoveryError {
 
 impl From<nabudget::BudgetError> for RestDiscoveryError {
     /// 业务作用：保留显式取消和绝对截止点耗尽的区别。
-    /// 参数说明：`error` 为本地等待终止原因。
+    ///
+    /// 参数说明：
+    /// - `error`：为本地等待终止原因。
+    ///
     /// 返回：对应 REST 稳定错误，不推断远端副作用。
     fn from(error: nabudget::BudgetError) -> Self {
         match error {

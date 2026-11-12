@@ -1,4 +1,4 @@
-//! `#[grafana]` 属性宏:编译期把 async handler 包装进 `nafana` 运行时命令,保留原函数签名。
+//! `#[grafana]` 属性宏：为 async handler 生成 `nafana` 命令包装，保留入口名称与可见性并把输出转换为 Axum Response。
 //!
 //! 参数全部可选，宏负责参数校验、路由名提取、运行时命令初始化和重复标注检测。
 
@@ -6,19 +6,13 @@ use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
 use syn::{parse_macro_input, FnArg, ItemFn, LitInt, LitStr};
 
-/// 业务作用：把一个同步终态响应函数收集为 nafana 进程级全局降级入口。
+/// 业务作用：把一个同步终态响应函数收集为 nafana 进程级全局降级入口。 属性不接受参数；函数必须同步、恰好接收一个 `FallbackContext`，并返回任意 `IntoResponse`。具体参数和返回类型由生成代码交给 Rust 类型系统校验。 # 参数说明 - `attr`: 属性参数，必须为空。 - `item`: 被收集的同步终态响应函数。
 ///
-/// 属性不接受参数；函数必须同步、恰好接收一个 `FallbackContext`，并返回任意
-/// `IntoResponse`。具体参数和返回类型由生成代码交给 Rust 类型系统校验。
+/// 参数说明：
+/// - `attr`：属性参数，必须为空。
+/// - `item`：被收集的同步终态响应函数。
 ///
-/// # 参数说明
-///
-/// - `attr`: 属性参数，必须为空。
-/// - `item`: 被收集的同步终态响应函数。
-///
-/// # 返回
-///
-/// 返回原函数与 linkme 描述项；签名不满足终态处理约束时返回定位明确的编译错误。
+/// 返回：返回原函数及链接期描述项；非空属性、异步或其它不支持的签名生成编译错误。实际 FallbackContext 与 IntoResponse 类型兼容性交给生成代码的编译检查。
 #[proc_macro_attribute]
 pub fn global_fallback(attr: TokenStream, item: TokenStream) -> TokenStream {
     let root = match nasa_macro_support::runtime_root("grafana", "nafana") {
@@ -28,18 +22,15 @@ pub fn global_fallback(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_global_fallback(attr, item, root, "nafana")
 }
 
-/// 业务作用：校验全局终态处理函数形态并生成组件级链接切片注册项。
+/// 业务作用：校验全局终态处理函数形态并生成组件级链接切片注册项。 # 参数说明 - `attr`: 属性参数，必须为空。 - `item`: 被注解函数的源码 token。 - `root`: 当前依赖形态下的 nafana 运行时根路径。 - `component`: 编译错误中使用的组件名。
 ///
-/// # 参数说明
+/// 参数说明：
+/// - `attr`：属性参数，必须为空。
+/// - `item`：被注解函数的源码 token。
+/// - `root`：当前依赖形态下的 nafana 运行时根路径。
+/// - `component`：编译错误中使用的组件名。
 ///
-/// - `attr`: 属性参数，必须为空。
-/// - `item`: 被注解函数的源码 token。
-/// - `root`: 当前依赖形态下的 nafana 运行时根路径。
-/// - `component`: 编译错误中使用的组件名。
-///
-/// # 返回
-///
-/// 返回可直接交给编译器的展开结果；失败时返回 `compile_error!`。
+/// 返回：形态合法时返回原同步函数及全局终态注册项；属性、语法或签名约束不满足时返回编译错误，不在展开时调用处理函数。
 fn expand_global_fallback(
     attr: TokenStream,
     item: TokenStream,
@@ -133,9 +124,12 @@ fn expand_global_fallback(
 /// #[grafana(max_concurrent = 20, timeout_ms = 800)]       // bulkhead 20 并发 + 超时 800ms
 /// #[grafana(name = "下载", max_concurrent = 5, timeout_ms = 3000, tps = 1)]
 /// ```
-/// # 参数
+///
+/// 参数说明：
 /// - `attr`: `#[grafana(...)]` 括号内的隔离、超时、降级和监控配置 token stream。
 /// - `item`: 被注解的 async fn 源码 token。
+///
+/// 返回：生成同名、同可见性且输出转为 Axum Response 的 async 包装函数，首个请求惰性建立共享 Command；参数、JSON、互斥配置、非 async 或重复命令槽检查不通过时生成编译错误。
 #[proc_macro_attribute]
 pub fn grafana(attr: TokenStream, item: TokenStream) -> TokenStream {
     // ⓪ 运行时根路径发现:nasa → ::nasa::grafana;旧直接依赖 → ::nafana。
@@ -357,8 +351,10 @@ pub fn grafana(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// 业务作用：把 `Option<T>` 的解析结果拼成源码级 `Some(...)` / `None` token。
 ///
-/// # 参数
-/// - `value`: Some(值 token) 或 None。
+/// 参数说明：
+/// - `value`：Some(值 token) 或 None。
+///
+/// 返回：Some 时生成保留内层 token 的完整 Some 表达式，None 时生成完整 None 表达式，不求值。
 fn option_tokens(value: Option<proc_macro2::TokenStream>) -> proc_macro2::TokenStream {
     match value {
         Some(v) => quote! { ::core::option::Option::Some(#v) },
@@ -368,9 +364,11 @@ fn option_tokens(value: Option<proc_macro2::TokenStream>) -> proc_macro2::TokenS
 
 /// 业务作用：递归扫描 token 流，检测是否已有宏生成的命令槽。
 ///
-/// # 参数
-/// - `stream`: 待扫描的 token 流(函数体)。
-/// - `saw_nafana_cmd`: 命中 `__NAFANA_CMD` 时置位。
+/// 参数说明：
+/// - `stream`：待扫描的 token 流(函数体)。
+/// - `saw_nafana_cmd`：命中 `__NAFANA_CMD` 时置位。
+///
+/// 返回：遇到精确标识符时把标志置 true，未遇到时保留原值；递归检查所有分组，不判断标识符是否实际代表该静态槽。
 fn scan_idents(stream: proc_macro2::TokenStream, saw_nafana_cmd: &mut bool) {
     for tree in stream {
         match tree {
@@ -386,8 +384,18 @@ fn scan_idents(stream: proc_macro2::TokenStream, saw_nafana_cmd: &mut bool) {
 }
 
 /// 业务作用：返回类型中包含返回位置 `impl Trait` 时，不能把它直接写进局部变量类型标注。
+///
+/// 参数说明：
+/// - `ty`：原处理函数的返回类型节点。
+///
+/// 返回：类型 token 树任意位置出现 impl 标识符时返回 true，否则 false；不进行类型解析或别名展开。
 fn type_contains_impl_trait(ty: &syn::Type) -> bool {
     /// 业务作用：递归检查返回类型 token 树中是否出现 `impl` 关键字。
+    ///
+    /// 参数说明：
+    /// - `stream`：待递归检查的类型 token 流。
+    ///
+    /// 返回：当前流或其任意分组内出现 impl 标识符时返回 true，否则 false。
     fn contains(stream: proc_macro2::TokenStream) -> bool {
         stream.into_iter().any(|tree| match tree {
             proc_macro2::TokenTree::Ident(ident) => ident == "impl",
@@ -401,9 +409,11 @@ fn type_contains_impl_trait(ty: &syn::Type) -> bool {
 
 /// 业务作用：属性名按最后一个 path segment 匹配，支持短路径、门面完整路径和 Cargo 重命名后的多段路径。
 ///
-/// # 参数
-/// - `attr`: 待判定的属性。
-/// - `expected`: 期望的末段名。
+/// 参数说明：
+/// - `attr`：待判定的属性。
+/// - `expected`：期望的末段名。
+///
+/// 返回：末段名精确匹配时返回 true，空路径或不匹配时 false，不验证前缀来源。
 fn attr_name_is(attr: &syn::Attribute, expected: &str) -> bool {
     attr.path()
         .segments
@@ -412,11 +422,12 @@ fn attr_name_is(attr: &syn::Attribute, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 业务作用：从一条 #[*_mapping(...)] 属性里抽出 path 字符串;单串简写与 key=value 具名写法都支持,
-/// 取不到返回 None。
+/// 业务作用：从一条 #[*_mapping(...)] 属性里抽出 path 字符串;单串简写与 key=value 具名写法都支持, 取不到返回 None。
 ///
-/// # 参数
-/// - `attr`: mapping 属性。
+/// 参数说明：
+/// - `attr`：mapping 属性。
+///
+/// 返回：单字符串简写返回其文本；具名形态返回解析过程中最后遇到的 path/value 字符串，未取得则 None。忽略嵌套解析错误，可能保留错误前已提取的路径，不承担完整 mapping 校验。
 fn mapping_path(attr: &syn::Attribute) -> Option<String> {
     if let Ok(lit) = attr.parse_args::<LitStr>() {
         return Some(lit.value());

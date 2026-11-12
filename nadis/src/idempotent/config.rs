@@ -29,7 +29,7 @@ pub enum IdempotentTtlMode {
 impl IdempotentTtlMode {
     /// 业务作用：返回写入 layout marker 的稳定协议文本，其它节点据此复验布局一致。
     ///
-    /// 参数说明：`profile` 决定 marker 的跨语言或 Rust 独立线格式。
+    /// 参数说明：无。
     ///
     /// 返回：`AUTO`/`HASH_FIELD`/`HASH_BUCKET`；文本是持久协议的一部分，不可改名。
     pub(crate) fn marker_token(self) -> &'static str {
@@ -94,7 +94,8 @@ impl Default for IdempotentCounterCfg {
 impl IdempotentCounterCfg {
     /// 业务作用：把原始配置校验并冻结为运行期快照；桶数按窗口与桶跨度派生，越界在使用前拒绝。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：
+    /// - `profile`：账本兼容协议；跨语言模式仅接受共享协议规定的固定前缀。
     ///
     /// 返回：全部约束通过时返回不可变快照；前缀非法、参数非正、shard 非 2 的幂或桶数越界返回配置错误。
     pub(crate) fn snapshot(
@@ -166,13 +167,21 @@ impl IdempotentCounterCfg {
 /// 已校验并冻结的账本布局；跨节点一致性由 layout marker 保证。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IdempotentLayoutSnapshot {
+    /// 已去除首尾空白且满足协议字符集的账本键前缀。
     pub(crate) ledger_key_prefix: String,
+    /// 隔离逻辑数据源布局标记的身份，不是单个计数器的身份。
     pub(crate) layout_marker_id: String,
+    /// 决定共享标记文本和键派生规则的兼容协议。
     pub(crate) profile: CompatibilityProfile,
+    /// 同一 nonce 保证返回首次结算结果的有效窗口，单位毫秒。
     pub(crate) nonce_ttl_ms: u64,
+    /// 请求的过期布局，`Auto` 仍需在远端能力确认后解析。
     pub(crate) ttl_mode: IdempotentTtlMode,
+    /// 环形桶覆盖的时间跨度，参与跨节点布局一致性检查。
     pub(crate) bucket_span_ms: u64,
+    /// 对账本记录进行摘要分片的数量，已验证为有界的二次幂。
     pub(crate) ledger_shards: u32,
+    /// 覆盖整个有效窗口及桶边界所需的环形桶数。
     pub(crate) bucket_count: u32,
 }
 
@@ -223,12 +232,12 @@ impl IdempotentLayoutSnapshot {
     }
 }
 
-/// 业务作用：构造带 `idempotent_counter` 前缀的配置错误，便于业务定位账本布局问题。
+/// 业务作用：将账本布局校验原因归为配置错误，交给调用方停止布局准备。
 ///
 /// 参数说明：
 /// - `message`: 稳定错误摘要。
 ///
-/// 返回：`NasaRedisError::Config` 错误。
+/// 返回：保留调用方摘要的 `NasaRedisError::Config`，不额外添加字段前缀。
 fn cfg(message: &str) -> NasaRedisError {
     NasaRedisError::Config(message.to_owned())
 }

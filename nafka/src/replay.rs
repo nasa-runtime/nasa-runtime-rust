@@ -52,7 +52,10 @@ pub enum ReplayError {
 
 impl std::fmt::Display for ReplayError {
     /// 业务作用：输出不携带敏感内容的稳定规划与执行失败原因。
-    /// 参数说明：formatter 为输出目的地。
+    ///
+    /// 参数说明：
+    /// - `formatter`：formatter 为输出目的地。
+    ///
     /// 返回：固定类别文本。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "Kafka replay: {self:?}")
@@ -88,7 +91,12 @@ pub struct ReplayObservation {
 
 impl ReplayObservation {
     /// 业务作用：规范化有界完整证据，供共同计划冻结和恢复比较。
-    /// 参数说明：cluster_id 为物理源，timestamp_millis 为可选非负时间，partitions 为全部所选分区。
+    ///
+    /// 参数说明：
+    /// - `cluster_id`：cluster_id 为物理源。
+    /// - `timestamp_millis`：timestamp_millis 为可选非负时间。
+    /// - `partitions`：partitions 为全部所选分区。
+    ///
     /// 返回：排序后的合法证据；重复或相互矛盾的范围拒绝。
     pub fn new(
         cluster_id: String,
@@ -106,7 +114,9 @@ impl ReplayObservation {
     }
 
     /// 业务作用：在使用公开可变观测前复验身份和范围，不能信任结构字面量。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：完整且严格排序的证据通过；非法或超额内容拒绝。
     pub fn validate(&self) -> ReplayResult<()> {
         token(&self.cluster_id, 1024)?;
@@ -157,7 +167,9 @@ pub struct ReplayLimits {
 
 impl Default for ReplayLimits {
     /// 业务作用：为历史回放提供独立于在线消费的保守额度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：每秒 1000 条及 16 MiB、最多 256 条及 16 MiB 在途、单分区执行。
     fn default() -> Self {
         Self {
@@ -172,7 +184,9 @@ impl Default for ReplayLimits {
 
 impl ReplayLimits {
     /// 业务作用：限制跨语言数值边界和执行并行，防止无限驻留责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：速率和容量可共同表示且执行并行不超容量时通过。
     pub fn validate(&self) -> ReplayResult<()> {
         if self.records_per_second > i64::MAX as u64
@@ -235,7 +249,9 @@ impl ReplayPlan {
     pub const MAX_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 
     /// 业务作用：保存完整冻结合同，恢复时不再计算移动末尾或时间起点。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：共同正文及 SHA-256 完整性尾部；摘要不能替代归档存储的写权限。
     pub fn encode(&self) -> ReplayResult<Vec<u8>> {
         let mut bytes = self.payload()?;
@@ -245,14 +261,26 @@ impl ReplayPlan {
     }
 
     /// 业务作用：还原持久计划并拒绝截断、损坏、错序和无界声明。
-    /// 参数说明：bytes 为完整归档，最大 8 MiB。
+    ///
+    /// 参数说明：
+    /// - `bytes`：bytes 为完整归档。
+    ///
     /// 返回：经过完整验证的冻结合同；读取不授予执行权。
     pub fn decode(bytes: &[u8]) -> ReplayResult<Self> {
         wire::decode(bytes)
     }
 
     /// 业务作用：把一次完整 broker 观测转换为不再移动的历史范围，不启动消费或写入 checkpoint。
-    /// 参数说明：task_id/source_id 为身份，observation 为 LSO 证据，topic_generations 为当前外部代次，pipeline_fingerprint 为处理合同，limits 为独立额度，start 为起点策略。
+    ///
+    /// 参数说明：
+    /// - `task_id`：持久回放任务的稳定身份，用于独占执行及 checkpoint 恢复。
+    /// - `source_id`：计划绑定的 Kafka 源逻辑名称，执行时必须与实际运行时一致。
+    /// - `observation`：observation 为 LSO 证据。
+    /// - `topic_generations`：topic_generations 为当前外部代次。
+    /// - `pipeline_fingerprint`：pipeline_fingerprint 为处理合同。
+    /// - `limits`：limits 为独立额度。
+    /// - `start`：start 为起点策略。
+    ///
     /// 返回：有界完整计划；缺项、保留缺口、起点超末尾或时间无结果按声明拒绝。
     pub fn freeze(
         task_id: String,
@@ -321,7 +349,9 @@ impl ReplayPlan {
     }
 
     /// 业务作用：在公开计划用于指纹或执行前复验完整恢复合同。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：身份、严格排序范围及外部代次一一对应时通过。
     pub fn validate(&self) -> ReplayResult<()> {
         token(&self.source_id, 128)?;
@@ -357,14 +387,18 @@ impl ReplayPlan {
     }
 
     /// 业务作用：生成 Java/Rust 相同的任务合同摘要，防止恢复静默改变处理语义。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：长度前缀、固定排序和大端整数编码的 SHA-256 小写十六进制；非法公开字段拒绝。
     pub fn fingerprint(&self) -> ReplayResult<String> {
         Ok(format!("{:x}", Sha256::digest(self.payload()?)))
     }
 
     /// 业务作用：以同一规范正文支持合同摘要和完整持久归档。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：校验后的有界大端字节，不包含运行进度。
     fn payload(&self) -> ReplayResult<Vec<u8>> {
         self.validate()?;
@@ -398,7 +432,9 @@ impl ReplayPlan {
     }
 
     /// 业务作用：生成尚未接管任务的初始持久声明。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：generation/revision 为零且 next 位于 start 的 checkpoint；不获得独占权。
     pub fn initial_checkpoint(&self) -> ReplayResult<ReplayCheckpoint> {
         Ok(ReplayCheckpoint {
@@ -411,7 +447,12 @@ impl ReplayPlan {
     }
 
     /// 业务作用：在接管前拒绝错连、资源重建、分区变化及历史缺口，不重新计算冻结边界。
-    /// 参数说明：current 为新 broker 观测，generations 为重新查询的外部代次，checkpoint 为原持久进度。
+    ///
+    /// 参数说明：
+    /// - `current`：current 为新 broker 观测。
+    /// - `generations`：generations 为重新查询的外部代次。
+    /// - `checkpoint`：checkpoint 为原持久进度。
+    ///
     /// 返回：所有证据一致且剩余范围可读时通过，不改变存储或消费组。
     pub fn validate_resume(
         &self,
@@ -447,7 +488,11 @@ impl ReplayPlan {
 }
 
 /// 业务作用：限制不透明合同身份到共同 ASCII 编码和有界长度。
-/// 参数说明：value 为身份，maximum 为最大字节数。
+///
+/// 参数说明：
+/// - `value`：value 为身份。
+/// - `maximum`：maximum 为最大字节数。
+///
 /// 返回：非空可见 ASCII 时通过。
 fn token(value: &str, maximum: usize) -> ReplayResult<()> {
     if value.is_empty()
@@ -460,7 +505,11 @@ fn token(value: &str, maximum: usize) -> ReplayResult<()> {
 }
 
 /// 业务作用：为合法合同文本生成无歧义长度前缀。
-/// 参数说明：bytes 为内存编码缓冲，value 为已校验文本。
+///
+/// 参数说明：
+/// - `bytes`：bytes 为内存编码缓冲。
+/// - `value`：value 为已校验文本。
+///
 /// 返回：追加两字节长度及 ASCII 内容，不产生外部副作用。
 fn text(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());

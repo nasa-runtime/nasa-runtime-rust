@@ -8,7 +8,11 @@ use crate::types::{KafkaPartitionLag, Tp};
 use crate::KafkaProxy;
 
 /// 业务作用：复用源级Admin连接，避免内部交付任务持有业务句柄造成生命周期环。
-/// 参数说明：inner 为真实所属源。返回：共享原生责任；最终关闭门内拒绝重建。
+///
+/// 参数说明：
+/// - `inner`：真实所属源。
+///
+/// 返回：共享原生责任；最终关闭门内拒绝重建。
 pub(crate) fn shared_client(inner: &crate::KafkaProxyInner) -> Result<std::sync::Arc<AdminHandle>> {
     let ensure = || {
         if inner
@@ -83,11 +87,13 @@ pub struct TopicDescription {
 impl TopicSpec {
     /// 业务作用：构造最小 topic 契约。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`: topic 名。
     /// - `partitions`: 初始分区数。
     /// - `replication_factor`: 副本数。
+    ///
+    /// 返回：尚未提交的创建声明，动态配置为空；参数合法性在管理请求提交前统一校验。
     pub fn new(name: impl Into<String>, partitions: i32, replication_factor: i32) -> Self {
         Self {
             name: name.into(),
@@ -99,10 +105,12 @@ impl TopicSpec {
 
     /// 业务作用：追加一个 topic 级原生配置。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `key`: broker topic 配置键。
     /// - `value`: 配置值。
+    ///
+    /// 返回：包含该项的声明，同名键替换旧值；不访问 broker 或校验配置支持情况。
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.configs.insert(key.into(), value.into());
         self
@@ -123,7 +131,7 @@ pub struct KafkaAdmin {
 impl KafkaAdmin {
     /// 业务作用：构造管理端轻量句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `proxy`: 所属运行时。
     ///
@@ -137,7 +145,9 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：把管理视图永久收窄为只读诊断能力，不改变资源所有者的其它视图。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：克隆继承只读边界；写操作在建连前返回 Authorization，没有恢复写权限的入口。
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
@@ -145,14 +155,18 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：说明当前视图是否禁止管理写入，供装配与权限诊断使用。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：只读限制是否已附加；false 不表示 broker 已授予 ACL 权限。
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
 
     /// 业务作用：在提交外部管理副作用前核验当前视图的显式写入权。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：开放且未收窄的视图通过；终态为 Lifecycle，只读视图为 Authorization，均不提交请求。
     fn ensure_writable(&self) -> Result<()> {
         self.ensure_open()?;
@@ -164,7 +178,10 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：为当前管理视图附加不可撤销的宿主准入边界。
-    /// 参数说明：scope 为宿主持有并在最终清理时关闭的域。
+    ///
+    /// 参数说明：
+    /// - `scope`：宿主持有并在最终清理时关闭的域。
+    ///
     /// 返回：继承已有全部边界的句柄；克隆不能绕过关闭，已准入查询继续承担实际资源责任。
     pub fn with_access_scope(mut self, scope: &crate::KafkaAccessScope) -> Self {
         scope.attach(&mut self.scopes);
@@ -172,14 +189,18 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：明确保留管理句柄及克隆与所属源最终关闭边界的绑定。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：保留 graceful shutdown 阶段的显式管理能力，最终 Admin 关闭后永久拒绝新操作；克隆继承该边界。
     pub fn until_shutdown(self) -> Self {
         self
     }
 
     /// 业务作用：在复用或构造资源前拒绝已退出宿主的管理操作。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：源与附加宿主域均尚未关闭管理准入时通过，否则为 Lifecycle。
     fn ensure_open(&self) -> Result<()> {
         for scope in &self.scopes {
@@ -206,14 +227,56 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：读取来源物理集群身份，供回放合同和跨源操作拒绝错连。
-    /// 参数说明：无，使用冻结的 Admin 总请求预算。
+    ///
+    /// 参数说明: 无。
+    /// ，使用冻结的 Admin 总请求预算。
+    ///
     /// 返回：broker 提供的非空 cluster ID；缺少证据、超时或客户端失败均拒绝，不以 bootstrap 地址代替身份。
     pub async fn cluster_id(&self) -> Result<String> {
         self.client()?.cluster_id().await
     }
 
+    /// 业务作用：以 read_committed 读取单分区固定边界内的有界原文页，不加入消费组或推进位点。
+    ///
+    /// 参数说明：
+    /// - `plan`：明确物理身份、分区拓扑、读取范围和页面预算。
+    ///
+    /// 返回：具有精确下一位置的页面；取消等待不解除实际原生任务责任，最多同时运行 16 个读取任务。
+    pub async fn read_committed_page(
+        &self,
+        plan: crate::CommittedRead,
+    ) -> crate::ReplayResult<crate::CommittedPage> {
+        static CAPACITY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+        plan.validate()?;
+        self.ensure_open().map_err(|_| crate::ReplayError::Closed)?;
+        let permit = CAPACITY
+            .try_acquire()
+            .map_err(|_| crate::ReplayError::Capacity)?;
+        let owner = self.client().map_err(|_| crate::ReplayError::Closed)?;
+        let config = self.proxy.inner.config.clone();
+        let deadline = std::time::Instant::now() + plan.timeout;
+        let task = tokio::task::spawn_blocking(move || {
+            let result = crate::committed_read::read(config, plan, deadline);
+            // 原生 consumer 已退出后才归还管理持有和并发额度，调用方取消不能绕过实际责任上限。
+            drop(owner);
+            drop(permit);
+            result
+        });
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task)
+            .await
+            .map_err(|_| crate::ReplayError::Timeout)?
+            .map_err(|_| crate::ReplayError::ObservationFailed)?
+    }
+
     /// 业务作用：以明确隔离级别观测位置，保留逐分区、逐字段缺失原因。
-    /// 参数说明：group 为可选组，tps 为至多10000个唯一分区，isolation 为读取隔离，timestamp_millis 为可选非负时间，timeout 为全部步骤共享的正预算。
+    ///
+    /// 参数说明：
+    /// - `group`：可选组。
+    /// - `tps`：至多10000个唯一分区。
+    /// - `isolation`：读取隔离。
+    /// - `timestamp_millis`：可选非负时间。
+    /// - `timeout`：全部步骤共享的正预算。
+    ///
     /// 返回：封存的部分证据报告，不订阅、提交或修改资源；非法声明与关闭源拒绝，取消等待保留实际查询责任。
     pub async fn observe_offsets(
         &self,
@@ -250,7 +313,12 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：为有限历史回放读取完整 topic 保留起点、LSO 和可选时间定位，不加入消费组。
-    /// 参数说明：topics 为 topic 白名单，timestamp_millis 为可选非负时间，timeout 为全部查询共用正预算且不超过五分钟。
+    ///
+    /// 参数说明：
+    /// - `topics`：topic 白名单。
+    /// - `timestamp_millis`：可选非负时间。
+    /// - `timeout`：全部查询共用正预算且不超过五分钟。
+    ///
     /// 返回：真实物理身份和完整范围；查询失败或范围不完整拒绝，不提交 offset。
     pub async fn replay_observation(
         &self,
@@ -269,7 +337,9 @@ impl KafkaAdmin {
     /// # 错误
     ///
     /// 原生配置或管理客户端构造失败时返回错误。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：通过源与宿主域门禁后的共享客户端；已关闭视图拒绝，不重建连接。
     fn client(&self) -> Result<std::sync::Arc<AdminHandle>> {
         // 对外视图先复验宿主域；内部 DLT 收尾仍独立使用源级共享连接。
@@ -282,6 +352,10 @@ impl KafkaAdmin {
     /// # 错误
     ///
     /// 元数据请求超时、无权限或底层传输失败时返回错误。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：本次元数据中未携带 topic 错误的名称；客户端关闭或整体查询失败返回错误。
     pub async fn list_topics(&self) -> Result<Vec<String>> {
         Ok(self
             .client()?
@@ -295,13 +369,14 @@ impl KafkaAdmin {
 
     /// 业务作用：判断 topic 是否存在。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 待查询 topic 名。
     ///
     /// # 错误
     ///
     /// 元数据请求失败时返回错误。
+    ///
     /// 返回：明确存在为 true，明确不存在为 false；无权限与不完整响应不能用 false 代替。
     pub async fn topic_exists(&self, topic: &str) -> Result<bool> {
         validate_topic(topic)?;
@@ -310,13 +385,14 @@ impl KafkaAdmin {
 
     /// 业务作用：返回 topic 当前分区号列表。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     ///
     /// # 错误
     ///
     /// topic 不存在、无权限或请求失败时返回错误。
+    ///
     /// 返回：目标资源的实际分区号；只请求 metadata，不要求 DescribeConfigs 权限。
     pub async fn partitions_for(&self, topic: &str) -> Result<Vec<i32>> {
         validate_topic(topic)?;
@@ -329,7 +405,7 @@ impl KafkaAdmin {
 
     /// 业务作用：读取 topic 的分区、副本和可选配置快照。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `include_configs`: 是否额外请求 DescribeConfigs 权限并返回配置。
@@ -337,6 +413,8 @@ impl KafkaAdmin {
     /// # 错误
     ///
     /// topic 不存在、无 Describe 权限或 broker 请求失败时返回错误。
+    ///
+    /// 返回：实际分区、副本及请求的配置；未请求配置时不额外查询配置权限，非法名称和后端错误向上传递。
     pub async fn describe_topic(
         &self,
         topic: &str,
@@ -349,7 +427,11 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：只读核对目标 topic 的分区、副本及要求的配置子集。
-    /// 参数说明：spec 为冻结的预期合同，timeout 为元数据与配置共用正预算。
+    ///
+    /// 参数说明：
+    /// - `spec`：冻结的预期合同。
+    /// - `timeout`：元数据与配置共用正预算。
+    ///
     /// 返回：匹配时返回实际描述；漂移为 TopicContract，权限和观测失败保留原分类，不创建或修改资源。
     pub async fn verify_topic(
         &self,
@@ -385,13 +467,15 @@ impl KafkaAdmin {
 
     /// 业务作用：创建 topic，并逐项检查 broker 返回结果。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `spec`: topic 契约。
     ///
     /// # 错误
     ///
     /// 参数非法、topic 已存在、无权限或 broker 拒绝时返回错误。
+    ///
+    /// 返回：broker 明确接受创建时成功；关闭、只读或非法声明在提交前拒绝，提交后超时为 AdminOutcomeUnknown。
     pub async fn create_topic(&self, spec: TopicSpec) -> Result<()> {
         self.ensure_writable()?;
         validate_spec(&spec)?;
@@ -400,20 +484,24 @@ impl KafkaAdmin {
 
     /// 业务作用：topic 不存在时创建，已存在时返回成功。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `spec`: topic 契约。
     ///
     /// # 错误
     ///
     /// 查询或创建失败时返回错误。
+    ///
     /// 返回：明确创建或已存在均为成功；已提交请求的超时为 AdminOutcomeUnknown，取消等待不撤销远端修改。
     pub async fn create_if_absent(&self, spec: TopicSpec) -> Result<()> {
         self.create_if_absent_result(spec).await.map(|_| ())
     }
 
     /// 业务作用：幂等创建 topic，并区分本次创建与已经存在，供并发初始化协调。
-    /// 参数说明：spec 为资源名、分区、副本及初始配置契约。
+    ///
+    /// 参数说明：
+    /// - `spec`：资源名、分区、副本及初始配置契约。
+    ///
     /// 返回：仅明确资源确认返回 Created 或 AlreadyExists；权限拒绝单独报告，等待取消不撤销已提交请求，超时为 AdminOutcomeUnknown。
     pub async fn create_if_absent_result(&self, spec: TopicSpec) -> Result<TopicCreation> {
         self.ensure_writable()?;
@@ -423,13 +511,15 @@ impl KafkaAdmin {
 
     /// 业务作用：删除 topic。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 待删除 topic 名。
     ///
     /// # 错误
     ///
     /// topic 不存在、无权限或 broker 拒绝时返回错误。
+    ///
+    /// 返回：broker 明确接受删除时成功；关闭、只读或非法名称在提交前拒绝，提交后结果不明须回读资源状态。
     pub async fn delete_topic(&self, topic: &str) -> Result<()> {
         self.ensure_writable()?;
         validate_topic(topic)?;
@@ -437,8 +527,14 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：增量设置已有 topic 的单项动态配置，保留请求未声明的配置项。
-    /// 参数说明：topic 为目标资源，key 为动态配置键，value 为新值；配置内容是否合法由 broker 裁决。
+    ///
+    /// 参数说明：
+    /// - `topic`：目标资源。
+    /// - `key`：动态配置键。
+    /// - `value`：新值；配置内容是否合法由 broker 裁决。
+    ///
     /// 返回：目标资源明确确认才成功；非法目标、权限或 broker 拒绝返回错误，已提交请求的超时或响应缺失为 AdminOutcomeUnknown。
+    ///
     /// broker 不支持增量修改时返回 UnsupportedCapability，不退回整组替换；同一配置键的并发写仍由 broker 决定最终值。
     pub async fn alter_topic_config(&self, topic: &str, key: &str, value: &str) -> Result<()> {
         self.alter_topic_configs(
@@ -449,7 +545,11 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：一次增量设置或恢复目标 topic 的多个配置，保留所有未声明项。
-    /// 参数说明：topic 为目标；changes 的 Some 值表示 SET，None 表示 DELETE 并恢复 broker 默认配置。
+    ///
+    /// 参数说明：
+    /// - `topic`：唯一待修改的 topic 名称。
+    /// - `changes`：逐键修改声明；Some 表示 SET，None 表示 DELETE 并恢复 broker 默认配置。
+    ///
     /// 返回：唯一目标资源明确确认才成功；空变更、空键或 NUL 在原生提交前拒绝，超时为 AdminOutcomeUnknown，不退回整组替换。
     pub async fn alter_topic_configs(
         &self,
@@ -474,7 +574,7 @@ impl KafkaAdmin {
 
     /// 业务作用：只增不减 topic 分区数。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `total_partitions`: 目标总分区数。
@@ -482,6 +582,7 @@ impl KafkaAdmin {
     /// # 错误
     ///
     /// 目标不大于当前分区数或 broker 拒绝时返回错误。
+    ///
     /// 返回：目标资源确认才成功；未知结果要求回读实际分区数，不能直接再次扩容。
     pub async fn increase_partitions(&self, topic: &str, total_partitions: i32) -> Result<()> {
         self.ensure_writable()?;
@@ -497,20 +598,26 @@ impl KafkaAdmin {
 
     /// 业务作用：查询分区最早和末尾 offset。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `tps`: topic-partition 列表。
     ///
     /// # 错误
     ///
     /// 任一 watermark 查询失败时返回错误。
+    ///
+    /// 返回：每个请求分区的最早和末尾 offset；非法、重复或空分区集合及任何后端失败均返回错误。
     pub async fn watermarks(&self, tps: Vec<Tp>) -> Result<Vec<(Tp, i64, i64)>> {
         validate_tps(&tps)?;
         self.client()?.watermarks(tps).await
     }
 
     /// 业务作用：使用不加入消费组的短命客户端查询 broker 已提交位置。
-    /// 参数说明：group 为待查的原文组名；tps 为目标分区。
+    ///
+    /// 参数说明：
+    /// - `group`：待查的原文组名。
+    /// - `tps`：目标分区。
+    ///
     /// 返回：逐分区提交位置，None 仅表示明确无历史；非法组为 Config，权限拒绝、响应缺项与 broker 失败保留错误。
     pub async fn committed_offsets(
         &self,
@@ -526,7 +633,11 @@ impl KafkaAdmin {
     }
 
     /// 业务作用：组合已提交位置与普通日志末尾，计算分区的 offset 距离。
-    /// 参数说明：group 为原文组名；tps 为待计算分区。
+    ///
+    /// 参数说明：
+    /// - `group`：原文组名。
+    /// - `tps`：待计算分区。
+    ///
     /// 返回：逐分区滞后报告；非法组为 Config，其它查询失败保留错误。两次查询共享总预算，不构成原子快照，距离不等于业务消息数。
     pub async fn committed_lag(&self, group: &str, tps: Vec<Tp>) -> Result<Vec<KafkaPartitionLag>> {
         // 管理查询必须与消费准入使用相同组名，不能拒绝已接纳身份或查询其替代名称。
@@ -568,15 +679,17 @@ impl KafkaAdmin {
     }
 }
 
-/// 业务作用：校验 topic 名不为空。
+/// 业务作用：在构造原生请求前拒绝空白或含 NUL 的 topic 名。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `topic`: 待校验 topic。
 ///
 /// # 错误
 ///
-/// topic 为空时返回配置错误。
+/// topic 为空白或含 NUL 时返回配置错误。
+///
+/// 返回：合法原文名称通过，不 trim 改名；拒绝时不执行网络请求。
 fn validate_topic(topic: &str) -> Result<()> {
     if topic.trim().is_empty() || topic.contains('\0') {
         Err(NafkaError::Config("topic 不能为空或含 NUL".into()))
@@ -587,13 +700,15 @@ fn validate_topic(topic: &str) -> Result<()> {
 
 /// 业务作用：校验创建 topic 的公共契约。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `spec`: 待校验契约。
 ///
 /// # 错误
 ///
 /// 名称非法、分区非正、副本数不在正 i16 范围或配置键值非法时返回配置错误。
+///
+/// 返回：本地结构合法时通过；不保证 broker 支持配置或具备足够副本，远端仍需裁决。
 fn validate_spec(spec: &TopicSpec) -> Result<()> {
     validate_topic(&spec.name)?;
     if spec.partitions <= 0 {
@@ -616,13 +731,15 @@ fn validate_spec(spec: &TopicSpec) -> Result<()> {
 
 /// 业务作用：校验 topic-partition 列表并拒绝重复项。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tps`: 待校验分区列表。
 ///
 /// # 错误
 ///
 /// 列表为空、topic 为空、分区为负或存在重复项时返回配置错误。
+///
+/// 返回：非空、名称合法、分区非负且无重复时通过；仅校验本地输入，不证明分区实际存在。
 fn validate_tps(tps: &[Tp]) -> Result<()> {
     if tps.is_empty() {
         return Err(NafkaError::Config("topic-partition 列表不能为空".into()));

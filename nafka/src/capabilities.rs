@@ -22,13 +22,20 @@ pub struct KafkaCapabilities {
 
 impl KafkaCapabilities {
     /// 业务作用：独立查询本地可用实现，不创建Kafka连接。
-    /// 参数说明：无。返回：配置启用之前的构建证据；没有证据时明确报UnsupportedCapability。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：配置启用之前的构建证据；没有证据时明确报UnsupportedCapability。
     pub fn supported_capabilities() -> Result<BTreeSet<String>> {
         crate::rd::capabilities::supported()
     }
 
     /// 业务作用：汇总所属源的配置与真实健康，不把构建能力误报为Ready。
-    /// 参数说明：source为真实所属源。返回：不建连、不含认证值或路径的独立快照。
+    ///
+    /// 参数说明：
+    /// - `source`：source为真实所属源。
+    ///
+    /// 返回：不建连、不含认证值或路径的独立快照。
     pub(crate) fn snapshot(source: &KafkaProxy) -> Result<Self> {
         let groups = source
             .inner
@@ -60,7 +67,11 @@ impl KafkaCapabilities {
 }
 
 /// 业务作用：在原生资源创建前拒绝未实现能力和角色间认证漂移。
-/// 参数说明：config为完整源配置。返回：全部启用项有实际支持才通过；不输出未知配置值或凭据。
+///
+/// 参数说明：
+/// - `config`：config为完整源配置。
+///
+/// 返回：全部启用项有实际支持才通过；不输出未知配置值或凭据。
 pub(crate) fn validate(config: &KafkaConfig) -> Result<()> {
     for properties in [
         &config.producer.properties,
@@ -102,7 +113,11 @@ pub(crate) fn validate(config: &KafkaConfig) -> Result<()> {
 }
 
 /// 业务作用：按源级raw和强类型优先级识别认证及通道算法，避免raw绕过构建能力门禁。
-/// 参数说明：config为合并源配置。返回：规范能力名，未知声明拒绝而不猜测其它机制。
+///
+/// 参数说明：
+/// - `config`：config为合并源配置。
+///
+/// 返回：规范能力名，未知声明拒绝而不猜测其它机制。
 fn configured(config: &KafkaConfig) -> Result<BTreeSet<String>> {
     let security = &config.security;
     let effective = |typed: &Option<String>, key: &str| {
@@ -184,7 +199,11 @@ fn configured(config: &KafkaConfig) -> Result<BTreeSet<String>> {
 }
 
 /// 业务作用：在源校验阶段覆盖全部 lane，防止缺失的压缩实现延迟到原生构造或发送时才暴露。
-/// 参数说明：config为冻结源配置。返回：default及命名lane的规范压缩算法。
+///
+/// 参数说明：
+/// - `config`：config为冻结源配置。
+///
+/// 返回：default及命名lane的规范压缩算法。
 fn compressions(config: &KafkaConfig) -> BTreeMap<String, String> {
     let base = config.producer.compression.clone();
     let mut values = BTreeMap::from([("default".into(), base.clone())]);

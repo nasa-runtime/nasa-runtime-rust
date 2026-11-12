@@ -43,7 +43,10 @@ pub fn next_fire_at(definition: &JobDefinition, logical_fire_at: i64) -> Result<
 
 /// 业务作用：一步跨过长时间积压，计算严格晚于 Redis 当前时刻的第一个逻辑触发时刻。
 ///
-/// 参数说明：`definition` 提供调度语义，`logical_fire_at` 是当前网格锚点，`redis_now` 是脚本观测的权威时刻。
+/// 参数说明：
+/// - `definition`：已校验的调度定义，提供固定间隔或 Cron 语义。
+/// - `logical_fire_at`：当前逻辑触发时刻，固定速率必须保持该时间网格。
+/// - `redis_now`：脚本观测到的权威毫秒，自动调度结果必须严格晚于该时刻。
 ///
 /// 返回：自动调度返回严格晚于 `redis_now` 的时刻；手工与 Fanout-only 返回零；算术溢出或 Cron 无后继时返回配置错误。
 pub fn first_fire_at_after(
@@ -85,7 +88,9 @@ pub fn first_fire_at_after(
 
 /// 业务作用：校验表达式属于已冻结的 Spring 六段数字语法交集，并确认时区可由编译期 tzdb 解析。
 ///
-/// 参数说明：`expr` 是秒到星期的六段表达式，`zone` 是 IANA 时区 ID。
+/// 参数说明：
+/// - `expr`：从秒到星期的六段表达式，必须属于固定数字语法交集。
+/// - `zone`：IANA 时区标识，校验时忽略首尾空白。
 ///
 /// 返回：表达式可无损转换为本地引擎语义时成功；Spring 扩展、年字段、歧义日期组合或未知时区被拒绝。
 pub fn validate_cron_compatibility(expr: &str, zone: &str) -> Result<()> {
@@ -128,7 +133,10 @@ fn next_cron(expr: &str, zone: &str, from_millis: i64) -> Result<i64> {
 
 /// 业务作用：在 DST 回拨的重复本地时间内按绝对时间寻找最早匹配，保留 Spring 会依次返回两个 offset 实例的语义。
 ///
-/// 参数说明：`schedule` 是已转换的表达式，`tz` 是命名时区，`base` 是严格下界。
+/// 参数说明：
+/// - `schedule`：已转换为本地引擎语义的 Cron 表达式。
+/// - `tz`：用于识别重复本地时间的命名时区。
+/// - `base`：后续匹配的严格绝对时间下界。
 ///
 /// 返回：基准落在 overlap 本地区间时返回第一个后续匹配；其它情况返回 `None` 交由常规迭代器处理。
 fn next_match_inside_overlap(
@@ -161,7 +169,8 @@ fn next_match_inside_overlap(
 
 /// 业务作用：把 Spring 数字星期编号转为本地引擎编号，其余允许字段保持原语义。
 ///
-/// 参数说明：`expr` 是待冻结的 Spring 六段表达式。
+/// 参数说明：
+/// - `expr`：待冻结的 Spring 六段表达式，星期数字需转换为本地引擎编号。
 ///
 /// 返回：本地 `cron` 引擎可执行的六段表达式；交集外语法返回配置错误。
 fn normalize_cron(expr: &str) -> Result<String> {
@@ -176,6 +185,7 @@ fn normalize_cron(expr: &str) -> Result<String> {
     }
     let day_of_month_any = matches!(fields[3], "*" | "?");
     let day_of_week_any = matches!(fields[5], "*" | "?");
+    // 两个日期条件同时受限会落入不同实现的语义差异，必须在写入共享定义前拒绝。
     if !day_of_month_any && !day_of_week_any {
         return Err(err("cron 日与星期不能同时受限"));
     }
@@ -191,7 +201,11 @@ fn normalize_cron(expr: &str) -> Result<String> {
 
 /// 业务作用：校验一个数值 cron 字段的通配、列表、范围和步进语法。
 ///
-/// 参数说明：`field` 是单字段文本，`min`/`max` 是包含边界，`allow_question` 控制是否将 `?` 视为通配。
+/// 参数说明：
+/// - `field`：单个 Cron 字段的文本，仅允许规定的数字与操作符。
+/// - `min`：该字段允许的最小数值，包含边界。
+/// - `max`：该字段允许的最大数值，包含边界。
+/// - `allow_question`：是否允许将独立的 `?` 转为无日期约束的通配。
 ///
 /// 返回：语法与数值边界合法时返回规范文本；否则返回配置错误。
 fn normalize_numeric_field(
@@ -245,7 +259,8 @@ fn normalize_numeric_field(
 
 /// 业务作用：转换 Spring 星期编号（0 或 7 为周日）到本地引擎编号（1 为周日）。
 ///
-/// 参数说明：`field` 只允许通配或数字列表。
+/// 参数说明：
+/// - `field`：星期字段，只允许独立通配或数字列表，零和七都代表周日。
 ///
 /// 返回：去重排序后的本地星期字段；范围、步进、名称或越界编号被拒绝。
 fn normalize_day_of_week(field: &str) -> Result<String> {
@@ -273,7 +288,10 @@ fn normalize_day_of_week(field: &str) -> Result<String> {
 
 /// 业务作用：解析并检查 cron 数字原子的包含边界。
 ///
-/// 参数说明：`value` 是十进制原子，`min`/`max` 是该字段的合法区间。
+/// 参数说明：
+/// - `value`：需要解析的十进制数值文本。
+/// - `min`：字段允许的最小数值，包含边界。
+/// - `max`：字段允许的最大数值，包含边界。
 ///
 /// 返回：区间内数值；空值、非数字或越界时返回配置错误。
 fn parse_ordinal(value: &str, min: u32, max: u32) -> Result<u32> {

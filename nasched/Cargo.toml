@@ -29,7 +29,7 @@ async-macro = { version = "2.0.0" }
 # 仅 cluster feature 下编入:把 nadis::Leader 适配成 LeaderGate;core 不依赖它。
 nadis = { package = "nadis", version = "2.0.0", optional = true }
 linkme = "0.3"
-tokio = { version = "1", features = ["rt", "time", "macros", "sync"] }
+tokio = { version = "1.54.1", features = ["rt", "time", "macros", "sync"] }
 tokio-cron-scheduler = "0.13"
 # 宏展开经 __private 桥恢复调用方 trace 上下文;调度触发以新根链路关联下游调用。
 natelemetry = { version = "2.0.0" }

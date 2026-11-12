@@ -49,7 +49,7 @@ Copied external client handles do not acquire the revocation guarantees of manag
 
 ## Check configuration and entry points
 
-- `zcf/application.yml` must exist and is resolved relative to the process working directory.
+- A non-empty `APP_CONFIG_FILE` selects the required main file; unset or empty uses `zcf/application.yml`. Relative paths resolve against the process working directory.
 - `application.mode` selects Service or Batch. Set `service` explicitly for a long-running background
   process without an inbound component.
 - Use `database` for a single source or `datasources` for named sources; the roots are mutually

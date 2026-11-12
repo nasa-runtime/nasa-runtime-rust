@@ -10,7 +10,7 @@
 // rest-discovery-nacos —— RestDiscovery + Nacos 一键装配便利层。
 //
 //   业务 main 只调一个入口(经 nasa 门面):
-//     let disc = nasa::discovery::init_from_config(&cfg.rest_discovery, app_info).await?;
+//     装配入口为 `nasa::discovery::init_from_config`，参数是发现配置和应用注册信息。
 //   优雅停机:disc.deregister().await(先摘流)→ 再 drain HTTP server → 最后 drop。
 //
 // 边界:rest-discovery 默认路径面向 provider-neutral 抽象;本 crate 收敛 Nacos 装配 +
@@ -58,6 +58,10 @@ pub struct DiscoveryConfig {
 
 impl Default for DiscoveryConfig {
     /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回关闭发现、使用 Nacos 提供方及默认子配置的值；不会连接、注册或发布全局运行时。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -105,10 +109,12 @@ pub struct NacosConnConfig {
 }
 
 impl std::fmt::Debug for NacosConnConfig {
-    /// 业务作用：输出连接配置的调试视图;username/password 只标记是否已配置,避免日志泄露凭据。
+    /// 业务作用：展示 Nacos 连接配置，隐藏用户名和密码正文。
     ///
-    /// 参数说明:
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收摘要的标准格式化器。
+    ///
+    /// 返回：成功写出摘要或返回格式化错误；不查询注册中心，不能作为远端健康确认。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NacosConnConfig")
             .field("server_addr", &self.server_addr)
@@ -167,6 +173,10 @@ pub struct RegistrationConfig {
 
 impl Default for RegistrationConfig {
     /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回启用注册、临时且健康、权重为 1 的配置；服务名与端口待应用补齐，地址待显式解析，注册丢失默认非关键降级。
     fn default() -> Self {
         Self {
             enabled: true,
@@ -325,7 +335,11 @@ pub struct DiscoveryHandle {
 }
 
 impl DiscoveryHandle {
-    /// 业务作用：构造仅外部调用的客户端模式；用于不依赖注册中心的普通地址访问。
+    /// 业务作用：创建仅表示外部调用装配完成的空生命周期句柄。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回没有提供方连接与注册句柄的装配句柄；本方法不创建 HTTP 客户端或发布全局状态。
     fn external_only() -> Self {
         Self {
             _client: None,
@@ -333,8 +347,11 @@ impl DiscoveryHandle {
         }
     }
 
-    /// 业务作用：显式优雅下线(**幂等**):有注册句柄则 deregister 摘流,第二次调用为 no-op。
+    /// 业务作用：取走注册句柄并显式等待注销，不关闭共享出站客户端。
     ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：有句柄时先取走并等待注销，返回具体结果；失败或取消后本地也不再持有句柄，Drop 仅尽力接力。后续调用直接成功，不证明之前注销已完成。
     pub async fn deregister(&mut self) -> anyhow::Result<()> {
         if let Some(reg) = self.registration.take() {
             reg.deregister().await?;
@@ -342,17 +359,23 @@ impl DiscoveryHandle {
         Ok(())
     }
 
-    /// 业务作用：是否注册了本实例(`enabled` 且 `registration.enabled`)。
+    /// 业务作用：读取本地注册句柄的持有状态。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅当本地仍持有注册句柄时返回 true，不向注册中心核验存在性或健康状态。
     pub fn is_registered(&self) -> bool {
         self.registration.is_some()
     }
 }
 
 impl std::fmt::Debug for DiscoveryHandle {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示本地是否仍持有注册句柄。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收摘要的标准格式化器。
+    ///
+    /// 返回：成功写出摘要或返回格式化错误；不查询注册中心，不能作为远端健康确认。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DiscoveryHandle")
             .field("registered", &self.registration.is_some())
@@ -379,43 +402,41 @@ pub struct DiscoverySession {
 }
 
 impl DiscoverySession {
-    /// 业务作用：返回当前会话安装的共享出站 HTTP 客户端。
+    /// 业务作用：返回当前会话安装的共享出站 HTTP 客户端。 clone 只增加客户端共享引用；会话关闭运行时时仍会显式停止索引刷新和监听任务，因此外部句柄 不会阻止宿主执行停机协议，但停机后不得再发起新请求。
     ///
-    /// clone 只增加客户端共享引用；会话关闭运行时时仍会显式停止索引刷新和监听任务，因此外部句柄
-    /// 不会阻止宿主执行停机协议，但停机后不得再发起新请求。
+    /// 参数说明: 无。
     ///
-    /// 参数说明:
-    /// 本方法无参数；运行时已关闭时返回 `None`。
+    /// 返回：会话仍保留运行时时返回共享客户端，否则返回 None；关闭未排干但保留 owner 时仍可能返回已关闭准入的客户端，不能凭 Some 推断可发新请求。
     pub fn rest_client(&self) -> Option<Arc<RestDiscoveryClient>> {
         self.runtime.as_ref().map(|runtime| runtime.rest())
     }
 
-    /// 业务作用：是否已注册本实例。
+    /// 业务作用：读取本地注册句柄的持有状态。
     ///
-    /// 参数说明:
-    /// 本方法无参数;`deregister` 之后重新变为 false。
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅当本地仍持有注册句柄时返回 true，不向注册中心核验存在性或健康状态。
     pub fn is_registered(&self) -> bool {
         self.registration.is_some()
     }
 
     /// 业务作用：本配置是否要求注册本实例。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数;纯消费者(`registration.enabled=false`)返回 false。
+    /// 返回：发现总开关与实例注册开关同时开启时返回 true，否则返回 false。
     pub fn wants_registration(&self) -> bool {
         self.config.enabled && self.config.registration.enabled
     }
 
-    /// 业务作用：注册本实例,使其开始接收流量。
+    /// 业务作用：在调用方确认监听及业务准备完成后，按配置登记实例并保存回查身份。
     ///
-    /// 调用时机必须晚于监听端口绑定:注册的端口就是消费者会拨号的端口,提前注册会把流量导向尚未
-    /// 就绪的实例。重复调用为 no-op,便于停机路径与失败回滚共用同一段代码。
+    /// 参数说明：
+    /// - `app`：服务名与端口缺省值，以及需随实例发布的元数据；app.ip 不参与注册地址选择。
     ///
-    /// # 参数
-    ///
-    /// - `app`: 运行期自报的服务名与真实监听端口,用于补齐配置里留空的字段。
+    /// 返回：无需注册或已持有句柄时直接成功；否则解析身份并等待远端登记，确认后保存句柄与回查身份。缺少提供方、配置非法或远端失败时返回错误；成功不证明业务端点健康或实例承载流量。
     pub async fn register(&mut self, app: AppRegistrationInfo) -> anyhow::Result<()> {
+        // 配置未开放注册或已经持有句柄时不再次登记，避免同一会话产生重复生命周期责任。
         if !self.wants_registration() || self.registration.is_some() {
             return Ok(());
         }
@@ -433,19 +454,17 @@ impl DiscoverySession {
             .with_weight(self.config.registration.weight)
             .with_metadata_map(app.metadata);
         self.registration = Some(client.register(&service, instance).await?);
-        // 保存注册中心可见身份(resolve 后的真实可路由 ip/port,非监听地址),供运行期回查在健康实例集里定位本实例。
+        // 远端确认后保存本次提交的身份供回查；地址来源校验并不证明网络实际可达。
         self.registered_identity = Some((service.clone(), ip, port));
         tracing::info!(service = %service, "rest-discovery-nacos: 本实例已注册");
         Ok(())
     }
 
-    /// 业务作用：显式摘流(幂等)。
+    /// 业务作用：消费本地注册句柄并等待远端摘流，不关闭出站运行时。
     ///
-    /// 只影响注册中心中的本实例记录;出站 `lb://` 能力仍然可用,正在 drain 的请求不受影响。
+    /// 参数说明: 无。
     ///
-    /// # 参数
-    ///
-    /// 本方法无参数;未注册时直接返回 Ok。
+    /// 返回：取走句柄后等待远端注销，确认成功才清空回查身份；失败或取消时本地句柄已失去但身份可能保留，Drop 尽力接力。无句柄时直接成功，不证明远端已删除。
     pub async fn deregister(&mut self) -> anyhow::Result<()> {
         if let Some(registration) = self.registration.take() {
             registration.deregister().await?;
@@ -455,20 +474,11 @@ impl DiscoverySession {
         Ok(())
     }
 
-    /// 业务作用：回查本实例是否仍在自己服务的健康实例集里(运行期自注册就绪再核)。
+    /// 业务作用：根据保存的注册身份回查该地址是否仍在注册中心的流量候选集合中。
     ///
-    /// 语义:
-    /// - 未注册 / 纯消费者(无注册身份)→ `Ok(None)`:没有"本实例是否在册"这一就绪含义,调用方跳过观测。
-    /// - 已注册 → 向注册中心查询本服务的**可用实例集**([`NacosDiscoveryClient::discover`],已过滤
-    ///   健康/启用/正权重),按注册时保存的 `(ip, port)` 判定本实例是否仍在册且健康,返回 `Ok(Some(present))`。
-    ///   `present=false` 即心跳失联被驱逐/权重清零等——注册中心已不再把流量导向本实例。
-    /// - provider 未连接或查询本身失败 → `Err`:让调用方记为**探测失败**而不是静默当作健康。
+    /// 参数说明: 无。
     ///
-    /// 只读注册中心、不改本地注册状态;仅供低频 monitor 调用,绝不放进就绪探针热路径。
-    ///
-    /// # 参数
-    ///
-    /// 本方法无参数;比对身份取自 [`register`](Self::register) 成功时保存的 `(service, ip, port)`。
+    /// 返回：无保存身份时返回 None；否则查询可承载流量实例，以 IP 和端口匹配返回 Some(bool)。缺少提供方或查询失败返回错误；不检查本地句柄存在，不复验集群或业务健康。
     pub async fn self_registration_healthy(&self) -> anyhow::Result<Option<bool>> {
         let Some((service, ip, port)) = self.registered_identity.as_ref() else {
             return Ok(None);
@@ -496,21 +506,21 @@ impl DiscoverySession {
         client.discover(service).await
     }
 
-    /// 业务作用：关闭出站客户端运行时(幂等)。
+    /// 业务作用：关闭出站客户端运行时(幂等)。 必须最后调用:在途请求、用户任务和业务资源清理都可能仍在调下游。只有当全局槽仍指向本会话 安装的运行时才会取下,避免误关后来安装的实例。
     ///
-    /// 必须最后调用:在途请求、用户任务和业务资源清理都可能仍在调下游。只有当全局槽仍指向本会话
-    /// 安装的运行时才会取下,避免误关后来安装的实例。
+    /// 参数说明: 无。
     ///
-    /// # 参数
-    ///
-    /// 本方法无参数;运行时已被取下时返回 Ok。
+    /// 返回：以当前时刻加五秒为截止点执行关闭，排干成功后释放会话依赖；失败保留运行时以便再次等待，入口已经可能撤下，不注销实例。
     pub async fn shutdown_runtime(&mut self) -> anyhow::Result<()> {
         self.shutdown_runtime_until(tokio::time::Instant::now() + Duration::from_secs(5))
             .await
     }
 
     /// 业务作用：撤下本会话出站入口，并等待当前代 REST 任务和调用退出。
-    /// 参数说明：`deadline` 为宿主统一停机截止点。
+    ///
+    /// 参数说明：
+    /// - `deadline`：为宿主统一停机截止点。
+    ///
     /// 返回：排干后释放会话依赖；未排干保留 owner 以便再次等待，不影响后续实例。
     pub async fn shutdown_runtime_until(
         &mut self,
@@ -526,20 +536,23 @@ impl DiscoverySession {
     }
 }
 
-/// 业务作用：只连接 provider 并安装出站 RestDiscovery runtime,不注册本实例。
+/// 业务作用：只连接 provider 并安装出站 RestDiscovery runtime,不注册本实例。 `enabled=false` 时安装 external-only 客户端:普通 http(s) 可用,`lb://` 得到明确错误而不是退化成 DNS。
 ///
-/// `enabled=false` 时安装 external-only 客户端:普通 http(s) 可用,`lb://` 得到明确错误而不是退化成 DNS。
+/// 参数说明：
+/// - `cfg`：discovery/nacos/rest 配置源;注册相关字段留到 [`DiscoverySession::register`] 才校验。
 ///
-/// # 参数
-///
-/// - `cfg`: discovery/nacos/rest 配置源;注册相关字段留到 [`DiscoverySession::register`] 才校验。
+/// 返回：成功时发布全局出站运行时并返回尚未注册的会话；总开关关闭时只支持外部 URL。配置、连接或运行时初始化失败返回错误，不在本入口校验实例注册地址。
 pub async fn prepare_from_config(cfg: &DiscoveryConfig) -> anyhow::Result<DiscoverySession> {
     prepare_from_config_with_span_recorder(cfg, None).await
 }
 
-/// 业务作用：同 [`prepare_from_config`]，并把 Application-owned 只写 span 记录器接入出站 REST。
+/// 业务作用：准备提供方与全局出站客户端，并可接入应用提供的 span 写入器。
 ///
-/// recorder 只允许非阻塞写 span，不拥有 drainer/flush/关闭能力；`None` 保持纯 trace context 传播。
+/// 参数说明：
+/// - `cfg`：发现、Nacos 与 REST 配置；注册参数延迟到 register 检查。
+/// - `span_recorder`：可选的共享 span 写入器，不提供关闭或排干权。
+///
+/// 返回：成功时发布全局出站运行时并返回尚未注册的会话；总开关关闭时只支持外部 URL。配置、连接或运行时初始化失败返回错误，不在本入口校验实例注册地址。
 pub async fn prepare_from_config_with_span_recorder(
     cfg: &DiscoveryConfig,
     span_recorder: Option<SpanRecorder>,
@@ -583,10 +596,11 @@ pub async fn prepare_from_config_with_span_recorder(
 
 /// 业务作用：按 [`DiscoveryConfig`] 一键装配 RestDiscovery(+ 可选注册本实例)。返回的 [`DiscoveryHandle`] 须由 main 持有。
 ///
+/// 参数说明：
+/// - `cfg`：发现、注册及出站客户端配置。
+/// - `app`：补齐服务名与端口的应用信息；本入口不随实例发布 app.metadata。
 ///
-/// # 参数
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
-/// - `app`: 应用自报注册信息。
+/// 返回：成功时发布全局出站运行时并返回需持有的注册生命周期句柄；关闭总开关时只安装外部 URL 模式。配置或连接失败返回错误；注册后运行时初始化失败时限时尝试注销再返回原错误，不能保证注销成功。
 pub async fn init_from_config(
     cfg: &DiscoveryConfig,
     app: AppRegistrationInfo,
@@ -594,13 +608,14 @@ pub async fn init_from_config(
     init_from_config_impl(cfg, app, None).await
 }
 
-/// 业务作用：同 [`init_from_config`],但**注入自定义 [`LoadBalancer`]**:`cfg.rest.lb_strategy` 仍解析校验但被忽略,
-/// `enabled=true` 时三类内部调用共享传入算法。`enabled=false`(external-only)不选址,传入算法被忽略(会 warn)。
+/// 业务作用：同 [`init_from_config`],但**注入自定义 [`LoadBalancer`]**:`cfg.rest.lb_strategy` 仍解析校验但被忽略, `enabled=true` 时三类内部调用共享传入算法。`enabled=false`(external-only)不选址,传入算法被忽略(会 warn)。
 ///
-/// # 参数
-/// - `cfg`: discovery/nacos/rest 配置源,仍负责启停、注册和超时等运行参数。
-/// - `app`: 运行期应用自报信息,用于补齐配置中缺省的服务名和端口。
-/// - `load_balancer`: 业务注入的负载均衡器,启用 discovery 时三类内部调用共享它。
+/// 参数说明：
+/// - `cfg`：发现、注册及出站客户端配置，lb_strategy 仍解析。
+/// - `app`：补齐服务名与端口的应用信息；app.ip 和 metadata 不参与登记。
+/// - `load_balancer`：发现启用时使用的共享选址器；外部 URL 模式下忽略。
+///
+/// 返回：成功时发布全局出站运行时并返回需持有的注册生命周期句柄；关闭总开关时只安装外部 URL 模式。配置或连接失败返回错误；注册后运行时初始化失败时限时尝试注销再返回原错误，不能保证注销成功。
 pub async fn init_from_config_with_load_balancer(
     cfg: &DiscoveryConfig,
     app: AppRegistrationInfo,
@@ -611,10 +626,12 @@ pub async fn init_from_config_with_load_balancer(
 
 /// 业务作用：按配置初始化发现客户端；用于串联本地配置、注册中心和负载均衡。
 ///
-/// # 参数
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
-/// - `app`: 应用自报注册信息。
-/// - `load_balancer`: REST 客户端选择服务实例时使用的负载均衡器。
+/// 参数说明：
+/// - `cfg`：发现、注册及出站客户端配置。
+/// - `app`：服务名与端口的应用缺省值。
+/// - `load_balancer`：覆盖配置选址策略的可选共享实现。
+///
+/// 返回：成功时发布全局出站运行时并返回需持有的注册生命周期句柄；关闭总开关时只安装外部 URL 模式。配置或连接失败返回错误；注册后运行时初始化失败时限时尝试注销再返回原错误，不能保证注销成功。
 async fn init_from_config_impl(
     cfg: &DiscoveryConfig,
     app: AppRegistrationInfo,
@@ -709,10 +726,12 @@ async fn init_from_config_impl(
     }
 }
 
-/// 业务作用：构建 build props 结果；用于把配置和上下文组装成可执行对象。
+/// 业务作用：转换连接配置并保留本层注册地址优先级。
 ///
-/// # 参数
-/// - `nacos`: Nacos 连接或配置项。
+/// 参数说明：
+/// - `nacos`：提供方连接参数与凭据。
+///
+/// 返回：返回经构造器去除非敏感字段首尾空白的 Nacos 配置，空分组保留 DEFAULT_GROUP。故意不传 discovery_ip，避免覆盖已经选定的更高优先级地址；不连接或完整校验。
 fn build_props(nacos: &NacosConnConfig) -> NacosProps {
     // 刻意不把 nacos.discovery_ip 写进 NacosProps.discovery_ip:它是注册 IP 的第三优先级,
     // 进了 props 底层 register 会拿它覆盖 LOCAL_NETWORK_IP / registration.ip 前两级。
@@ -729,9 +748,11 @@ fn build_props(nacos: &NacosConnConfig) -> NacosProps {
 
 /// 业务作用：`a` trim 后非空 → 用 `a`;否则用 `b`。
 ///
-/// # 参数
-/// - `a`: 参与当前计算或编码的第一个输入值。
-/// - `b`: 参与当前计算或编码的第二个输入值。
+/// 参数说明：
+/// - `a`：优先使用的配置值。
+/// - `b`：优先值为空时使用的应用缺省值。
+///
+/// 返回：a 去除首尾空白后非空则返回该值，否则复制 b 且不去空白。
 fn first_nonempty(a: &str, b: &str) -> String {
     let a = a.trim();
     if a.is_empty() {
@@ -743,16 +764,21 @@ fn first_nonempty(a: &str, b: &str) -> String {
 
 /// 业务作用：`s` trim 后非空 → Some(owned);空白/None → None。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：要解析的输入字符串。
+///
+/// 返回：Some 去除首尾空白后非空则返回新字符串；None 或空白返回 None。
 fn non_blank_owned(s: Option<&str>) -> Option<String> {
     s.map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_string)
 }
 
-/// 业务作用：注册 IP 最高优先级:环境变量 `LOCAL_NETWORK_IP`(trim 后非空才有效)。
-/// `LOCAL__NETWORK__IP` 只是旧启动脚本的临时兼容,读取顺序在后;新方案统一用 `LOCAL_NETWORK_IP`。
+/// 业务作用：读取优先级最高的进程注册地址环境配置。
+///
+/// 参数说明: 无。
+///
+/// 返回：先读取 LOCAL_NETWORK_IP，未提供非空白 Unicode 值时尝试 LOCAL__NETWORK__IP；均未命中返回 None，不验证 IP 格式或可达性。
 fn local_network_ip_from_env() -> Option<String> {
     std::env::var("LOCAL_NETWORK_IP")
         .ok()
@@ -764,14 +790,14 @@ fn local_network_ip_from_env() -> Option<String> {
         })
 }
 
-/// 业务作用：解析最终注册参数。注册 IP 优先级
-/// `LOCAL_NETWORK_IP` env → `rest_discovery.registration.ip` → `nacos.discovery_ip` → fail-fast;
-/// `AppRegistrationInfo.ip` 不参与(监听 host 兜底会让 `0.0.0.0`/`::` 绕过规则)。
+/// 业务作用：解析最终注册参数。注册 IP 优先级 `LOCAL_NETWORK_IP` env → `rest_discovery.registration.ip` → `nacos.discovery_ip` → fail-fast; `AppRegistrationInfo.ip` 不参与(监听 host 兜底会让 `0.0.0.0`/`::` 绕过规则)。
 ///
-/// # 参数
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
-/// - `app`: 应用自报注册信息。
-/// - `nacos_discovery_ip`: Nacos 配置中的注册 IP fallback。
+/// 参数说明：
+/// - `cfg`：实例注册配置及流量属性。
+/// - `app`：服务名与端口的缺省来源，监听 IP 不参与回退。
+/// - `nacos_discovery_ip`：环境和注册配置均未提供地址时的最后回退。
+///
+/// 返回：成功返回服务名、地址与非零端口；环境地址优先于注册配置，再回退 Nacos 地址。未解析占位符、缺失地址、两个指定的未指定地址字面量或非法权重被拒绝；不完整解析 IP 或证明可达性。
 fn resolve_registration(
     cfg: &RegistrationConfig,
     app: &AppRegistrationInfo,
@@ -822,10 +848,12 @@ fn resolve_registration(
 
 // ── RestConfig → RestDiscoveryOptions(字符串枚举解析 + 数值校验) ──
 
-/// 业务作用：映射 rest options 配置；用于转换为运行时需要的类型。
+/// 业务作用：将外部 REST 配置映射为客户端选项，在连接前暴露可识别的配置错误。
 ///
-/// # 参数
-/// - `rest`: RestDiscovery 运行时配置。
+/// 参数说明：
+/// - `rest`：RestDiscovery 运行时配置。
+///
+/// 返回：返回枚举已解析并通过各局部映射检查的选项；遇到非法值返回错误。不执行完整运行时 validate，重试预算和部分时长边界由初始化入口继续检查。
 fn map_rest_options(rest: &RestConfig) -> anyhow::Result<RestDiscoveryOptions> {
     let mut o = RestDiscoveryOptions::new();
     if rest.heuristic_http {
@@ -846,10 +874,12 @@ fn map_rest_options(rest: &RestConfig) -> anyhow::Result<RestDiscoveryOptions> {
     Ok(o)
 }
 
-/// 业务作用：解析 parse scheme policy 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用：解析外部 URL 转发到实例时的协议策略。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：来自配置的策略名称。
+///
+/// 返回：先去除首尾空白并转为 ASCII 小写；空值或 preserve 返回 Preserve；force_http、force_https 返回对应策略；其它值返回配置错误。
 fn parse_scheme_policy(s: &str) -> anyhow::Result<SchemePolicy> {
     match s.trim().to_ascii_lowercase().as_str() {
         "" | "preserve" => Ok(SchemePolicy::Preserve),
@@ -861,10 +891,12 @@ fn parse_scheme_policy(s: &str) -> anyhow::Result<SchemePolicy> {
     }
 }
 
-/// 业务作用：解析 parse instance scheme 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用：解析显式内部服务调用的默认实例协议。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：来自配置的策略名称。
+///
+/// 返回：先去除首尾空白并转为 ASCII 小写；空值或 http 返回 Http，https 返回 Https；其它值返回配置错误。
 fn parse_instance_scheme(s: &str) -> anyhow::Result<InstanceScheme> {
     match s.trim().to_ascii_lowercase().as_str() {
         "" | "http" => Ok(InstanceScheme::Http),
@@ -877,10 +909,12 @@ fn parse_instance_scheme(s: &str) -> anyhow::Result<InstanceScheme> {
     }
 }
 
-/// 业务作用：解析 parse startup 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用：解析服务名启发式索引的启动策略。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：来自配置的策略名称。
+///
+/// 返回：先去除首尾空白并转为 ASCII 小写；空值、require_initial_service_list_when_heuristic_enabled 或 require_initial 要求初始列表，allow_empty_service_index 或 allow_empty 允许空索引；其它值返回配置错误。
 fn parse_startup(s: &str) -> anyhow::Result<StartupPolicy> {
     match s.trim().to_ascii_lowercase().as_str() {
         "" | "require_initial_service_list_when_heuristic_enabled" | "require_initial" => {
@@ -895,11 +929,12 @@ fn parse_startup(s: &str) -> anyhow::Result<StartupPolicy> {
     }
 }
 
-/// 业务作用：`removed_service_grace_ms` 与 `refresh_interval_ms` 同样要求 `> 0`(0 没有「最快两轮移除」之外的合理语义,
-/// 且与 `poll_interval_ms` 一致),非法即 fail-fast。
+/// 业务作用：转换启发式服务名索引的刷新周期和移除宽限。
 ///
-/// # 参数
-/// - `heuristic`: yml 中 `rest_discovery.rest.heuristic` 的刷新和移除宽限配置。
+/// 参数说明：
+/// - `heuristic`：yml 中 `rest_discovery.rest.heuristic` 的刷新和移除宽限配置。
+///
+/// 返回：返回保留缺省并应用显式值的选项；显式刷新周期或移除宽限为零时失败，较大时长留给运行时完整校验。
 fn map_heuristic(heuristic: &HeuristicConfig) -> anyhow::Result<RestHeuristicOptions> {
     let mut o = RestHeuristicOptions::new();
     if let Some(ms) = heuristic.refresh_interval_ms {
@@ -919,10 +954,12 @@ fn map_heuristic(heuristic: &HeuristicConfig) -> anyhow::Result<RestHeuristicOpt
     Ok(o)
 }
 
-/// 业务作用：解析 parse service match 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用：解析服务名与 URL 主机名的大小写匹配规则。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：来自配置的策略名称。
+///
+/// 返回：先去除首尾空白并转为 ASCII 小写；空值或 case_insensitive 返回忽略大小写模式，case_sensitive 返回精确模式；其它值返回配置错误。
 fn parse_service_match(s: &str) -> anyhow::Result<ServiceMatchMode> {
     match s.trim().to_ascii_lowercase().as_str() {
         "" | "case_insensitive" => Ok(ServiceMatchMode::CaseInsensitive),
@@ -933,10 +970,12 @@ fn parse_service_match(s: &str) -> anyhow::Result<ServiceMatchMode> {
     }
 }
 
-/// 业务作用：解析 parse lb strategy 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用：解析客户端负载均衡算法选择。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：来自配置的策略名称。
+///
+/// 返回：先去除首尾空白并转为 ASCII 小写；空值或 round_robin 返回轮询，weighted 返回加权模式；其它值返回配置错误。
 fn parse_lb_strategy(s: &str) -> anyhow::Result<LbStrategy> {
     match s.trim().to_ascii_lowercase().as_str() {
         "" | "round_robin" => Ok(LbStrategy::RoundRobin),
@@ -947,10 +986,12 @@ fn parse_lb_strategy(s: &str) -> anyhow::Result<LbStrategy> {
     }
 }
 
-/// 业务作用：解析 parse unknown host 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用：解析启发式索引未识别主机时的处理策略。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：来自配置的策略名称。
+///
+/// 返回：先去除首尾空白并转为 ASCII 小写；空值或 external_http 允许外部直连，error 返回拒绝策略；其它值返回配置错误。
 fn parse_unknown_host(s: &str) -> anyhow::Result<UnknownHostPolicy> {
     match s.trim().to_ascii_lowercase().as_str() {
         "" | "external_http" => Ok(UnknownHostPolicy::ExternalHttp),
@@ -961,10 +1002,12 @@ fn parse_unknown_host(s: &str) -> anyhow::Result<UnknownHostPolicy> {
     }
 }
 
-/// 业务作用：解析 parse no instance 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用：解析服务无流量实例时的处理策略。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：来自配置的策略名称。
+///
+/// 返回：先去除首尾空白并转为 ASCII 小写；空值或 error 返回报错策略，stale_if_discovery_error 返回允许发现失败时使用旧值的策略；其它值返回配置错误。
 fn parse_no_instance(s: &str) -> anyhow::Result<NoInstancePolicy> {
     match s.trim().to_ascii_lowercase().as_str() {
         "" | "error" => Ok(NoInstancePolicy::Error),
@@ -975,10 +1018,12 @@ fn parse_no_instance(s: &str) -> anyhow::Result<NoInstancePolicy> {
     }
 }
 
-/// 业务作用：映射 watch 配置；用于转换为运行时需要的类型。
+/// 业务作用：转换实例监听的容量、轮询、缓存与重建退避配置。
 ///
-/// # 参数
-/// - `watch`: yml 中 `rest_discovery.rest.watch` 的轮询和退避配置。
+/// 参数说明：
+/// - `watch`：yml 中 `rest_discovery.rest.watch` 的轮询和退避配置。
+///
+/// 返回：返回覆盖显式字段后的选项；订阅容量越界、轮询为零、重建退避为零或最小值大于最大值时失败。TTL 与旧值容忍可为零，完整时长范围由运行时继续校验。
 fn map_watch(watch: &WatchConfig) -> anyhow::Result<RestWatchOptions> {
     let mut o = RestWatchOptions::new();
     if let Some(max_services) = watch.max_services {
@@ -1029,10 +1074,12 @@ fn map_watch(watch: &WatchConfig) -> anyhow::Result<RestWatchOptions> {
     Ok(o)
 }
 
-/// 业务作用：映射 retry 配置；用于转换为运行时需要的类型。
+/// 业务作用：转换幂等请求的重试触发条件及每服务预算。
 ///
-/// # 参数
-/// - `retry`: yml 中 `rest_discovery.rest.retry` 的幂等重试策略。
+/// 参数说明：
+/// - `retry`：yml 中 `rest_discovery.rest.retry` 的幂等重试策略。
+///
+/// 返回：状态重试开关优先，启用时也允许网络错误重试；否则按网络开关选择，仅在启用时使用尝试数和预算配置。都关闭时返回禁用选项，预算合法性由运行时校验。
 fn map_retry(retry: &RetryConfig) -> RetryOptions {
     if retry.get_head_on_retryable_status {
         RetryOptions::get_head_on_transient_failure(
@@ -1051,10 +1098,12 @@ fn map_retry(retry: &RetryConfig) -> RetryOptions {
     }
 }
 
-/// 业务作用：映射 http 配置；用于转换为运行时需要的类型。
+/// 业务作用：转换出站请求整体超时与连接超时。
 ///
-/// # 参数
-/// - `http`: yml 中 `rest_discovery.rest.http` 的请求总超时和连接超时配置。
+/// 参数说明：
+/// - `http`：yml 中 `rest_discovery.rest.http` 的请求总超时和连接超时配置。
+///
+/// 返回：返回应用显式超时后的选项；显式请求或连接超时为零时失败，上界由运行时继续校验。
 fn map_http(http: &HttpConfig) -> anyhow::Result<RestHttpOptions> {
     let mut o = RestHttpOptions::new();
     if let Some(ms) = http.timeout_ms {

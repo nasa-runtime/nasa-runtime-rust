@@ -119,7 +119,8 @@ pub type ParticipantRuntime = PgParticipantRuntime;
 
 /// 业务作用：在指定 PostgreSQL 事务域中建立并复验 Orchestrator 独占的 Saga、result Inbox 与 command Outbox 持久结构。
 ///
-/// 参数说明：`datasource` 是 Application 已冻结的 PostgreSQL datasource qualifier。
+/// 参数说明：
+/// - `datasource`：是 Application 已冻结的 PostgreSQL datasource qualifier。
 ///
 /// 返回：全部结构可用时成功；连接、DDL 或最终结构门禁失败时返回错误。
 pub async fn ensure_orchestrator_schema_for(datasource: &str) -> anyhow::Result<()> {
@@ -135,7 +136,8 @@ pub async fn ensure_orchestrator_schema_for(datasource: &str) -> anyhow::Result<
 
 /// 业务作用：在指定 PostgreSQL 事务域中建立并复验 participant gate、command Inbox 与 result Outbox 持久结构。
 ///
-/// 参数说明：`datasource` 是 participant binding 唯一绑定的 PostgreSQL datasource qualifier。
+/// 参数说明：
+/// - `datasource`：是 participant binding 唯一绑定的 PostgreSQL datasource qualifier。
 ///
 /// 返回：全部本地事务结构可用时成功；任一结构不可用时返回错误。
 pub async fn ensure_participant_schema_for(datasource: &str) -> anyhow::Result<()> {
@@ -151,7 +153,8 @@ pub async fn ensure_participant_schema_for(datasource: &str) -> anyhow::Result<(
 
 /// 业务作用：在角色事务域中建立跨副本共享的 HTTP nonce 一次性裁决表。
 ///
-/// 参数说明：`connection` 是持有当前 database/schema 自举锁的连接。
+/// 参数说明：
+/// - `connection`：是持有当前 database/schema 自举锁的连接。
 ///
 /// 返回：表与过期索引可用时成功；DDL 权限或结构冲突返回错误并阻止 Ready。
 async fn ensure_http_replay_schema(connection: &mut natx_pgsql::PgConn) -> anyhow::Result<()> {
@@ -271,7 +274,8 @@ pub async fn claim_http_replay_for(
 
 /// 业务作用：在目标 PostgreSQL database/schema 范围内取得跨进程 advisory lock，使多副本 DDL 串行化。
 ///
-/// 参数说明：`datasource` 是已冻结的 PostgreSQL qualifier。
+/// 参数说明：
+/// - `datasource`：是已冻结的 PostgreSQL qualifier。
 ///
 /// 返回：取得 database/schema 级 session lock 时返回持锁连接；连接或锁操作失败时返回错误。
 async fn acquire_schema_lock(datasource: &str) -> anyhow::Result<natx_pgsql::PgConn> {
@@ -289,7 +293,8 @@ async fn acquire_schema_lock(datasource: &str) -> anyhow::Result<natx_pgsql::PgC
 
 /// 业务作用：在全部结构复验成功后显式释放 PostgreSQL schema 自举权。
 ///
-/// 参数说明：`connection` 是取得 advisory lock 的同一 session。
+/// 参数说明：
+/// - `connection`：是取得 advisory lock 的同一 session。
 ///
 /// 返回：服务端确认释放时成功；持有权已丢失或往返失败时返回错误。
 async fn release_schema_lock(connection: &mut natx_pgsql::PgConn) -> anyhow::Result<()> {
@@ -306,7 +311,10 @@ async fn release_schema_lock(connection: &mut natx_pgsql::PgConn) -> anyhow::Res
 pub trait PgSagaCommandService: Send + Sync + 'static {
     /// 业务作用：把已认证命令交给 PostgreSQL Participant 的完整本地事务。
     ///
-    /// 参数说明：`runtime` 是 PostgreSQL 参与方运行时，`envelope` 是命令，`producer` 是可信来源映射的身份。
+    /// 参数说明：
+    /// - `runtime`：是 PostgreSQL 参与方运行时
+    /// - `envelope`：是命令
+    /// - `producer`：是可信来源映射的身份。
     ///
     /// 返回：本地事务提交后返回可确认结论；合同、业务或基础设施失败返回错误。
     fn handle_saga_command<'a>(
@@ -318,9 +326,13 @@ pub trait PgSagaCommandService: Send + Sync + 'static {
 
     /// 业务作用：在同一参与方事务中携带已验证收据链路上下文。
     ///
-    /// 参数说明：前三项与无 trace 入口一致，`receipt_trace` 是可选受信收据上下文。
+    /// 参数说明：
+    /// - `runtime`：绑定 PostgreSQL 本地事务能力的参与方运行时。
+    /// - `envelope`：已认证且仍需业务合同复验的命令 envelope。
+    /// - `producer`：transport 从可信凭据映射的编排服务身份。
+    /// - `receipt_trace`：可选且已经验证的命令收据因果上下文。
     ///
-    /// 返回：语义与 [`PgSagaCommandService::handle_saga_command`] 一致。
+    /// 返回：默认实现忽略 receipt_trace 并直接委托无 trace 入口，返回其 future；需要传播 trace 的实现必须覆盖本方法。结果与事务语义由实际 Service 入口保证。
     fn handle_saga_command_traced<'a>(
         &'a self,
         runtime: &'a PgParticipantRuntime,
@@ -384,11 +396,13 @@ pub static COLLECTED_MANAGED_PGSQL_SAGA_STEPS: [ManagedSagaStepFactory];
 /// PostgreSQL 受管步骤工厂目录；与 MySQL 目录隔离,宏登记和运行时读取使用同一目录。
 pub use COLLECTED_MANAGED_PGSQL_SAGA_STEPS as COLLECTED_MANAGED_SAGA_STEPS;
 
-/// 业务作用：把 `Default` 构造的业务 Service 与 PostgreSQL Participant runtime 绑定为受管 handler。
+/// 业务作用：把已构造的业务 Service 与 PostgreSQL Participant runtime 绑定为受管 handler。
 ///
-/// 参数说明：`runtime` 持有同源本地事务能力，`service` 是宏声明的业务步骤实现。
+/// 参数说明：
+/// - `runtime`：需要与 service 绑定的共享参与方运行时。
+/// - `service`：调用方已经构造好的业务步骤实现。
 ///
-/// 返回：不暴露具体 Service 类型的共享 handler。
+/// 返回：返回保存给定 runtime 和 service 的共享类型擦除适配，不调用 Default、不验证资源同源性或执行命令。
 #[doc(hidden)]
 pub fn managed_saga_step_handler<S>(
     runtime: std::sync::Arc<ParticipantRuntime>,
@@ -397,7 +411,10 @@ pub fn managed_saga_step_handler<S>(
 where
     S: PgSagaCommandService,
 {
-    std::sync::Arc::new(ManagedSagaCommandHandlerAdapter { runtime, service })
+    std::sync::Arc::new(ManagedSagaCommandHandlerAdapter {
+        runtime,
+        service,
+    })
 }
 
 /// 业务作用：保存受管 PostgreSQL Participant runtime 与单个类型化业务 Service。
@@ -454,11 +471,16 @@ pub struct ParticipantCommandHandler<S> {
 impl<S> ParticipantCommandHandler<S> {
     /// 业务作用：绑定 PostgreSQL 参与方运行时与类型化 Saga Service，不启动消费任务。
     ///
-    /// 参数说明：`runtime` 持有同源事务能力，`service` 持有精确步骤分发合同。
+    /// 参数说明：
+    /// - `runtime`：持有同源事务能力
+    /// - `service`：持有精确步骤分发合同。
     ///
     /// 返回：可交给任一已编入 connector 的轻量 handler。
     pub fn new(runtime: std::sync::Arc<PgParticipantRuntime>, service: std::sync::Arc<S>) -> Self {
-        Self { runtime, service }
+        Self {
+            runtime,
+            service,
+        }
     }
 }
 
@@ -471,6 +493,12 @@ impl<S: PgSagaCommandService> nasaga_runtime_core::SagaCommandHandler
     for ParticipantCommandHandler<S>
 {
     /// 业务作用：把已认证 command 交给 PostgreSQL 参与方的完整本地事务。
+    ///
+    /// 参数说明：
+    /// - `envelope`：已认证且仍需业务合同复验的命令 envelope。
+    /// - `producer`：transport 从可信凭据映射的编排服务身份。
+    ///
+    /// 返回：等待 Service 处理并原样传播结论或错误；本适配不再次认证 transport 或自行开启事务，提交错误可能代表结果未知。
     async fn handle_authenticated_command(
         &self,
         envelope: &SagaCommandEnvelope,
@@ -482,6 +510,13 @@ impl<S: PgSagaCommandService> nasaga_runtime_core::SagaCommandHandler
     }
 
     /// 业务作用：把已验证收据 trace 与 command 一并交给 PostgreSQL 参与方事务。
+    ///
+    /// 参数说明：
+    /// - `envelope`：已认证且仍需业务合同复验的命令 envelope。
+    /// - `producer`：transport 从可信凭据映射的编排服务身份。
+    /// - `receipt_trace`：可选且已经验证的命令收据因果上下文。
+    ///
+    /// 返回：将 trace 一并委托并传播结论或错误；Service 默认实现可能忽略 trace，不在本适配中单独开启或提交事务。
     async fn handle_authenticated_command_traced(
         &self,
         envelope: &SagaCommandEnvelope,

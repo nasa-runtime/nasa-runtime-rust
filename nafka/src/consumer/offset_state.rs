@@ -70,6 +70,10 @@ pub(crate) enum OffsetStateError {
 
 impl OffsetStateError {
     /// 业务作用：判断错误是否只是 outcome permit 暂时不足，而不是 offset/epoch 不变量破坏。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：分区或组进度容量不足时为 true，其它错误为 false；不释放额度或决定实际恢复时机。
     pub(crate) fn is_capacity(&self) -> bool {
         matches!(
             self,
@@ -127,6 +131,10 @@ impl RecordOutcome {
     /// 业务作用：是否可被提交越过:已确认 / 已跳过 / 已入死信为安全;失败与未处理为不安全。
     ///
     /// 这是整条水位规则唯一的分类点。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：确认、安全跳过或死信交付成功为 true；失败或未处理为 false，本判断不证明结果仍属于当前分配代次。
     fn is_safe(self) -> bool {
         matches!(
             self,
@@ -167,7 +175,7 @@ pub(crate) struct PartitionOffsetState {
 impl PartitionOffsetState {
     /// 业务作用：在 assignment 时用起始位点初始化。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `committed`: broker 已确认的 next-offset；没有提交历史时为 `None`。
     /// - `resolved_start`: 底层按重置策略解析后的实际读取起点；必须是非负 offset。
@@ -175,6 +183,8 @@ impl PartitionOffsetState {
     /// # 错误
     ///
     /// `committed` 或 `resolved_start` 为负数时返回不变量错误。
+    ///
+    /// 返回：没有未提交观察的分区状态；存在 committed 时以其为基线，否则使用 resolved_start，不查询或写入 broker。
     pub(crate) fn new(committed: Option<i64>, resolved_start: i64) -> OffsetResult<Self> {
         if committed.is_some_and(|offset| offset < 0) || resolved_start < 0 {
             return Err(OffsetStateError::InvalidCommitConfirmation {
@@ -190,6 +200,10 @@ impl PartitionOffsetState {
     }
 
     /// 业务作用：返回 broker 已确认的 next offset。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：初始化或提交确认时保存的本地提交证据；None 表示尚无确认历史，不代表读取位置为零。
     #[allow(dead_code)]
     pub(crate) fn last_confirmed(&self) -> Option<i64> {
         self.last_confirmed
@@ -197,7 +211,7 @@ impl PartitionOffsetState {
 
     /// 业务作用：记录一条已处理记录的结果。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `assignment_epoch`: 观察发生时的 epoch;必须与本 in_flight 一致(rebalance 后 poll_task 先 reset)。
     /// - `offset`: 记录真实 offset;必须严格大于上一条观察 offset(允许与其相差多于 1,即 gap)。
@@ -206,6 +220,8 @@ impl PartitionOffsetState {
     /// # 错误
     ///
     /// epoch 不一致或 offset 没有严格递增时返回框架不变量错误；调用方必须 Halt，不能继续提交。
+    ///
+    /// 返回：合法结果追加到当前代次进度；代次或顺序不符时拒绝追加，本层不检查容量或执行提交。
     pub(crate) fn observe(
         &mut self,
         assignment_epoch: u64,
@@ -216,6 +232,7 @@ impl PartitionOffsetState {
             assignment_epoch,
             observed: Vec::new(),
         });
+        // 旧分配结果不能混入新分配的安全前沿，代次不一致必须在追加前拒绝。
         if progress.assignment_epoch != assignment_epoch {
             return Err(OffsetStateError::EpochMismatch {
                 expected: progress.assignment_epoch,
@@ -230,20 +247,25 @@ impl PartitionOffsetState {
                 });
             }
         }
-        progress.observed.push(ObservedOutcome { offset, outcome });
+        progress.observed.push(ObservedOutcome {
+            offset,
+            outcome,
+        });
         Ok(())
     }
 
     /// 业务作用：在不修改状态的前提下校验一个连续交付 run 能否原子接纳。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `assignment_epoch`: run 所属 assignment epoch。
-    /// - `offsets`: 按 broker 交付顺序排列的非空真实 offsets；允许数值 gap。
+    /// - `offsets`：按 broker 交付顺序排列的真实 offsets，允许数值空洞；空切片只检查已有代次。
     ///
     /// # 错误
     ///
     /// epoch 失配或 offset 没有相对当前状态严格递增时返回错误。
+    ///
+    /// 返回：整段能延续当前代次和严格递增顺序时成功；无论结果如何都不追加观察或占用进度容量。
     fn validate_run(&self, assignment_epoch: u64, offsets: &[i64]) -> OffsetResult<()> {
         if let Some(progress) = &self.in_flight {
             if progress.assignment_epoch != assignment_epoch {
@@ -276,6 +298,10 @@ impl PartitionOffsetState {
     ///
     /// 规则见模块头:首个不安全 offset,或全安全时的末尾 offset + 1;并要求结果严格大于 last_confirmed
     /// 才有提交意义(否则本批没有推进已确认位点)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：严格超过已确认位置或初始基线的安全 next-offset；没有进展为 None，末尾加一溢出为错误，不更新本地或 broker 状态。
     pub(crate) fn committable_next(&self) -> OffsetResult<Option<i64>> {
         let Some(progress) = self.in_flight.as_ref() else {
             return Ok(None);
@@ -296,6 +322,10 @@ impl PartitionOffsetState {
     /// 业务作用：返回失败重投的起点(首个不安全 offset);`None` 表示本批无失败记录。
     ///
     /// poll_task 据此 seek 回该 offset 重投,并让其后尚未派发的预取记录重新拉取。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前观察序列中首个失败或未处理记录的真实 offset；无此记录为 None，本方法不会执行 seek 或清理观察。
     #[allow(dead_code)]
     pub(crate) fn retry_from(&self) -> Option<i64> {
         let progress = self.in_flight.as_ref()?;
@@ -308,18 +338,21 @@ impl PartitionOffsetState {
 
     /// 业务作用：broker 同步 commit 成功后调用:推进 last_confirmed 并裁剪已提交的观察记录。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `next_offset`: 已成功提交的 next-offset(应来自本状态机的 [`Self::committable_next`])。
     ///
     /// 裁剪保留 `offset >= next_offset` 的记录:例如提交到首个不安全 offset 时,该失败记录仍留在
     /// observed 里参与后续重投判定;全安全提交(next=末尾+1)时全部裁完,in_flight 清空。
-    /// 这样 observed 的常数上限由"commit 后即裁剪"保证,失败时不继续扩大。
+    /// 裁剪释放已确认前缀的本地存储；未提交结果的硬容量由组级准入检查保证。
     /// # 错误
     ///
     /// `next_offset` 不是调用当下的唯一安全前沿时返回不变量错误，状态保持不变。
+    ///
+    /// 返回：更新已确认位置及基线并裁剪前缀；本函数信任调用方已有 broker 成功证据，不自行执行或核实远端提交。
     pub(crate) fn confirm_committed(&mut self, next_offset: i64) -> OffsetResult<()> {
         let expected = self.committable_next()?;
+        // 只能确认当前唯一安全前沿，拒绝跳过未处理记录或使用过期提交结果。
         if expected != Some(next_offset) {
             return Err(OffsetStateError::InvalidCommitConfirmation {
                 expected,
@@ -342,11 +375,19 @@ impl PartitionOffsetState {
     /// 业务作用：清空当前 epoch 的进行中进度(rebalance 收回分区或作废本地 progress 时用)。
     ///
     /// 只丢弃未提交的观察进度,不改动 last_confirmed(broker 已确认的位点由新 owner 重放继续)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：进行中观察被丢弃，基线与已确认位置保持；不提交、回滚或重新定位 broker 消费位置。
     pub(crate) fn reset(&mut self) {
         self.in_flight = None;
     }
 
     /// 业务作用：当前进行中观察记录数,供 per-partition 容量上限计量。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仍未裁剪的安全和不安全结果总数；没有进行中观察时为零，不等同于尚未执行业务的消息数。
     pub(crate) fn observed_len(&self) -> usize {
         self.in_flight
             .as_ref()
@@ -354,6 +395,10 @@ impl PartitionOffsetState {
     }
 
     /// 业务作用：当前是否存在不安全（失败 / 未处理）的已观察记录。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：至少有一条结果尚不能被提交越过时为 true；无观察或全部安全时为 false，不触发重试。
     fn has_unsafe_observation(&self) -> bool {
         self.in_flight.as_ref().is_some_and(|progress| {
             progress
@@ -381,7 +426,12 @@ pub(crate) struct GroupOffsetState {
 
 impl GroupOffsetState {
     /// 业务作用：识别维护回退后重复取到的已安全输入，避免再次调用业务或重复登记进度。
-    /// 参数说明：tp、offset 为原始消息坐标；assignment_epoch 为当前派发权威。
+    ///
+    /// 参数说明：
+    /// - `tp`：原始消息所属分区，用于查找该分区的提交证据。
+    /// - `assignment_epoch`：assignment_epoch 为当前派发权威。
+    /// - `offset`：待判断记录的真实 offset；已提交边界以下不需要再次登记业务结果。
+    ///
     /// 返回：broker 已确认覆盖，或同一代次已登记安全结果时为 true；失败、未知和失效证据仍须重投。
     pub(crate) fn already_safe(&self, tp: &Tp, assignment_epoch: u64, offset: i64) -> bool {
         let Some(state) = self.partitions.get(tp) else {
@@ -401,7 +451,9 @@ impl GroupOffsetState {
 
     /// 业务作用：读取 broker 已确认的边界，用于裁剪压缩空洞中残留的本地完成证据。
     ///
-    /// 参数说明：`tp` 为当前 assignment 的分区身份。
+    /// 参数说明：
+    /// - `tp`：`tp` 为当前 assignment 的分区身份。
+    ///
     /// 返回：已由 broker 确认的 next-offset；没有确认历史时为 None。
     pub(crate) fn confirmed_offset(&self, tp: &Tp) -> Option<i64> {
         self.partitions
@@ -411,10 +463,12 @@ impl GroupOffsetState {
 
     /// 业务作用：构造带双层容量上限的 group 状态。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `max_partition_records`: 每分区最大未裁剪结果数。
     /// - `max_group_records`: group 跨分区最大未裁剪结果数。
+    ///
+    /// 返回：尚无分区和结果的本地协调器；零上限允许构造但会拒绝任何非空观察，不分配 Kafka 资源。
     pub(crate) fn new(max_partition_records: usize, max_group_records: usize) -> Self {
         Self {
             partitions: BTreeMap::new(),
@@ -428,7 +482,7 @@ impl GroupOffsetState {
     ///
     /// 容量检查先于状态修改；任一门禁失败都不会留下半条 progress。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `tp`: 记录所属分区。
     /// - `assignment_epoch`: 当前 assignment epoch。
@@ -438,6 +492,8 @@ impl GroupOffsetState {
     /// # 错误
     ///
     /// 容量超限、epoch 失配或 offset 未递增时返回不变量错误。
+    ///
+    /// 返回：接纳成功后分区观察和组总数各增加一条；失败不登记结果，首次分区以该条非负 offset 建立基线。
     pub(crate) fn observe(
         &mut self,
         tp: &Tp,
@@ -449,6 +505,7 @@ impl GroupOffsetState {
             .partitions
             .get(tp)
             .map_or(0, PartitionOffsetState::observed_len);
+        // 两层容量均通过后才创建分区或追加结果，避免拒绝输入仍占用半份进度。
         if partition_len >= self.max_partition_records {
             return Err(OffsetStateError::PartitionProgressFull {
                 tp: tp.clone(),
@@ -476,7 +533,7 @@ impl GroupOffsetState {
     /// 容量、epoch 与 offset 顺序全部预校验成功后才写入，避免批 handler 的部分 outcome
     /// 进入水位而剩余项因容量不足丢失。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `tp`: run 所属分区。
     /// - `assignment_epoch`: 当前 assignment epoch。
@@ -485,6 +542,8 @@ impl GroupOffsetState {
     /// # 错误
     ///
     /// run 为空直接成功；容量超限、epoch 失配或 offset 未递增时返回错误且状态不变。
+    ///
+    /// 返回：非空批次通过全部预检后完整追加并更新组计数；空批次无副作用，任何预检失败均不发布部分结果。
     pub(crate) fn observe_run(
         &mut self,
         tp: &Tp,
@@ -545,6 +604,10 @@ impl GroupOffsetState {
 
     /// 业务作用：返回每个分区当前可以安全同步提交的 next-offset。
     ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只包含有新安全前沿的分区映射；任一分区计算溢出则整体返回错误，不发起提交或改变观察状态。
+    ///
     /// # 错误
     ///
     /// 任一分区的末尾 offset 无法表示 next-offset 时返回错误。
@@ -561,14 +624,17 @@ impl GroupOffsetState {
 
     /// 业务作用：在一次 broker 批量同步提交成功后原子确认并裁剪全部对应分区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `offsets`: 本次已由 broker 确认的分区 next-offset 表。
     ///
     /// # 错误
     ///
     /// 任一 offset 不等于其分区当前安全前沿时，所有状态保持不变。
+    ///
+    /// 返回：全部前沿验证通过后裁剪各分区并重算总数；空映射无状态变化，提交证据须由调用方提供，不会再访问 broker。
     pub(crate) fn confirm_committed(&mut self, offsets: &BTreeMap<Tp, i64>) -> OffsetResult<()> {
+        // 先验证整张确认表，防止后一个分区的过期结果使前一个分区已被提前裁剪。
         for (tp, offset) in offsets {
             let expected = self
                 .partitions
@@ -595,9 +661,11 @@ impl GroupOffsetState {
 
     /// 业务作用：丢弃指定分区未提交的本地进度。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `tp`: seek、失败重投或 revoke 的分区。
+    ///
+    /// 返回：目标未提交观察清空并重算总数；已确认位置及基线保留，目标不存在时无副作用。
     pub(crate) fn reset_partition(&mut self, tp: &Tp) {
         // 热失败、DLT 与 rebalance 清理只能作废本 epoch 的观察结果；broker 已确认水位是
         // 跨 epoch 的事实。删除整个条目会让下一条消息被当作新 baseline，掩盖 fetch position
@@ -610,11 +678,14 @@ impl GroupOffsetState {
 
     /// 业务作用：只保留新 assignment 仍归当前 owner 的分区，并清空它们的旧 epoch 观察。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `assigned`: 新 assignment 集合。
+    ///
+    /// 返回：不再归属的分区移除，保留分区的旧观察清空但提交基线保留；新分区不在此创建，总数重新汇总。
     pub(crate) fn reset_for_assignment(&mut self, assigned: &[Tp]) {
         let assigned: BTreeSet<&Tp> = assigned.iter().collect();
+        // 新代次不能继承旧代次的未提交结果，失去归属的分区连同本地提交缓存一起移除。
         self.partitions.retain(|tp, state| {
             if assigned.contains(tp) {
                 state.reset();
@@ -627,13 +698,20 @@ impl GroupOffsetState {
     }
 
     /// 业务作用：清空全部本地进度；用于显式重订阅、取消订阅和 restart。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：分区状态及总计数清空，旧基线不再参与新读取周期；不删除 broker 提交历史或执行 seek。
     pub(crate) fn clear(&mut self) {
         self.partitions.clear();
         self.observed_total = 0;
     }
 
     /// 业务作用：人工定位为一个分区建立独立的新读取坐标，保留其它分区责任。
-    /// 参数说明：tp 为显式定位目标。
+    ///
+    /// 参数说明：
+    /// - `tp`：tp 为显式定位目标。
+    ///
     /// 返回：目标的旧 baseline 与本地观察被释放；其它分区安全前沿不变。
     pub(crate) fn clear_partition(&mut self, tp: &Tp) {
         self.partitions.remove(tp);
@@ -641,12 +719,19 @@ impl GroupOffsetState {
     }
 
     /// 业务作用：返回当前未裁剪结果总数，作为按记录数触发 commit 的计量值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：所有分区已登记但尚未裁剪的结果数量，包含安全与失败结果，不表示当前可提交条数。
     pub(crate) fn observed_total(&self) -> usize {
         self.observed_total
     }
 
     /// 业务作用：定位前检查目标是否仍承担未提交的本地消费责任。
-    /// 参数说明：tp 为显式控制目标。
+    ///
+    /// 参数说明：
+    /// - `tp`：tp 为显式控制目标。
+    ///
     /// 返回：还有观察记录时为 true；不能因其它分区已经提交而解除本目标门禁。
     pub(crate) fn has_partition_observations(&self, tp: &Tp) -> bool {
         self.partitions
@@ -655,6 +740,10 @@ impl GroupOffsetState {
     }
 
     /// 业务作用：判断 group outcome permit 是否至少释放出一个位置。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：未裁剪总量低于组上限时为 true；不检查单分区上限，也不为后续结果预留容量。
     pub(crate) fn has_group_capacity(&self) -> bool {
         self.observed_total < self.max_group_records
     }
@@ -668,9 +757,11 @@ impl GroupOffsetState {
     /// 但也**不能**要求"每个分区都有余"：门禁会暂停全部分区，只要有任意一个分区卡在上限
     /// （例如已 Halt 且前沿无法推进），整组就再也无法恢复——把空转升级成了全组死锁。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `trigger`: 触发反压的分区；`None` 表示只按 group 总量裁决。
+    ///
+    /// 返回：组有余量且已登记的触发分区也有余量时为 true；触发分区不存在时仅按组裁决，实际接纳仍须重新检查容量。
     pub(crate) fn has_dispatch_capacity(&self, trigger: Option<&Tp>) -> bool {
         if !self.has_group_capacity() {
             return false;
@@ -684,8 +775,11 @@ impl GroupOffsetState {
 
     /// 业务作用：是否存在已观察但不安全（失败 / 未处理）的记录，即"空洞仍在"。
     ///
-    /// 规则 5 用它区分「等待重试/DLT 收尾的正常反压」与「满且无任何可推进理由」
-    /// 的框架不变量破坏。
+    /// 背压流程据此区分仍有失败记录等待处理和没有失败空洞的容量停滞。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：任一分区存在失败或未处理观察时为 true；不证明该记录已经安排重试或死信交付。
     pub(crate) fn has_pending_gap(&self) -> bool {
         self.partitions
             .values()
@@ -693,6 +787,10 @@ impl GroupOffsetState {
     }
 
     /// 业务作用：重新汇总总结果数；只在提交裁剪或显式清理后调用。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：组总数与当前各分区未裁剪结果一致；不修改分区水位或额外接纳输入。
     fn recount(&mut self) {
         self.observed_total = self
             .partitions
@@ -704,11 +802,11 @@ impl GroupOffsetState {
 
 /// 业务作用：计算一段严格递增观察序列的提交上界(next-offset)。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `observed`: 非空、按 offset 严格递增的观察序列。
 ///
-/// 返回首个不安全 offset;若全部安全,返回末尾 offset + 1。
+/// 返回：首个不安全记录的 offset，或全部安全时的末尾 offset 加一；加一溢出返回错误，空序列违反内部前置条件并 panic。
 fn frontier_of(observed: &[ObservedOutcome]) -> OffsetResult<i64> {
     for entry in observed {
         if !entry.outcome.is_safe() {
@@ -723,5 +821,7 @@ fn frontier_of(observed: &[ObservedOutcome]) -> OffsetResult<i64> {
         .offset;
     offset
         .checked_add(1)
-        .ok_or(OffsetStateError::NextOffsetOverflow { offset })
+        .ok_or(OffsetStateError::NextOffsetOverflow {
+            offset,
+        })
 }

@@ -22,15 +22,26 @@ pub struct HttpResponse {
 
 impl HttpTransport {
     /// 业务作用：创建独立连接池并限定响应大小及单次请求期限。
-    /// 参数说明：`timeout` 是传输上限，`max_bytes` 是解码前字节上限，`ca_pem` 为可选受信 CA。
+    ///
+    /// 参数说明：
+    /// - `timeout`：是传输上限
+    /// - `max_bytes`：是解码前字节上限
+    /// - `ca_pem`：为可选受信 CA。
+    ///
     /// 返回：TLS 证书校验开启的传输；非法 CA 或预算失败。
     pub fn new(timeout: Duration, max_bytes: usize, ca_pem: Option<&[u8]>) -> Result<Self> {
         Self::with_identity(timeout, max_bytes, ca_pem, None)
     }
 
-    /// 业务作用：为需要双向 TLS 的控制面配置显式客户端证书。
-    /// 参数说明：`timeout`、`max_bytes` 限制操作，`ca_pem` 为服务端 CA，`identity_pem` 包含客户端证书和私钥。
-    /// 返回：只使用指定认证材料的连接池，证书无效时拒绝。
+    /// 业务作用：创建受超时和字节限额约束的控制面连接池，并可配置显式双向 TLS 身份。
+    ///
+    /// 参数说明：
+    /// - `timeout`：非零单次请求及建连超时。
+    /// - `max_bytes`：完整响应正文上限，须为 1 字节到 64 MiB。
+    /// - `ca_pem`：可选 PEM 根证书集合；显式提供时关闭内建根证书。
+    /// - `identity_pem`：可选的客户端证书与私钥 PEM，用于双向 TLS。
+    ///
+    /// 返回：限额及证书有效时返回不使用环境代理或重定向的传输；无效限额、证书或连接池构造失败返回 InvalidConfig，不发起网络请求。
     pub fn with_identity(
         timeout: Duration,
         max_bytes: usize,
@@ -80,9 +91,13 @@ impl HttpTransport {
         })
     }
 
-    /// 业务作用：构造一次有限控制面请求，关闭后不再发放连接池引用。
-    /// 参数说明：`method` 与 `url` 是 adapter 已确定的控制面操作。
-    /// 返回：请求构造器；不得记录包含秘密的请求对象。
+    /// 业务作用：从仍开放的连接池取得一次控制面请求构造器。
+    ///
+    /// 参数说明：
+    /// - `method`：适配器选定的 HTTP 操作。
+    /// - `url`：已由适配器确定作用域和目标的请求地址。
+    ///
+    /// 返回：连接池未关闭时返回构造器，已关闭返回 OwnerClosed；此时尚未发送请求，已发放构造器不因随后 close 自动撤销。
     pub fn request(&self, method: Method, url: Url) -> Result<RequestBuilder> {
         let client = self
             .client
@@ -95,14 +110,21 @@ impl HttpTransport {
     }
 
     /// 业务作用：读取有限响应并将 HTTP 错误映射为稳定类别。
-    /// 参数说明：`request` 是已经配置作用域及凭据的请求。
+    ///
+    /// 参数说明：
+    /// - `request`：是已经配置作用域及凭据的请求。
+    ///
     /// 返回：完整响应字节；超过上限、截断或权限失败不返回部分成功。
     pub async fn send(&self, request: RequestBuilder) -> Result<HttpResponse> {
         self.send_admitted(request, None).await
     }
 
     /// 业务作用：在实际请求首次交给传输时核对写许可，避免鉴权等待后越过撤权。
-    /// 参数说明：`request` 是最终请求，`admission` 为受管写许可；只读操作为空。
+    ///
+    /// 参数说明：
+    /// - `request`：是最终请求
+    /// - `admission`：为受管写许可；只读操作为空。
+    ///
     /// 返回：完整有限响应；撤权发生在提交前时不发出请求。
     pub async fn send_admitted(
         &self,
@@ -115,7 +137,10 @@ impl HttpTransport {
     }
 
     /// 业务作用：保留只读查询的 404 状态和有限正文，供 adapter 区分后端明确缺失与接口不可用。
-    /// 参数说明：`request` 是已限定作用域和凭据的查询。
+    ///
+    /// 参数说明：
+    /// - `request`：是已限定作用域和凭据的查询。
+    ///
     /// 返回：成功或 404 的状态码及完整有限响应；404 必须由调用方核对协议码，其他 HTTP 错误仍拒绝。
     pub async fn send_allow_not_found(
         &self,
@@ -125,7 +150,10 @@ impl HttpTransport {
     }
 
     /// 业务作用：保留只读查询的 400 状态和有限正文，供 adapter 识别后端定义的业务缺失码。
-    /// 参数说明：`request` 是已限定作用域和凭据的查询。
+    ///
+    /// 参数说明：
+    /// - `request`：是已限定作用域和凭据的查询。
+    ///
     /// 返回：成功或 400 的状态码及完整有限响应；400 必须复验协议码，权限、截断与容量错误仍拒绝。
     pub async fn send_allow_bad_request(
         &self,
@@ -135,7 +163,12 @@ impl HttpTransport {
     }
 
     /// 业务作用：在提交许可与响应限额内执行控制面请求，默认拒绝所有非成功状态。
-    /// 参数说明：`request` 为最终请求，`admission` 为可选写许可，`evidence_status` 仅保留只读入口指定的待协议复验状态。
+    ///
+    /// 参数说明：
+    /// - `request`：为最终请求
+    /// - `admission`：为可选写许可
+    /// - `evidence_status`：仅保留只读入口指定的待协议复验状态。
+    ///
     /// 返回：状态码及完整响应；拒绝、截断与超限均不发布部分证据。
     async fn send_inner(
         &self,
@@ -214,11 +247,19 @@ impl HttpTransport {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok((status, HttpResponse { headers, body }))
+        Ok((
+            status,
+            HttpResponse {
+                headers,
+                body,
+            },
+        ))
     }
 
     /// 业务作用：释放连接池持有权，禁止新的控制面操作。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已取得的请求仍须由 owner 取消或等待到截止点。
     pub fn close(&self) {
         self.client
@@ -228,7 +269,10 @@ impl HttpTransport {
     }
 
     /// 业务作用：等待一条 Kubernetes 对象变更，不把 bookmark 或连接存活当健康证据。
-    /// 参数说明：`request` 是带作用域及游标的 watch 请求；行大小受传输字节限额保护。
+    ///
+    /// 参数说明：
+    /// - `request`：是带作用域及游标的 watch 请求；行大小受传输字节限额保护。
+    ///
     /// 返回：首个对象变更触发重读；410、EOF、错误帧与超大事件返回失败。
     pub async fn wait_json_event(&self, request: RequestBuilder) -> Result<()> {
         let mut response = request
@@ -284,9 +328,11 @@ impl HttpTransport {
 }
 
 impl HttpResponse {
-    /// 业务作用：只对通过字节限额的完整响应执行结构化解码。
-    /// 参数说明：目标类型由 adapter 确定，不输出解析错误中的响应片段。
-    /// 返回：完整数据或脱敏的协议错误。
+    /// 业务作用：仅解码已经完成有限读取的控制面响应。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：正文符合目标类型时返回完整值，否则返回固定 IncompleteSnapshot；不把 serde 错误或正文放入错误，自定义 Deserialize 展开仍传播。
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
         serde_json::from_slice(&self.body).map_err(|_| {
             error(
@@ -298,7 +344,10 @@ impl HttpResponse {
 }
 
 /// 业务作用：拒绝含用户信息、查询串或片段的控制面根地址。
-/// 参数说明：`value` 为显式 HTTP(S) 地址，允许部署要求的路径前缀。
+///
+/// 参数说明：
+/// - `value`：为显式 HTTP(S) 地址，允许部署要求的路径前缀。
+///
 /// 返回：规范化 URL，不从环境推测代理或其他后端。
 pub fn base_url(value: &str) -> Result<Url> {
     let url = Url::parse(value)
@@ -319,7 +368,11 @@ pub fn base_url(value: &str) -> Result<Url> {
 }
 
 /// 业务作用：提供不会携带服务器响应正文的固定错误。
-/// 参数说明：`code` 是稳定类别，`reason` 为固定原因。
+///
+/// 参数说明：
+/// - `code`：是稳定类别
+/// - `reason`：为固定原因。
+///
 /// 返回：适配器可直接传给 owner 的失败事实。
 pub fn error(code: ErrorCode, reason: &'static str) -> DiscoveryError {
     DiscoveryError::new(code, reason)

@@ -45,13 +45,11 @@ pub struct SecretKeyMaterial {
 impl SecretKeyMaterial {
     /// 业务作用：从已经过 secret 来源合并的拥有字节建立材料。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `bytes`: 高敏感密钥字节，调用方完成来源读取后移动进容器；不得来自公开配置样例。
     ///
-    /// # 返回
-    ///
-    /// 返回 best-effort 清零容器；空材料会在 key ring 构建时拒绝。
+    /// 返回：返回 best-effort 清零容器；空材料会在 key ring 构建时拒绝。
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes: Zeroizing::new(bytes),
@@ -60,9 +58,9 @@ impl SecretKeyMaterial {
 
     /// 业务作用：在一次受控密码调用期间借用密钥字节。
     ///
-    /// # 返回
+    /// 返回：返回只读切片，生命周期不超过当前材料容器。
     ///
-    /// 返回只读切片，生命周期不超过当前材料容器。
+    /// 参数说明: 无。
     pub fn expose(&self) -> &[u8] {
         self.bytes.as_slice()
     }
@@ -71,13 +69,11 @@ impl SecretKeyMaterial {
 impl std::fmt::Debug for SecretKeyMaterial {
     /// 业务作用：只输出材料长度，防止配置错误和 panic 泄露密钥。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回脱敏后的标准格式化结果。
+    /// 返回：返回脱敏后的标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SecretKeyMaterial")
@@ -131,13 +127,11 @@ pub struct KeyEntrySpec {
 impl std::fmt::Debug for KeyEntry {
     /// 业务作用：输出非敏感元数据，不输出材料和当前调用的外部输入。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回脱敏后的标准格式化结果。
+    /// 返回：返回脱敏后的标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("KeyEntry")
@@ -152,13 +146,11 @@ impl std::fmt::Debug for KeyEntry {
 impl KeyEntry {
     /// 业务作用：建立一条由快照独占的密钥记录。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `spec`: 已完成来源合并的公开元数据、敏感材料、有效期、调用上限与代次。
     ///
-    /// # 返回
-    ///
-    /// 返回尚未注册到任何 ring 的不可变 key 记录。
+    /// 返回：返回尚未注册到任何 ring 的不可变 key 记录。
     pub fn new(spec: KeyEntrySpec) -> Self {
         Self {
             kid: spec.kid,
@@ -175,23 +167,21 @@ impl KeyEntry {
 
     /// 业务作用：借用敏感材料供单次 provider 操作使用。
     ///
-    /// # 返回
+    /// 返回：返回只读字节切片；调用方不得记录、缓存或回显。
     ///
-    /// 返回只读字节切片；调用方不得记录、缓存或回显。
+    /// 参数说明: 无。
     pub fn material(&self) -> &[u8] {
         self.material.expose()
     }
 
     /// 业务作用：在每次密码操作前原子消费一次调用配额。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `now`: 请求固定快照所使用的当前系统时间。
     /// - `for_encryption`: `true` 表示新加密，只允许 active；解密允许 active/decrypt-only。
     ///
-    /// # 返回
-    ///
-    /// key 状态、有效期和次数均允许时返回空值，否则 fail closed。
+    /// 返回：key 状态、有效期和次数均允许时返回空值，否则 fail closed。
     pub fn begin_operation(
         &self,
         now: SystemTime,
@@ -211,14 +201,12 @@ impl KeyEntry {
 
     /// 业务作用：只检查当前时间和方向是否允许使用，不消费调用次数。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `now`: 当前请求固定使用的系统时间。
     /// - `for_encryption`: `true` 时只接受 active；`false` 时也接受 decrypt-only。
     ///
-    /// # 返回
-    ///
-    /// 状态和生效窗口均允许时返回 `true`。该方法只用于候选集筛选，真正进入 provider 前仍须
+    /// 返回：状态和生效窗口均允许时返回 `true`。该方法只用于候选集筛选，真正进入 provider 前仍须
     /// 调用 [`Self::begin_operation`] 原子消费一次额度。
     fn usable_at(&self, now: SystemTime, for_encryption: bool) -> bool {
         let state_allowed = if for_encryption {
@@ -233,37 +221,38 @@ impl KeyEntry {
 
     /// 业务作用：返回当前绑定的共享调用计数器。
     ///
-    /// # 返回
+    /// 返回：返回只含原子次数、不含密钥材料的共享句柄，供运行时热更新注册表延续同一 kid 的额度。
     ///
-    /// 返回只含原子次数、不含密钥材料的共享句柄，供运行时热更新注册表延续同一 kid 的额度。
+    /// 参数说明: 无。
     pub(super) fn invocation_counter(&self) -> Arc<AtomicU64> {
         self.invocations.load_full()
     }
 
     /// 业务作用：把当前快照记录绑定到进程级共享调用计数器。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `counter`：同一 tenant、key scope 和 kid 在此前快照中持续使用的原子计数。
     ///
-    /// - `counter`: 同一 tenant、key scope 和 kid 在此前快照中持续使用的原子计数。
+    /// 返回：无返回值；原子替换本条目的共享计数器句柄，不合并旧计数、不校验 tenant/scope/kid 对应关系，调用方须绑定正确身份。
     pub(super) fn attach_invocation_counter(&self, counter: Arc<AtomicU64>) {
         self.invocations.store(counter);
     }
 
     /// 业务作用：返回当前已经消费的密码调用次数。
     ///
-    /// # 返回
+    /// 返回：返回 Acquire 读取的累计值，只用于快照发布校验和 readiness，不包含请求信息。
     ///
-    /// 返回 Acquire 读取的累计值，只用于快照发布校验和 readiness，不包含请求信息。
+    /// 参数说明: 无。
     pub(super) fn invocation_count(&self) -> u64 {
         self.invocations.load().load(Ordering::Acquire)
     }
 
     /// 业务作用：计算不暴露原始材料的固定长度密钥指纹。
     ///
-    /// # 返回
-    ///
-    /// 返回当前材料的 SHA-256 摘要，只用于阻止热更新在同一 kid 下静默替换材料；该摘要不会写入
+    /// 返回：返回当前材料的 SHA-256 摘要，只用于阻止热更新在同一 kid 下静默替换材料；该摘要不会写入
     /// 日志、指标或协议响应。
+    ///
+    /// 参数说明: 无。
     pub(super) fn material_fingerprint(&self) -> [u8; 32] {
         Sha256::digest(self.material()).into()
     }
@@ -282,13 +271,11 @@ pub struct KeyRing {
 impl std::fmt::Debug for KeyRing {
     /// 业务作用：输出非敏感 ring 摘要，不输出密钥材料。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("KeyRing")
@@ -303,15 +290,13 @@ impl std::fmt::Debug for KeyRing {
 impl KeyRing {
     /// 业务作用：从完整 key 集合建立一个有界密钥环。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `tenant_scope`: 已认证租户域或单租户固定服务域，最大 128 字节。
     /// - `key_scope`: route policy 使用的静态域，最大 128 字节。
     /// - `keys`: 同一算法合同下的 active、decrypt-only 与 retired 记录，最多 16 条。
     ///
-    /// # 返回
-    ///
-    /// 恰好一个 active 且材料合法时返回 ring；任何歧义都会拒绝启动。
+    /// 返回：恰好一个 active 且材料合法时返回 ring；任何歧义都会拒绝启动。
     pub fn new(
         tenant_scope: impl Into<Arc<str>>,
         key_scope: impl Into<Arc<str>>,
@@ -377,14 +362,12 @@ impl KeyRing {
 
     /// 业务作用：按信封显式 kid 解析可用于解密的 key。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `kid`: 经过长度和字符集检查的公开定位符，只在当前有限 ring 内查找。
     /// - `now`: 本次请求固定使用的系统时间。
     ///
-    /// # 返回
-    ///
-    /// active/decrypt-only key 可用时返回共享记录；未知或失效 key 统一返回 key 错误。
+    /// 返回：active/decrypt-only key 可用时返回共享记录；未知或失效 key 统一返回 key 错误。
     pub fn resolve_for_decrypt(
         &self,
         kid: &str,
@@ -401,13 +384,11 @@ impl KeyRing {
 
     /// 业务作用：选择当前快照唯一 active key 进行新加密。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `now`: 本次响应固定使用的系统时间。
     ///
-    /// # 返回
-    ///
-    /// active key 有效且未耗尽调用次数时返回共享记录，否则 fail closed。
+    /// 返回：active key 有效且未耗尽调用次数时返回共享记录，否则 fail closed。
     pub fn active_for_encrypt(&self, now: SystemTime) -> Result<Arc<KeyEntry>, CryptoError> {
         let key = self
             .keys
@@ -420,10 +401,10 @@ impl KeyRing {
 
     /// 业务作用：返回启动审计使用的 active key 非敏感元数据句柄。
     ///
-    /// # 返回
-    ///
-    /// active 记录当前有效且尚有调用额度时返回，但不消费调用配额；该入口只允许启动审计读取
+    /// 返回：active 记录当前有效且尚有调用额度时返回，但不消费调用配额；该入口只允许启动审计读取
     /// 算法和状态。
+    ///
+    /// 参数说明: 无。
     pub fn active_for_audit(&self) -> Result<Arc<KeyEntry>, MappingBuildError> {
         let key = self
             .keys
@@ -443,13 +424,11 @@ impl KeyRing {
 
     /// 业务作用：返回 legacy-v1 无 kid 信封允许尝试的固定有界解密序列。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `now`: 本次请求固定使用的系统时间。
     ///
-    /// # 返回
-    ///
-    /// 返回 active 加至多一个按 kid 排序的 decrypt-only key。调用方必须在真正尝试某一项之前
+    /// 返回：返回 active 加至多一个按 kid 排序的 decrypt-only key。调用方必须在真正尝试某一项之前
     /// 才调用 `begin_operation`，避免 active 已成功时仍提前消耗 previous key 配额。函数绝不遍历
     /// 无界历史 key，避免失败请求放大 CPU 成本。
     pub fn legacy_decrypt_candidates(
@@ -484,18 +463,20 @@ impl KeyRing {
 
     /// 业务作用：返回 key ring 中全部有限记录，供进程级调用次数注册表在热更新时重新绑定。
     ///
-    /// # 返回
+    /// 返回：返回至多 16 个共享记录的迭代器；调用方只读取公开元数据和原子计数，不读取材料。
     ///
-    /// 返回至多 16 个共享记录的迭代器；调用方只读取公开元数据和原子计数，不读取材料。
+    /// 参数说明: 无。
     pub(super) fn usage_entries(&self) -> impl Iterator<Item = &Arc<KeyEntry>> {
         self.keys.values()
     }
 }
 
-/// 业务作用：在监听端口前验证 legacy key 的真实算法格式。
+/// 业务作用：在监听端口前验证 legacy key 的真实算法格式。 只检查长度、UTF-8、Base64/DER 和 RSA 模数，不执行私钥加解密，也不把材料写入诊断。这样错误 AES 长度或损坏 RSA 私钥会成为清晰的启动错误，而不是第一条业务请求上的统一 4xx/5xx。
 ///
-/// 只检查长度、UTF-8、Base64/DER 和 RSA 模数，不执行私钥加解密，也不把材料写入诊断。这样错误
-/// AES 长度或损坏 RSA 私钥会成为清晰的启动错误，而不是第一条业务请求上的统一 4xx/5xx。
+/// 参数说明：
+/// - `key`：待检查算法与敏感材料的 key 条目。
+///
+/// 返回：LegacyAes 要求 UTF-8 且恰为 16/24/32 字节，RSA 形态交给 ncrypto 验证私钥格式，失败返回受控启动错误；A256Gcm 在本函数直接成功，其材料约束由其它构造边界保证。
 fn validate_legacy_key_material(key: &KeyEntry) -> Result<(), MappingBuildError> {
     match key.algorithm {
         KeyAlgorithm::A256Gcm => Ok(()),
@@ -522,26 +503,22 @@ fn validate_legacy_key_material(key: &KeyEntry) -> Result<(), MappingBuildError>
 
 /// 业务作用：校验租户与路由密钥域文本。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 启动配置提供的域文本，最大 128 字节。
 ///
-/// # 返回
-///
-/// 非空且不含控制字符时返回 `true`。
+/// 返回：非空且不含控制字符时返回 `true`。
 fn valid_scope(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
 }
 
 /// 业务作用：校验信封公开 kid 的字符集与长度。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: key 配置中的公开定位符，最大 128 字节。
 ///
-/// # 返回
-///
-/// 只含安全 ASCII 字符时返回 `true`。
+/// 返回：只含安全 ASCII 字符时返回 `true`。
 fn valid_kid(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128

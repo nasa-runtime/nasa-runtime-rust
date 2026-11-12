@@ -50,6 +50,16 @@ async fn start() -> anyhow::Result<()> {
 }
 ```
 
+## 同端口与宿主 listener
+
+独立 TCP/WS 端口仍是默认行为。显式调用 `ServerBuilder::multiplex(true)` 时，主 listener 同时接收原生 TCP 与 HTTP/1.1 WebSocket 握手；编入 Socket.IO 能力时沿用同一 WebSocket 处理路径。此模式不允许再配置 `ws_addr`，且 `max_frame` 不超过 64 MiB，绑定前会拒绝歧义配置。
+
+协议分类不消费字节、不按客户端长度分配缓冲，分类、握手和认证共享接入时确定的 `auth_timeout`。未知前缀、超时或停机关闭连接，未认证容量也覆盖分类阶段。它不提供 TLS 终止或任意 HTTP 服务。
+
+宿主已有监听 socket 时，可把标准 `tokio::net::TcpListener` 传给 `Server::bind_suspended_on(listener)`。此调用接管所有权，不再次 bind；集群准备完成后返回尚未接流的 `RunningServer`，宿主完成自身准备再调用 `activate()`。`addr` 不重新覆盖移交 socket 的真实地址；此入口不接受额外 `ws_addr`。端口范围、自动分配、配额与对外地址发布由宿主负责。
+
+`ServerBuilder::endpoint_registry()` 返回同一端点目录，后续注册/注销遵守既有会话代际清理。`SessionHandle::disconnect()` 关闭该连接的出站准入并通知协议循环退出；它不解释业务撤权原因，也不是等待连接任务排空的证明。完整服务退出仍需等待 `shutdown_graceful` 的结果。
+
 ## 发送消息
 
 `RunningServer::sender()` 可向会话、用户、群组或 endpoint 发送消息。
@@ -432,7 +442,7 @@ handler 即使已经调用 `ack()`，之后返回 `Err`/panic/timeout 时，本�
   路由索引查询自身仍可能创建临时集合，不能宣称整条路径“0 分配”。
 - 混合协议 fan-out 时，NASA 会话共享上述 frame；Socket.IO 会话另走 JSON/base64 文本转换，不属于 one-copy SLO。
 - `BITPACK_TLV`、`VARINT_TLV` 属于少拷贝路径；`JSON_BYTES` 只有显式加入 allowlist 才可用，并会构造拥有型
-  JSON/临时缓冲；`FAST_FIXED` v1 拒绝。
+  JSON/临时缓冲；内置变长信封的 `FAST_FIXED` 明确拒绝。
 - tombstone 不是空 payload：空 Kafka value 是合法 `Some(&[])`，null value 是非法 data record，必须进入
   Invalid/DLT/Halt 流程。只有失败耗尽需要 DLT 时才复制 borrowed record。
 
@@ -494,3 +504,7 @@ ws_clients + 同代认证材料 → Prepare 首连与 AUTH → 等待宿主启�
 成功替代心跳证据；历史失败保留到下一次失败，重新认证不会清除已有故障事实。
 `send_message()` 的帧限制含 type/mode，返回 true 仅表示本地有界队列接受；关闭、断线可丢弃排队消息，
 不保证远端收到或执行。认证 token 固定到本次配置，不支持自动轮换、透明重发或 TLS。
+
+## 原始传输的共享接收预算
+
+原始 TCP/WebSocket 入口可通过 `transport::Connection::accept_with_budget` 共享字节容量，在读取或分配前取得责任；导出的文本、二进制与共享切片由最后一个 owner 归还容量。既有无共享预算入口保持原行为。接口、WebSocket 缓冲高水位及关闭边界见[接收预算](docs/receive-budget.md) / [English](docs/receive-budget.en.md)。

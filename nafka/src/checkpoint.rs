@@ -37,7 +37,10 @@ pub enum CheckpointError {
 
 impl std::fmt::Display for CheckpointError {
     /// 业务作用：以固定类别输出可操作的持久化失败。
-    /// 参数说明：formatter 为诊断输出。
+    ///
+    /// 参数说明：
+    /// - `formatter`：formatter 为诊断输出。
+    ///
     /// 返回：不包含原始文件路径或 checkpoint 内容的错误文本。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "Kafka checkpoint: {self:?}")
@@ -65,7 +68,9 @@ pub struct ReplayPosition {
 
 impl ReplayPosition {
     /// 业务作用：拒绝越过授权范围或不能表示 Kafka 坐标的进度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：名称、分区和范围有效时成功，否则不允许写入存储。
     pub fn validate(&self) -> CheckpointResult<()> {
         if self.topic.is_empty()
@@ -104,7 +109,14 @@ impl ReplayCheckpoint {
     pub const MAX_PARTITIONS: usize = 4096;
 
     /// 业务作用：固定任务身份和完整有界范围，并生成共同排序。
-    /// 参数说明：task_id 与 contract_fingerprint 为稳定合同；generation/revision 为所有权与更新序号；positions 为完整分区集合。
+    ///
+    /// 参数说明：
+    /// - `task_id`：稳定任务身份，必须满足任务名字符及长度限制。
+    /// - `contract_fingerprint`：完整回放合同的 SHA-256 小写十六进制摘要。
+    /// - `generation`：独占权代次，须处于跨语言有符号整数可表示范围。
+    /// - `revision`：持久条件更新序号，须处于跨语言有符号整数可表示范围。
+    /// - `positions`：完整冻结分区集合，构造时按 topic 和分区排序并拒绝重复坐标。
+    ///
     /// 返回：合法规范化快照；重复坐标、非法身份或范围拒绝。
     pub fn new(
         task_id: String,
@@ -128,7 +140,9 @@ impl ReplayCheckpoint {
     }
 
     /// 业务作用：在读写存储边界复验可由业务构造的快照，不能信任可变公开字段。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：身份、序号、范围和严格排序均合法时成功。
     pub fn validate(&self) -> CheckpointResult<()> {
         validate_task(&self.task_id)?;
@@ -158,7 +172,9 @@ impl ReplayCheckpoint {
     }
 
     /// 业务作用：判断冻结范围是否全部形成已确认进度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部 next_offset 到达 end_offset 时为 true，不要求日志存在 end_offset-1 的记录。
     pub fn complete(&self) -> bool {
         self.validate().is_ok()
@@ -169,7 +185,10 @@ impl ReplayCheckpoint {
     }
 
     /// 业务作用：阻止恢复或推进时静默替换任务处理合同及读取范围。
-    /// 参数说明：other 为待比较快照。
+    ///
+    /// 参数说明：
+    /// - `other`：other 为待比较快照。
+    ///
     /// 返回：忽略代次、序号及进度，其余身份和范围必须完全相同。
     pub fn same_contract(&self, other: &Self) -> bool {
         self.validate().is_ok()
@@ -193,12 +212,18 @@ impl ReplayCheckpoint {
 /// 回放持久存储接口；共享后端必须实现原子 claim/CAS 及真实持久化，调用由独立有界执行资源承担。
 pub trait CheckpointStore: Send + Sync {
     /// 业务作用：只读查看持久进度，不授予业务副作用权限。
-    /// 参数说明：task_id 为稳定任务名。
+    ///
+    /// 参数说明：
+    /// - `task_id`：task_id 为稳定任务名。
+    ///
     /// 返回：完整快照或不存在；损坏、身份不一致或读取失败明确拒绝。
     fn load(&self, task_id: &str) -> CheckpointResult<Option<ReplayCheckpoint>>;
 
     /// 业务作用：独占任务并持久化新的所有权代次后交付推进权。
-    /// 参数说明：initial 为 generation/revision 为零且所有进度位于起点的冻结声明。
+    ///
+    /// 参数说明：
+    /// - `initial`：initial 为 generation/revision 为零且所有进度位于起点的冻结声明。
+    ///
     /// 返回：只有独占权和持久证据均成立才返回 lease；活动任务、合同变化或损坏拒绝。
     fn claim(&self, initial: &ReplayCheckpoint) -> CheckpointResult<Box<dyn CheckpointLease>>;
 }
@@ -206,17 +231,25 @@ pub trait CheckpointStore: Send + Sync {
 /// 覆盖实际任务寿命的独占推进权，关闭之前必须完成或明确停止全部在途业务责任。
 pub trait CheckpointLease: Send {
     /// 业务作用：读取当前 lease 最后确认持久化的完整进度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：独立快照；关闭后读取不重新授予推进权限。
     fn checkpoint(&self) -> ReplayCheckpoint;
 
     /// 业务作用：在新业务副作用前复验当前所有权与最后持久证据，历史快照不能授权继续执行。
-    /// 参数说明：无。返回：可证明的推进权仍成立时成功；失权或证据不足后禁止此 lease 后续推进。
-    /// 此检查与远端副作用不是原子操作，已经在途的调用仍可能形成至少一次重复。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：可证明的推进权仍成立时成功；失权或证据不足后禁止此 lease 后续推进。此检查与远端副作用不是原子操作，已经在途的调用仍可能形成至少一次重复。
     fn verify(&mut self) -> CheckpointResult<()>;
 
     /// 业务作用：在目标成功之后条件推进连续安全进度。
-    /// 参数说明：expected_revision 为预期序号，positions 为范围不变的完整新进度。
+    ///
+    /// 参数说明：
+    /// - `expected_revision`：expected_revision 为预期序号。
+    /// - `positions`：positions 为范围不变的完整新进度。
+    ///
     /// 返回：持久化后的快照；旧序号、回退、越界、失权或存储未知拒绝继续推进。
     fn advance(
         &mut self,
@@ -225,13 +258,18 @@ pub trait CheckpointLease: Send {
     ) -> CheckpointResult<ReplayCheckpoint>;
 
     /// 业务作用：归还任务独占责任并永久拒绝旧 lease 的新推进。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：重复关闭无副作用；关闭不能撤销已经发生的远端副作用。
     fn close(&mut self) -> CheckpointResult<()>;
 }
 
 /// 业务作用：建立不含目录语义的稳定任务身份。
-/// 参数说明：task 为用户声明的 ID。
+///
+/// 参数说明：
+/// - `task`：task 为用户声明的 ID。
+///
 /// 返回：首字母数字且只含 ASCII 字母数字、点、横线和下划线时成功，最大 128 字符。
 fn validate_task(task: &str) -> CheckpointResult<()> {
     if task.is_empty()
@@ -245,14 +283,20 @@ fn validate_task(task: &str) -> CheckpointResult<()> {
 }
 
 /// 业务作用：为双端任务名和 topic 采用共同 ASCII 字符边界。
-/// 参数说明：byte 为身份中的一个字节。
+///
+/// 参数说明：
+/// - `byte`：byte 为身份中的一个字节。
+///
 /// 返回：可安全参与稳定身份的字符为 true。
 fn identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
 }
 
 /// 业务作用：避免所有权或更新序号溢出后复用旧权限。
-/// 参数说明：value 为当前序号。
+///
+/// 参数说明：
+/// - `value`：value 为当前序号。
+///
 /// 返回：下一跨语言有效序号，耗尽时拒绝。
 fn increment(value: u64) -> CheckpointResult<u64> {
     if value >= i64::MAX as u64 {

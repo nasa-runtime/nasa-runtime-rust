@@ -59,6 +59,12 @@ static PROPERTIES: std::sync::LazyLock<HashMap<String, String>> = std::sync::Laz
 pub(crate) mod properties {
     use crate::PROPERTIES;
 
+    /// 业务作用：从进程首次读取时冻结的属性快照中获取可选配置值。
+    ///
+    /// 参数说明：
+    /// - `key`：按原文精确匹配的配置键。
+    ///
+    /// 返回：存在时复制原值，否则为空；首次调用触发 dotenv 加载和环境快照，后续环境修改不会重新加载。
     pub(crate) fn get_value_option<Key>(key: Key) -> Option<String>
     where
         Key: AsRef<str>,
@@ -66,6 +72,13 @@ pub(crate) mod properties {
         PROPERTIES.get(key.as_ref()).cloned()
     }
 
+    /// 业务作用：读取固定属性快照中的文本配置，缺失时使用调用方的缺省值。
+    ///
+    /// 参数说明：
+    /// - `key`：待查找配置键。
+    /// - `default`：键不存在时采用的文本，空配置值不会触发此回退。
+    ///
+    /// 返回：原值或缺省值的独立字符串，不解析内容或动态重载环境。
     pub(crate) fn get_value<Key, Default>(key: Key, default: Default) -> String
     where
         Key: AsRef<str>,
@@ -76,6 +89,13 @@ pub(crate) mod properties {
             .map_or(default.as_ref().to_string(), |value| value.to_string())
     }
 
+    /// 业务作用：读取可表示为 u16 的属性，为端口等有限范围配置提供缺省回退。
+    ///
+    /// 参数说明：
+    /// - `key`：固定属性快照中的配置键。
+    /// - `default`：键缺失或原文不能解析为 u16 时采用的值。
+    ///
+    /// 返回：解析值或缺省值；不清除空白、不拒绝零值，也不报告无效配置错误。
     pub(crate) fn get_value_u16<Key>(key: Key, default: u16) -> u16
     where
         Key: AsRef<str>,
@@ -85,6 +105,13 @@ pub(crate) mod properties {
         })
     }
 
+    /// 业务作用：读取布尔开关，无法解释的配置沿用调用方给定策略。
+    ///
+    /// 参数说明：
+    /// - `key`：固定属性快照中的开关键。
+    /// - `default`：键缺失或文本不是 Rust 布尔格式时采用的值。
+    ///
+    /// 返回：精确的 true 或 false 文本对应值，否则为缺省值；不进行大小写或空白归一，也不动态重载。
     pub(crate) fn get_value_bool<Key>(key: Key, default: bool) -> bool
     where
         Key: AsRef<str>,

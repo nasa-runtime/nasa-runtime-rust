@@ -38,7 +38,9 @@ struct DatasourceObservation {
 
 impl DatasourceObservation {
     /// 业务作用：为显式延后建池的 default 名额预占有限后端候选，不猜测业务将移交的 Pool 类型。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已知后端返回单项；双后端延后模式固定返回两个候选。
     fn drivers(&self) -> impl Iterator<Item = DatabaseDriver> + '_ {
         [
@@ -63,7 +65,10 @@ pub struct SqlObservabilityRuntime {
 
 impl SqlObservabilityRuntime {
     /// 业务作用：按实际冻结目录组合有界 SQL 策略诊断，避免期望配置覆盖仍运行的来源。
-    /// 参数说明：`limit` 为调用方已校验的条数上限。
+    ///
+    /// 参数说明：
+    /// - `limit`：`limit` 为调用方已校验的条数上限。
+    ///
     /// 返回：当前有效策略和是否截断，不触发数据库 I/O。
     pub(crate) fn diagnostic_policies(
         &self,
@@ -84,7 +89,11 @@ impl SqlObservabilityRuntime {
     }
 
     /// 业务作用：在 Application 校验过 UserHook 窗口后登记已声明的渠道实现。
-    /// 参数说明：`provider_id` 为配置名称，`provider` 为只在后台 worker 中执行的实现。
+    ///
+    /// 参数说明：
+    /// - `provider_id`：`provider_id` 为配置名称。
+    /// - `provider`：`provider` 为只在后台 worker 中执行的实现。
+    ///
     /// 返回：唯一登记成功；封口、未知类型或重名返回安全阶段错误。
     pub fn register_custom(
         &self,
@@ -97,7 +106,11 @@ impl SqlObservabilityRuntime {
     }
 
     /// 业务作用：返回与实际运行一致且不包含 SQL、URL 或凭据的有效配置。
-    /// 参数说明：`datasource` 必须属于冻结目录，`method` 为可选完整静态方法身份。
+    ///
+    /// 参数说明：
+    /// - `datasource`：`datasource` 必须属于冻结目录。
+    /// - `method`：`method` 为可选完整静态方法身份。
+    ///
     /// 返回：逐叶继承后的策略；未知身份不产生隐式策略。
     pub fn effective(
         &self,
@@ -120,7 +133,12 @@ impl SqlObservabilityRuntime {
     }
 
     /// 业务作用：只在建池后一次填入预先登记的指标代理，不改变 descriptor 或预算。
-    /// 参数说明：`driver` 为 typed 后端，`names` 为实际建池目录，`source` 持有只读 Pool 句柄。
+    ///
+    /// 参数说明：
+    /// - `driver`：`driver` 为 typed 后端。
+    /// - `names`：`names` 为实际建池目录。
+    /// - `source`：`source` 持有只读 Pool 句柄。
+    ///
     /// 返回：实际目录与预留目录完全匹配时发布；不允许运行期增加数据源。
     #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     fn install_pools(
@@ -178,7 +196,9 @@ impl SqlObservabilityRuntime {
     }
 
     /// 业务作用：在 Pool 释放之前撤销出口侧句柄，避免抓取已关闭的资源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无；descriptor 保留，Pool 样本在后续快照中消失。
     fn detach_pools(&self) {
         for proxy in &self.pools {
@@ -201,13 +221,17 @@ struct DeferredPoolSource {
 
 impl LegacyMetricsSource for DeferredPoolSource {
     /// 业务作用：在连接建立前提供固定 Pool gauge 合同。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：后端共用的静态 descriptor。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         self.descriptors
     }
     /// 业务作用：只在抓取阶段借用已经建好的 Pool。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：未安装或已停机时为空快照，其它情况透传同源样本。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         Some(
@@ -220,7 +244,10 @@ impl LegacyMetricsSource for DeferredPoolSource {
         )
     }
     /// 业务作用：使用统一结构化样本渲染 Pool 文本。
-    /// 参数说明：`output` 为出口缓冲区。
+    ///
+    /// 参数说明：
+    /// - `output`：`output` 为出口缓冲区。
+    ///
     /// 返回：追加当前样本而不持有长期连接借用。
     fn render_prometheus(&self, output: &mut String) {
         nametrics_core::atomic::render_snapshot(
@@ -238,7 +265,10 @@ struct SqlMetricsSource {
 
 impl SqlMetricsSource {
     /// 业务作用：把多后端共享 descriptor 的源合成一个原子注册事务，避免半套指标可见。
-    /// 参数说明：`sources` 为 Mapper、连接、Pool 和通知的只读出口。
+    ///
+    /// 参数说明：
+    /// - `sources`：`sources` 为 Mapper、连接、Pool 和通知的只读出口。
+    ///
     /// 返回：静态 descriptor 去重后的聚合源；冲突语义在注册前拒绝。
     fn new(sources: Vec<Arc<dyn LegacyMetricsSource>>) -> ApplicationResult<Self> {
         let mut descriptors: BTreeMap<&'static str, &'static MetricDescriptor> = BTreeMap::new();
@@ -274,13 +304,17 @@ impl SqlMetricsSource {
 
 impl LegacyMetricsSource for SqlMetricsSource {
     /// 业务作用：给 MetricHub 一次提交全部 SQL 观测合同。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：名称唯一的静态 descriptor 目录。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         self.descriptors
     }
     /// 业务作用：让 Prometheus 与 OTLP 读取同一组结构化领域样本。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有已安装源的合并快照，不在 SQL 路径进行采样。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         Some(
@@ -291,7 +325,10 @@ impl LegacyMetricsSource for SqlMetricsSource {
         )
     }
     /// 业务作用：从同一快照追加 Prometheus 文本，保持桶和标签一致。
-    /// 参数说明：`output` 为出口缓冲区。
+    ///
+    /// 参数说明：
+    /// - `output`：`output` 为出口缓冲区。
+    ///
     /// 返回：追加已登记指标，不创建第二份统计状态。
     fn render_prometheus(&self, output: &mut String) {
         nametrics_core::atomic::render_snapshot(
@@ -310,7 +347,9 @@ pub(crate) struct SqlObservabilityComponent {
 
 impl SqlObservabilityComponent {
     /// 业务作用：创建尚未读取配置或分配队列的生命周期组件。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无外部副作用的组件。
     pub(crate) fn new() -> Self {
         Self {
@@ -322,14 +361,19 @@ impl SqlObservabilityComponent {
 
 impl ApplicationComponent for SqlObservabilityComponent {
     /// 业务作用：为配置、资源与停机动作提供独立的稳定归属。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：SQL 观测组件标识。
     fn id(&self) -> ComponentId {
         ComponentId::SqlObservability
     }
 
     /// 业务作用：在 DB 外部动作前冻结策略、预留全部 SQL 指标并安装有界生产端。
-    /// 参数说明：`context` 提供最终配置、统一 MetricHub 和受管资源登记。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供最终配置、统一 MetricHub 和受管资源登记。
+    ///
     /// 返回：全部目录、预算及路由验证成功时发布运行时；失败阻止业务 I/O。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -478,8 +522,19 @@ impl ApplicationComponent for SqlObservabilityComponent {
             }
             let metrics = Arc::new(SqlMetricsSource::new(sources)?);
             let hub = app.metrics_hub();
-            hub.register_legacy_source_reserved(metrics, budget).map_err(|_| observation_error(ApplicationPhase::Start,
-                format!("SQL metric registration failed: methods={}, datasources={}, required_series={}, available_series={}", MAPPER_METHOD_META.len(), catalog.len(), budget, nametrics_core::MAX_METRIC_SERIES.saturating_sub(hub.reserved_series()))))?;
+            hub.register_legacy_source_reserved(metrics, budget)
+                .map_err(|_| {
+                    observation_error(
+                        ApplicationPhase::Start,
+                        format!(
+                            "SQL metric registration failed: methods={}, datasources={}, required_series={}, available_series={}",
+                            MAPPER_METHOD_META.len(),
+                            catalog.len(),
+                            budget,
+                            nametrics_core::MAX_METRIC_SERIES.saturating_sub(hub.reserved_series())
+                        ),
+                    )
+                })?;
             let runtime = Arc::new(SqlObservabilityRuntime {
                 settings,
                 #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
@@ -509,7 +564,10 @@ impl ApplicationComponent for SqlObservabilityComponent {
     }
 
     /// 业务作用：封口命名通知路由，默认路由保持对 nanotify-core 业务实现的按需引用。
-    /// 参数说明：`_context` 为宿主 Prepare 阶段上下文；不构造协议客户端或读取渠道凭据。
+    ///
+    /// 参数说明：
+    /// - `_context`：`_context` 为宿主 Prepare 阶段上下文。
+    ///
     /// 返回：路由准备完成后成功；未提供实现不阻止启动，使用时忽略。
     fn prepare<'a>(&'a mut self, _context: &'a mut PrepareContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -523,7 +581,10 @@ impl ApplicationComponent for SqlObservabilityComponent {
     }
 
     /// 业务作用：出口已接管后启动唯一通知 dispatcher，并登记先撤销生产权再排空的逆序动作。
-    /// 参数说明：`context` 提供停机清理栈；业务流量尚未开放。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供停机清理栈。
+    ///
     /// 返回：消费者所有权安全移交给 Supervisor 时成功。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -562,7 +623,11 @@ impl ApplicationComponent for SqlObservabilityComponent {
                 self.task = Some(Box::pin(async move {
                     // 组件 Ready 先于全应用 Ready；后续组件失败时不能把 UserHook 候选提前发往外部。
                     if wait_application_ready(&application, &stop, &force).await {
-                        tokio::select! { biased; _ = force.cancelled() => {}, _ = dispatcher.run(stop) => {} }
+                        tokio::select! {
+                            biased;
+                            _ = force.cancelled() => {},
+                            _ = dispatcher.run(stop) => {},
+                        }
                     }
                     let _ = done.send(());
                     Ok(())
@@ -573,7 +638,9 @@ impl ApplicationComponent for SqlObservabilityComponent {
     }
 
     /// 业务作用：让 Runner 持有唯一后台任务，禁止通知脱离 Application 生命周期。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只移交一次通知任务；未启用通知时为 None。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.task
@@ -585,13 +652,18 @@ impl ApplicationComponent for SqlObservabilityComponent {
 struct StopSqlSources(Arc<SqlObservabilityRuntime>);
 impl ShutdownAction for StopSqlSources {
     /// 业务作用：标识撤销 SQL 观测对运行资源的借用步骤。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定动作名称。
     fn label(&self) -> &'static str {
         "detach-sql-observation-sources"
     }
     /// 业务作用：在连接池释放前撤销生产能力和 Pool 快照句柄。
-    /// 参数说明：`context` 是共享停机边界，本动作不等待外部资源。
+    ///
+    /// 参数说明：
+    /// - `_context`：`context` 是共享停机边界。
+    ///
     /// 返回：内存所有权撤销后成功。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -610,13 +682,18 @@ struct StopNotifications {
 }
 impl ShutdownAction for StopNotifications {
     /// 业务作用：标识与业务数据库隔离的通知排空步骤。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定动作名称。
     fn label(&self) -> &'static str {
         "drain-sql-notifications"
     }
     /// 业务作用：先关新通知，再在组件与全局剩余预算内排空，超时取消剩余请求。
-    /// 参数说明：`context` 提供不可延长的全局停机预算。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供不可延长的全局停机预算。
+    ///
     /// 返回：排空或有限放弃后成功；不等待外部渠道恢复。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -640,7 +717,11 @@ impl ShutdownAction for StopNotifications {
 }
 
 /// 业务作用：在 DB probe/build 之前读取冻结的逐数据源语句日志策略。
-/// 参数说明：`application` 为当前宿主，`datasource` 为受管目录名称。
+///
+/// 参数说明：
+/// - `application`：`application` 为当前宿主。
+/// - `datasource`：`datasource` 为受管目录名称。
+///
 /// 返回：SQLx 日志级别；禁用时两个 SQLx statement 出口均应关闭。
 #[cfg(any(feature = "db", feature = "db-pgsql"))]
 pub(crate) async fn statement_logging(
@@ -662,7 +743,11 @@ pub(crate) async fn statement_logging(
 }
 
 /// 业务作用：MySQL 建池成功后填入启动期已预留的指标代理。
-/// 参数说明：`application` 为宿主，`pools` 为已经拥有显式停机动作的受管池。
+///
+/// 参数说明：
+/// - `application`：`application` 为宿主。
+/// - `pools`：`pools` 为已经拥有显式停机动作的受管池。
+///
 /// 返回：目录一致且仅安装一次时成功。
 #[cfg(feature = "db")]
 pub(crate) async fn install_mysql_pools(
@@ -700,7 +785,11 @@ pub(crate) async fn install_mysql_pools(
 }
 
 /// 业务作用：PostgreSQL 建池成功后填入同一合同的指标代理。
-/// 参数说明：`application` 为宿主，`pools` 为已经拥有显式停机动作的受管池。
+///
+/// 参数说明：
+/// - `application`：`application` 为宿主。
+/// - `pools`：`pools` 为已经拥有显式停机动作的受管池。
+///
 /// 返回：目录一致且仅安装一次时成功。
 #[cfg(feature = "db-pgsql")]
 pub(crate) async fn install_postgres_pools(
@@ -738,9 +827,11 @@ pub(crate) async fn install_postgres_pools(
 }
 
 /// 业务作用：把 SQLite 真实 worker 状态填入 Start 阶段已预留的指标代理。
+///
 /// 参数说明：
 /// - `application`：统一指标和配置宿主。
 /// - `pools`：已经登记关闭动作的文件来源 owner。
+///
 /// 返回：名称和预算一致时完成绑定，失败阻止 Ready。
 #[cfg(feature = "db-sqlite")]
 pub(crate) async fn install_sqlite_pools(
@@ -778,7 +869,10 @@ pub(crate) async fn install_sqlite_pools(
 }
 
 /// 业务作用：从最终配置与静态方法集合计算实际启用的渠道引用，供 secret 惰性投影共用。
-/// 参数说明：`raw` 是完整且尚未执行外部动作的配置树。
+///
+/// 参数说明：
+/// - `raw`：`raw` 是完整且尚未执行外部动作的配置树。
+///
 /// 返回：按最终逐叶覆盖去重的 provider 名称；未显式指定时使用默认进程路由，不要求通知凭据。
 pub fn active_provider_refs(raw: &Value) -> Result<BTreeSet<String>, String> {
     let settings =
@@ -817,7 +911,11 @@ pub fn active_provider_refs(raw: &Value) -> Result<BTreeSet<String>, String> {
 }
 
 /// 业务作用：在配置加载阶段验证所有 SQL 观测叶子、静态目录和渠道引用，不创建资源。
-/// 参数说明：`raw` 为完整配置，`phase` 指定安全错误归因。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为完整配置。
+/// - `phase`：`phase` 指定安全错误归因。
+///
 /// 返回：所有启动合同成立时成功；方法、数据源或预算不一致在 I/O 前拒绝。
 pub(crate) fn validate_section(raw: &Value, phase: ApplicationPhase) -> ApplicationResult<()> {
     let config = parse_sql(raw, phase)?;
@@ -928,7 +1026,11 @@ pub(crate) fn validate_section(raw: &Value, phase: ApplicationPhase) -> Applicat
 }
 
 /// 业务作用：把统一默认配置与日志兼容模式组合成可冻结策略。
-/// 参数说明：`raw` 为完整配置，`phase` 是诊断阶段。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为完整配置。
+/// - `phase`：`phase` 是诊断阶段。
+///
 /// 返回：已严格验证的 SQL 配置；console 与低层 directive 同时声明时拒绝歧义。
 fn parse_sql(raw: &Value, phase: ApplicationPhase) -> ApplicationResult<SqlConfig> {
     let mut config =
@@ -969,7 +1071,11 @@ fn parse_sql(raw: &Value, phase: ApplicationPhase) -> ApplicationResult<SqlConfi
 }
 
 /// 业务作用：在 probe 之前提取数据库观测所需的非敏感目录，不保存 URL。
-/// 参数说明：`raw` 为完整配置，`phase` 为错误归因。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为完整配置。
+/// - `phase`：`phase` 为错误归因。
+///
 /// 返回：名字、driver 与 acquire 预算；无显式数据库配置时保留空目录。
 fn datasource_catalog(
     raw: &Value,
@@ -1101,7 +1207,12 @@ fn datasource_catalog(
 }
 
 /// 业务作用：在启动期解析 concrete 通知路由，不让执行路径查表或调用第三方代码。
-/// 参数说明：`producer` 为可选有界队列，`enabled` 和 `provider` 为有效叶子。
+///
+/// 参数说明：
+/// - `producer`：已冻结通知路由目录的可选生产入口。
+/// - `enabled`：该告警规则是否启用；关闭时不要求生产入口存在。
+/// - `provider`：指定提供器名称；缺省或 DEFAULT_PROVIDER_ID 选择默认路由。
+///
 /// 返回：关闭规则返回 None；启用但缺失 route 属于启动错误。
 fn alert_route(
     producer: &Option<NotificationProducer>,
@@ -1127,7 +1238,10 @@ fn alert_route(
 }
 
 /// 业务作用：把共享 YAML 等待策略转换成连接核心的后端中立结构。
-/// 参数说明：`policy` 为已经逐叶继承和验证的有效配置。
+///
+/// 参数说明：
+/// - `policy`：`policy` 为已经逐叶继承和验证的有效配置。
+///
 /// 返回：固定阈值、级别与冷却，不包含任意 observer。
 fn wait_policy(policy: &WaitPolicy) -> WaitObservationPolicy {
     WaitObservationPolicy {
@@ -1143,7 +1257,11 @@ fn wait_policy(policy: &WaitPolicy) -> WaitObservationPolicy {
 }
 
 /// 业务作用：把已有冻结观测身份用于通知，未启用出口时仍创建稳定进程来源。
-/// 参数说明：`app` 提供应用名和启动时刻，`raw` 只读取非敏感身份字段。
+///
+/// 参数说明：
+/// - `app`：`app` 提供应用名和启动时刻。
+/// - `raw`：`raw` 只读取非敏感身份字段。
+///
 /// 返回：启用统一出口时复用其已冻结身份，否则按应用启动身份生成；身份读取失败阻止启动。
 fn notification_identity(
     app: &Application,
@@ -1193,7 +1311,10 @@ fn notification_identity(
 }
 
 /// 业务作用：保持数据库后端标签与 Mapper 静态身份一致。
-/// 参数说明：`driver` 是冻结 typed 后端。
+///
+/// 参数说明：
+/// - `driver`：`driver` 是冻结 typed 后端。
+///
 /// 返回：稳定协议名称。
 fn driver_name(driver: DatabaseDriver) -> &'static str {
     match driver {
@@ -1204,15 +1325,24 @@ fn driver_name(driver: DatabaseDriver) -> &'static str {
 }
 
 /// 业务作用：把已脱敏的配置和装配错误绑定到 SQL 观测阶段。
-/// 参数说明：`phase` 是生命周期阶段，`message` 不得包含 SQL、URL 或凭据。
+///
+/// 参数说明：
+/// - `phase`：`phase` 是生命周期阶段。
+/// - `message`：`message` 不得包含 SQL、URL 或凭据。
+///
 /// 返回：可安全输出的应用错误。
 fn observation_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::SqlObservability, phase, message.into())
 }
 
 /// 业务作用：把组件准备完成与全应用开放流量区分，启动失败不得产生外部通知。
-/// 参数说明：`application` 提供全局状态，`stop` 与 `force` 提供正常及强制停止权威。
-/// 返回：Service 观察到全应用 Ready，或 Batch 观测专用屏障后允许执行；停止、失败或状态通道结束返回 false。
+///
+/// 参数说明：
+/// - `application`：提供进程模式和全局生命周期状态的应用句柄。
+/// - `stop`：正常停机信号，未获准执行时取消等待。
+/// - `force`：强制退出信号，未获准执行时取消等待。
+///
+/// 返回：Service 观察到 Ready 时为 true；Batch 由调用方保证已过专用屏障，且两种取消信号均未触发时为 true。其它情况下遇到终态、取消或状态通道结束返回 false；Ready 判断先于取消等待，不形成后续执行租约。
 async fn wait_application_ready(
     application: &Application,
     stop: &CancellationToken,
@@ -1239,7 +1369,7 @@ async fn wait_application_ready(
                 if changed.is_err() {
                     return false;
                 }
-            },
+            }
         }
     }
 }

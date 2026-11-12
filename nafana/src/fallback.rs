@@ -33,17 +33,22 @@ pub enum FallbackCause {
 /// 交给业务全局降级处理器的稳定请求视图。
 #[derive(Debug, Clone)]
 pub struct FallbackContext {
+    /// 本次降级所属命令的稳定名称。
     command: String,
+    /// 命令所属的指标分组。
     group: String,
+    /// 真实路由，无法取得时使用命令名。
     path: String,
+    /// 端点每次请求的事务权重；未设置时不计 TPS。
     transaction_weight: Option<u64>,
+    /// 本次降级对应的并发拒绝或执行超时原因。
     cause: FallbackCause,
 }
 
 impl FallbackContext {
     /// 业务作用：冻结一次降级事件的命令元数据，使终态处理不再借用命令对象。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `command`: 面板和指标使用的命令名。
     /// - `group`: 命令分组。
@@ -51,9 +56,7 @@ impl FallbackContext {
     /// - `transaction_weight`: REST 事务权重；`None` 表示不计入 TPS。
     /// - `cause`: 本次触发降级的运行时原因。
     ///
-    /// # 返回
-    ///
-    /// 返回拥有全部字符串的只读上下文。
+    /// 返回：拥有全部字符串的只读上下文。
     pub(crate) fn new(
         command: &str,
         group: &str,
@@ -72,65 +75,45 @@ impl FallbackContext {
 
     /// 业务作用：返回面板与指标使用的稳定命令名。
     ///
-    /// # 参数说明
-    ///
     /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// 返回本次降级事件所属的命令名。
+    /// 返回：本次降级事件所属的命令名。
     pub fn command(&self) -> &str {
         &self.command
     }
 
     /// 业务作用：返回命令分组，供业务按领域选择终态响应。
     ///
-    /// # 参数说明
-    ///
     /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// 返回本次降级事件所属的命令分组。
+    /// 返回：本次降级事件所属的命令分组。
     pub fn group(&self) -> &str {
         &self.group
     }
 
     /// 业务作用：返回真实 REST 路由，供统一响应和低基数观测使用。
     ///
-    /// # 参数说明
-    ///
     /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// 返回真实路由；运行时无法取得路由时返回命令名。
+    /// 返回：真实路由；运行时无法取得路由时返回命令名。
     pub fn path(&self) -> &str {
         &self.path
     }
 
     /// 业务作用：返回 REST 事务权重，不改变本次请求已经完成的 TPS 计数。
     ///
-    /// # 参数说明
-    ///
     /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// `Some(weight)` 表示该端点每次请求贡献的事务权重，`None` 表示非事务端点。
+    /// 返回：`Some(weight)` 表示该端点每次请求贡献的事务权重，`None` 表示非事务端点。
     pub fn transaction_weight(&self) -> Option<u64> {
         self.transaction_weight
     }
 
     /// 业务作用：返回并发拒绝或执行超时原因，供业务选择终态响应。
     ///
-    /// # 参数说明
-    ///
     /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// 返回本次降级事件的不可变原因快照。
+    /// 返回：本次降级事件的不可变原因快照。
     pub fn cause(&self) -> FallbackCause {
         self.cause
     }
@@ -148,13 +131,11 @@ pub enum FallbackDecision {
 pub trait GlobalFallbackHandler: Send + Sync + 'static {
     /// 业务作用：为没有局部降级配置的并发拒绝或执行超时同步生成最终响应。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `context`: 已冻结的命令、路由、事务权重和触发原因。
     ///
-    /// # 返回
-    ///
-    /// 返回完整响应或明确退回组件内置响应；实现不得发起阻塞或异步外部调用。
+    /// 返回：完整响应或明确退回组件内置响应；实现不得发起阻塞或异步外部调用。
     fn handle(&self, context: FallbackContext) -> FallbackDecision;
 }
 
@@ -200,23 +181,25 @@ pub enum GlobalFallbackInstallError {
 impl std::fmt::Display for GlobalFallbackInstallError {
     /// 业务作用：输出不包含请求数据的稳定安装冲突说明。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `formatter`: 标准格式化输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回格式化结果，不泄露处理器内部状态。
+    /// 返回：格式化结果，不泄露处理器内部状态。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyInstalled => formatter.write_str("全局降级处理器已经手动安装"),
-            Self::CollectedHandlerPresent { handler } => {
+            Self::CollectedHandlerPresent {
+                handler,
+            } => {
                 write!(
                     formatter,
                     "已收集全局降级处理器 {handler}，不能重复手动安装"
                 )
             }
-            Self::MultipleCollectedHandlers { handlers } => write!(
+            Self::MultipleCollectedHandlers {
+                handlers,
+            } => write!(
                 formatter,
                 "同一组件只能声明一个 #[global_fallback]，当前冲突项: {}",
                 handlers.join(", ")
@@ -224,7 +207,9 @@ impl std::fmt::Display for GlobalFallbackInstallError {
             Self::ManualHandlerPresent => {
                 formatter.write_str("已手动安装全局降级处理器，不能再启用自动收集项")
             }
-            Self::CollectedHandlerUnavailable { handler } => {
+            Self::CollectedHandlerUnavailable {
+                handler,
+            } => {
                 write!(formatter, "全局降级处理器 {handler} 的链接描述不可用")
             }
         }
@@ -246,7 +231,9 @@ enum GlobalFallbackOrigin {
 
 /// 业务作用：把全局降级处理器与其安装来源绑定，保证进程内只发布一份可追溯运行时。
 struct GlobalFallbackRuntime {
+    /// 冻结后的唯一处理入口。
     handler: GlobalFallbackHandlerKind,
+    /// 手动安装或链接收集的来源，用于重复初始化时校验身份。
     origin: GlobalFallbackOrigin,
 }
 
@@ -262,13 +249,9 @@ struct GlobalFallbackGuard;
 impl Drop for GlobalFallbackGuard {
     /// 业务作用：无论处理器正常返回还是崩溃，都解除当前线程的递归门禁。
     ///
-    /// # 参数说明
-    ///
     /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// 无返回值；只恢复线程局部执行标记。
+    /// 返回：无返回值；只恢复线程局部执行标记。
     fn drop(&mut self) {
         GLOBAL_FALLBACK_ACTIVE.with(|active| active.set(false));
     }
@@ -276,13 +259,9 @@ impl Drop for GlobalFallbackGuard {
 
 /// 业务作用：按声明位置生成稳定的自动收集冲突列表。
 ///
-/// # 参数说明
-///
 /// 参数说明: 无。
 ///
-/// # 返回
-///
-/// 返回已排序的静态声明位置；不会修改链接切片。
+/// 返回：已排序的静态声明位置；不会修改链接切片。
 fn collected_sources() -> Vec<&'static str> {
     let mut sources = NAFANA_COLLECTED_GLOBAL_FALLBACKS
         .iter()
@@ -296,13 +275,11 @@ fn collected_sources() -> Vec<&'static str> {
 ///
 /// 业务作用：无属性宏声明时冻结一个手动 trait 实现，作为当前组件唯一的终态处理器。
 ///
-/// # 参数说明
+/// 参数说明：
 ///
 /// - `handler`: 业务实现的共享终态处理器。
 ///
-/// # 返回
-///
-/// 首次且不存在自动收集项时返回成功；重复安装或与属性宏声明冲突时返回明确错误。
+/// 返回：首次且不存在自动收集项时返回成功；重复安装或与属性宏声明冲突时返回明确错误。
 pub fn install_global_fallback(
     handler: Arc<dyn GlobalFallbackHandler>,
 ) -> Result<(), GlobalFallbackInstallError> {
@@ -310,10 +287,14 @@ pub fn install_global_fallback(
     match sources.as_slice() {
         [] => {}
         [source] => {
-            return Err(GlobalFallbackInstallError::CollectedHandlerPresent { handler: source })
+            return Err(GlobalFallbackInstallError::CollectedHandlerPresent {
+                handler: source,
+            })
         }
         _ => {
-            return Err(GlobalFallbackInstallError::MultipleCollectedHandlers { handlers: sources })
+            return Err(GlobalFallbackInstallError::MultipleCollectedHandlers {
+                handlers: sources,
+            })
         }
     }
     GLOBAL_FALLBACK
@@ -328,20 +309,18 @@ pub fn install_global_fallback(
 ///
 /// 业务作用：确定性验证当前组件只有一个 `#[global_fallback]`，并把它冻结为进程级终态入口。
 ///
-/// # 参数说明
-///
 /// 参数说明: 无。
 ///
-/// # 返回
-///
-/// 没有声明或唯一声明已就绪时返回成功；多个声明或与手动实现冲突时返回明确错误。
+/// 返回：没有声明或唯一声明已就绪时返回成功；多个声明或与手动实现冲突时返回明确错误。
 pub fn initialize_global_fallback() -> Result<(), GlobalFallbackInstallError> {
     let sources = collected_sources();
     let source = match sources.as_slice() {
         [] => return Ok(()),
         [source] => *source,
         _ => {
-            return Err(GlobalFallbackInstallError::MultipleCollectedHandlers { handlers: sources })
+            return Err(GlobalFallbackInstallError::MultipleCollectedHandlers {
+                handlers: sources,
+            })
         }
     };
     if let Some(runtime) = GLOBAL_FALLBACK.get() {
@@ -359,7 +338,9 @@ pub fn initialize_global_fallback() -> Result<(), GlobalFallbackInstallError> {
         .iter()
         .find(|entry| entry.source == source)
     else {
-        return Err(GlobalFallbackInstallError::CollectedHandlerUnavailable { handler: source });
+        return Err(GlobalFallbackInstallError::CollectedHandlerUnavailable {
+            handler: source,
+        });
     };
     if GLOBAL_FALLBACK
         .set(GlobalFallbackRuntime {
@@ -387,13 +368,9 @@ pub fn initialize_global_fallback() -> Result<(), GlobalFallbackInstallError> {
 ///
 /// 业务作用：触发自动收集初始化，并供启动审计确认终态降级能力是否就绪。
 ///
-/// # 参数说明
-///
 /// 参数说明: 无。
 ///
-/// # 返回
-///
-/// 唯一实现已成功安装返回 `true`；没有实现或存在配置冲突返回 `false`。
+/// 返回：唯一实现已成功安装返回 `true`；没有实现或存在配置冲突返回 `false`。
 pub fn global_fallback_installed() -> bool {
     initialize_global_fallback().is_ok() && GLOBAL_FALLBACK.get().is_some()
 }
@@ -410,13 +387,9 @@ pub(crate) enum GlobalFallbackExecution {
 
 /// 业务作用：获取当前线程的终态处理执行权，防止处理器间接递归进入自身。
 ///
-/// # 参数说明
-///
 /// 参数说明: 无。
 ///
-/// # 返回
-///
-/// 首次进入返回守卫；已经处于处理器内部时返回 `None`，且不改变现有门禁。
+/// 返回：首次进入返回守卫；已经处于处理器内部时返回 `None`，且不改变现有门禁。
 fn try_enter_global_fallback() -> Option<GlobalFallbackGuard> {
     GLOBAL_FALLBACK_ACTIVE.with(|active| {
         if active.replace(true) {
@@ -429,13 +402,11 @@ fn try_enter_global_fallback() -> Option<GlobalFallbackGuard> {
 
 /// 业务作用：调用当前组件的唯一全局终态处理器，并把配置冲突、崩溃或递归收敛为内置响应信号。
 ///
-/// # 参数说明
+/// 参数说明：
 ///
 /// - `context`: 已冻结的降级事件上下文。
 ///
-/// # 返回
-///
-/// 返回细分执行结果；处理器只运行一次，失败后不再进入任何业务降级链。
+/// 返回：细分执行结果；处理器只运行一次，失败后不再进入任何业务降级链。
 pub(crate) fn execute_global_fallback(context: FallbackContext) -> GlobalFallbackExecution {
     if initialize_global_fallback().is_err() {
         return GlobalFallbackExecution::InvalidConfiguration;

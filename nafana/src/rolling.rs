@@ -58,6 +58,10 @@ pub(crate) struct RollingWindow {
 
 impl RollingWindow {
     /// 业务作用：构造空窗口,起点锚定当前时刻。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：以当前单调时刻为起点的空滚动窗口，没有历史桶或结局计数。
     pub(crate) fn new() -> Self {
         Self {
             start: Instant::now(),
@@ -66,14 +70,20 @@ impl RollingWindow {
     }
 
     /// 业务作用：返回当前时间相对窗口起点的第几秒(桶 key)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：从窗口创建起累计的整秒数；使用单调时钟，不受系统日期调整影响。
     fn now_sec(&self) -> u64 {
         self.start.elapsed().as_secs()
     }
 
     /// 业务作用：丢弃十秒滚动窗口之外的旧桶。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `now`: 当前秒。
+    ///
+    /// 返回：删除早于当前十秒窗口下界的桶；窗口内的计数与峰值保持原样。
     fn evict(&mut self, now: u64) {
         let window_floor = now.saturating_sub(WINDOW_SECS - 1);
         while self
@@ -88,8 +98,10 @@ impl RollingWindow {
 
     /// 业务作用：取/建当前秒的桶(队尾不是当前秒就补一个空桶),返回可变引用。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `now`: 当前秒。
+    ///
+    /// 返回：当前秒桶的独占引用；队尾不属于当前秒时新建空桶，本方法不驱逐旧桶。
     fn bucket_mut(&mut self, now: u64) -> &mut Bucket {
         if self.buckets.back().map(|b| b.sec) != Some(now) {
             self.buckets.push_back(Bucket {
@@ -102,8 +114,10 @@ impl RollingWindow {
 
     /// 业务作用：记录一次执行结局。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `outcome`: 本次结局(成功/失败/超时/被拒/被取消)。
+    ///
+    /// 返回：先驱逐过期桶，再为当前秒对应结局增加一次计数，不累计其它结局。
     pub(crate) fn record(&mut self, outcome: Outcome) {
         let now = self.now_sec();
         self.evict(now);
@@ -118,6 +132,10 @@ impl RollingWindow {
     }
 
     /// 业务作用：记一次"产出了降级响应"。在拒绝/超时分支记完主结局后、同一把锁内连续调用。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：先驱逐过期桶，再增加当前秒降级计数；不重复增加主请求结局。
     pub(crate) fn record_fallback(&mut self) {
         let now = self.now_sec();
         self.evict(now);
@@ -126,8 +144,10 @@ impl RollingWindow {
 
     /// 业务作用：进入执行区时采样当前并发,抬高当前秒桶的 `max_inflight`(滚动峰值数据源)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `current`: 本次进入后的并发数(gauge +1 之后的值)。
+    ///
+    /// 返回：先驱逐过期桶，再以较大值更新当前秒峰值；并发回落不降低该桶峰值。
     pub(crate) fn observe_inflight(&mut self, current: u64) {
         let now = self.now_sec();
         self.evict(now);
@@ -138,6 +158,10 @@ impl RollingWindow {
     }
 
     /// 业务作用：汇总当前滚动窗口:先驱逐过期数据,再累加计数与滚动并发峰值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：有效窗口内各结局的总数和最大并发；删除过期桶但不清空仍有效的数据。
     pub(crate) fn snapshot(&mut self) -> WindowSum {
         let now = self.now_sec();
         self.evict(now);
@@ -161,6 +185,10 @@ impl RollingWindow {
     }
 
     /// 业务作用：返回当前十秒窗口请求总数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：有效窗口内五类主请求结局总数；降级计数不重复计入，读取会清除过期桶。
     pub(crate) fn request_count(&mut self) -> u64 {
         let now = self.now_sec();
         self.evict(now);

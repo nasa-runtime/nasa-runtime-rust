@@ -38,8 +38,11 @@ const HEALTH_STALE_AFTER: Duration = Duration::from_secs(5);
 /// Application 统一停机；`force_on_timeout` 决定无损预算耗尽后是否显式升级为有损收口。
 #[derive(Debug, Clone)]
 pub struct PartitionApplicationPlan {
+    /// 当前 Runner 的规范化容量、调度与停止参数，构造计划不创建 worker。
     config: napart::RunnerConfig,
+    /// 健康失败是否影响应用整体就绪并触发统一停机。
     critical: bool,
+    /// 正常停机无损等待失败后是否允许尝试有损停止。
     force_on_timeout: bool,
 }
 
@@ -98,12 +101,13 @@ impl PartitionApplicationPlan {
         self.validated_at(ApplicationPhase::UserHook)
     }
 
-    /// 业务作用：设置 Application 为当前 Runner 分配的无损收口预算。
+    /// 业务作用：设置 Application 停止当前 Runner 时使用的计划总预算上限。
     ///
     /// 参数说明：
     /// - `timeout`: 必须大于零且不超过 365 天；实际值仍受 Application 剩余期限约束。
     ///
-    /// 返回：预算合法时返回更新计划；否则返回 UserHook 配置错误。
+    /// 返回：预算合法时返回更新计划；否则返回 UserHook 配置错误，不创建任务。
+    /// 受管停机先以剩余总预算的一半等待无损退出；允许强制停止时再使用原总截止点内的剩余时间。
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> ApplicationResult<Self> {
         self.config.shutdown_timeout = timeout;
         self.validated_at(ApplicationPhase::UserHook)
@@ -201,42 +205,61 @@ impl Default for PartitionApplicationPlan {
 #[serde(deny_unknown_fields)]
 /// 业务作用：承载单个分区 Runner 的可选 YAML 字段，并在启动期补齐有界默认值。
 struct PartitionRunnerSettings {
+    /// 期望 worker 数，计划校验时规范化为不小于该值的二次幂。
     #[serde(default)]
     partitions: Option<usize>,
+    /// 每类型队列容量的兼容字段，不得与 queue_capacity_per_type 同时设置。
     #[serde(default)]
     queue_capacity: Option<usize>,
+    /// 每个原始分区及任务类型的排队上限，缺省使用 Runner 默认值。
     #[serde(default)]
     queue_capacity_per_type: Option<usize>,
+    /// 延迟、排队、迁移和执行中任务共同占用的总容量。
     #[serde(default)]
     global_inflight: Option<usize>,
+    /// 类型状态上限的兼容字段，不得与 max_type_states 同时设置。
     #[serde(default)]
     max_lanes: Option<usize>,
+    /// 当前执行代次允许创建的类型状态总数，必须覆盖规范化分区数。
     #[serde(default)]
     max_type_states: Option<usize>,
+    /// 冻结失败证据的有界样本容量，不保存业务载荷。
     #[serde(default)]
     frozen_evidence_capacity: Option<usize>,
+    /// 单个 slot 允许同时接入的任务窃取通道上限。
     #[serde(default)]
     max_inbound_tunnels: Option<usize>,
+    /// 触发热点迁移观察的排队任务阈值。
     #[serde(default)]
     idle_task_threshold: Option<usize>,
+    /// 每次负载观察中严格顺序候选允许尝试的接力次数。
     #[serde(default)]
     strict_opportunity_attempts: Option<usize>,
+    /// 请求严格归还前必须连续观察到低负载的次数。
     #[serde(default)]
     return_observations: Option<usize>,
+    /// 非严格窃取通道没有进展时的租约上限毫秒数。
     #[serde(default)]
     tunnel_lease_ms: Option<u64>,
+    /// 全量负载观察间隔毫秒数，影响新迁移机会的发现频率。
     #[serde(default)]
     load_observer_interval_ms: Option<u64>,
+    /// 推进活动迁移、归还和失败收口的控制间隔毫秒数。
     #[serde(default)]
     control_tick_ms: Option<u64>,
+    /// 单次任务移动保持 Moving 状态的最长毫秒数。
     #[serde(default)]
     transition_timeout_ms: Option<u64>,
+    /// 此 Runner 的受管停机总预算上限毫秒数，仍受宿主剩余期限限制。
     #[serde(default)]
     shutdown_timeout_ms: Option<u64>,
+    /// worker 单轮处理主队列与窃取通道任务的批次上限。
     #[serde(default)]
     drain_batch: Option<usize>,
+    /// 省略为 true；当前 Runner 健康失败是否触发应用停机。
     #[serde(default = "default_true")]
     critical: bool,
+    /// 省略为 true；正常停机无损等待失败后是否允许尝试有损停止。
     #[serde(default = "default_true")]
     force_on_timeout: bool,
 }
@@ -326,8 +349,10 @@ impl PartitionRunnerSettings {
 #[serde(deny_unknown_fields)]
 /// 业务作用：绑定默认 Runner 名与命名 Runner 配置表，避免运行期猜测唯一实例。
 struct NamedPartitionSettings {
+    /// 无名称 getter 使用的 Runner，必须存在于 runners 表中。
     #[serde(default = "default_runner_name")]
     default_runner: String,
+    /// YAML 提供的稳定名称及独立参数，不能和 UserHook 同名重复登记。
     runners: BTreeMap<String, PartitionRunnerSettings>,
 }
 
@@ -341,7 +366,9 @@ enum PartitionSettingsShape {
 #[derive(Clone)]
 /// 业务作用：保存已经规范化的默认 Runner 身份与全部唯一命名启动计划。
 struct PartitionPlanSet {
+    /// 已校验且确实存在于集合中的默认 Runner 名称。
     default_runner: napart::RunnerName,
+    /// 按稳定名称排序的计划，确定启动和反序停止的顺序。
     runners: BTreeMap<napart::RunnerName, PartitionApplicationPlan>,
 }
 
@@ -389,11 +416,11 @@ impl PartitionSettingsShape {
     }
 }
 
-/// 业务作用：提供布尔策略字段的兼容默认值。
+/// 业务作用：使省略的 Runner 关键性和超时强制停止策略默认启用。
 ///
 /// 参数说明: 无。
 ///
-/// 返回：true。
+/// 返回：固定真值；关键 Runner 健康失败触发应用停机，正常停机无损等待超时后允许尝试有损停止。
 fn default_true() -> bool {
     true
 }
@@ -453,6 +480,7 @@ fn partition_plans_from_tree(
 /// Runner 的确定停机只由 Application 生命周期 action 持有。
 #[derive(Clone)]
 pub struct PartitionApplicationHandle {
+    /// 与宿主共享的执行域，仅通过本句柄开放提交和观察入口。
     runner: napart::PartitionRunner,
 }
 
@@ -464,7 +492,9 @@ impl PartitionApplicationHandle {
     ///
     /// 返回：共享同一执行域的可克隆业务句柄。
     fn new(runner: napart::PartitionRunner) -> Self {
-        Self { runner }
+        Self {
+            runner,
+        }
     }
 
     /// 业务作用：读取本业务句柄绑定的稳定 Runner 名称。
@@ -595,7 +625,8 @@ impl PartitionApplicationHandle {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：Application 尚未开始收口且本 Runner 开放准入时返回 true。
+    /// 返回：Runner 当前阶段恰为 Accepting 时返回 true；不另行读取 Application 状态。
+    /// 这是瞬时观察，不为后续提交预留准入或容量，提交时仍须通过 Runner 门禁。
     pub fn is_started(&self) -> bool {
         self.runner.phase() == napart::RunnerPhase::Accepting
     }
@@ -690,15 +721,21 @@ fn normalized_partitions(partitions: usize) -> usize {
 #[derive(Clone)]
 /// 业务作用：原子发布 Ready 后可访问的默认 Runner 与命名只读句柄表。
 struct PublishedRunners {
+    /// 完整目录中由无名称入口选择的稳定名称。
     default_runner: napart::RunnerName,
+    /// 所有 Runner 成功启动后一次性发布的业务句柄目录。
     handles: BTreeMap<napart::RunnerName, PartitionApplicationHandle>,
 }
 
 /// YAML/UserHook 计划、readiness 与 Prepare 原子发布共用的命名状态。
 pub(crate) struct PartitionRuntimeState {
+    /// UserHook 计划登记及 Prepare 取走共用的互斥状态，取走后不重新开放。
     plans: Mutex<PartitionPlanState>,
+    /// 按名称登记的独立就绪更新句柄，Prepare 要求所有计划都有对应项。
     contributors: Mutex<BTreeMap<napart::RunnerName, ReadinessContributor>>,
+    /// Start 从 YAML 登记的名称，用于明确拒绝 UserHook 的同名来源冲突。
     yaml_names: Mutex<BTreeSet<napart::RunnerName>>,
+    /// Prepare 只能发布一次的完整业务目录，后续读取仍要复验 Runner 准入。
     published: OnceLock<PublishedRunners>,
 }
 
@@ -787,7 +824,7 @@ impl PartitionRuntimeState {
     /// 参数说明：
     /// - `name`: 待配置的稳定名称。
     ///
-    /// 返回：该名称已有 readiness 贡献项时返回 true。
+    /// 返回：名称已记入 YAML 来源集合时为 true，不通过 readiness 是否存在推断计划来源。
     pub(crate) fn has_yaml_plan(&self, name: &napart::RunnerName) -> bool {
         self.yaml_names
             .lock()
@@ -947,6 +984,7 @@ impl PartitionRuntimeState {
 
 /// 受管命名 Runner 组件。
 pub(crate) struct PartitionComponent {
+    /// Prepare 建立、向 Runner 一次性移交的全部命名执行域健康监督任务。
     critical_task: Option<ApplicationFuture<'static>>,
 }
 
@@ -1009,12 +1047,13 @@ impl ApplicationComponent for PartitionComponent {
         })
     }
 
-    /// 业务作用：按稳定名称批量创建并启动 Runner，全部成功后原子发布映射与反序停机权。
+    /// 业务作用：按稳定名称启动 Runner，登记业务句柄后发布完整目录，再交由宿主管理反序停机。
     ///
     /// 参数说明：
     /// - `context`: 提供资源登记、active stack 和共享启动 deadline 的 Prepare 上下文。
     ///
-    /// 返回：全部 Runner 已受管且业务映射发布时成功；任一失败先反序收口已启动项再返回错误。
+    /// 返回：全部 Runner 已启动、资源与目录已发布且停机动作已登记时成功。
+    /// 启动或资源发布失败会尝试反序停止已创建项；目录、就绪观察与停机动作依次发布，并非一次原子事务。
     fn prepare<'a>(&'a mut self, context: &'a mut PrepareContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let runtime = context.application().partition_runtime();
@@ -1111,9 +1150,12 @@ impl ApplicationComponent for PartitionComponent {
                 context.application().clone(),
                 managed.clone(),
             )));
-            // 业务映射与 readiness 同时可见后才发布停机所有权，后续任何启动失败都会先关闭
-            // 全部 Runner，再释放资源容器中的业务句柄。
-            context.activate(Box::new(PartitionShutdown { managed, registry }));
+            // 目录与各 Runner 的就绪观察已依次发布；在返回 Prepare 前登记停机责任，
+            // 后续阶段失败时先停止 Runner，再释放资源容器持有的业务句柄。
+            context.activate(Box::new(PartitionShutdown {
+                managed,
+                registry,
+            }));
             Ok(())
         })
     }
@@ -1133,9 +1175,13 @@ impl ApplicationComponent for PartitionComponent {
 #[derive(Clone)]
 /// 业务作用：把一个已启动 Runner 与其冻结计划、名称和 readiness 更新权绑定到同一所有权单元。
 struct ManagedRunner {
+    /// 计划、指标和停机报告共同使用的已校验稳定名称。
     name: napart::RunnerName,
+    /// 生命周期持有启停权的执行域，业务仅获得受限投影。
     runner: napart::PartitionRunner,
+    /// 启动冻结的关键性、容量及停机策略。
     plan: PartitionApplicationPlan,
+    /// 此执行域的健康事实更新权，监督任务和停机动作共用。
     contributor: ReadinessContributor,
 }
 
@@ -1243,7 +1289,9 @@ async fn run_health_monitor(
 
 /// 停机 action 持有命名注册表和全部 Runner 的显式收口权。
 struct PartitionShutdown {
+    /// 按启动顺序保留的执行域，停机按反序逐项等待。
     managed: Vec<ManagedRunner>,
+    /// 保持命名注册表存活至收口结束，防止停止过程中提前释放执行域 owner。
     registry: napart::PartitionRunnerRegistry,
 }
 
@@ -1263,6 +1311,8 @@ impl ShutdownAction for PartitionShutdown {
     /// - `context`: 提供全部 active step 共用的绝对停机期限。
     ///
     /// 返回：全部 Runner 无损退出时成功；未收敛或产生冻结、中止证据时聚合名称与计数返回错误。
+    /// future 开始执行后先请求所有 Runner 停止准入；逐项预算受宿主剩余期限限制，无损阶段只用其一半。
+    /// 强制停止仅在计划允许时进行，使用同一总截止点；取消等待不表示已经取得退出证明。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let _registry_guard = &self.registry;

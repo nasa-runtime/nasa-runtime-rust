@@ -2,8 +2,9 @@
 
 `naoutbox-pgsql` 把业务事实与等待投递的事件写入同一个命名 PostgreSQL datasource 和 ambient transaction，
 消除“业务已提交但消息没有持久化”的窗口。dispatcher 以数据库 owner 租约和递增 fencing token 取得
-global 或单 lane 权威，再通过 `FOR UPDATE SKIP LOCKED` 按稳定 `id` 升序领取候选；只有下游已确认的
-成功前缀会按精确 `id + event_id` 标记完成。
+global 或单 lane 权威。原批次入口通过 `FOR UPDATE SKIP LOCKED` 按稳定 `id` 升序领取候选，
+只确认下游已接收的成功前缀；显式聚合根轮转入口允许独立业务继续投递，同时保留失败聚合根的原头事件。
+两种读取策略均按精确 `id + event_id` 确认，复用租约、fencing 和事务内配额释放。
 
 ## 初始化与使用
 
@@ -48,10 +49,34 @@ async fn create_order(order_id: i64) -> anyhow::Result<()> {
 - global dispatcher 与 lane dispatcher 是两种互斥运行模式，不能同时处理同一张 `outbox_event` 表；
   lane 模式必须为每个已配置 lane 启动对应 dispatcher。
 
+## 独立聚合根轮转
+
+宿主可持有一个 `AggregateCursor::default()`，持续调用
+`PgOutbox::dispatch_next_aggregate(&publisher, &mut cursor, max_payload_bytes)`。
+一次只尝试当前聚合根最早的一个待投递事件，下轮从 `(aggregate_type, aggregate_id)` 后继开始，
+到达末尾后回绕。正文只读取一份并移入发布链；游标只保存两个有界身份，不持有正文或持久调度权威。
+失败、头行被锁或正文超限时保留原事件，后续轮次可以服务其它聚合根。同一聚合根不会越过该头事件。
+
+使用前须显式应用 `migrations/create_outbox_aggregate_dispatch_index.sql`；`ensure_schema` 的显式自举
+也创建该索引。每轮验证索引的有效性、键序和待投递谓词，缺失或漂移时拒绝派发。
+该入口与原 global 批次入口竞争同一 owner，仍不能与 lane 模式混用。不同聚合根没有全局顺序保证；
+同一聚合根的生产者必须串行提交，自增 `id` 不代表并发事务的提交顺序。
+
+`max_payload_bytes` 必须为 1 至 16 MiB；超限正文不传到客户端，不自动确认或记入死信。
+候选事务的语句等待上限为 2 秒、锁等待上限为 250 毫秒；头行使用 `NOWAIT`，不会跳过被锁头行。
+单次调用总上限为 30 秒，发布仍受原有 25 秒上限约束。未取得 owner 返回空报告；明确暂缓返回
+`first_error`，数据库、结构或整轮超时返回错误。宿主应对空轮次和失败施加有界退避。
+
+取消或重启允许原事件重投，原 owner 未释放时需等待租约到期；未知提交不等同未执行。
+`AggregateCursor::reset()` 只清除本地位置，不改变持久事件、租约或配额。该接口提供轮转机会，
+不提供并行执行、跨根事务或下游恰好一次副作用；下游仍须按 `event_id` 幂等。
+Application 的受管 dispatcher 不会自动切换到该策略，使用者须显式拥有轮转任务的生命周期。
+
 ## lane、配额与保留
 
 lane 路由和租户配额都是显式安装的进程级冻结策略。未安装路由时全部事件进入 `global`；列入配额的租户
-必须先在同源事务中完成账本对账，随后 append 才能原子预留名额。投递或进入死信与名额释放同事务提交。
+必须先在同源事务中完成账本对账，再使用 `append_transactional_with_context` 和受信租户上下文
+原子预留名额；兼容写入入口不承担该预留。投递或进入死信与名额释放同事务提交。
 同一 `event_id` 的幂等追加不新增待投递事实、不重复占用配额，也不产生无效提交唤醒。
 
 保留清理只处理达到最小年龄的已投递行，或具备独立批准和归档收据的死信。待投递行永不进入候选；

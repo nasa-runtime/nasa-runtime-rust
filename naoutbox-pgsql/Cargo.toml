@@ -16,5 +16,5 @@ async-trait = "0.1"
 naoutbox-core = { version = "2.0.0" }
 natx-pgsql = { version = "2.0.0" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1.54.1", features = ["sync", "time"] }
 uuid = { version = "1", features = ["v4"] }

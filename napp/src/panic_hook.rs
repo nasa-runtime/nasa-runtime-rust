@@ -13,9 +13,10 @@ pub(crate) const PANIC_MARKER_MAX_BYTES: usize = 512;
 /// 只捕获错误无法阻止默认 hook 先把业务 payload 写到 stderr。多入口重复调用由 `Once` 收敛，
 /// 保证首次安装最早生效且不重复替换。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数无参数；调用后 hook 持续生效到进程退出。
+/// 返回：首次调用替换进程 hook，后续调用不重复安装；不停止 panic 展开或 abort。
+/// hook 没有自动恢复步骤，但进程内其他代码仍可再次替换它，应用须统一管理此进程级入口。
 pub(crate) fn install_process_panic_hook() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(install_hook);
@@ -36,13 +37,16 @@ fn install_hook() {
     }));
 }
 
-/// 业务作用：构造有界、单行且不含绝对构建路径的 panic 标记。
+/// 业务作用：构造有界单行 panic 位置标记，不包含 panic payload、线程名或回溯。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `file`：panic 位置对应的源文件路径。
 /// - `line`：源文件行号。
 /// - `column`：源文件列号。
+///
+/// 返回：含固定前缀、压缩路径、行列号和一个末尾换行的字符串，总长度不超过 512 字节。
+/// 路径裁剪保留完整 UTF-8 字符，不读取文件或验证源码位置存在。
 fn panic_marker(file: &str, line: u32, column: u32) -> String {
     let file = compact_source_path(file);
     let suffix = format!(":{line}:{column}\n");
@@ -54,11 +58,14 @@ fn panic_marker(file: &str, line: u32, column: u32) -> String {
     format!("{prefix}{file}{suffix}")
 }
 
-/// 业务作用：清洗控制字符并把绝对路径压缩成末尾三个路径段。
+/// 业务作用：清洗控制字符并移除绝对路径前缀，只保留最多三个源码路径尾段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `file`：编译器提供的源文件位置；该值可能包含平台分隔符或控制字符。
+///
+/// 返回：控制字符替换为问号，去除根分隔符和独立 Windows 盘符段，以斜杠连接最多三个非空尾段。
+/// 空输入或仅根、盘符的输入返回空串；不解析相对目录，也不保证剩余目录名不含业务信息。
 fn compact_source_path(file: &str) -> String {
     let sanitized = file
         .chars()
@@ -76,21 +83,29 @@ fn compact_source_path(file: &str) -> String {
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    if segments.len() <= 3 {
-        sanitized
+    // 短绝对路径同样需要去除根和盘符，不能仅在段数超限时才压缩来源身份。
+    let segments = if segments.first().is_some_and(|segment| {
+        let bytes = segment.as_bytes();
+        bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+    }) {
+        &segments[1..]
     } else {
-        segments[segments.len() - 3..].join("/")
-    }
+        &segments[..]
+    };
+    segments[segments.len().saturating_sub(3)..].join("/")
 }
 
 /// 业务作用：保留字符串末尾不超过指定字节数的完整 UTF-8 字符。
 ///
 /// 保留末尾可以让超长路径仍包含文件名，而不是只留下无定位价值的目录前缀。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`：已经清洗的源文件路径。
 /// - `max_bytes`：该路径在完整标记中可占用的最大字节数。
+///
+/// 返回：原字符串末尾的借用切片，长度不超过上限且不截断 UTF-8 字符；零上限返回空切片。
+/// 本函数不分配、不清洗内容，也不保证截断点恰好是路径段边界。
 fn tail_at_char_boundary(value: &str, max_bytes: usize) -> &str {
     if value.len() <= max_bytes {
         return value;

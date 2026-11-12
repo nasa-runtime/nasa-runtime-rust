@@ -271,8 +271,10 @@ See the detailed [naml contract](naml/README.md) and [configuration adapter](con
 
 ## Configuration and operations
 
-Application reads `zcf/application.yml` relative to the process working directory. The file must
-exist, even if its content is `{}`. Configuration precedence is the base file, explicit profile,
+Application reads the path in a non-empty `APP_CONFIG_FILE` environment variable, defaulting to
+`zcf/application.yml` when unset or empty. Relative paths resolve against the process working directory.
+The selected file must exist, even if its content is `{}`; an unreadable selected path does not fall back
+to the default file. Configuration precedence is the base file, explicit profile,
 ordered local/remote overlays, then `APP__...` environment overrides. Strict imports use the order
 described above; compatibility loading keeps its existing reading scope. Credentials belong in the deployment
 environment or a secret provider.

@@ -4,7 +4,9 @@ use crate::{CloseReport, KafkaProxy, OffsetIsolation, OffsetObservation};
 
 impl KafkaProxy {
     /// 业务作用：由宿主按自身周期采样源级关闭责任，不增加定时器或 broker 请求。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：独立采样的关闭报告；指标有界异步入队，出口拥塞或关闭可以丢弃，不影响资源裁决。
     pub fn sample_metrics(&self) -> CloseReport {
         let report = self.close_report();
@@ -60,7 +62,10 @@ impl KafkaProxy {
         report
     }
     /// 业务作用：把已封存的 broker 提交距离送入有界观测出口，缺项不会被补成完整零积压。
-    /// 参数说明：report 为显式请求范围和读取隔离下的证据。
+    ///
+    /// 参数说明：
+    /// - `report`：report 为显式请求范围和读取隔离下的证据。
+    ///
     /// 返回：无组时不输出；任一缺项使 lag=-1，并同时报告范围大小、缺项及观测时刻。
     pub(crate) fn sample_offset_metrics(&self, report: &OffsetObservation) {
         let Some(group) = report.group.as_deref() else {

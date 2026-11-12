@@ -37,6 +37,8 @@ use syn::{parse_macro_input, parse_quote, Expr, ItemFn, LitBool, LitInt, LitStr,
 ///
 /// 参数说明：
 /// - `u`: 注解里填写的 `time_unit` 原始字符串,允许大小写和常见别名。
+///
+/// 返回：已识别的单位返回固定记号；未知单位返回编译期诊断文本，不推定默认单位。
 fn canonical_time_unit(u: &str) -> Result<&'static str, String> {
     match u.trim().to_ascii_lowercase().as_str() {
         "ms" | "milli" | "millis" | "millisecond" | "milliseconds" => Ok("ms"),
@@ -58,6 +60,8 @@ fn canonical_time_unit(u: &str) -> Result<&'static str, String> {
 /// - `value`: 注解中的数值部分,例如 `fixed_rate = 5` 或 duration string 中的 `5s` 的 `5`。
 /// - `unit`: 已规范化的单位记号(`ms/s/m/h/d/us/ns`)。
 /// - `ctx`: 错误定位上下文,通常是 string 原文或"数字版"。
+///
+/// 返回：可精确表示时返回毫秒数；溢出、亚毫秒余数或未知单位返回带上下文的错误。
 fn unit_part_to_ms(value: u64, unit: &str, ctx: &str) -> Result<u64, String> {
     let mul = |f: u64| {
         value
@@ -81,8 +85,10 @@ fn unit_part_to_ms(value: u64, unit: &str, ctx: &str) -> Result<u64, String> {
 
 /// 业务作用：单位粒度排序:d>h>m>s>ms>us>ns。COMPOSITE 段必须严格从大到小(避免歧义与重复)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `unit`: duration string 中已经转小写的单位段。
+///
+/// 返回：已知单位返回从粗到细递增的序号；未知单位返回 `None`，由调用方拒绝该时长。
 fn unit_rank(unit: &str) -> Option<u8> {
     match unit {
         "d" => Some(0),
@@ -100,9 +106,11 @@ fn unit_rank(unit: &str) -> Option<u8> {
 /// 支持**编译期字面量**:可选 `+` 正号;纯整数(走 fallback);SIMPLE/COMPOSITE 段式 `1s500ms`/`1h12m27s`/`1d 2h 3m`(单位
 /// `d/h/m/s/ms/us/ns`,从大到小);ISO-8601 `P1DT2H`/`PT1M30S`/`PT0.5S`。负号与占位符/表达式拒绝。
 ///
-/// # 参数
+/// 参数说明：
 /// - `s`: 注解里的 duration 字面量,例如 `fixed_rate_string = "1s500ms"`。
 /// - `fallback_unit`: 纯整数 duration 没写单位时使用的单位,来自同一注解的 `time_unit`。
+///
+/// 返回：合法且可无损折算的字面量返回毫秒数；非法单位、顺序、占位表达式、负数或溢出返回错误。
 fn duration_str_to_ms(s: &str, fallback_unit: &str) -> Result<u64, String> {
     let t0 = s.trim();
     if t0.contains("${") || t0.contains("#{") {
@@ -204,8 +212,10 @@ fn duration_str_to_ms(s: &str, fallback_unit: &str) -> Result<u64, String> {
 /// **仅秒可带小数(1~9 位,按纳秒解析)**,且须能**无损折算到毫秒**否则拒绝(同 us/ns 策略)。大小写不限。
 /// 不支持年/月/周(`Y`/`W`/月,需历法不定长)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `t`: 已确认以 `P`/`p` 开头的 ISO-8601 duration 字符串。
+///
+/// 返回：支持的时间段返回累加毫秒数；缺少数值或单位、不支持的段、小数精度损失及溢出均返回错误。
 fn parse_iso8601_duration(t: &str) -> Result<u64, String> {
     let body = &t[1..]; // 去掉 P
                         // 以 'T'/'t' 分日期段与时间段。
@@ -315,9 +325,11 @@ fn parse_iso8601_duration(t: &str) -> Result<u64, String> {
 
 /// 业务作用：从多个来源里收敛出**最多一个**(>1 个即互斥冲突),返回 (选中来源名, 毫秒值)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `family`: 参数族名称,用于错误文案,例如 `fixed_rate` 或 `fixed_delay`。
 /// - `cands`: 已解析成功的候选来源列表,元素为 `(来源名, 毫秒值)`。
+///
+/// 返回：无候选时为 `Ok(None)`，唯一候选时返回该项；多个来源返回互斥错误，不按顺序覆盖。
 fn pick_one<'a>(
     family: &str,
     cands: Vec<(&'a str, u64)>,
@@ -339,8 +351,10 @@ fn pick_one<'a>(
 /// 故裸名 `Result<…>`、类型别名、`custom::Result` 一律按**普通返回值忽略**——保证"任意返回类型都能用、绝不因命名碰撞编译失败"。
 /// 想让调度器自动记 `Err`:用 `anyhow::Result` 或 `std::result::Result` / `core::result::Result` 的**显式路径**返回。
 ///
-/// # 参数
+/// 参数说明：
 /// - `output`: 被 `#[scheduled]` 标注函数的返回类型 AST。
+///
+/// 返回：显式支持路径且带类型参数时为真；省略返回类型、其它 AST 或无法判定来源的名称均为假。
 fn is_result_return(output: &ReturnType) -> bool {
     let ReturnType::Type(_, ty) = output else {
         return false;
@@ -377,8 +391,10 @@ fn is_result_return(output: &ReturnType) -> bool {
 /// `anyhow::Result<_>` 时这一转换**必然成立**(同类型)。其它显式路径 Result(如 `std::result::Result<_, String>`,
 /// `String` 不实现 `From<anyhow::Error>`)若注入 `?` 会编译失败——过程宏无法静态求解 `From`,故只认 anyhow,其余走 expect。
 ///
-/// # 参数
+/// 参数说明：
 /// - `output`: 被 `#[EnableScheduling]` 标注 main 函数的返回类型 AST。
+///
+/// 返回：只在显式 `anyhow::Result` 路径带类型参数时为真；其它返回形式不授权生成 `?` 传播。
 fn is_anyhow_result_return(output: &ReturnType) -> bool {
     let ReturnType::Type(_, ty) = output else {
         return false;
@@ -415,7 +431,10 @@ enum AsyncExecutor {
     Spawn,
     /// `runner = <expr>, spec = <expr>`:提交到 napart 分区执行域,同键保序,
     /// 返回受理/拒绝结果(保留容量、停机与顺序门禁语义)。表达式装箱以免空变体分摊大枚举体积。
-    Partition { runner: Box<Expr>, spec: Box<Expr> },
+    Partition {
+        runner: Box<Expr>,
+        spec: Box<Expr>,
+    },
 }
 
 /// 业务作用：解析 `#[Async(...)]` 属性参数,把执行域裁决固定在编译期。
@@ -625,7 +644,11 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(r) => r,
         Err(msg) => return quote! { ::core::compile_error!(#msg); }.into(),
     };
-    if let AsyncExecutor::Partition { runner, spec } = executor {
+    if let AsyncExecutor::Partition {
+        runner,
+        spec,
+    } = executor
+    {
         return expand_partition_async(&root, *runner, *spec, item);
     }
 
@@ -683,8 +706,8 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
             Err(e) => e.into(),
         },
         syn::Item::Impl(imp) => {
-            // trait impl 拒绝:trait 方法签名必须与 trait 定义一致,改写返回类型为 JoinHandle 会破坏签名(展开后底层报
-            // "incompatible type for trait")。只支持 inherent impl;trait 抽象由用户在具体方法上自行设计异步入口。
+            // 拒绝 trait impl，因为改写返回类型为 JoinHandle 会破坏 trait 的签名约束。
+            // 只处理 inherent impl；trait 的异步入口由具体实现保持其原有合同。
             if imp.trait_.is_some() {
                 return syn::Error::new_spanned(
                     &imp.self_ty,
@@ -780,15 +803,35 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// ## 用法示例
 /// ```ignore
-/// #[scheduled(initial_delay_ms = 3000)]                          async fn warmup() {}    // 启动后 3s 跑一次
-/// #[scheduled(fixed_rate_ms = 5000)]                             async fn heartbeat() {} // 每 5s(立即首跑)
-/// #[scheduled(fixed_rate_ms = 5000, initial_delay_ms = 1000)]    async fn poll() {}      // 1s 后开跑,之后每 5s
-/// #[scheduled(fixed_rate = 5, time_unit = "seconds")]            async fn beat2() {}     // = fixed_rate_ms = 5000
-/// #[scheduled(fixed_rate_string = "500ms")]                      async fn beat3() {}     // = fixed_rate_ms = 500
-/// #[scheduled(fixed_rate_ms = 1000, skip_if_running = true)]     async fn slow() {}      // 上次没跑完就跳过本拍
-/// #[scheduled(fixed_rate_ms = 1000, max_in_flight = 3)]          async fn capped() {}    // 最多 3 个并发
-/// #[scheduled(fixed_delay_ms = 2000)]                            async fn drain() {}     // 完成后等 2s 再跑
-/// #[scheduled(cron = "0/10 * * * * *", zone = "Asia/Shanghai")]  async fn tick() -> anyhow::Result<()> { Ok(()) }
+/// // 启动后等待三秒，只执行一次。
+/// #[scheduled(initial_delay_ms = 3000)]
+/// async fn warmup() {}
+/// // 立即执行，后续每五秒触发。
+/// #[scheduled(fixed_rate_ms = 5000)]
+/// async fn heartbeat() {}
+/// // 等待一秒首次执行，后续每五秒触发。
+/// #[scheduled(fixed_rate_ms = 5000, initial_delay_ms = 1000)]
+/// async fn poll() {}
+/// // 数字和单位组合，与五千毫秒周期等价。
+/// #[scheduled(fixed_rate = 5, time_unit = "seconds")]
+/// async fn beat2() {}
+/// // 字符串指定五百毫秒周期。
+/// #[scheduled(fixed_rate_string = "500ms")]
+/// async fn beat3() {}
+/// // 上次任务仍在执行时跳过本次触发。
+/// #[scheduled(fixed_rate_ms = 1000, skip_if_running = true)]
+/// async fn slow() {}
+/// // 同一任务最多允许三个实例并发执行。
+/// #[scheduled(fixed_rate_ms = 1000, max_in_flight = 3)]
+/// async fn capped() {}
+/// // 本次完成后等待两秒，再执行下一次。
+/// #[scheduled(fixed_delay_ms = 2000)]
+/// async fn drain() {}
+/// // 按指定时区解析日历触发时间。
+/// #[scheduled(cron = "0/10 * * * * *", zone = "Asia/Shanghai")]
+/// async fn tick() -> anyhow::Result<()> {
+///     Ok(())
+/// }
 /// // 旧别名仍可用:#[scheduled(every_ms = 5000)] / #[scheduled(delay_ms = 3000, every_ms = 5000)]
 /// ```
 ///
@@ -1212,11 +1255,14 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
 // `std::result::Result<_, String>` 注入 `?` 会因 `String: !From<anyhow::Error>` 编译失败,过程宏无法静态求解)。
 // 其余一切(`()`、无返回、`ExitCode`、裸名/其它 Result)→ `expect` **fail-fast panic**(不进 body),不吞失败。
 // `#[Enable*(...)]` 非空参数 → compile_error(本注解无参)。
-/// 业务作用：`#[Enable*(...)]` 非空参数 → compile_error(本注解无参)。
-/// # 参数
+/// 业务作用：在异步入口执行用户代码前启动定时调度，并按返回类型选择启动错误传播方式。
+///
+/// 参数说明：
 /// - `attr`: `#[EnableScheduling]`/`#[EnableAsync]` 括号内的 token stream,当前必须为空。
 /// - `item`: 被注解的 async main 函数 token stream。
 /// - `what`: 当前宏的展示名,用于生成精确的 compile_error 文案。
+///
+/// 返回：生成先启动后进入原函数体的代码；非空属性、运行时依赖缺失或同步函数产生编译期错误。
 fn gen_enable(attr: TokenStream, item: TokenStream, what: &str) -> TokenStream {
     if !attr.is_empty() {
         let item2: proc_macro2::TokenStream = item.into();
@@ -1273,16 +1319,21 @@ fn gen_enable(attr: TokenStream, item: TokenStream, what: &str) -> TokenStream {
 /// ```ignore
 /// #[EnableScheduling]   // ← 在上(先展开,看到的是 async fn main 原体)
 /// #[tokio::main]        // ← 在下
-/// async fn main() -> anyhow::Result<()> { /* ... */ }
+/// async fn main() -> anyhow::Result<()> {
+///     // 在此维持业务服务的生命周期。
+///     Ok(())
+/// }
 /// ```
 ///
 /// ⚠️ 注入点在 main 体【最前面】(早于 `log::init()` 等),"注册 N 个任务"那几行启动日志可能打不出来(subscriber 未装);
 ///   任务本身正常注册/运行。想看注册日志可不用本注解,在日志初始化后手动 `scheduling::start_scheduled().await?;`。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `attr`: `#[EnableScheduling(...)]` 括号内的 token stream；当前必须为空。
 /// - `item`: 被注解的 async main 函数 token stream。
+///
+/// 返回：带调度启动门禁的入口函数；属性或函数形态不合法时生成编译期错误。
 #[proc_macro_attribute]
 pub fn EnableScheduling(attr: TokenStream, item: TokenStream) -> TokenStream {
     gen_enable(attr, item, "EnableScheduling")
@@ -1291,10 +1342,12 @@ pub fn EnableScheduling(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 业务作用：`#[EnableScheduling]` 的**兼容别名**(旧名;实际启动的是 #[scheduled] 定时调度,与 #[Async] 无关)。新代码建议用
 /// `#[EnableScheduling]`。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `attr`: `#[EnableAsync(...)]` 括号内的 token stream；当前必须为空。
 /// - `item`: 被注解的 async main 函数 token stream。
+///
+/// 返回：与 `EnableScheduling` 相同的启动代码和错误语义，仅宏的诊断名称不同。
 #[proc_macro_attribute]
 pub fn EnableAsync(attr: TokenStream, item: TokenStream) -> TokenStream {
     gen_enable(attr, item, "EnableAsync")

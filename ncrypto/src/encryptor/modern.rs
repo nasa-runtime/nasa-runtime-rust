@@ -253,14 +253,14 @@ fn derive_nc2_key(
     Ok(key)
 }
 
-/// 业务作用: 生成 NC1 的历史认证上下文，保证既有密文仍按原格式验证。
+/// 业务作用：按 NC1 密文协议构造派生参数与随机量的认证上下文。
 ///
-/// 参数说明:
-/// - `iterations`: PBKDF2 迭代次数。
-/// - `salt`: KDF 随机盐。
-/// - `nonce`: AES-GCM nonce。
+/// 参数说明：
+/// - `iterations`：按大端四字节编码的 PBKDF2 迭代次数。
+/// - `salt`：调用方已固定长度的随机盐。
+/// - `nonce`：调用方已固定长度的 AES-GCM 随机数。
 ///
-/// 返回: 返回符合 NC1 线格式的 AAD。
+/// 返回：返回协议前缀、迭代次数、盐及随机数顺序拼接的 AAD，不校验字段长度或派生成本。
 fn nc1_aad(iterations: u32, salt: &[u8], nonce: &[u8]) -> Vec<u8> {
     let mut aad = Vec::with_capacity(
         MODERN_TOKEN_V1_PREFIX.len() + std::mem::size_of::<u32>() + salt.len() + nonce.len(),
@@ -272,17 +272,17 @@ fn nc1_aad(iterations: u32, salt: &[u8], nonce: &[u8]) -> Vec<u8> {
     aad
 }
 
-/// 业务作用: 生成 NC2 认证上下文，把版本、KDF 参数、随机量和业务 AAD 绑定到认证标签。
+/// 业务作用：将 NC2 派生参数、随机量及外部业务上下文绑定到认证数据。
 ///
-/// 参数说明:
-/// - `memory_kib`: Argon2id 内存成本。
-/// - `iterations`: Argon2id 时间成本。
-/// - `parallelism`: Argon2id 并行度。
-/// - `salt`: KDF 随机盐。
-/// - `nonce`: AES-GCM nonce。
-/// - `external_aad`: 调用方提供且不进入密文的业务认证上下文。
+/// 参数说明：
+/// - `memory_kib`：按大端四字节编码的 Argon2id 内存成本。
+/// - `iterations`：按大端四字节编码的时间成本。
+/// - `parallelism`：按大端四字节编码的并行度。
+/// - `salt`：由调用方固定长度的随机盐。
+/// - `nonce`：由调用方固定长度的 AES-GCM 随机数。
+/// - `external_aad`：仅参与认证、不进入密文正文的业务上下文。
 ///
-/// 返回: 返回字段边界无歧义的二进制 AAD。
+/// 返回：返回协议前缀、成本、盐、随机数、外部上下文长度及原字节的顺序拼接；不在此检查参数预算，固定随机量长度由调用方保证。
 fn nc2_aad(
     memory_kib: u32,
     iterations: u32,
@@ -486,7 +486,13 @@ fn encrypt_aead(
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| CryptoError::config("AES-256-GCM key 初始化失败"))?;
     cipher
-        .encrypt(&Nonce::from(nonce), Payload { msg: content, aad })
+        .encrypt(
+            &Nonce::from(nonce),
+            Payload {
+                msg: content,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::encrypt("AES-256-GCM 加密失败"))
 }
 

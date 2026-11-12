@@ -71,7 +71,8 @@ impl MySqlIdempotencyStore {
 
     /// 业务作用：创建绑定命名 datasource 的幂等 store。
     ///
-    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：为启动期已注册的数据源名称。
     ///
     /// 返回：后续操作固定使用该 datasource；名称非法时在 I/O 前失败。
     pub fn with_datasource(datasource: impl AsRef<str>) -> Result<Self, IdempotencyError> {
@@ -91,7 +92,9 @@ impl MySqlIdempotencyStore {
     }
 
     /// 业务作用：在宿主迁移门禁之后只读核对本 store 所需表和字段，不隐式执行 DDL。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：连接和必要字段可读取时成功；表缺失、权限不足或结构不符时返回脱敏错误。
     pub async fn validate_schema(&self) -> Result<(), IdempotencyError> {
         let mut connection = natx::conn_for(&self.datasource).await.map_err(map_err)?;
@@ -100,16 +103,19 @@ impl MySqlIdempotencyStore {
         Ok(())
     }
 
-    /// 业务作用：确保幂等表存在。部署由迁移拥有 schema;此方法供演示环境自举。
+    /// 业务作用：确保幂等表存在。部署由迁移拥有 schema;此方法供演示环境自举。 需先 `natx::init` 注册默认 datasource。
     ///
-    /// 需先 `natx::init` 注册默认 datasource。
+    /// 参数说明: 无。
+    ///
+    /// 返回：默认 datasource 表存在或 DDL 执行成功时返回成功；数据源、连接或 DDL 失败返回脱敏错误，不比对既有表的完整结构。
     pub async fn ensure_schema() -> Result<(), IdempotencyError> {
         Self::ensure_schema_for("default").await
     }
 
     /// 业务作用：在指定 datasource 上确保幂等表结构存在。
     ///
-    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：为启动期已注册的数据源名称。
     ///
     /// 返回：表已存在或创建成功时返回成功；名称、连接或 DDL 失败时返回脱敏错误。
     pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), IdempotencyError> {
@@ -274,6 +280,12 @@ impl IdempotencyStore for MySqlIdempotencyStore {
 
 impl MySqlIdempotencyStore {
     /// 业务作用：主键已存在时读现有行裁决:指纹不符→冲突;已完成→重放;仍进行中→并发冲突。
+    ///
+    /// 参数说明：
+    /// - `key`：需要读取的完整幂等命名空间。
+    /// - `fingerprint`：本次请求待与持久记录比较的指纹。
+    ///
+    /// 返回：行不存在时保守判在途，指纹不同返回冲突；同指纹的完成行解码为重放，在途行返回并发。未知状态、损坏字段或数据库故障返回错误，不取得新租约或校验 header 白名单。
     async fn decide_existing(
         &self,
         key: &IdempotencyKey,
@@ -350,6 +362,11 @@ fn validate_key(key: &IdempotencyKey) -> Result<(), IdempotencyError> {
 }
 
 /// 业务作用：把任意底层错误映射为脱敏的 [`IdempotencyError`](绝不回显 SQL/凭据/请求体)。
+///
+/// 参数说明：
+/// - `_error`：仅用于触发失败分类的底层值。
+///
+/// 返回：丢弃输入错误并返回固定 database error，不保留 SQL、连接或后端错误文本。
 fn map_err<E>(_error: E) -> IdempotencyError {
     IdempotencyError::new("database error")
 }

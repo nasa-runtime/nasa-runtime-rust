@@ -180,17 +180,21 @@ pub struct VerifiedIdentity {
     pub command: CommandId,
 }
 
-/// 业务作用：解析并复验 envelope 公共身份字段，把"自报身份"升级为"已证身份"。
-///
-/// 关键步骤：effect/command 由 `(saga, version, step, phase, attempt)` **重新派生**后与
-/// 自报值比对——不一致说明伪造、损坏或派生漂移，绝不进入 Inbox claim 或业务 handler，
-/// 否则攻击者可用自报 id 预先污染合法命令的去重身份。
+/// 业务作用：校验 envelope 的公共身份结构和确定性派生关系，在 Inbox claim 前拒绝身份字段不一致的命令。
 ///
 /// 参数说明：
-/// - `saga_id`/`tenant_id`/`workflow`/`definition_version`/`definition_digest`/`step`/
-///   `phase`/`attempt`/`effect_id`/`command_id`: envelope 自报的身份字段。
+/// - `saga_id`：命令声明的 Saga 实例身份。
+/// - `tenant_id`：命令声明的租户身份。
+/// - `workflow`：命令声明的工作流名。
+/// - `definition_version`：用于确定性身份派生的定义版本。
+/// - `definition_digest`：需为 64 字节小写十六进制的定义摘要。
+/// - `step`：命令声明的步骤名。
+/// - `phase`：需属于封闭集合的执行阶段。
+/// - `attempt`：用于命令身份派生的有效 attempt 序号。
+/// - `effect_id`：需要与本地派生结果精确比较的效果身份。
+/// - `command_id`：需要与本地派生结果精确比较的命令身份。
 ///
-/// 返回：全部字段合法且派生一致时返回已证身份；否则返回携带稳定原因的错误。
+/// 返回：标识、阶段、attempt、摘要编码有效且重新派生的 effect/command 与声明一致时返回类型化身份，否则报受控原因。不会验证 transport 身份、摘要对应的真实定义或 producer 授权。
 #[allow(clippy::too_many_arguments)]
 fn verify_identity(
     saga_id: &str,
@@ -339,9 +343,11 @@ impl SagaCommandEnvelope {
 
     /// 业务作用：在 Inbox 和业务解码前按本地 handler 声明复验媒体与 schema。
     ///
-    /// 参数说明：content_type 与 schema_id 来自编译期 descriptor，不来自请求 header。
+    /// 参数说明：
+    /// - `content_type`：本地编译期 descriptor 声明的精确媒体类型。
+    /// - `schema_id`：本地编译期 descriptor 声明的精确 schema 身份。
     ///
-    /// 返回：无正文或合同完全一致时成功；任一漂移返回确定性合同拒绝。
+    /// 返回：business_payload 解析有效且正文缺省或媒体类型、schema ID 精确一致时成功，否则报错；不根据声明查找外部 schema 或验证其业务语义。
     pub fn verify_payload_contract(
         &self,
         content_type: &str,

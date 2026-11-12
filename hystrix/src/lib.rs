@@ -28,8 +28,8 @@
 //! - **包执行体而不是包提交**：`Command` 不感知任务队列语义，包裹 napart/`#[Async]` 的提交动作
 //!   只测到入队耗时，超时与隔离对真实执行不生效。
 //! - **命令名必须是代码常量级低基数**：拼接租户、订单等业务值会让指标序列失控。
-#![recursion_limit = "512"] // hystrix snapshot_json 的 json!{} 字段多,提高宏递归上限
-                            // ============================================================================
+// Dashboard 快照字段较多，为 JSON 宏展开提供足够的递归深度。
+#![recursion_limit = "512"]
 
 mod fallback;
 
@@ -66,7 +66,7 @@ pub use managed::{ManagedError, ManagedRuntime};
 /// 公开构造器保持非 fallible，因此把无实际意义的极端时长收敛到安全 deadline 上限。
 const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
-// 配置驱动隔离的规则结构(原在业务 config.rs;门面 crate 自带它,业务 config 直接 use hystrix::IsolationRule)。
+// 门面暴露固定隔离规则，宿主可直接在应用配置中声明。
 /// 一条隔离模式的参数(并发上限/超时/是否计 TPS)。`#[derive(Deserialize)]` 让业务 yml 能直接反序列化进来。
 #[derive(Debug, Clone, serde::Deserialize)]
 // 未知字段直接反序列化失败:`timeoutMs`/`maxConcurrent` 这类拼写错误若被静默忽略,
@@ -87,16 +87,20 @@ const WINDOW_SECS: u64 = 10;
 
 // ── 全局命令注册表：所有被监控的路由都注册在这，SSE 端点遍历它逐个上报 ──
 static REGISTRY: OnceLock<Mutex<Vec<Arc<Command>>>> = OnceLock::new();
-/// 业务作用：返回全局熔断命令表；用于集中登记和查询命令配置。
+/// 业务作用：提供进程级隔离命令目录，供命令登记、周期观测和 SSE 快照共享。
+///
+/// 参数说明：无。
+///
+/// 返回：首次访问时创建的空目录锁；不创建命令、执行任务或启用熔断状态机。
 fn registry() -> &'static Mutex<Vec<Arc<Command>>> {
     REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// 业务作用：取全局命令表的锁;一次持锁 panic 不应让后续所有请求和 Dashboard 上报都跟着 panic。
 ///
-/// # 参数
+/// 参数说明：无。
 ///
-/// 本函数没有参数,返回可继续使用的命令表守卫(中毒时取回内部数据)。
+/// 返回：可访问目录的互斥守卫；锁中毒时取回内部状态，持锁期间不得跨 await 或执行业务回调。
 fn lock_registry() -> std::sync::MutexGuard<'static, Vec<Arc<Command>>> {
     registry()
         .lock()
@@ -108,7 +112,11 @@ fn lock_registry() -> std::sync::MutexGuard<'static, Vec<Arc<Command>>> {
 // 与 Dashboard QPS 共用采样窗口，避免独立时钟造成统计口径不一致。
 
 /// 业务作用：读取当前 TPS（每秒事务数）= 所有计 TPS 的命令的 requestCount(×weight) 求和 / 窗口秒数。
-/// 先 clone 出命令列表立刻释放 REGISTRY 锁，再逐个 snapshot（避免攥着 registry 锁去锁 stats）。
+///
+/// 参数说明：无。
+///
+/// 返回：各命令当前窗口请求数按权重求和后的每秒速率，包含失败、拒绝、超时和取消；无参与命令时为零。
+/// 先复制目录再分别读取命令窗口，不持有跨命令原子快照，也不收集或排序延迟样本。
 fn tps_rate() -> f64 {
     let commands: Vec<Arc<Command>> = lock_registry().clone();
     let total: u64 = commands
@@ -125,7 +133,7 @@ fn tps_rate() -> f64 {
 }
 
 // ── 一次执行的结局 ──
-// 一次 run() 走完的四种归宿，决定计入哪个滚动计数（对应 Hystrix 的 rollingCountXxx）。
+// 主请求的五种结局分别计入对应滚动计数，取消也必须参与请求总数。
 #[derive(Clone, Copy)]
 enum Outcome {
     Success,  // 成功（下游正常返回，且非 5xx）→ rollingCountSuccess
@@ -138,7 +146,9 @@ enum Outcome {
 /// 降级执行面的最终结局，与主业务执行结局分轨统计。
 #[derive(Clone, Copy)]
 enum FallbackOutcome {
+    /// 已选择业务或内置终态响应，降级过程完成。
     Success,
+    /// 全局处理器配置冲突、panic 或递归导致无法使用其响应。
     Failure,
 }
 
@@ -153,13 +163,15 @@ struct Bucket {
     timeout: u64,  // 这一秒内的超时次数
     rejected: u64, // 这一秒内被 bulkhead 拒绝的次数
     canceled: u64, // 这一秒内执行 future 被丢弃/unwind 的次数(客户端断连、外层超时、panic)
+    /// 本秒正常完成的局部、全局或内置降级响应数。
     fallback_success: u64,
+    /// 本秒全局处理器配置冲突、panic 或递归的次数。
     fallback_failure: u64,
 }
 
 /// Hystrix 命令的滚动统计窗口。
 ///
-/// 保存最近 `WINDOW_SECS` 秒的计数桶和延迟样本,为熔断判断与 dashboard 快照提供基础数据。
+/// 保存最近 `WINDOW_SECS` 秒的计数桶和延迟样本，供周期日志、TPS 和 Dashboard 使用。
 struct Rolling {
     start: Instant,            // 窗口起点（单调时钟）
     buckets: VecDeque<Bucket>, // 按秒滑动的计数桶，队首最旧、队尾最新
@@ -168,7 +180,11 @@ struct Rolling {
 }
 
 impl Rolling {
-    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：为一个命令建立空滚动窗口，以单调时钟作为后续统计桶的时间基准。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：尚无计数桶和延迟样本的窗口，不读取墙钟或启动周期任务。
     fn new() -> Self {
         Self {
             start: Instant::now(),
@@ -179,16 +195,19 @@ impl Rolling {
 
     /// 业务作用：返回当前时间相对窗口起点的第几秒。
     ///
-    /// 该值用作桶 key,保证桶切换不依赖墙钟回拨。
+    /// 参数说明：无。
+    ///
+    /// 返回：从窗口创建时刻起算的整秒数，用作统计桶身份，不受墙钟调整影响。
     fn now_sec(&self) -> u64 {
         self.start.elapsed().as_secs()
     }
 
-    // 丢弃滑出窗口的旧桶/旧样本
-    // 参数：now = 当前秒。floor = 窗口内允许保留的最早一秒。
+    /// 业务作用：在记录或读取统计之前移除窗口外的计数桶和延迟样本，保持两类数据的时间范围一致。
     ///
-    /// # 参数
-    /// 业务作用：- `now`: 当前时间戳,用于窗口统计和状态过期判断。
+    /// 参数说明：
+    /// - `now`：相对当前窗口起点的整秒数，必须与桶和样本使用相同单调时钟基准。
+    ///
+    /// 返回：删除早于最近 WINDOW_SECS 个秒桶的记录；启动不足一个窗口时保留起点以来的数据。
     fn evict(&mut self, now: u64) {
         let floor = now.saturating_sub(WINDOW_SECS - 1);
         // 弹出过期的计数桶
@@ -206,12 +225,13 @@ impl Rolling {
         }
     }
 
-    /// 业务作用：记录一次执行结果。
-    /// 参数：outcome = 本次结局（成功/失败/超时/被拒）；latency_ms = 本次耗时(毫秒)。
+    /// 业务作用：将一次主请求结局计入当前秒桶，并为实际完成的执行保留有界延迟样本。
     ///
-    /// # 参数
-    /// - `outcome`: 命令、发送或任务执行结果。
-    /// - `latency_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
+    /// 参数说明：
+    /// - `outcome`：本次主请求的成功、失败、超时、拒绝或取消结局。
+    /// - `latency_ms`：主执行段的耗时，单位毫秒；拒绝和取消不进入延迟样本。
+    ///
+    /// 返回：清除过期数据并累计一次结局；延迟样本最多保留最近 5000 条，不记录降级执行耗时。
     fn record(&mut self, outcome: Outcome, latency_ms: u64) {
         let now = self.now_sec();
         self.evict(now);
@@ -243,13 +263,10 @@ impl Rolling {
 
     /// 业务作用：记录一次降级执行结局，与主请求的拒绝或超时结局保持独立口径。
     ///
-    /// # 参数说明
+    /// 参数说明：
+    /// - `outcome`：产生终态响应的成功，或全局处理器配置冲突、panic、递归导致的失败。
     ///
-    /// - `outcome`: 局部或全局降级最终成功、失败或被自身资源边界拒绝的结局。
-    ///
-    /// # 返回
-    ///
-    /// 无返回值；当前秒滚动桶对应计数增加一次。
+    /// 返回：清除过期数据后增加当前秒的降级成功或失败计数，不改变主请求计数和延迟样本。
     fn record_fallback(&mut self, outcome: FallbackOutcome) {
         let now = self.now_sec();
         self.evict(now);
@@ -268,15 +285,9 @@ impl Rolling {
 
     /// 业务作用：汇总当前滚动窗口的主请求与降级结局，作为 Dashboard 单一事实源。
     ///
-    /// 会先驱逐过期桶和样本,再把窗口内计数相加并计算延迟百分位,供熔断判断和 `/hystrix.stream` 输出。
+    /// 参数说明：无。
     ///
-    /// # 参数说明
-    ///
-    /// 参数说明: 无。
-    ///
-    /// # 返回
-    ///
-    /// 返回当前有效窗口内的计数和延迟分位快照。
+    /// 返回：清除过期数据后的计数与延迟分位快照；排序仅作用于样本副本，不清空仍有效的数据或改变准入策略。
     fn snapshot(&mut self) -> WindowSum {
         let now = self.now_sec();
         self.evict(now);
@@ -300,12 +311,9 @@ impl Rolling {
 
     /// 业务作用：只累加窗口内的请求总数,不收集也不排序延迟样本。
     ///
-    /// TPS 只需要"这个圈窗口内跑了多少次",走 `snapshot()` 会白白复制并排序最多 5000 个延迟样本;
-    /// 命令多时 `tps_rate()` 每次调用的开销会随命令数线性放大。
+    /// 参数说明：无。
     ///
-    /// # 参数
-    ///
-    /// 本函数没有参数,返回当前滚动窗口内的请求总数。
+    /// 返回：清理过期桶后，成功、失败、超时、拒绝与取消次数之和；降级次数不重复计入主请求总数。
     fn request_count(&mut self) -> u64 {
         let now = self.now_sec();
         self.evict(now);
@@ -349,18 +357,19 @@ struct Percentiles {
 }
 
 impl Percentiles {
-    /// 业务作用：从【已升序排序】的延迟样本算出各分位。
-    /// 参数：sorted = 升序排好的延迟数组(ms)。空数组直接返回全 0（default）。
+    /// 业务作用：从有序延迟样本生成 Dashboard 使用的均值和固定百分位集合。
     ///
-    /// # 参数
-    /// - `sorted`: 已按时间或优先级排序的统计样本。
+    /// 参数说明：
+    /// - `sorted`：按延迟数值升序排列的毫秒样本；不是按采样时间排序。
+    ///
+    /// 返回：平均值及 0 到 100 的固定分位，分位索引按 p×(n−1) 四舍五入；空样本返回全零集合。
     fn from_sorted(sorted: &[u64]) -> Self {
         if sorted.is_empty() {
             return Self::default();
         }
-        // 闭包 pick：给一个百分比 p，用“最近秩法”取对应分位值
+        // 分位落在相邻样本之间时取四舍五入后的索引，不对两个延迟值插值。
         let pick = |p: f64| -> u64 {
-            // 最近秩法取分位：idx = round(p% * (n-1))，再夹到合法下标范围
+            // 百分比映射到零基索引并限制到合法范围，空样本已在前面返回。
             let idx = ((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
             sorted[idx.min(sorted.len() - 1)]
         };
@@ -389,13 +398,15 @@ impl Percentiles {
 /// `Command` 通常对应一个接口路由或一个配置匹配模式。它会自动注册到全局表,供 `/hystrix.stream`
 /// 输出 Dashboard 指标,同时也负责 CostTime 风格的周期延迟日志。
 pub struct Command {
+    /// 受管命令所属 owner 的弱引用；失去归属后拒绝执行，不转借后续实例。
     owner: Option<std::sync::Weak<managed::ManagedState>>,
+    /// 构造时是否被目录接纳；拒绝的命令始终返回 503。
     admitted: std::sync::atomic::AtomicBool,
     name: String,  // Dashboard 里那个圈的标题（HystrixCommand name）
     group: String, // 归类名（command group / threadPool 名，圈会按 group 分组）
-    // 并发上限。None = 不限并发（不建信号量、永不 429），用于"只看监控"。Some(n) = bulkhead 容量 n。
+    // 主执行段并发上限；None 不建信号量，不因并发容量产生拒绝响应。
     max_concurrent: Option<usize>,
-    // 单请求超时。None = 不超时（跳过 timeout 包裹，永不 504）。Some(d) = 超时时长。
+    // 主执行段超时；None 跳过期限保护，但不改变业务自身返回的 HTTP 状态。
     timeout: Option<Duration>,
     // bulkhead 本体。None = 不限并发时不建信号量；Some(sem) 许可数 = max_concurrent。
     sem: Option<tokio::sync::Semaphore>,
@@ -414,16 +425,16 @@ pub struct Command {
     // 路径只允许设置一次，未设置时日志回退到命令名。
     path: OnceLock<String>,
     // 【自定义限流返回】#[hystrix(reject_response = "{...}")] 设的 JSON body：bulkhead 满时返回它(HTTP 200)。
-    //   None(未设) → 回退默认 429 壳 rejected_response。OnceLock：构造后由 set_reject_response_str 补设。
+    //   未设置时继续尝试全局处理器，最终可使用内置 429；只允许首次设置。
     reject_body: OnceLock<Value>,
     // 【自定义超时返回】#[hystrix(timeout_response = "{...}")] 设的 JSON body：超时时返回它(HTTP 200)。
-    //   None(未设) → 回退默认 504 壳 timeout_response。
+    //   未设置时继续尝试全局处理器，最终可使用内置 504。
     timeout_body: OnceLock<Value>,
     // 【自定义限流降级 fn】#[hystrix(reject_fn = path)] 设:bulkhead 满时调它产出 Response。
-    //   优先级高于 reject_body;None → 回退 reject_body → 默认 429 壳。由 set_reject_fn 补设。
+    //   优先于静态拒绝响应，未设置时依次尝试静态响应、全局处理器和内置响应。
     reject_fb: OnceLock<FallbackFn>,
     // 【自定义超时降级 fn】#[hystrix(timeout_fn = path)] 设:超时时调它产出 Response。
-    //   优先级高于 timeout_body;None → 回退 timeout_body → 默认 504 壳。由 set_timeout_fn 补设。
+    //   优先于静态超时响应，未设置时依次尝试静态响应、全局处理器和内置响应。
     timeout_fb: OnceLock<FallbackFn>,
 }
 
@@ -434,18 +445,21 @@ type FallbackFn = Box<
 >;
 
 /// 并发 gauge 的 RAII 守卫:构造 +1 并抬峰值,Drop 时 -1。
-/// 用 RAII 而非手动 fetch_sub——请求被取消时(客户端断连,run_fn future 被 drop)Drop 仍会归还,
-/// 不会像旧实现那样让 `currentConcurrentExecutionCount` 单调泄漏虚高(信号量 permit 本就 RAII,不受影响)。
+/// 请求取消或 panic 展开时仍归还统计责任，未产生主结局时补记取消。
 struct ConcurrentGauge<'a> {
+    /// 本次主执行段所属命令，提供并发和滚动统计归属。
     command: &'a Command,
+    /// 主执行段是否已经取得确定结局，避免析构时重复记为取消。
     completed: bool,
 }
 
 impl<'a> ConcurrentGauge<'a> {
     /// 业务作用：进入命令执行区并递增当前并发数。
     ///
-    /// # 参数
-    /// - `command`: 本次执行所属命令(并发 gauge、峰值和滚动窗口都挂在它上面)。
+    /// 参数说明：
+    /// - `command`：已通过准入的命令，提供并发量、历史峰值和取消结局的统计归属。
+    ///
+    /// 返回：并发量已增加且峰值已更新的守卫；析构时归还计数，此入口本身不申请信号量许可。
     fn enter(command: &'a Command) -> Self {
         let cur = command.concurrent.fetch_add(1, Ordering::Relaxed) + 1;
         command
@@ -459,9 +473,9 @@ impl<'a> ConcurrentGauge<'a> {
 
     /// 业务作用：标记本次执行已产生 success/failure/timeout 结局,Drop 时不再补记 canceled。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本函数没有参数,只翻转守卫内部的完成标记。
+    /// 返回：守卫标记已完成，只抑制取消补记；不归还并发量或记录主结局，调用方仍须在当前同步执行段完成结局记账。
     fn complete(&mut self) {
         self.completed = true;
     }
@@ -470,6 +484,10 @@ impl<'a> ConcurrentGauge<'a> {
 impl Drop for ConcurrentGauge<'_> {
     /// 业务作用：离开命令执行区时归还当前并发计数;未产生结局的(客户端断连、外层超时丢弃、panic
     /// unwind)补记一次 canceled,避免这些请求在 QPS 与错误率里凭空消失。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：并发量减一；尚未标记完成时补记取消结局且不记录延迟，已经完成时不重复记账。
     fn drop(&mut self) {
         self.command.concurrent.fetch_sub(1, Ordering::Relaxed);
         if !self.completed {
@@ -481,9 +499,9 @@ impl Drop for ConcurrentGauge<'_> {
 impl Command {
     /// 业务作用：取本命令滚动窗口的锁;一次持锁 panic 不应让该端点后续所有请求都跟着 panic。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本函数没有参数,返回可继续使用的滚动窗口守卫(中毒时取回内部数据)。
+    /// 返回：当前命令统计窗口的互斥守卫；锁中毒时取回内部数据，调用方应在 await 或业务回调前释放。
     fn stats(&self) -> std::sync::MutexGuard<'_, Rolling> {
         self.stats
             .lock()
@@ -491,7 +509,14 @@ impl Command {
     }
 
     /// 业务作用：统一构造隔离命令，将运行实例登记到当前受管代次或独立进程目录。
-    /// 参数说明：`name`、`group` 为固定身份；`max_concurrent`、`timeout` 为执行边界；`tps_weight` 为统计权重。
+    ///
+    /// 参数说明：
+    /// - `name`：命令的稳定身份，同一受管目录内与分组组合唯一。
+    /// - `group`：命令分组，用于目录冲突判断和观测归属。
+    /// - `max_concurrent`：可选并发上限；零视为关闭隔离，超出信号量范围时限制到可表达上限。
+    /// - `timeout`：可选执行期限；零视为关闭超时，非零值限制到 MAX_COMMAND_TIMEOUT。
+    /// - `tps_weight`：每个请求参与全局 TPS 的权重，None 表示不参与。
+    ///
     /// 返回：独立模式按原有方式归一化参数；受管模式身份、容量或边界不合法时返回只拒绝执行的命令。
     fn build(
         name: &str,
@@ -570,7 +595,7 @@ impl Command {
             let weak = Arc::downgrade(&cmd);
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(WINDOW_SECS));
-                ticker.tick().await; // 吃掉立即触发的首拍（interval 首拍在 t0）→ 首打在 t0+10s（对齐 TimingWheel 初始 delay=PERIOD）
+                ticker.tick().await; // 跳过立即首拍，等一个完整周期后再输出延迟统计。
                 loop {
                     ticker.tick().await; // t0+10s、t0+20s …（相位锚定本命令的创建时刻）
                     match weak.upgrade() {
@@ -583,30 +608,30 @@ impl Command {
         cmd
     }
 
-    /// 业务作用：创建命令并【自动注册】到全局表（SSE 端点据此上报）。
-    /// name 会成为 Dashboard 里那个圈的标题；group 用于归类。
-    /// 本入口创建的命令不计入全局 TPS。
+    /// 业务作用：创建不参与全局 TPS 的隔离命令，并尝试登记到当前运行目录供执行与观测使用。
     ///
-    /// # 参数
-    /// - `name`: Dashboard 圈标题和默认日志标签。
-    /// - `group`: Dashboard 分组名。
-    /// - `max_concurrent`: 并发上限,会作为信号量许可数。
-    /// - `timeout`: 单请求执行超时时长。
+    /// 参数说明：
+    /// - `name`：稳定命令名，用作目录身份和默认日志标识。
+    /// - `group`：与命令名组成目录身份的观测分组。
+    /// - `max_concurrent`：主执行段并发上限，零表示不启用并发隔离。
+    /// - `timeout`：主执行段的协作式超时，零表示不启用超时保护。
+    ///
+    /// 返回：共享命令；受管目录拒绝登记时返回只响应 503 的命令，独立模式按构造上限归一化极端参数。
     pub fn new(name: &str, group: &str, max_concurrent: usize, timeout: Duration) -> Arc<Self> {
-        // 这两个构造器收【具体值】，包成 Some 传给 build —— 行为和重构前完全一致（硬编码/配置驱动路由用这俩）。
+        // 零并发和零超时统一交给 build 归一为未启用，保持所有构造入口的边界一致。
         Self::build(name, group, Some(max_concurrent), Some(timeout), None)
     }
 
-    /// 业务作用：【最通用构造器】并发上限/超时都可为 None（None = 不限并发 / 不超时），tps_weight 也可 None。
-    /// 给 #[hystrix] 属性宏用：注解里不写 max_concurrent → None(不限)，不写 timeout_ms → None(不超时)，
-    ///   `#[hystrix()]` 空参 → 全 None = 只采集监控指标、不做任何拦截/限时。
+    /// 业务作用：以可选保护边界构造命令，供属性宏或只需要统计的调用方复用同一执行链路。
     ///
-    /// # 参数
-    /// - `name`: Dashboard 圈标题和默认日志标签。
-    /// - `group`: Dashboard 分组名。
-    /// - `max_concurrent`: 可选并发上限;`None` 表示不做 bulkhead 限流。
-    /// - `timeout`: 可选单请求超时;`None` 表示不做超时包裹。
-    /// - `tps_weight`: 可选 TPS 权重;`None` 表示不计入全局 TPS。
+    /// 参数说明：
+    /// - `name`：稳定命令名，禁止按请求数据构造高基数身份。
+    /// - `group`：目录冲突判断和 Dashboard 展示使用的分组。
+    /// - `max_concurrent`：可选主执行段并发上限，None 或零表示不隔离。
+    /// - `timeout`：可选主执行段超时，None 或零表示不施加期限。
+    /// - `tps_weight`：主请求参与全局 TPS 的权重，None 表示不参与。
+    ///
+    /// 返回：按当前 owner 归属构造的共享命令；受管目录拒绝时只返回 503，即使未配置并发与超时也不绕过关闭门禁。
     pub fn monitor(
         name: &str,
         group: &str,
@@ -618,14 +643,15 @@ impl Command {
     }
 
     /// 业务作用：创建计入全局 TPS 的命令，按 weight 加权统计每个请求。
-    /// 只有用本构造器创建的命令，其请求才会累加到顶栏 TPS；其余命令对 TPS 贡献为 0。
     ///
-    /// # 参数
-    /// - `name`: Dashboard 圈标题和默认日志标签。
-    /// - `group`: Dashboard 分组名。
-    /// - `max_concurrent`: 并发上限,会作为信号量许可数。
-    /// - `timeout`: 单请求执行超时时长。
-    /// - `weight`: 每个请求给全局 TPS 累加的权重。
+    /// 参数说明：
+    /// - `name`：稳定命令名，用于目录身份和观测展示。
+    /// - `group`：命令所属的目录与观测分组。
+    /// - `max_concurrent`：主执行段并发上限，零表示不启用隔离。
+    /// - `timeout`：主执行段协作式超时，零表示不施加期限。
+    /// - `weight`：窗口内每个主请求贡献的 TPS 权重，零权重不产生吞吐贡献。
+    ///
+    /// 返回：带统计权重的共享命令；受管目录拒绝登记时只响应 503，未执行请求不进入窗口统计。
     pub fn with_tps(
         name: &str,
         group: &str,
@@ -642,16 +668,12 @@ impl Command {
         )
     }
 
-    /// 业务作用：【融合自 CostTime.extra】给本命令挂一个"附加信息生成器"，每 10s 打延迟日志时拼到行尾。
-    /// 参数：
-    ///   f —— 闭包 `Fn(period_ms: u64) -> String`：入参是统计周期毫秒数（= WINDOW_SECS*1000），
-    ///        返回一段要追加到日志行尾的文本（如自定义吞吐/计数指标）。Send+Sync+'static 因为
-    ///        它会被后台定时任务在别的线程里调用、且要活到进程结束。
-    /// 只能设一次（OnceLock）；重复设无效（忽略）。在 main.rs 构造完命令后调用即可，例如：
-    ///   `kline_cmd.set_extra(|_p| format!("tps={:.0}/s", hystrix::current_tps()));`
+    /// 业务作用：为命令周期延迟日志安装附加信息生成器，使业务可补充同周期的统计文本。
     ///
-    /// # 参数
-    /// - `f`: 周期日志的附加信息生成闭包,入参为统计周期毫秒数。
+    /// 参数说明：
+    /// - `f`：接受统计周期毫秒数并返回日志文本的同步闭包；由周期任务调用，应保持短小且避免输出敏感数据。
+    ///
+    /// 返回：首次安装后在有延迟样本的日志周期调用；重复安装保持原闭包，不在本次设置时执行回调。
     pub fn set_extra<F>(&self, f: F)
     where
         F: Fn(u64) -> String + Send + Sync + 'static,
@@ -660,91 +682,90 @@ impl Command {
         let _ = self.extra.set(Box::new(f));
     }
 
-    /// 业务作用：设置本命令的真实接口路由（如 "/spot/kline"），只影响 CostTime 定时日志的显示。
-    /// 不设则 log_cost 回退用 name（Dashboard 圈标题）。Dashboard 显示不受影响（它读 name）。
+    /// 业务作用：固定命令的路由标识，供周期日志与全局降级上下文使用。
     ///
-    /// # 参数
-    /// - `path`: 真实接口路由字符串,用于周期延迟日志展示。
+    /// 参数说明：
+    /// - `path`：稳定路由模板，避免使用带业务标识或敏感参数的实际请求路径。
+    ///
+    /// 返回：首次设置生效，重复设置不覆盖；未设置时日志与降级上下文使用命令名，不改变 Dashboard 命令身份。
     pub fn set_path(&self, path: &str) {
         let _ = self.path.set(path.to_string());
     }
 
-    /// 业务作用：【自定义限流返回】设 bulkhead 满时返回的 JSON body(随后以 HTTP 200 返回)。
-    /// 由 `#[hystrix(reject_response = "...")]` 在构造时调用(宏已在编译期校验过 JSON);传入【合法 JSON 字符串】。
-    /// **非法 JSON 会被静默忽略**(回退默认 429 壳)——直接调用方若要感知失败,请用 [`try_set_reject_response_str`]。只设一次。
+    /// 业务作用：为并发拒绝安装静态 JSON 响应，供已在编译期检查内容的宏入口使用。
     ///
-    /// [`try_set_reject_response_str`]: Self::try_set_reject_response_str
+    /// 参数说明：
+    /// - `json`：并发拒绝时以 HTTP 200 返回的 JSON 文本，优先级低于局部异步降级函数。
     ///
-    /// # 参数
-    /// - `json`: bulkhead 拒绝时返回的 JSON body 字符串。
+    /// 返回：首次有效 JSON 安装生效；无效 JSON 或重复设置被忽略，调用方需要知道结果时使用 Self::try_set_reject_response_str。
     pub fn set_reject_response_str(&self, json: &str) {
         let _ = self.try_set_reject_response_str(json);
     }
 
-    /// 业务作用：同 [`set_reject_response_str`],但**返回结果供直接调用方感知**:JSON 非法 → `Err`;合法且本次设入 → `Ok(true)`;
-    /// 合法但**之前已设过**(OnceLock 只设一次,本次未覆盖)→ `Ok(false)`。
+    /// 业务作用：解析并尝试安装并发拒绝的静态响应，使直接调用方明确区分内容错误和重复设置。
     ///
-    /// [`set_reject_response_str`]: Self::set_reject_response_str
+    /// 参数说明：
+    /// - `json`：并发拒绝时使用的 JSON 响应文本，不要求根节点一定为对象。
     ///
-    /// # 参数
-    /// - `json`: bulkhead 拒绝时返回的 JSON body 字符串。
+    /// 返回：首次安装返回 Ok(true)，已有响应返回 Ok(false)，JSON 无效返回解析错误；所有失败均保留原响应。
     pub fn try_set_reject_response_str(&self, json: &str) -> Result<bool, serde_json::Error> {
         let v = serde_json::from_str::<Value>(json)?;
         Ok(self.reject_body.set(v).is_ok()) // set: Ok(())=本次设入 / Err(v)=已设过
     }
 
-    /// 业务作用：【自定义超时返回】设超时时返回的 JSON body(随后以 HTTP 200 返回)。用法同 [`set_reject_response_str`]。
-    /// 非法 JSON 静默忽略;要感知失败用 [`try_set_timeout_response_str`]。
+    /// 业务作用：为执行超时安装静态 JSON 响应，供已验证文本的宏入口使用。
     ///
-    /// [`set_reject_response_str`]: Self::set_reject_response_str
-    /// [`try_set_timeout_response_str`]: Self::try_set_timeout_response_str
+    /// 参数说明：
+    /// - `json`：主执行段超时后以 HTTP 200 返回的 JSON 文本，优先级低于局部超时降级函数。
     ///
-    /// # 参数
-    /// - `json`: 请求超时时返回的 JSON body 字符串。
+    /// 返回：首次有效内容安装生效；无效 JSON 或重复设置被忽略，需要结果时使用 Self::try_set_timeout_response_str。
     pub fn set_timeout_response_str(&self, json: &str) {
         let _ = self.try_set_timeout_response_str(json);
     }
 
-    /// 业务作用：同 [`set_timeout_response_str`],但**返回结果**:JSON 非法 → `Err`;本次设入 → `Ok(true)`;已设过 → `Ok(false)`。
+    /// 业务作用：解析并尝试安装执行超时的静态响应，明确区分首次生效、重复设置与内容无效。
     ///
-    /// [`set_timeout_response_str`]: Self::set_timeout_response_str
+    /// 参数说明：
+    /// - `json`：主执行段超时后使用的 JSON 响应文本，不限制根节点类型。
     ///
-    /// # 参数
-    /// - `json`: 请求超时时返回的 JSON body 字符串。
+    /// 返回：首次安装为 Ok(true)，重复设置为 Ok(false)，无效 JSON 返回解析错误且保留已有响应。
     pub fn try_set_timeout_response_str(&self, json: &str) -> Result<bool, serde_json::Error> {
         let v = serde_json::from_str::<Value>(json)?;
         Ok(self.timeout_body.set(v).is_ok())
     }
 
-    /// 业务作用：【自定义限流降级 fn】设 bulkhead 满时调用的降级闭包(产出 Response)。
-    /// 由 `#[hystrix(reject_fn = path)]` 在构造时调用;优先级高于 reject_response;只设一次(OnceLock)。
+    /// 业务作用：安装并发拒绝时使用的局部异步降级函数，其优先级高于静态响应和全局处理器。
     ///
-    /// # 参数
-    /// - `fb`: bulkhead 拒绝时执行的异步降级响应闭包。
+    /// 参数说明：
+    /// - `fb`：每次拒绝时创建响应 future 的闭包；不占主业务信号量，调用方须自行控制外部调用边界。
+    ///
+    /// 返回：首次安装生效，重复设置保持原函数；此处不执行降级，也不为降级增加超时或 panic 捕获。
     pub fn set_reject_fn(&self, fb: FallbackFn) {
         let _ = self.reject_fb.set(fb);
     }
 
-    /// 业务作用：【自定义超时降级 fn】设超时时调用的降级闭包(产出 Response)。用法同 set_reject_fn。
+    /// 业务作用：安装主业务执行超时后的局部异步降级函数，优先于静态响应和全局处理器。
     ///
-    /// # 参数
-    /// - `fb`: 请求超时时执行的异步降级响应闭包。
+    /// 参数说明：
+    /// - `fb`：主执行 future 超时后创建响应 future 的闭包，不沿用已经结束的主业务执行期限。
+    ///
+    /// 返回：首次安装生效，重复设置不覆盖；降级不占主信号量，其自身超时、阻塞和失败策略由调用方负责。
     pub fn set_timeout_fn(&self, fb: FallbackFn) {
         let _ = self.timeout_fb.set(fb);
     }
 
     /// 业务作用：按“局部函数、局部静态响应、全局处理器、内置响应”的固定顺序解析一次降级。
     ///
-    /// # 参数说明
-    ///
+    /// 参数说明：
     /// - `cause`: 已完成主结局记账的并发拒绝或执行超时原因。
     ///
-    /// # 返回
-    ///
-    /// 返回最终 HTTP 响应；全局处理器配置冲突、崩溃或递归时安全回退到内置响应。
+    /// 返回：最终 HTTP 响应并记录降级结局；全局配置冲突、可捕获 panic 或递归时使用内置响应。
+    /// 局部异步函数直接等待，不增加期限或捕获其 panic；静态 JSON 以 HTTP 200 返回，主请求结局不重复记账。
     async fn resolve_fallback(&self, cause: FallbackCause) -> Response {
         match cause {
-            FallbackCause::BulkheadRejected { .. } => {
+            FallbackCause::BulkheadRejected {
+                ..
+            } => {
                 if let Some(fallback) = self.reject_fb.get() {
                     let response = fallback().await;
                     self.stats().record_fallback(FallbackOutcome::Success);
@@ -755,7 +776,9 @@ impl Command {
                     return custom_response(body);
                 }
             }
-            FallbackCause::ExecutionTimeout { .. } => {
+            FallbackCause::ExecutionTimeout {
+                ..
+            } => {
                 if let Some(fallback) = self.timeout_fb.get() {
                     let response = fallback().await;
                     self.stats().record_fallback(FallbackOutcome::Success);
@@ -805,17 +828,21 @@ impl Command {
         }
 
         match cause {
-            FallbackCause::BulkheadRejected { max_concurrent, .. } => {
-                rejected_response(&self.name, max_concurrent)
-            }
-            FallbackCause::ExecutionTimeout { timeout, .. } => {
-                timeout_response(&self.name, timeout)
-            }
+            FallbackCause::BulkheadRejected {
+                max_concurrent,
+                ..
+            } => rejected_response(&self.name, max_concurrent),
+            FallbackCause::ExecutionTimeout {
+                timeout,
+                ..
+            } => timeout_response(&self.name, timeout),
         }
     }
 
     /// 业务作用：按命令周期输出最近窗口的延迟聚合日志。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：有样本时输出统计；不清空滚动窗口，以免破坏共用窗口的 SSE 观测。
     fn log_cost(&self) {
         // 取最近窗口汇总（含各结局计数 + 延迟百分位）
@@ -867,43 +894,26 @@ impl Command {
         );
     }
 
-    /// 业务作用：作为中间件包裹一次请求：bulkhead + 超时 + 指标记录。
-    /// 用法见 main.rs：`axum::middleware::from_fn(move |req, next| cmd.clone().run(req, next))`
-    /// 参数：
-    ///   `self: Arc<Self>` —— 用 Arc 接收者(而非 &self)，因为同一个 Command 会被多个并发请求/
-    ///                       SSE 端点共享；Arc 让闭包能 move 一份并跨 .await 持有所有权。
-    ///   req  —— axum 的 Request（本次进来的 HTTP 请求）。
-    ///   next —— axum 的 Next 放行句柄；next.run(req) 把请求交给下游 handler/中间件链。
-    /// 【中间件形态】用本命令保护下游 (req, next)。
-    /// 现在它只是 run_fn 的【薄封装】：把 `next.run(req)` 这个"下游 future"包成闭包交给 run_fn。
-    /// /heavy/slow 的 `.layer(... cmd.run)` 和配置驱动 dispatch 都走这里，行为与重构前完全一致。
+    /// 业务作用：将 Axum 中间件请求交给统一命令执行入口，复用并发隔离、超时和结局统计。
     ///
+    /// 参数说明：
+    /// - `req`：需要保护的本次 HTTP 请求，未获准入时不传递给后续处理器。
+    /// - `next`：后续中间件与业务处理链，仅在命令准入通过后执行。
     ///
-    /// # 参数
-    /// - `req`: HTTP 请求对象。
-    /// - `next`: 下一个中间件或后续处理器。
+    /// 返回：业务、降级或内置响应；受管命令失效时返回 503，不调用下游处理链。
     pub async fn run(self: Arc<Self>, req: Request, next: Next) -> Response {
         // move 把 next、req 一起搬进闭包；闭包只有在 run_fn 里【抢到许可后】才被调用 → 才真正执行下游。
         self.run_fn(move || next.run(req)).await
     }
 
-    /// 业务作用：【通用执行入口】用本命令的 bulkhead + 超时保护【任意 async 执行体】，并把
-    /// 成功/失败/超时/拒绝记入滚动窗口（→ /hystrix.stream → Dashboard）。
+    /// 业务作用：在 owner 准入、并发许可和可选期限内执行业务 future，统一记录主结局并选择终态响应。
     ///
-    /// 为什么需要它：`run` 是中间件签名 `(req, next)`，只适合 `.layer(...)`。而 `#[hystrix]` 属性宏
-    ///   贴的是【普通 handler】（没有 Next），原来只能在宏里自带一套 Semaphore+timeout，结果【不上 Dashboard】。
-    ///   抽出 run_fn 后，宏把"原函数体"包成闭包传进来 → 注解版也走真正的 Command → 指标自然流进 Dashboard。
+    /// 参数说明：
+    /// - `f`：通过准入后才调用的 future 工厂；工厂与 future 不应阻塞执行器，超时仅能协作式取消被等待的 future。
     ///
-    /// 参数 f：`FnOnce() -> Future<Output = Response>`，即"要被保护的那段执行体"。
-    ///   只有 try_acquire 抢到许可后才会调用 f()（拿不到许可直接 429，f 根本不执行）。
-    ///
-    /// # 参数说明
-    ///
-    /// - `f`: 被当前命令保护的异步执行体,只有通过 bulkhead 后才会被调用。
-    ///
-    /// # 返回
-    ///
-    /// 返回业务响应、局部降级响应、全局降级响应或组件内置拒绝/超时响应。
+    /// 返回：业务响应或拒绝、超时后的降级响应；目录未接纳或 owner 关闭时返回 503 且不执行业务。
+    /// 5xx 记为失败，其余业务响应记为成功；取消或 panic 展开由守卫归还并发并补记取消。
+    /// 主信号量在降级前释放，owner 责任覆盖降级全过程；局部降级不继承主期限，独立启动的外部工作不会被自动撤销。
     pub async fn run_fn<F, Fut>(self: Arc<Self>, f: F) -> Response
     where
         F: FnOnce() -> Fut,
@@ -920,8 +930,7 @@ impl Command {
             },
             None => None,
         };
-        // 注：不再在此 tps_hit。TPS 改为从下面记的 requestCount 派生（见 tps_rate），
-        //   既和圈/QPS 同源、对得上，又免去热路径上抢全局 TPS 锁。tps_weight 仅作"是否计入 TPS"的标记。
+        // TPS 从主请求窗口结局按权重派生，此处不能额外记一次吞吐，否则会重复计数。
 
         // ── 1. bulkhead（仅当有并发上限时）：try_acquire 拿不到许可立刻拒绝（不排队，钉死队列长度=0）──
         // self.sem 为 None（不限并发，如 #[hystrix()] 只看监控）→ 不抢许可、直接放行（permit=None）。
@@ -1008,13 +1017,10 @@ impl Command {
 
     /// 业务作用：生成包含主请求与全局降级真实结局的 Hystrix Dashboard 命令快照。
     ///
-    /// # 参数说明
+    /// 参数说明：无。
     ///
-    /// 参数说明: 无。
-    ///
-    /// # 返回
-    ///
-    /// 返回 Dashboard 可消费的 `HystrixCommand` JSON，不改变运行时状态。
+    /// 返回：兼容 HystrixCommand 的 JSON，包含当前有效窗口统计、配置边界、并发量和全局 TPS。
+    /// 读取时会清除过期统计但不改变准入策略；计数、并发量和 TPS 分别采样，不构成原子快照，熔断字段固定为关闭。
     fn snapshot_json(&self) -> Value {
         // 取窗口汇总：成功/失败/超时/拒绝计数 + 延迟百分位
         let w = self.stats().snapshot();
@@ -1023,7 +1029,7 @@ impl Command {
         // errorCount = 非成功的总数 = 失败 + 超时 + 被拒 + 被取消
         let error_count = w.failure + w.timeout + w.rejected + w.canceled;
         // errorPercentage = error_count / request_count * 100（无请求时为 0，防除零）
-        // checked_div:无请求时为 0,防除零(clippy manual_checked_div)。
+        // 空窗口没有可计算的错误比例，固定输出零而不是进行除零运算。
         let error_pct = (error_count * 100).checked_div(request_count).unwrap_or(0) as i64;
         // currentTime：当前 Unix 毫秒时间戳（Dashboard 用来判断数据新鲜度）
         let now_ms = SystemTime::now()
@@ -1033,8 +1039,15 @@ impl Command {
         let lat = &w.latency;
         // 延迟分位 map：key 是百分位字符串，value 是对应延迟(ms)。execute/total 共用这一份
         let lat_json = json!({
-            "0": lat.p0, "25": lat.p25, "50": lat.p50, "75": lat.p75,
-            "90": lat.p90, "95": lat.p95, "99": lat.p99, "99.5": lat.p995, "100": lat.p100
+            "0": lat.p0,
+            "25": lat.p25,
+            "50": lat.p50,
+            "75": lat.p75,
+            "90": lat.p90,
+            "95": lat.p95,
+            "99": lat.p99,
+            "99.5": lat.p995,
+            "100": lat.p100
         });
 
         json!({
@@ -1111,9 +1124,11 @@ impl Command {
 // 注:门面 crate 不依赖业务的 BaseResponse,这里用 serde_json::json! 直接拼同样形状 {code, message, data}。
 /// 业务作用：bulkhead 满时的 429 响应。
 ///
-/// # 参数
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
-/// - `max`: 允许的最大值或区间上界。
+/// 参数说明：
+/// - `name`：拒绝本次请求的命令名，用于响应中的固定资源说明。
+/// - `max`：触发拒绝的命令并发上限，供调用方理解当前隔离边界。
+///
+/// 返回：HTTP 429 和包含 code、message、空 data 的 JSON；不触发重试或其他降级处理。
 fn rejected_response(name: &str, max: usize) -> Response {
     let body = Json(json!({
         "code": 429,
@@ -1125,9 +1140,11 @@ fn rejected_response(name: &str, max: usize) -> Response {
 
 /// 业务作用：超时时的 504 响应。
 ///
-/// # 参数
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
-/// - `dur`: 持续时间,用于超时、滑窗或指标统计。
+/// 参数说明：
+/// - `name`：执行超时的命令名，用于响应中的资源说明。
+/// - `dur`：命令配置的主执行期限，按毫秒写入响应，不是实际耗时。
+///
+/// 返回：HTTP 504 和包含 code、message、空 data 的 JSON，不再次调用业务执行体。
 fn timeout_response(name: &str, dur: Duration) -> Response {
     let body = Json(json!({
         "code": 504,
@@ -1137,11 +1154,12 @@ fn timeout_response(name: &str, dur: Duration) -> Response {
     (StatusCode::GATEWAY_TIMEOUT, body).into_response()
 }
 
-/// 业务作用：自定义限流/超时返回:**HTTP 200 + 用户给的 JSON body**(对齐统一响应风格,业务码放在 body 里,
-/// 前端 axios 不会因 4xx/5xx 抛错)。body 由 #[hystrix(reject_response/timeout_response)] 在构造时解析存好。
+/// 业务作用：将命令预先配置的静态降级内容转换为成功 HTTP 状态的 JSON 响应，业务状态由内容自身表达。
 ///
-/// # 参数
-/// - `body`: 请求体、响应体或待处理原始内容。
+/// 参数说明：
+/// - `body`：构造阶段已解析的拒绝或超时响应值，可被多个请求共享。
+///
+/// 返回：HTTP 200 和复制后的 JSON 响应体，不修改已安装的共享配置，也不替换其业务字段。
 fn custom_response(body: &Value) -> Response {
     (StatusCode::OK, Json(body.clone())).into_response()
 }
@@ -1151,8 +1169,10 @@ fn custom_response(body: &Value) -> Response {
 // ════════════════════════════════════════════════════════════════════════════
 /// 业务作用：输出 Hystrix Dashboard 可消费的 SSE 指标流。
 ///
-/// Dashboard 填入这个 URL 即可监控。它消费的是 text/event-stream,每条 `data: {json}\n\n`
-/// 是一个命令的快照;本端点每秒推一轮,每个命令一条。
+/// 参数说明：无。
+///
+/// 返回：每秒遍历当前目录并逐命令输出 JSON 的 SSE 响应，空闲时按 5 秒间隔发送保活注释。
+/// 流的生命周期由 HTTP 消费方持有；此函数不添加认证或访问限制，宿主应保护监控路由。
 pub async fn hystrix_stream() -> impl IntoResponse {
     // async_stream::stream! 宏：把一段含 yield 的异步代码块变成一个 Stream（异步迭代器），
     // 每个 yield 出去的元素就是一条 SSE Event。
@@ -1183,9 +1203,10 @@ pub async fn hystrix_stream() -> impl IntoResponse {
 // 每个 Command 独立持有周期任务，无需业务额外启动；日志读取不会清空 SSE 共用的窗口。
 
 /// 业务作用：读取当前全局 TPS（每秒事务数）的公开入口。
-/// 给 set_extra 的闭包用——例如让某条命令的 CostTime 日志行尾带上实时吞吐：
-///   `cmd.set_extra(|_period_ms| format!("tps={:.0}/s", hystrix::current_tps()));`
-/// （tps_rate 本身是模块私有，这里开一个只读窗口暴露出去。）
+///
+/// 参数说明：无。
+///
+/// 返回：当前目录中配置了权重的命令，其窗口请求数加权后除以窗口秒数；没有参与命令时为零，不产生新的计数事件。
 pub fn current_tps() -> f64 {
     tps_rate()
 }
@@ -1193,7 +1214,7 @@ pub fn current_tps() -> f64 {
 // 路由隔离从 YAML 建立 matchit 索引，并按匹配到的路由模板复用并发信号量。
 // 异步请求通过许可与期限控制并发，不创建额外线程池；阻塞业务须由调用方隔离。
 
-/// 运行期的一条隔离规则（由 zconf::IsolationRule 转来，多带一个 pattern 串做 key/名字）。
+/// 从 IsolationRule 转换的运行期规则，附带原始匹配模式供命令身份回退使用。
 struct IsolationCfg {
     pattern: String, // 原始模式（如 "/download/*"），做 Command 的 key/name/path（日志/Dashboard 显示它）
     max_concurrent: usize, // 并发上限 = 信号量许可数
@@ -1203,6 +1224,7 @@ struct IsolationCfg {
 
 /// 全局隔离表：Trie + context-path 前缀 + 「模式 → 已建 Command」缓存。
 struct IsolationTable {
+    /// 受管隔离表所属 owner；匹配前取得在途责任，防止关闭期间跨代登记命令。
     owner: Option<std::sync::Weak<managed::ManagedState>>,
     // 前缀树：path → 隔离规则。matchit 是 axum 内部用的那个基数树匹配器
     trie: matchit::Router<IsolationCfg>,
@@ -1216,20 +1238,28 @@ struct IsolationTable {
 static ISOLATION: OnceLock<Mutex<Option<Arc<IsolationTable>>>> = OnceLock::new();
 
 /// 业务作用：提供可按 owner 撤销的隔离表槽，独立安装仍保持一次性合同。
+///
 /// 参数说明：无。
+///
 /// 返回：进程级槽，读取方取得 Arc 后立即释放锁。
 fn isolation() -> &'static Mutex<Option<Arc<IsolationTable>>> {
     ISOLATION.get_or_init(|| Mutex::new(None))
 }
 
 /// 业务作用：独立模式安装进程隔离规则，已有受管 owner 时保留其配置权。
-/// 参数说明：`rules` 为路由规则；`context_path` 为匹配时剥离的上下文前缀。
-/// 返回：首次合法配置安装生效；重复安装、受管冲突或非法模式保留原有警告行为。
+///
+/// 参数说明：
+/// - `rules`：路由模式到并发、超时和事务权重的映射，空表不安装。
+/// - `context_path`：匹配前尝试剥离的应用路径前缀，去除两侧空白和末尾斜线后存储。
+///
+/// 返回：首次无归属冲突时安装隔离表；受管 owner 或既有表存在时告警并保留现状，非法模式逐项告警并跳过。
+/// 此入口不保证每条规则均成功安装；需要启动时整体拒绝无效配置时使用 ManagedRuntime。
 pub fn init_isolation(
     rules: &std::collections::HashMap<String, IsolationRule>,
     context_path: &str,
 ) {
     let owner = managed::lock_owner();
+    // 独立安装不能争用受管 owner 的规则归属，否则关闭时无法完整撤销应用状态。
     if owner.is_some() {
         tracing::warn!("managed hystrix owner rejects standalone isolation installation");
         return;
@@ -1276,22 +1306,26 @@ pub fn init_isolation(
     );
 }
 
-/// 业务作用：把 配置中的通配 "/download/*" 转成 matchit 0.8 的命名 catch-all "/download/{*rest}"。
-/// matchit 要求 catch-all 必须带名字且在末尾；非 "/*" 结尾的（已是具体路由）原样返回。
-/// 注：matchit 0.8 起 catch-all 用花括号 {*rest}（0.7 是 *rest），与 axum 0.8 路由占位一致。
+/// 业务作用：将隔离配置末尾的匿名路径通配转换为 matchit 使用的命名捕获形式。
 ///
-/// # 参数
-/// - `pattern`: 匹配模式,用于扫描、订阅或路径匹配。
+/// 参数说明：
+/// - `pattern`：待登记的路由模式，仅转换末尾的斜线星号形式。
+///
+/// 返回：末尾为 /* 时替换为 /{*rest}，否则原样复制；不检查其他路由语法，合法性由后续索引插入验证。
 fn normalize_pattern(pattern: &str) -> String {
     if let Some(prefix) = pattern.strip_suffix("/*") {
-        format!("{prefix}/{{*rest}}") // "/download/*" → "/download/{*rest}"
+        format!("{prefix}/{{*rest}}") // 将匿名后缀转换为命名路径捕获。
     } else {
         pattern.to_string()
     }
 }
 
 /// 业务作用：按固定路由模板匹配隔离规则并复用命令，受管关闭期间拒绝新执行。
-/// 参数说明：`req` 为业务 HTTP 请求；`next` 为取得许可后执行的业务链路。
+///
+/// 参数说明：
+/// - `req`：本次业务 HTTP 请求，其 URI 用于规则匹配，MatchedPath 用于命令身份以避免动态路径扩张目录。
+/// - `next`：未匹配隔离规则或命令准入通过后执行的后续业务链路。
+///
 /// 返回：未匹配时原样放行；命中时返回业务、降级或隔离响应，目录关闭／超限返回 503。
 pub async fn dispatch(req: Request, next: Next) -> Response {
     // 没配 hystrix.isolation → ISOLATION 未初始化 → 全部放行

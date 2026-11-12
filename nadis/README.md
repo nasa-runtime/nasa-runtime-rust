@@ -15,6 +15,13 @@
 
 Handler 通过 `JobContext::parameter::<T>()` 获取 JSON 参数，`T` 可以是包含集合、映射或嵌套结构的任意 `serde::DeserializeOwned` 类型；框架会先执行重复键、深度和节点预算校验。非 JSON 参数通过 `payload()` 读取原始字节并由业务按声明的 codec 解码，框架不会猜测 Protobuf 类型。
 
+JSON 业务类型解码失败只保留错误类别和行列位置，不传播输入值或自定义 `Deserialize` 的错误正文。
+结构校验失败保留固定原因；业务自行实现的 `JobParameter::decode` 仍须保证其错误摘要不含敏感载荷。
+
+JSON target-type decoding reports only the error category and line/column location, excluding input
+values and custom `Deserialize` error text. Structural validation retains fixed rejection reasons.
+Business implementations of `JobParameter::decode` must also keep sensitive payloads out of errors.
+
 业务项目通过门面开启 `redis`：
 
 ```toml
@@ -44,6 +51,16 @@ async fn connect() -> nasa::redis::Result<std::sync::Arc<RedisClient>> {
 
 不同 profile 不要共享同一持久化 namespace。
 
+连接时必须取得明确的 `INFO cluster` 响应：唯一的 `cluster_enabled:0` 选择单节点传输，
+唯一的 `cluster_enabled:1` 选择集群传输。字段缺失、重复或值非法时返回 `topology` 阶段错误，
+不会写入协议标记；不能因为拓扑证据缺失而退回单节点模式。部署所用账号须允许该探测命令。
+
+Connection setup requires an unambiguous `INFO cluster` response. A single `cluster_enabled:0`
+selects standalone transport; a single `cluster_enabled:1` selects cluster transport. Missing,
+duplicate, or invalid values fail during `topology` before any protocol marker is written.
+Missing topology evidence never selects standalone transport. The deployment account must allow
+this probe command.
+
 ## 常用命令
 
 ```rust
@@ -70,6 +87,16 @@ Cluster 多 key 命令会做同 slot 守卫；需要跨 key 时请使用 `{tag}`
 
 Redis 相对 TTL 最终由 signed 64-bit 毫秒或秒参数表达；超过服务端范围的 `Duration` 会在本地
 返回配置错误，不会截断、回绕或发送负 TTL。
+
+`h_decr_by` 在发送前拒绝无法取负的 `i64::MIN` 步长；`set_range` 在发送前拒绝超出
+`isize` 非负范围的字节偏移。服务端仍独立检查字段计数和字符串长度限制。
+`x_group_create_if_missing` 仅将精确的 `BUSYGROUP` 错误码视为组已存在；其它错误会原样返回，
+不会因为描述文本出现同名词而被当作成功。
+
+`h_decr_by` rejects an `i64::MIN` step before sending because its negation cannot be represented.
+`set_range` rejects byte offsets outside the nonnegative `isize` range before sending. Redis still
+enforces counter and string size limits. `x_group_create_if_missing` treats only the exact
+`BUSYGROUP` error code as an existing group; all other errors propagate, regardless of their text.
 
 ## Pipeline
 
@@ -104,9 +131,42 @@ String、Hash 与 ZSet 共提供九个 `*_idempotent` helper。nonce 不能为�
 
 `HASH_FIELD` 需要全部 master 支持 `HPEXPIRE`；`HASH_BUCKET` 使用时间桶；`AUTO` 只在全量响应明确确认命令不存在时选择时间桶。探测超时、ACL 拒绝、拓扑不稳或节点结果缺失会拒绝本次准备且不建立 marker，后续调用可重新探测。与 Java `LegacyV1` 共享账本还要求 key、Hash field 和 ZSet member 的序列化字节一致。
 
+单节点和集群的能力探测都校验 `COMMAND INFO HPEXPIRE` 的唯一响应及命令定义结构；仅唯一的 nil 项表示
+命令缺失。畸形定义、额外结果或错误响应表示能力未知，不能据此建立任何账本布局标记。
+
+Both standalone and cluster capability probes validate the single `COMMAND INFO HPEXPIRE` result and
+its command definition. Only a single nil entry confirms an absent command. Malformed definitions,
+extra results, and error responses leave capability unknown and cannot establish a layout marker.
+
 ## RedisJob
 
 直接依赖 `nadis` 时开启 `job` feature；业务经 `nasa` 门面时开启 `redis-job`。`nadis::job` 提供无全局 leader 的分布式任务运行时。多节点可以同时扫描，到期触发、领取、续租、完成、恢复和 Fanout assignment 都由 Redis 时间、CAS、owner、attempt token 与 fencing 收敛。普通任务可以共享 Worker Stream 与独立容量池；Fanout 目标必须声明为 `FANOUT_ONLY`，避免普通 Dispatcher 与定向 shard 竞争同一 Handler。
+
+逐数据源配置可以覆盖任务命名空间和容量，但不能覆盖 `application_name` 或 `instance_identity`。
+`JobConfig::resolve_source` 先检查根配置及原始覆盖，再校验合并结果，使同一进程的执行器身份保持一致。
+
+Per-source settings may override the task namespace and capacities, but cannot override
+`application_name` or `instance_identity`. `JobConfig::resolve_source` validates the root and
+original overrides before validating the merged result, preserving one executor identity per process.
+
+`FanoutCoordinator` 接受的根尝试次数为 `1..=i32::MAX`，与 Fanout 标识的整数编码一致。
+超出范围会在建立持久 intent 前返回协议错误，避免整数截断使不同尝试共享标识。
+
+`FanoutCoordinator` accepts root attempt numbers in `1..=i32::MAX`, matching the integer encoding
+used by Fanout identifiers. Out-of-range values return a protocol error before creating a durable
+intent, preventing integer truncation from assigning the same identifier to different attempts.
+
+Fanout 清理请求携带构造分片键时的观察游标。并发请求已经推进游标时，旧请求返回零删除和当前游标，
+调用方重新读取持久根后再继续，避免跳过分片。清理前检查游标范围、批量及键对数量；未对账或未到保留期
+的根不会被删除。到期扫描严格检查四组索引的字段完整性和每组批量上限，在分配成员缓冲前校验声明数量
+不超过实际响应能容纳的成员数；畸形响应返回协议错误。
+
+Fanout cleanup carries the cursor used to construct its shard keys. If another caller has advanced
+the cursor, the stale request returns zero deletions and the current cursor; the caller must read
+the durable root again before continuing. Cursor ranges, batch sizes and key pairs are checked
+before deletion. Unreconciled roots and roots still within retention are preserved. Due-index scans
+validate the exact four-group layout and per-group limits, and bound member allocation by the actual
+response length. Malformed responses return protocol errors.
 
 ### 运行架构
 
@@ -123,7 +183,33 @@ Redis 调度账本 ── Dispatch Stream/定向 inbox ──> Executor
 扫描器：receipt、ready、lease、root 分桶对账 ──> CAS/Lua 终态提交与 Fanout 聚合
 ```
 
-Prepare 阶段只发布已通过配置、定义、codec、容量和 source 门禁的计划；Dispatcher 取得执行权后才调用 Handler。Handler 外部写入必须携带 `attempt_token` 并在副作用前调用 `checkpoint()`，租约失效、取消或本地保守截止到达后立即停止。扫描器不是单一 leader，重复扫描依靠 Redis 权威时间、CAS、assignment epoch 和 fencing 收敛。
+Prepare 阶段逐 source 确认布局和能力后登记定义，全部准备成功才返回可启动计划；后续 source 失败不会撤销先前已提交的布局和定义。初次触发使用经过分量及毫秒范围校验的 Redis TIME，非法时间在登记定义前拒绝。Dispatcher 取得执行权后才调用 Handler。Handler 外部写入必须携带 `attempt_token` 并在副作用前调用 `checkpoint()`，租约失效、取消或本地保守截止到达后立即停止。扫描器不是单一 leader，重复扫描依靠 Redis 权威时间、CAS、assignment epoch 和 fencing 收敛。
+
+Preparation validates each source and registers its definitions before returning a startable plan.
+Failure on a later source does not roll back earlier layout markers or definitions. Initial trigger
+time uses Redis TIME only after validating its components and millisecond range; invalid time is
+rejected before definition registration.
+
+Fanout 后台任务异常退出也属于执行权威失败：运行时必须取得已结束任务的退出结果并关闭 source 准入，
+不会丢弃任务句柄后继续接收新工作。Handler 正常结束或被超时停止后，先关闭所有上下文副本的本地权威，
+再释放业务 Future 并提交持久结果；完成请求的网络等待不能延长业务写入权限。
+
+Abnormal Fanout task exits are authority failures: the runtime observes completed task results and
+closes source admission instead of discarding failed task handles. Once a Handler completes or times
+out, local authority is closed for every context clone before dropping its future and committing the
+durable result. Waiting for that commit does not extend the Handler's permission to perform effects.
+
+普通 Run 和 Fanout shard 的本地租约以请求发出前的单调时刻为基准，扣除安全余量，
+响应等待与载荷读取时间不会额外延长持权窗口。首次领取的证据到达时已经过期，则不调用 Handler。
+旧窗口已经到期后，即使迟到的续期响应表示服务端续租成功，也永久关闭该上下文并交给权威监督收敛；
+租约仍有效时的正常续期可以推进截止点。外部存储仍须使用 attempt token 实施 fencing。
+
+Ordinary runs and Fanout shards measure local lease windows from the monotonic instant before
+sending each request, less the safety allowance. Response waits and payload reads do not extend
+authority. An expired initial grant cannot invoke the Handler. Once the previous local window
+expires, even a delayed successful renewal cannot reopen that context; authority supervision
+handles the failure. Timely renewals can advance the deadline. External stores must still fence
+writes using the attempt token.
 
 普通 Run 通过 Worker Stream 分发；Fanout 先冻结兼容执行器快照，再为每个快照成员建立一个 shard。目标先写入持久 receipt，再申请本地 Handler 槽位；容量不足进入独立容量窗口。容量超窗优先切换兼容目标，无候选时重开窗口并保留 assignment，不把健康满载节点改判为失联。
 
@@ -164,10 +250,35 @@ let plan = nasa::redis::job::RedisJobPlan::new()
 第一次执行结果，不会重复延长服务端存活期；脚本也拒绝续期已经到期但尚未 GC 的记录。第一次续租若
 已在 Redis 执行但其结果始终无法在旧截止前取回，本地仍会立即关闭准入，服务端成员可能保留到该次
 续租的 TTL 到期；Fanout 投递必须依赖持久 receipt 和失联重分配收敛，不能把成员记录等同于进程确认。
-后续成功会把 Degraded 恢复为 Up；`NotFound`、权威 revision 不一致、协议响应非法或已确认截止耗尽
+旧截止前被采用的成功回包会把 Degraded 恢复为 Up；原窗口过期后，迟到结果不能推进本地截止或修订号。
+即使超时 Future 同时拿到成功结果，也先在状态锁内复验旧截止，再采用新证据。
+`NotFound`、权威 revision 不一致、协议响应非法或已确认截止耗尽
 会让 source 进入 NotReady。监督器只记录 source、循环与封闭原因，不记录 endpoint、payload 或凭据。
 
+Only a heartbeat accepted before the previously confirmed deadline can recover a degraded source.
+A late response cannot advance its local deadline or revision after that window expires, even if
+the timeout Future also observes a ready success. The old deadline is checked under the state lock
+before the response is adopted. Shutdown still reports expired executor authority as an error.
+
 命名空间暂停或恢复按调度分片逐一发布，不是跨分片原子事务。控制调用返回错误时，部分分片可能已经进入目标状态，调用方不得据此判定整个 source 已暂停或已恢复，必须使用同一 actor 幂等重试直至成功。`JobControl::namespace_governance` 聚合 `enabled`、`paused`、`untouched` 与 `unknown` 分片数、最近权威时刻和 actor；混合状态或未知持久值都会把 `divergent` 置真，供治理面告警与续作，但不会把逐分片操作包装为原子成功。该门禁只阻止普通 Run 取得新执行权：已经取得的 attempt 可以继续续期和完成，已经建立的 Fanout 批次也会继续投递和收敛。
+
+Fanout 取消先校验根记录、身份、游标、批量和分片键对，再发布 `CANCELLING` 并逐批处理。
+记录缺失或参数非法时拒绝，不新建残缺根；陈旧游标返回当前进度，由调用方重读后继续。
+运行中分片只登记协作取消请求，保留执行器、令牌和租约，直到持有者结束或租约恢复流程接管。
+
+Fanout cancellation validates the root, identity, cursors, batch bounds and shard key pairs before
+publishing `CANCELLING`. Missing roots or invalid arguments are rejected without creating partial
+records. A stale cursor returns current progress for a fresh read. Running shards retain their
+owner, token and lease while cooperative cancellation waits for completion or lease recovery.
+
+完成事件按近似长度上界和最长保留时间定期裁剪；长度限制可能先删除仍在时间窗口内的事件。
+普通调度分片和 Fanout 桶都在任何裁剪前校验 Redis TIME 的分量及毫秒范围，非法时间直接拒绝。
+裁剪由多个命令完成，后续失败不会回滚此前删除，最旧事件 ID 也只是读取时的观测值。
+
+Completion streams are trimmed by approximate maximum length and maximum retention time; the
+length bound may remove events still within the time window. Both ordinary shards and Fanout
+buckets validate Redis TIME before any trim. The operations are not one transaction: later errors
+do not undo earlier deletions, and the oldest event ID is only a point-in-time observation.
 
 手工 trigger 在存在环境 trace 时只记录 `trace_id` 到派生 `run_id` 的映射；业务 `request_id` 原文
 不进入日志。Run hash 与共享 Lua 的跨语言线协议在所有实现共同扩展前保持不变，因此 worker 侧
@@ -187,6 +298,15 @@ let guard = lock.lock("lock:{order:1}", Some(std::time::Duration::from_secs(3)))
 
 guard.unlock().await?;
 ```
+
+最后一份守卫开始解锁后，即使等待解锁的 Future 被取消，也会请求停止看门狗。取消不证明
+远端已释放；已提交的续租仍可能完成，残留锁依赖最后一次服务端续租的租期回收。
+业务副作用仍需复验持有状态，并在外部写入端实施 fencing。
+
+Once the final guard starts unlocking, cancelling the unlock Future also requests watchdog
+shutdown. Cancellation does not confirm remote release: a renewal already submitted may still
+complete, so a remaining lock expires according to its last server-side renewal. Business side
+effects still require ownership checks and fencing at the external write boundary.
 
 也可以用 `with_lock` 包裹业务 future：
 
@@ -230,6 +350,16 @@ if let Some(msg) = sub.next_message().await {
 }
 ```
 
+Pub/Sub 是瞬时广播，重连只恢复订阅，不重放断线期间的消息。`next_message` 保留空正文和二进制正文，
+只接收当前已确认频道或模式的消息；无法确认字段、连接结束或订阅状态未知时返回 `None`。
+成功退订后，该来源在本地排队的消息也不再交付。
+
+追加或取消订阅时，一旦开始等待结果便暂时停止信任当前连接。等待被取消或返回错误后，
+最后确认的本地订阅列表保留，但后续拉取返回 `None`，后续订阅变更被拒绝；即使服务端明确拒绝也要求重连。
+调用 `reconnect` 或 `reconnect_timeout` 会在独立连接上重放最后确认的全部频道与模式，
+全部成功才替换旧连接并恢复使用；失败、超时或取消不会把半配置连接交给业务，也不会解除已有门禁。
+初始 `sub/psubscribe` 不设置整体准备期限，调用方可以为等待设置预算；取消等待不能撤回已发送的命令。
+
 ## 分布式雪花 workerId
 
 Redis 分配使用显式初始化、编号永久不复用的账本。管理方须从账本外证明首次初始化权威，
@@ -254,6 +384,10 @@ lease.release().await?;
 `alloc_worker_id/build_with_redis` 始终返回错误。incarnation 不进入 ID 位编码，改名不保证新旧 ID 空间隔离。
 `build_local` 固定 workerId=1，同一 ID 空间只允许一个共享生成器；重启须越过上一实例的逻辑时间上界。
 Application 使用 `redis.snowflake.<name>` 与 `app.snowflake(name).await`，由框架领取和关闭生成器。
+本地时间容量也必须可编码；已超出时间位上限的配置在访问账本前拒绝，领取后再构造失败也不归还编号。
+`ManagedSnowflake::generate` 在关闭、状态锁中毒或时间容量耗尽时返回错误，不交付 ID。
+直接持有 `Snowflake` 时可用 `try_generate/try_generate_n` 处理同类错误；原有 `generate/generate_n`
+在失败时 panic。时间耗尽不通过复用 workerId、重置账本或回绕时间位恢复。
 
 ## Stream 消费
 
@@ -371,6 +505,17 @@ redis:
 `snapshot()` 同时报告聚合责任与 `execution_domains`，可区分域满载、来源 Park、提交未知和 Runner
 降级。正常停机覆盖全部域，任一任务、I/O 或锁未取得退出证明时 `converged` 保持 false。
 
+分区管理命令先保存可查询结果，再投递操作 ID。重试必须保持动作与接纳窗口一致，即使短摘要
+发生碰撞也不能复用不同请求；既有终态不再重复投递。TIME 分量和毫秒范围在写入前校验，动作
+执行前重新比对持久动作。接纳超时只限制尚未开始的请求，不能据此中止已经开始的副作用。
+网络错误不撤销先前写入，结果确认与后续消息清理也不构成一个跨命令事务。
+
+Partition administration persists a queryable result before publishing its operation ID. Retries
+must retain the same action and admission window even when short digests collide. Terminal results
+do not produce another command. Invalid TIME components or millisecond overflow are rejected before
+writing, and execution checks the persisted action before polling the action Future. Admission
+timeouts do not cancel side effects already in progress; network errors do not undo earlier writes.
+
 ## PROXY 共享消费组
 
 `PreparedProxy` 适合一个共享 stream 上的多 consumer 并行消费；它不提供分区顺序或 owner fencing，
@@ -397,13 +542,25 @@ proxy.shutdown().await;
 ```
 
 `consumers` 最大 256，`batch_size` 最大 10000；`reclaim_min_idle_ms`、`handler_timeout_ms` 和
-`drain_deadline_ms` 必须大于 0，所有 timer 时长不超过 365 天。直接丢弃 `RunningProxy` 会立即
-停止 consumer/reclaim，但不会冒险删除可能含 PEL 的 consumer；正常停机应显式调用
-`shutdown().await`。
+`drain_deadline_ms` 必须大于 0，所有 timer 时长不超过 365 天。关闭信号停止后续领取，已经开始的
+读取、业务处理及确认由独立 owner 等待；空闲和退避等待可立即结束。预算耗尽后请求强停，
+并在取得任务退出证据后返回，不能强制中断不让出执行权的同步处理器。
+直接丢弃 `RunningProxy` 也会发起关闭，但不等待结果；需要确认退出时调用
+`begin_shutdown()` / `wait_closed()`，或使用等待关闭的 `shutdown().await`。
+
+正常停机在同一 Redis 脚本内复验每个消费者没有 pending，再删除消费者元数据，避免旧摘要与
+删除之间的重新分配丢失 PEL。清理需要 `EVALSHA`、`SCRIPT LOAD` 及脚本内 `XPENDING`、
+`XGROUP DELCONSUMER` 的权限。权限不足、脚本或回复异常返回 `ProxyCleanup::Unavailable`；
+本地任务已经退出不等于清理已完成，网络错误也不能证明已发出的删除没有执行。
 
 ## RediSearch 文档
 
 开启 `derive` feature 后可派生 `RedisDocument`。
+
+JSON 文档共用 `to_json_omit_null` 编码：递归省略对象中的 null 成员，保留数组中的 null 位置。
+编码失败返回只含类别与行列的 `Codec` 错误；捕获自定义 `Serialize` 展开时返回固定错误。
+编码只调用一次 `Serialize`，不会重试或撤销其自身副作用，也不改变宿主 panic hook。
+该边界不隔离进程终止或栈耗尽；ARRAY 编码失败发生在追加、覆盖或批量写命令发送之前。
 
 ```rust
 #[derive(nasa::redis::RedisDocument)]
@@ -418,7 +575,74 @@ struct UserDoc {
 }
 ```
 
+`Query::new()` 与 `Query::default()` 都使用偏移 0、上限 10，且尚未标记显式分页。
+调用 `limit(offset, count)` 才设置显式窗口，`count=0` 原样保留；ARRAY 查询拒绝显式分页和排序，
+不会忽略这些选项后返回全部子文档。
+
+`tag_in` 的空集合表示匹配空集：FT 渲染返回空串哨兵，ARRAY 渲染返回零宽切片 `$[0:0]`。
+直接使用渲染器的调用方应遵守哨兵语义；空集合不能退化为全量查询或删除。
+TEXT 输入把 ASCII 查询结构字符变为空格，保留非 ASCII 原文，不做 Unicode 归一化；
+TAG 使用自己的字面量转义规则，非 ASCII 原文也保持不变。后缀和包含条件要求字段声明
+`WITHSUFFIXTRIE`，并分别使用 TEXT 或 TAG 查询语法；TAG 输入中的标点和空格仍属于值本身。
+
+ARRAY 查询中的字段名是 `DocMeta` 的查询别名；找到定义后，按实际存储的 `name` 或显式
+`json_path` 读取子文档。未指定路径时，`name` 整体作为属性名，名称中的点号不会变成层级。
+显式路径以 `$` 表示当前子文档，支持点号属性、引号括号属性和有符号 64 位数组下标；
+例如 `$.details.state`、`$["details.state"]`、`$.items[-1].state`。
+属性名中的引号和反斜杠可在括号路径中转义。通配、递归、联合、切片、过滤表达式、
+控制字符和越界下标会在本地拒绝，避免将单值字段条件扩展为多对象选择。
+这些规则同样约束数组的查询、计数和条件删除；FT 索引模式的路径能力独立于此限制。
+按 ID 操作同样将 `id_name` 整体视为实际属性名；点号、空格和引号属于名称本身，
+不会作为嵌套路径或过滤表达式执行。
+
+ARRAY 的字符串比较值和子文档 ID 保留普通反斜杠；同时含两类引号、反斜杠紧接引号，
+或含 U+0020 以下控制字符的值会在生成条件时返回配置错误。该限制用于避免查询、覆盖或
+删除时改变原始身份，区别于属性名的转义能力。字符串 ID 的直接追加不会构造 ID 条件；需要随后按 ID
+查询或覆盖的数据应符合上述限制。
+
+数值 ID 必须能解析为有限数值。单条追加、批量追加和覆盖都会在发送写入前检查；
+NaN、正负无穷不能作为数组文档身份，因为 JSON 编码会将它们转换为 null 并省略该字段。
+批量追加会先准备全部文档，任一 ID 不符合约束时整批不发送。
+
+ARRAY 追加和覆盖只接受与请求数量一致的 RESP 整数确认，批量追加按每个键的分组数量核对。
+删除与分桶计数只接受非负 RESP 整数；负数、字符串数字和其它回复形态会返回错误。
+这些检查约束完成确认，不能撤销已经执行的写入或删除；异常回复不提供安全重试依据。
+
+ARRAY 读取的 JSON 正文必须是数组，缺失键和合法空数组表示没有匹配；空字符串、null 或对象
+不会被当成空结果。存在性判断和普通数组计数只检查匹配列表，不构造业务实体。多桶读取的
+每个片段必须是 UTF-8 BulkString，片段数不得超过请求桶数；任一片段解码失败则整个读取返回错误。
+JSON 解码错误只包含类别和位置，不带正文或自定义错误消息；自定义 Deserialize 的展开仍向调用方传播。
+
 ## 生产注意
+
+数组的数值 ID 按文本选择比较形式：可解析为 `i64` 的整数文本保留完整有符号 64 位精度；
+其它形式只接受绝对值小于 `2^53` 的有限浮点值。超出 `i64` 的整数、边界外的小数或指数形式
+在追加、批量追加、覆盖、按 ID 查询和删除前返回配置错误，避免以浮点转换选择相邻整数。
+非零系数在浮点解析后下溢为零也会被拒绝，避免选择零身份；真正的正负零及带指数的零可以使用。
+需要更大整数身份时使用字符串字段，并按业务迁移原数据；改变字段类型不会自动搬移数组或桶。
+追加、批量追加和覆盖还会检查编码后的根对象：`id_name` 对应的属性必须存在，且类型、值与本次
+`id()` 观察一致。字符串按原文比较；整型双方保持 `i64` 精度，涉及浮点的比较只允许绝对值小于
+`2^53`。不一致返回配置错误，覆盖不会先删除旧记录，混合批次也不会先写入前面的有效文档。
+该检查复用同一次 `Serialize` 的结果，不改变 ID 文本、字段编码或桶布局。例如 `f32` 的 `0.1`
+经现有 JSON 值编码为 `0.10000000149011612`，与 ID 文本不同，因此拒绝；`0.5` 可精确表示，仍可使用。
+需要十进制身份时使用字符串字段，并显式迁移已有数据；本地检查不会清理已有的不一致或混合数值记录。
+数值等价的 ID 文本仍可能散列到不同桶，查询和删除应使用写入时相同的 ID 文本；不会自动跨桶查找别名。
+
+ARRAY 追加、同键批量追加和覆盖在脚本内先通过 `JSON.TYPE` 检查已有根值。缺失键可以初始化，
+已有 JSON 对象、null、字符串及其它标量会在写入或删除旧成员前拒绝；普通 Redis 非 JSON 键也返回错误。
+该检查不会把错误布局自动改成数组。脚本执行隔离不提供失败回滚：通过根类型检查后，后续命令的
+权限或执行错误仍可能保留前序副作用；覆盖报错时旧记录可能已删除。跨键批次也不回滚已经完成的键，
+调用方必须核对持久状态，不能把错误当成安全重试依据。
+
+按 ID 查找、判断存在、覆盖或删除完整 i64 整数时，绝对值达到 2^53 的条件若命中已有浮点 ID，整个操作会拒绝。
+类型复验与读取或删除在同一个 Lua 中完成；只含整数的匹配保留完整 i64 范围，无命中时覆盖仍可追加、删除返回零。
+该门禁不清理或改写历史混合数据。通用 `Query` 的数值参数为 `f64`，大整数可能在传入前就已舍入；
+例如 `9007199254740993_i64 as f64` 已变成 `9007199254740992`。ARRAY 路径沿用 RedisJSON
+的数值比较，混合整数与浮点记录也可能同时匹配相邻业务值；`remove_in_array` 会删除这些匹配。
+需要精确整数身份定位时，使用上述按 ID 入口传入原始整数文本，或使用字符串字段；
+数值范围查询保持浮点语义，不会自动把数字改成字符串，也不会自动改写已有桶的身份文本。
+直接调用 `REPLACE_OR_APPEND` 脚本时还必须提供第三个参数：需要保护时传命中项的 ID 属性路径，
+其它身份传空字符串；省略第三个参数会在任何写入前拒绝。
 
 Application 受管 Redis 客户端由 `"redis"` 组件关闭，业务一次性收尾可以在其关闭前使用
 `app.register_graceful_shutdown`，不应重复关闭同一个受管客户端。业务自己启动的 Stream、Partition 或
@@ -560,6 +784,10 @@ AutoPipeline 也支持 Batch。具体 YAML 和 getter 见
 ```
 
 普通 Stream 按显式读取模式处理记录；组模式的 `on_success` 在 handler 失败时保留 PEL，不自动重投。
+关闭会中断读取、回调及确认等待，已发送的命令仍可能在远端生效；订阅不删除消费者或自动回收 PEL。
+`observation().unfinished` 只统计已收到并登记的本地责任，不能从零值推断远端没有待确认消息；
+尚未取得读取回复时的领取结果须由外部恢复流程核对。
+
 Proxy 以共享组竞争、回收和毒消息策略处理自己的信封格式；两者不能共用同源同 stream/group。
 AutoPipeline 合并命令传输，既不提供 Redis 事务，也不提供业务键有序消费。需要分区执行与业务键
 顺序时使用 `PreparedPartition` / `RunningPartition`。Service 的命名发送入口在放行前明确拒绝，
@@ -572,7 +800,8 @@ Stream、Proxy、AutoPipeline 的 `with_running` 在本地任务责任完整的�
 闭包不能阻塞或重入领域句柄；已退出的关键 owner 阻止 Ready 发布，不把本地存活等同远端可用。
 Stream 的 `begin_shutdown()` / `wait_closed()`、Proxy 的 `begin_shutdown_until()` / `wait_closed()`
 和 AutoPipeline 的 `shutdown_result()` 都保留真实退出证据，可在前一次等待被取消后再次等待。
-Proxy 强制关闭、查询失败或摘要不完整时保留 consumer/PEL；不把未知 pending 当作零。
+Proxy 强制关闭时跳过消费者清理；正常关闭只在原子查询确认该消费者没有 pending 时删除。
+查询或脚本失败不把未知 pending 当作零；已发出的脚本结果不明时，空消费者可能已经被删除。
 `ProxyStopReport.cleanup` 区分完整清理、合法 pending、证据不可用和预算耗尽，后两类在宿主中
 进入次要停机失败。删除回包超时保留结果未知。收尾 owner 被执行器销毁时，旧入口关闭，状态读取
 报告失败；Proxy 未取得全部 join 证据时保持 `terminated: false`，不会把任务取消冒充优雅退出。

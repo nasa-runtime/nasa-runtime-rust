@@ -47,10 +47,12 @@ pub enum LogConfigError {
 }
 
 impl fmt::Display for LogConfigError {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示配置解析失败的分类与输入摘要。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收错误说明的格式化器。
+    ///
+    /// 返回：成功写出分类与对应错误内容；写出失败传播格式化错误，输入摘要不自动脱敏。
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::InvalidSize(s) => write!(f, "invalid size: {s:?}"),
@@ -69,6 +71,10 @@ impl fmt::Display for LogConfigError {
 
 impl std::error::Error for LogConfigError {
     /// 业务作用：返回底层错误来源；用于错误链追踪。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅 InvalidPattern 返回底层格式错误，其它分类返回 None。
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidPattern(e) => Some(e),
@@ -80,8 +86,10 @@ impl std::error::Error for LogConfigError {
 impl From<ByteSizeError> for LogConfigError {
     /// 业务作用：把公共容量错误映射到日志配置错误。
     ///
-    /// # 参数
-    /// - `e`: 错误对象或外部错误值。
+    /// 参数说明：
+    /// - `e`：通用容量字符串的非法或换算溢出错误。
+    ///
+    /// 返回：按容量错误分类构造 InvalidSize 或 SizeOverflow，保留原输入文本。
     fn from(e: ByteSizeError) -> Self {
         match e {
             ByteSizeError::Invalid(s) => Self::InvalidSize(s),
@@ -101,10 +109,12 @@ pub enum LogApplyError {
 }
 
 impl fmt::Display for LogApplyError {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示日志配置应用的解析或文件错误。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收错误说明的格式化器。
+    ///
+    /// 返回：成功写出分类与对应错误内容；写出失败传播格式化错误，输入摘要不自动脱敏。
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Config(e) => write!(f, "log config error: {e}"),
@@ -115,6 +125,10 @@ impl fmt::Display for LogApplyError {
 
 impl std::error::Error for LogApplyError {
     /// 业务作用：返回底层错误来源；用于错误链追踪。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回内部配置错误或文件打开错误的借用，便于沿错误链定位。
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Config(e) => Some(e),
@@ -124,19 +138,23 @@ impl std::error::Error for LogApplyError {
 }
 
 impl From<LogConfigError> for LogApplyError {
-    /// 业务作用：执行类型转换；用于把外部值统一转成本模块类型。
+    /// 业务作用：将配置错误纳入统一日志应用错误。
     ///
-    /// # 参数
-    /// - `e`: 错误对象或外部错误值。
+    /// 参数说明：
+    /// - `e`：日志配置解析或过滤器应用错误。
+    ///
+    /// 返回：返回包裹原配置错误的 Config 变体，不丢弃错误信息。
     fn from(e: LogConfigError) -> Self {
         Self::Config(e)
     }
 }
 impl From<LogOpenError> for LogApplyError {
-    /// 业务作用：执行类型转换；用于把外部值统一转成本模块类型。
+    /// 业务作用：将文件输出准备错误纳入统一日志应用错误。
     ///
-    /// # 参数
-    /// - `e`: 错误对象或外部错误值。
+    /// 参数说明：
+    /// - `e`：文件目录或输出资源准备错误。
+    ///
+    /// 返回：返回包裹原文件错误的 Io 变体，不丢弃来源。
     fn from(e: LogOpenError) -> Self {
         Self::Io(e)
     }
@@ -183,6 +201,10 @@ pub struct LogConfig {
 
 impl Default for LogConfig {
     /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 info 级别、未指定路径且所有可选值缺省的配置；不创建文件，容量和格式默认值延迟到解析。
     fn default() -> Self {
         Self {
             level: "info".to_string(),
@@ -207,7 +229,7 @@ impl Default for LogConfig {
 /// 缺失 `path` 时的策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingPathPolicy {
-    /// 缺 path = 不接文件,只控制台(兼容 rust-simple-mvc 现状)。
+    /// 缺少 path 时不接文件，只使用控制台。
     ConsoleOnly,
     /// legacy default = 沿用历史日志目录规则;只影响缺省 path 的补全,不代表整套运行协议。
     /// 缺 path 且有 `app_name` = `{default_log_root}/{app_name}`。
@@ -227,6 +249,10 @@ pub struct LogContext {
 
 impl Default for LogContext {
     /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回无应用名、默认根 /usr/local/logs 且缺路径时只用控制台的上下文，不创建目录。
     fn default() -> Self {
         Self {
             app_name: None,
@@ -238,14 +264,20 @@ impl Default for LogContext {
 
 impl LogContext {
     /// 业务作用：缺 path = 只控制台(无 app_name)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回缺路径时仅控制台的默认上下文；显式配置路径仍可启用文件输出。
     pub fn console_only() -> Self {
         Self::default()
     }
 
     /// 业务作用：显式选择缺省文件日志目录；缺 path 时使用 `{default_log_root}/{app_name}`。
     ///
-    /// # 参数
-    /// - `app_name`: 应用名,用于在未显式配置日志目录时拼出默认文件日志目录。
+    /// 参数说明：
+    /// - `app_name`：应用名,用于在未显式配置日志目录时拼出默认文件日志目录。
+    ///
+    /// 返回：返回采用默认目录拼接策略并保存应用名的上下文；不验证应用名，也不创建目录。
     pub fn legacy_default(app_name: impl Into<String>) -> Self {
         Self {
             app_name: Some(app_name.into()),
@@ -256,8 +288,10 @@ impl LogContext {
 
     /// 业务作用：记录 app_name 并保持控制台输出(缺 path = 只控制台)。
     ///
-    /// # 参数
-    /// - `app_name`: 应用名,仅记录到上下文中,不会自动启用文件日志目录。
+    /// 参数说明：
+    /// - `app_name`：应用名,仅记录到上下文中,不会自动启用文件日志目录。
+    ///
+    /// 返回：返回记录应用名且仍采用缺路径仅控制台策略的上下文，不创建目录。
     pub fn with_app_name(app_name: impl Into<String>) -> Self {
         Self {
             app_name: Some(app_name.into()),
@@ -265,10 +299,12 @@ impl LogContext {
         }
     }
 
-    /// 业务作用：覆盖默认日志根(本地开发常用临时目录,避免写 `/usr/local/logs`)。
+    /// 业务作用：设置缺省目录拼接时使用的日志根。
     ///
-    /// # 参数
-    /// - `root`: 缺失 path 且使用 legacy 策略时的日志根目录。
+    /// 参数说明：
+    /// - `root`：缺失 path 且使用 legacy 策略时的日志根目录。
+    ///
+    /// 返回：返回替换默认根后的上下文；不规范或校验路径，只影响缺路径且采用默认目录拼接的解析。
     pub fn with_default_log_root(mut self, root: impl Into<String>) -> Self {
         self.default_log_root = root.into();
         self
@@ -276,8 +312,10 @@ impl LogContext {
 
     /// 业务作用：覆盖缺失 path 策略。
     ///
-    /// # 参数
-    /// - `p`: 未配置日志 path 时的处理策略,决定只打控制台还是拼 legacy 默认目录。
+    /// 参数说明：
+    /// - `p`：未配置日志 path 时的处理策略,决定只打控制台还是拼 legacy 默认目录。
+    ///
+    /// 返回：返回采用指定缺路径策略的上下文，不改变显式 path，也不创建目录。
     pub fn with_missing_path_policy(mut self, p: MissingPathPolicy) -> Self {
         self.missing_path_policy = p;
         self
@@ -310,6 +348,10 @@ pub struct ResolvedLogConfig {
 
 impl LogConfig {
     /// 业务作用：启动期级别(`level` 空 → `"info"`;**返回 trim 后的值**,避免 `" info "` 传给 `EnvFilter` 失败)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用去除首尾空白后的级别表达式，空白时返回 info；不校验 EnvFilter 语法。
     pub fn bootstrap_level(&self) -> &str {
         let l = self.level.trim();
         if l.is_empty() {
@@ -321,8 +363,10 @@ impl LogConfig {
 
     /// 业务作用：解析路径:`(目录, 来源)`;`Disabled` 时目录为 `None`。
     ///
-    /// # 参数
-    /// - `ctx`: 本次格式化、日志或运行阶段的上下文。
+    /// 参数说明：
+    /// - `ctx`：提供默认根、应用名和缺路径处理策略的上下文。
+    ///
+    /// 返回：显式非空路径去除首尾空白后优先返回；否则按策略返回无文件目录或拼接默认根与应用名。默认目录策略缺少非空应用名时失败；不校验路径安全或可写性。
     fn resolve_path(
         &self,
         ctx: &LogContext,
@@ -355,7 +399,11 @@ impl LogConfig {
         }
     }
 
-    /// 业务作用：解析 resolved max file size 结果；用于确定最终运行参数。
+    /// 业务作用：确定滚动日志的单文件字节上限。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：优先返回显式容量，其次按 1024² 换算 MB，最后采用默认值；换算溢出或结果为零时返回错误。
     fn resolved_max_file_size(&self) -> Result<u64, LogConfigError> {
         let bytes = match (self.max_file_size, self.max_file_size_mb) {
             (Some(bs), _) => bs.0,
@@ -370,7 +418,11 @@ impl LogConfig {
         Ok(bytes)
     }
 
-    /// 业务作用：解析 resolved total size cap 结果；用于确定最终运行参数。
+    /// 业务作用：确定历史归档清理使用的总字节容量。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：优先返回显式容量，其次按 1024² 换算 MB，最后采用默认值；换算溢出或结果为零时返回错误。容量是清理策略输入，不保证删除一定成功。
     fn resolved_total_size_cap(&self) -> Result<u64, LogConfigError> {
         let bytes = match (self.total_size_cap, self.total_size_cap_mb) {
             (Some(bs), _) => bs.0,
@@ -385,10 +437,12 @@ impl LogConfig {
         Ok(bytes)
     }
 
-    /// 业务作用：构建 build file cfg 结果；用于把配置和上下文组装成可执行对象。
+    /// 业务作用：将目录与滚动、保留和颜色选项组装为文件输出配置。
     ///
-    /// # 参数
-    /// - `dir`: 日志、存储或配置文件所在目录。
+    /// 参数说明：
+    /// - `dir`：已经按路径策略选定的文件输出目录。
+    ///
+    /// 返回：返回应用默认值后的文件选项；保留天数为负、容量为零或换算溢出时失败，不检查目录或打开文件。
     fn build_file_cfg(&self, dir: String) -> Result<FileLogConfig, LogConfigError> {
         let max_history_days = self.max_history_days.unwrap_or(DEFAULT_MAX_HISTORY_DAYS);
         if max_history_days < 0 {
@@ -407,8 +461,10 @@ impl LogConfig {
 
     /// 业务作用：解析为 `Option<FileLogConfig>`(`None` = 只控制台)。
     ///
-    /// # 参数
-    /// - `ctx`: 运行期日志上下文,提供应用名、默认日志根和缺失 path 策略。
+    /// 参数说明：
+    /// - `ctx`：运行期日志上下文,提供应用名、默认日志根和缺失 path 策略。
+    ///
+    /// 返回：有目录时校验并返回文件配置，无目录时返回 None；路径策略或文件参数非法时失败。不检查级别和 pattern，也不创建文件。
     pub fn resolve_file(&self, ctx: &LogContext) -> Result<Option<FileLogConfig>, LogConfigError> {
         match self.resolve_path(ctx)? {
             (Some(dir), _) => Ok(Some(self.build_file_cfg(dir)?)),
@@ -417,6 +473,10 @@ impl LogConfig {
     }
 
     /// 业务作用：编译输出 pattern(`None` → [`DEFAULT_LOG_PATTERN`]);非法 → `Err(InvalidPattern)`,不静默退回默认。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回已解析的共享 pattern；缺省采用 DEFAULT_LOG_PATTERN，语法不受支持时返回 InvalidPattern，不替换全局格式。
     fn resolve_pattern(&self) -> Result<Arc<CompiledLogPattern>, LogConfigError> {
         let s = self.pattern.as_deref().unwrap_or(DEFAULT_LOG_PATTERN);
         CompiledLogPattern::parse(s)
@@ -426,8 +486,10 @@ impl LogConfig {
 
     /// 业务作用：解析为完整 [`ResolvedLogConfig`](级别 + 文件配置 + 路径来源 + 编译 pattern)。
     ///
-    /// # 参数
-    /// - `ctx`: 运行期日志上下文,用于解析缺失 path、legacy 默认目录和应用名回退。
+    /// 参数说明：
+    /// - `ctx`：运行期日志上下文,用于解析缺失 path、legacy 默认目录和应用名回退。
+    ///
+    /// 返回：返回路径来源、可选文件配置、规范级别和编译格式；路径、容量或格式失败时返回错误，不解析级别语法、不创建文件、不修改全局输出。
     pub fn resolve(&self, ctx: &LogContext) -> Result<ResolvedLogConfig, LogConfigError> {
         let (dir, source) = self.resolve_path(ctx)?;
         let file = match dir {
@@ -498,7 +560,9 @@ struct ReclaimPermit {
 
 impl LogReclaimer {
     /// 业务作用：建立一个有界日志资源回收 owner，刷盘等待不占配置发布线程。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：拥有独立回收线程的队列；线程无法建立时不允许启动日志 owner。
     fn new() -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -526,7 +590,9 @@ impl LogReclaimer {
     }
 
     /// 业务作用：在打开候选文件前预留回收容量，慢回收时拒绝继续积累候选。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：最多两个在途候选/回收项中的一个许可；容量不足时返回配置应用错误。
     fn reserve(&self) -> Result<ReclaimPermit, LogApplyError> {
         let sender = self
@@ -549,7 +615,9 @@ impl LogReclaimer {
     }
 
     /// 业务作用：在停机的阻塞清理线程中确认已提交回收的旧 writer 全部完成。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：此前已交给回收 owner 的资源完成刷盘后返回。
     fn drain(&self) {
         let (done, wait) = std::sync::mpsc::sync_channel(0);
@@ -563,7 +631,9 @@ impl LogReclaimer {
     }
 
     /// 业务作用：关闭候选准入并等待有界回收线程退出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有持有候选归还后完成，调用方须在受停机预算监督的阻塞线程中执行。
     fn shutdown(&mut self) {
         self.sender.take();
@@ -575,7 +645,9 @@ impl LogReclaimer {
 
 impl Drop for ReclaimPermit {
     /// 业务作用：准备失败而尚未形成候选时归还容量。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：减少在途准备计数，不等待日志资源。
     fn drop(&mut self) {
         self.pending
@@ -585,7 +657,9 @@ impl Drop for ReclaimPermit {
 
 impl Drop for PreparedLogConfig {
     /// 业务作用：将未安装或已退役的 writer 移交给有界回收 owner。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本方法不等待刷盘；回收完成后容量归还。
     fn drop(&mut self) {
         let Some(permit) = self.reclaim.take() else {
@@ -615,11 +689,12 @@ impl Drop for PreparedLogConfig {
 }
 
 impl LogManager {
-    /// 业务作用：早期启动(严格版):**先提交 boot 配置的 pattern**
-    /// 再仅初始化控制台(文件 writer 槽仍空)。`init_with_default` 全局只能调一次。pattern 非法 → `Err`,不静默退默认。
+    /// 业务作用：早期启动(严格版):**先提交 boot 配置的 pattern** 再仅初始化控制台(文件 writer 槽仍空)。`init_with_default` 全局只能调一次。pattern 非法 → `Err`,不静默退默认。
     ///
-    /// # 参数
-    /// - `cfg`: 启动期可选日志配置,用于决定初始级别和控制台输出 pattern。
+    /// 参数说明：
+    /// - `cfg`：启动期可选日志配置,用于决定初始级别和控制台输出 pattern。
+    ///
+    /// 返回：配置格式合法时先设置全局 pattern，再初始化控制台并建立回收线程；格式非法返回错误。重复全局初始化或回收线程无法建立会展开，不在 Result 中返回；不接文件输出。
     pub fn try_bootstrap(cfg: Option<&LogConfig>) -> Result<Self, LogConfigError> {
         if let Some(c) = cfg {
             set_log_pattern(c.resolve_pattern()?); // 早期控制台即用配置 pattern
@@ -632,19 +707,22 @@ impl LogManager {
         })
     }
 
-    /// 业务作用：早期启动:仅初始化控制台(文件 writer 槽仍空)。便捷 fail-fast 版,boot pattern 非法直接 panic。
-    /// 需可恢复请用 [`LogManager::try_bootstrap`]。
+    /// 业务作用：早期启动:仅初始化控制台(文件 writer 槽仍空)。便捷 fail-fast 版,boot pattern 非法直接 panic。 需可恢复请用 [`LogManager::try_bootstrap`]。
     ///
-    /// # 参数
-    /// - `cfg`: 启动期可选日志配置,用于决定初始级别和控制台输出 pattern。
+    /// 参数说明：
+    /// - `cfg`：启动期可选日志配置,用于决定初始级别和控制台输出 pattern。
+    ///
+    /// 返回：返回控制台日志管理器；格式解析失败、重复全局初始化或回收线程无法建立时展开，不创建文件输出。
     pub fn bootstrap(cfg: Option<&LogConfig>) -> Self {
         Self::try_bootstrap(cfg).expect("invalid bootstrap log config (pattern)")
     }
 
     /// 业务作用：在发布前准备日志文件、writer 和过滤器，当前输出保持可用。
+    ///
     /// 参数说明：
     /// - `cfg`：完整日志配置。
     /// - `ctx`：稳定的应用日志上下文。
+    ///
     /// 返回：尚未安装的候选；任何解析或文件准备失败都不修改日志运行态。
     pub fn prepare(
         &self,
@@ -672,8 +750,10 @@ impl LogManager {
     }
 
     /// 业务作用：在宿主发布临界区安装已经准备的候选，不执行文件 I/O 或旧 writer 等待。
+    ///
     /// 参数说明：
     /// - `prepared`：尚未安装的候选，调用方必须在发布锁外释放它。
+    ///
     /// 返回：过滤器安装成功后切换输出并保留精确旧态；失败保留旧输出，候选仍负责资源清理。
     pub fn install(&mut self, prepared: &mut PreparedLogConfig) -> Result<(), LogApplyError> {
         let filter = prepared.filter.take().ok_or_else(|| {
@@ -703,8 +783,10 @@ impl LogManager {
     }
 
     /// 业务作用：配置事务未提交时恢复安装前的日志输出，旧文件无需重新打开。
+    ///
     /// 参数说明：
     /// - `prepared`：本管理器当前安装的候选，保管旧过滤器、输出槽和 guard。
+    ///
     /// 返回：尚未切换或恢复完成时成功；候选已失去安装权威或过滤器不可恢复时拒绝，不覆盖更新的输出。
     /// 失败候选的 guard 留在候选中等待发布锁外回收；已写出的日志及准备阶段创建的文件不撤销。
     pub fn rollback(&mut self, prepared: &mut PreparedLogConfig) -> Result<(), LogApplyError> {
@@ -737,9 +819,11 @@ impl LogManager {
     }
 
     /// 业务作用：独立使用时完成准备、安装和旧输出回收。
+    ///
     /// 参数说明：
-    /// - `cfg`：已合并的完整日志配置。
-    /// - `ctx`：用于解析应用名和缺省路径的日志上下文。
+    /// - `cfg`：为完整配置
+    /// - `ctx`：为应用日志上下文。
+    ///
     /// 返回：成功返回生效配置；失败保留原输出；此同步入口可能等待文件 I/O，不能在宿主发布锁内调用。
     pub fn apply(
         &mut self,
@@ -755,7 +839,9 @@ impl LogManager {
     }
 
     /// 业务作用：关闭文件日志并终止候选资源回收 owner，供宿主最终停机使用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前及退役 writer 刷盘、回收线程退出后返回；关闭后不再接受新候选。
     pub fn shutdown(&mut self) {
         self.disable_file();
@@ -765,7 +851,8 @@ impl LogManager {
     /// 业务作用：手动关闭文件日志,回到只控制台。
     ///
     /// 参数说明: 无。
-    /// 返回：撤销旧候选的回退资格，关闭文件输出并等待已退休资源回收，控制台输出继续有效。
+    ///
+    /// 返回：撤销旧候选回滚资格、清空文件输出槽并释放当前 guard，随后等待已入队回收；可能阻塞刷盘，不停止回收线程，也不关闭控制台。
     pub fn disable_file(&mut self) {
         // 停机或显式关闭撤销旧候选的恢复资格，避免迟到回滚重新启用已关闭 writer。
         self.publication = Arc::new(());
@@ -775,13 +862,13 @@ impl LogManager {
     }
 }
 
-/// 业务作用：轻量入口(不强制用 `LogManager`):接入/关闭文件日志 + `set_level`,返回新 `LogGuard`(调用方须持有)。
-/// 失败语义同 [`LogManager::apply`]:文件打开失败返 `Err(LogApplyError::Io)`,不静默吞。有 Nacos 热更新时建议用
-/// [`LogManager`] 管理 guard 生命周期。
+/// 业务作用：解析并应用独立文件日志配置，将文件输出生命周期交给调用方持有的 guard。
 ///
-/// # 参数
-/// - `cfg`: 最终日志配置,包含级别、文件滚动参数和输出 pattern。
-/// - `ctx`: 运行期日志上下文,用于解析缺失 path 和 legacy 默认目录。
+/// 参数说明：
+/// - `cfg`：最终日志配置,包含级别、文件滚动参数和输出 pattern。
+/// - `ctx`：运行期日志上下文,用于解析缺失 path 和 legacy 默认目录。
+///
+/// 返回：解析成功后顺序切换文件输出、pattern 和级别，返回必须持有的可选文件 guard；解析或文件准备失败返回错误。set_level 的拒绝被忽略，成功不证明过滤器已切换，各全局槽也不同时原子发布。
 pub fn apply_config(cfg: &LogConfig, ctx: &LogContext) -> Result<Option<LogGuard>, LogApplyError> {
     let resolved = cfg.resolve(ctx)?;
     match resolved.file {

@@ -87,6 +87,12 @@ use syn::{
 ///
 /// // 不要再调用 plan.global(automatic_audit::binding())；框架会自动装配。
 /// ```
+///
+/// 参数说明：
+/// - `attr`：ID、阶段、排序依赖、AuthRuntime 与自动全局装配声明的属性 token。
+/// - `item`：待保留并生成描述符与 binding 的 async 函数 token。
+///
+/// 返回：声明合法时生成原函数、描述符、binding helper 以及可选全局登记；非法配置、签名或缺少运行时门面时生成编译错误，实际 extractor 类型兼容性由 Rust 编译检查。
 #[proc_macro_attribute]
 pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let Some(mapping_p) = web_runtime_path() else {
@@ -175,6 +181,10 @@ pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ///
                 /// napp 应用通常使用 `State<Application>`，非 napp 应用则使用自己的 AppState；
                 /// mapping 只 clone 启动时传入的同一根状态，不建立全局容器。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回携带静态描述符的 binding，实际装配时 clone 传入的根状态供 extractor 使用。
                 #visibility fn binding() -> #mapping_p::InterceptorBinding<#state_ty> {
                     #mapping_p::InterceptorBinding::new(
                         <Self as #mapping_p::InterceptorDefinition>::DESCRIPTOR,
@@ -191,6 +201,11 @@ pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ///
                 /// 例如 Router 使用 napp `Application`，高频 Token interceptor 只持有 Redis
                 /// handle 与配置快照。窄 State 只在装配期 clone，受管资源的关闭权仍归根容器。
+                ///
+                /// 参数说明：
+                /// - `__interceptor_state`：启动期构造的拦截器状态，供装配时复制并注入。
+                ///
+                /// 返回：返回捕获该状态的 binding，不从 Router 根状态自动派生或校验资源归属。
                 #visibility fn binding_with<__RootState>(
                     __interceptor_state: #state_ty,
                 ) -> #mapping_p::InterceptorBinding<__RootState>
@@ -217,6 +232,10 @@ pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ///
                 /// Router 根 State 由调用位置推断；Header、Extension、InterceptorContext 等
                 /// `FromRequestParts` extractor 仍可照常使用。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回不注入 State 的 binding，实际 extractor 能力由编译检查与装配合同约束。
                 #visibility fn binding<__RootState>() -> #mapping_p::InterceptorBinding<__RootState>
                 where
                     __RootState: ::core::clone::Clone + ::core::marker::Send + ::core::marker::Sync + 'static,
@@ -285,6 +304,11 @@ pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// 业务作用：解析逗号分隔的 before/after ID，并对每项执行安全标识校验。
+///
+/// 参数说明：
+/// - `value`：逗号分隔的 before/after interceptor ID 字面量。
+///
+/// 返回：逐项 trim 后全部满足安全 ID 规则时按声明顺序返回字面量；空项或非法项报错，重复项保留供装配审计判断。
 fn parse_dependency_ids(value: &LitStr) -> syn::Result<Vec<LitStr>> {
     let mut result = Vec::new();
     for item in value.value().split(',') {
@@ -301,6 +325,11 @@ fn parse_dependency_ids(value: &LitStr) -> syn::Result<Vec<LitStr>> {
 }
 
 /// 业务作用：校验 interceptor 必须是非泛型 async 自由函数，且 Request/Next 位于末尾。
+///
+/// 参数说明：
+/// - `function`：待生成拦截器 binding 的自由函数节点。
+///
+/// 返回：async、无泛型与 receiver、尾部类型名为 Request/Next 且此前未出现 Json/Form/Request 时成功，否则报错；仅做语法形态筛选，FromRequestParts 与真实类型身份仍由 Rust 类型检查。
 fn validate_interceptor_function(function: &ItemFn) -> syn::Result<()> {
     if function.sig.asyncness.is_none() {
         return Err(syn::Error::new_spanned(
@@ -348,6 +377,11 @@ fn validate_interceptor_function(function: &ItemFn) -> syn::Result<()> {
 }
 
 /// 业务作用：返回一个 typed 参数路径的最后类型名，供 extractor 形状静态审计。
+///
+/// 参数说明：
+/// - `input`：待检查 extractor 形态的函数参数。
+///
+/// 返回：typed 路径参数返回最后一段类型名，其它形态返回 None；不展开引用、别名或验证路径来源。
 fn fn_arg_last_type(input: &FnArg) -> Option<String> {
     let FnArg::Typed(input) = input else {
         return None;
@@ -362,6 +396,11 @@ fn fn_arg_last_type(input: &FnArg) -> Option<String> {
 }
 
 /// 业务作用：从 interceptor 参数中提取 `State<T>` 的 T，供生成单态化 binding helper。
+///
+/// 参数说明：
+/// - `function`：已通过基本签名检查的 interceptor 函数。
+///
+/// 返回：按参数顺序返回首个末段名为 State 且首个泛型实参为类型的内层副本，找不到返回 None；不校验多个 State 是否一致或真实类型来源。
 fn interceptor_state_type(function: &ItemFn) -> Option<Type> {
     for input in &function.sig.inputs {
         let FnArg::Typed(input) = input else {
@@ -399,7 +438,7 @@ fn interceptor_state_type(function: &ItemFn) -> Option<Type> {
 /// `MappingRuntime`、`MappingPlan` 和根 State。它会先冻结 effective plan、检查阶段顺序与所有
 /// provider/condition/key/replay 依赖，再装配 Router；失败发生在监听端口之前。
 ///
-/// ## 参数
+/// 参数说明：
 /// | 参数 | 类型 | 必填 | 含义 |
 /// |---|---|---|---|
 /// | (位置参) | 类型 | ✅ | axum 的 State 类型,如 `crate::state::AppState`;无状态写 `()` |
@@ -419,9 +458,11 @@ fn interceptor_state_type(function: &ItemFn) -> Option<Type> {
 /// )?;
 /// ```
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `input`: 宏调用括号内的 axum State 类型 token stream，例如 `crate::state::AppState` 或 `()`。
+///
+/// 返回：生成按根 State 单态化的路由收集模块和装配函数；无法解析 State 时生成编译错误。宏本身不监听端口，调用方负责在启动监听前完成生成入口的装配审计。
 #[proc_macro]
 pub fn mvc_router(input: TokenStream) -> TokenStream {
     let (axum_p, linkme_p, tracing_p) = third_party_paths();
@@ -463,13 +504,11 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
 
                 /// 业务作用：装配不使用 mapping 运行时的兼容路由。
                 ///
-                /// # 参数
+                /// 参数说明：
                 ///
-                /// - `router`: 待追加注解路由的 Axum Router。
+                /// - `router`：待追加注解路由的 Axum Router。
                 ///
-                /// # 返回
-                ///
-                /// 返回完成装配的 Router。
+                /// 返回：完成全部收集项注册的 Router；路由冲突等 Axum 装配错误仍可能触发 panic。
                 pub fn register_all(mut router: Router<#state_ty>) -> Router<#state_ty> {
                     for entry in ROUTES.iter() {
                         #tracing_p::info!("[mvc] 收集到路由 {:>4} {}", entry.method, entry.path);
@@ -559,14 +598,13 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
 
             /// 业务作用：审计完整路由集合后逐条装配，任何安全依赖缺失都在监听端口前返回错误。
             ///
-            /// # 参数
+            /// 参数说明：
+            /// - `router`：待追加注解路由的 Axum Router。
+            /// - `runtime`：已完成组件构建的共享安全运行时。
+            /// - `plan`：调用方手动构造的拦截计划，自动全局项将在其后合并。
+            /// - `state`：与 Router 根 State 类型一致的启动状态，供 binding 装配使用。
             ///
-            /// - `router`: 待追加注解路由的 axum Router。
-            /// - `runtime`: 已完成配置合并和组件构建的共享安全运行时。
-            ///
-            /// # 返回
-            ///
-            /// 审计成功返回完成装配的 Router，失败返回不含 secret 的启动错误。
+            /// 返回：安全审计与各路由注册均成功时返回 Router；合同、依赖或 binding 错误返回失败，Axum 路由冲突仍可能 panic。审计成功可冻结 runtime 的路由合同，即使后续注册失败也不撤销该冻结。
             pub fn try_register_all(
                 mut router: Router<#state_ty>,
                 runtime: Arc<#mapping_p::MappingRuntime>,
@@ -639,13 +677,10 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
 
             /// 业务作用：仅供没有任何身份和密码策略的旧应用装配普通路由。
             ///
-            /// # 参数
+            /// 参数说明：
+            /// - `router`：待追加普通注解路由的 Axum Router。
             ///
-            /// - `router`: 待追加普通注解路由的 Axum Router。
-            ///
-            /// # 返回
-            ///
-            /// 返回完成装配的 Router；发现任何安全元数据时立即拒绝，避免静默忽略策略。
+            /// 返回：返回完成装配的 Router；存在安全元数据或自动全局 interceptor 时 panic，Axum 路由冲突也可能 panic。
             #[deprecated(note = "安全路由必须使用 try_register_all 并注入 MappingRuntime")]
             pub fn register_all(router: Router<#state_ty>) -> Router<#state_ty> {
                 if !GLOBAL_INTERCEPTORS.is_empty()
@@ -735,7 +770,9 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
 /// ## 用法示例
 /// ```ignore
 /// #[get_mapping("/spot/kline")]
-/// pub async fn public_kline() -> Json<Value> { /* ... */ }
+/// pub async fn public_kline() -> axum::Json<serde_json::Value> {
+///     axum::Json(serde_json::json!({"symbol": "BTCUSDT"}))
+/// }
 ///
 /// #[get_mapping(
 ///     path = "/account/profile",
@@ -743,13 +780,17 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
 ///     auth_condition = "fore-whitelist",
 ///     interceptors(audit_interceptor)
 /// )]
-/// pub async fn handler(/* ... */) -> Json</* ... */> { /* ... */ }
+/// pub async fn profile() -> axum::Json<serde_json::Value> {
+///     axum::Json(serde_json::json!({"ready": true}))
+/// }
 /// ```
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `attr`: `#[get_mapping(...)]` 括号内的完整路由、安全与 interceptor 配置 token stream。
 /// - `item`: 被注解的 handler 函数 token stream。
+///
+/// 返回：合法声明生成 GET 路由描述、注册与端点适配代码，非法路由或安全配置生成编译错误；本宏不启动监听。
 #[proc_macro_attribute]
 pub fn get_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "GET", "get")
@@ -767,8 +808,16 @@ pub fn get_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// ## 用法示例
 /// ```ignore
-/// #[post_mapping("/order")] // 默认 consumes = application/json
+/// #[post_mapping("/order")]
+/// pub async fn order() -> axum::Json<serde_json::Value> {
+///     axum::Json(serde_json::json!({"accepted": true}))
+/// }
+///
 /// #[post_mapping(path = "/form", consumes = "application/x-www-form-urlencoded")]
+/// pub async fn form() -> axum::Json<serde_json::Value> {
+///     axum::Json(serde_json::json!({"accepted": true}))
+/// }
+///
 /// #[post_mapping(
 ///     path = "/secure/order",
 ///     auth = "required",
@@ -778,56 +827,53 @@ pub fn get_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     crypto_provider = "modern-aead",
 ///     crypto_key_scope = "order"
 /// )]
-/// pub async fn handler(/* ... */) -> Json</* ... */> { /* ... */ }
+/// pub async fn secure_order() -> axum::Json<serde_json::Value> {
+///     axum::Json(serde_json::json!({"accepted": true}))
+/// }
 /// ```
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `attr`: `#[post_mapping(...)]` 括号内的完整路由、安全与 interceptor 配置 token stream。
 /// - `item`: 被注解的 handler 函数 token stream。
+///
+/// 返回：合法声明生成 POST 路由描述、注册与端点适配代码，非法路由或安全配置生成编译错误；省略 consumes 时使用 application/json。
 #[proc_macro_attribute]
 pub fn post_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "POST", "post")
 }
 
-/// 业务作用：# `#[put_mapping]` —— 注册一条 PUT 服务端路由
+/// 业务作用：# `#[put_mapping]` —— 注册一条 PUT 服务端路由 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。 ★ 与 `#[post_mapping]` 不同:**不写 `consumes` 时不默认任何值**(只有 POST 保留历史默认 `application/json`);要强制请求体类型就显式写 `consumes = "application/json"`。
 ///
-/// 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。
-/// ★ 与 `#[post_mapping]` 不同:**不写 `consumes` 时不默认任何值**(只有 POST 保留历史默认
-///   `application/json`);要强制请求体类型就显式写 `consumes = "application/json"`。
+/// 参数说明：
+/// - `attr`：`#[put_mapping(...)]` 括号内的完整路由、安全与 interceptor 配置 token stream。
+/// - `item`：被注解的 handler 函数 token stream。
 ///
-/// # 参数
-///
-/// - `attr`: `#[put_mapping(...)]` 括号内的完整路由、安全与 interceptor 配置 token stream。
-/// - `item`: 被注解的 handler 函数 token stream。
+/// 返回：生成保留 handler 的 PUT 静态路由登记；非法路由与安全属性生成编译错误，运行时依赖仍需装配审计。
 #[proc_macro_attribute]
 pub fn put_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "PUT", "put")
 }
 
-/// 业务作用：# `#[delete_mapping]` —— 注册一条 DELETE 服务端路由
+/// 业务作用：# `#[delete_mapping]` —— 注册一条 DELETE 服务端路由 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。 不默认 `consumes`(DELETE 通常无 body)。
 ///
-/// 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。
-/// 不默认 `consumes`(DELETE 通常无 body)。
+/// 参数说明：
+/// - `attr`：`#[delete_mapping(...)]` 括号内的完整路由、安全与 interceptor 配置 token stream。
+/// - `item`：被注解的 handler 函数 token stream。
 ///
-/// # 参数
-///
-/// - `attr`: `#[delete_mapping(...)]` 括号内的完整路由、安全与 interceptor 配置 token stream。
-/// - `item`: 被注解的 handler 函数 token stream。
+/// 返回：生成保留 handler 的 DELETE 静态路由登记；非法路由与安全属性生成编译错误，运行时依赖仍需装配审计。
 #[proc_macro_attribute]
 pub fn delete_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "DELETE", "delete")
 }
 
-/// 业务作用：# `#[patch_mapping]` —— 注册一条 PATCH 服务端路由
+/// 业务作用：# `#[patch_mapping]` —— 注册一条 PATCH 服务端路由 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。 不默认 `consumes`;要强制请求体类型就显式写 `consumes = "application/json"`。
 ///
-/// 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。
-/// 不默认 `consumes`;要强制请求体类型就显式写 `consumes = "application/json"`。
+/// 参数说明：
+/// - `attr`：`#[patch_mapping(...)]` 括号内的完整路由、安全与 interceptor 配置 token stream。
+/// - `item`：被注解的 handler 函数 token stream。
 ///
-/// # 参数
-///
-/// - `attr`: `#[patch_mapping(...)]` 括号内的完整路由、安全与 interceptor 配置 token stream。
-/// - `item`: 被注解的 handler 函数 token stream。
+/// 返回：生成保留 handler 的 PATCH 静态路由登记；非法路由与安全属性生成编译错误，运行时依赖仍需装配审计。
 #[proc_macro_attribute]
 pub fn patch_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "PATCH", "patch")
@@ -1471,14 +1517,14 @@ fn expand(attr: TokenStream, item: TokenStream, method: &str, verb: &str) -> Tok
     expanded.into()
 }
 
-/// 业务作用：produces/consumes 的最小媒体类型校验:非空 + 不含控制字符。
-///   不做完整 media-type 解析(不引依赖),只挡住空串与控制字符这类明显写错;
-///   出错返回指向注解处的 `compile_error!`,由调用方 `return ...into()`。
+/// 业务作用：produces/consumes 的最小媒体类型校验:非空 + 不含控制字符。 不做完整 media-type 解析(不引依赖),只挡住空串与控制字符这类明显写错; 出错返回指向注解处的 `compile_error!`,由调用方 `return ...into()`。
 ///
-/// # 参数
-/// - `verb`: HTTP 方法字符串。
-/// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
-/// - `value`: `produces` 或 `consumes` 属性中的媒体类型文本。
+/// 参数说明：
+/// - `verb`：用于错误定位的 mapping HTTP 动词。
+/// - `field`：当前 produces 或 consumes 属性名。
+/// - `value`：待检查的媒体类型原文。
+///
+/// 返回：非空且不含 Unicode 控制字符时成功，否则返回编译错误 token；不验证完整媒体类型语法，纯空格也可通过。
 fn validate_media_type(
     verb: &str,
     field: &str,
@@ -1503,8 +1549,10 @@ fn validate_media_type(
 
 /// 业务作用：Option<String> → `Some("x")` / `None` 的 token。
 ///
-/// # 参数
-/// - `o`: 映射宏正在处理的输出字段描述。
+/// 参数说明：
+/// - `o`：已解析的可选固定字符串配置。
+///
+/// 返回：Some 时生成字符串字面量 Some 表达式，None 时生成完整 None 表达式，不验证文本内容。
 fn opt_str_tokens(o: &Option<String>) -> proc_macro2::TokenStream {
     match o {
         Some(s) => quote! { ::core::option::Option::Some(#s) },
@@ -1514,13 +1562,11 @@ fn opt_str_tokens(o: &Option<String>) -> proc_macro2::TokenStream {
 
 /// 业务作用：判断媒体类型是否属于当前明确不支持的流式或文件场景。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 宏字面量提供且已经通过控制字符检查的媒体类型。
 ///
-/// # 返回
-///
-/// multipart、事件流、八位流或 WebSocket 相关类型返回 `true`。
+/// 返回：multipart、事件流、八位流或 WebSocket 相关类型返回 `true`。
 fn forbidden_crypto_media_type(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.starts_with("multipart/")
@@ -1531,13 +1577,11 @@ fn forbidden_crypto_media_type(value: &str) -> bool {
 
 /// 业务作用：校验路由策略中用作注册表索引的静态 ID。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 属性宏字符串字面量，最大允许 64 个 ASCII 字节。
 ///
-/// # 返回
-///
-/// 非空且只含字母、数字、点、横线与下划线时返回 `true`。
+/// 返回：非空且只含字母、数字、点、横线与下划线时返回 `true`。
 fn valid_policy_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -1548,14 +1592,12 @@ fn valid_policy_id(value: &str) -> bool {
 
 /// 业务作用：建立指向当前路由属性的编译期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `verb`: 当前属性宏的小写 HTTP 动词。
 /// - `message`: 不含业务输入的静态或本地校验说明。
 ///
-/// # 返回
-///
-/// 返回可直接结束过程宏展开的 `compile_error!` token stream。
+/// 返回：返回可直接结束过程宏展开的 `compile_error!` token stream。
 fn attribute_error(verb: &str, message: &str) -> TokenStream {
     syn::Error::new(Span::call_site(), format!("#[{verb}_mapping]: {message}"))
         .to_compile_error()
@@ -1564,10 +1606,10 @@ fn attribute_error(verb: &str, message: &str) -> TokenStream {
 
 /// 业务作用：解析业务 crate 实际依赖的 naweb 运行时门面路径。
 ///
-/// # 返回
-///
-/// 通过 `naweb` 或 `nasa::web` 使用宏时返回可生成安全类型的路径；仅直接依赖
+/// 返回：通过 `naweb` 或 `nasa::web` 使用宏时返回可生成安全类型的路径；仅直接依赖
 /// `naweb-macro` 时返回 `None`，只保留不含安全参数的装配能力。
+///
+/// 参数说明: 无。
 fn web_runtime_path() -> Option<proc_macro2::TokenStream> {
     use nasa_macro_support::WebRoot;
     match nasa_macro_support::web_root() {
@@ -1576,12 +1618,11 @@ fn web_runtime_path() -> Option<proc_macro2::TokenStream> {
     }
 }
 
-/// 业务作用：三方依赖路径解析
-/// - 业务依赖 `nasa`(含重命名)→ `::nasa::web::__private::<crate>`;
-/// - 业务直接依赖 `naweb` 运行时 → `::naweb::__private::<crate>`;
-/// - 旧布局(直接依赖 naweb-macro + axum/linkme/tracing)→ 裸 `::axum` 等。
+/// 业务作用：三方依赖路径解析 - 业务依赖 `nasa`(含重命名)→ `::nasa::web::__private::<crate>`; - 业务直接依赖 `naweb` 运行时 → `::naweb::__private::<crate>`; - 旧布局(直接依赖 naweb-macro + axum/linkme/tracing)→ 裸 `::axum` 等。 `crate::__mvc` 恒不变:收集模块必须生成在业务 crate 内(State 单态化 + linkme 链接收集)。
 ///
-/// `crate::__mvc` 恒不变:收集模块必须生成在业务 crate 内(State 单态化 + linkme 链接收集)。
+/// 参数说明: 无。
+///
+/// 返回：返回 axum、linkme、tracing 的有序路径元组；可解析运行时门面时统一经 __private 引用，否则使用裸依赖路径，后续编译负责确认可见性。
 fn third_party_paths() -> (
     proc_macro2::TokenStream, // axum
     proc_macro2::TokenStream, // linkme

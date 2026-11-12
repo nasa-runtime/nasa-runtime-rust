@@ -34,6 +34,11 @@ pub struct WsKafkaTopicSpec {
 
 impl WsKafkaTopicSpec {
     /// 业务作用：转为通用管理端创建契约。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：包含名称、分区、副本及四项 topic 配置的创建请求；不连接 broker 或验证预期值。
+    /// 调用方须先完成本地契约校验，再根据管理策略决定是否允许创建。
     fn create_spec(&self) -> TopicSpec {
         TopicSpec::new(
             self.name.clone(),
@@ -52,9 +57,9 @@ impl WsKafkaTopicSpec {
 pub struct WsKafkaTopicContract {
     /// topic 管理策略。
     pub management: TopicManagement,
-    /// control plane topic。
+    /// 承载集群状态控制事件的 topic 属性契约。
     pub control: WsKafkaTopicSpec,
-    /// data plane topic。
+    /// 承载业务载荷及路由头的数据 topic 属性契约。
     pub data: WsKafkaTopicSpec,
     /// 一个或多个死信 topic。
     pub dead_letters: Vec<WsKafkaTopicSpec>,
@@ -82,7 +87,7 @@ impl WsKafkaTopicContract {
     ///
     /// 本方法从不删除、改配置或增加已有 topic 的分区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `admin`: 已冻结 KafkaProxy 的管理端。
     /// - `limits`: runtime 的容量与 presence 约束。
@@ -90,11 +95,15 @@ impl WsKafkaTopicContract {
     /// # 错误
     ///
     /// 配置非法、权限不足、topic 缺失或任一实际属性漂移时返回 TopicContract 错误。
+    ///
+    /// 返回：全部 topic 创建策略及实际属性检查完成时成功；失败或取消时不回滚已经创建的 topic。
+    /// 成功只说明本次启动检查成立，持续运行期间的漂移仍须另行审计。
     pub async fn enforce(
         &self,
         admin: &KafkaAdmin,
         limits: TopicContractLimits,
     ) -> nafka::Result<()> {
+        // 先完整校验本地契约，避免配置已知无效时仍对 broker 产生部分创建副作用。
         self.validate(limits)?;
         for spec in self.specs() {
             let exists = admin
@@ -104,8 +113,10 @@ impl WsKafkaTopicContract {
             if !exists {
                 match self.management {
                     TopicManagement::ValidateOnly => {
-                        return Err(topic_error(format!("topic `{}` 不存在", spec.name)))
+                        // 只读部署不能通过自动创建掩盖缺失配置，必须保持启动失败。
+                        return Err(topic_error(format!("topic `{}` 不存在", spec.name)));
                     }
+                    // 只有显式创建策略允许此副作用；创建后仍需复核实际属性，不能直接放行业务。
                     TopicManagement::CreateIfAbsent => admin
                         .create_if_absent(spec.create_spec())
                         .await
@@ -125,7 +136,7 @@ impl WsKafkaTopicContract {
     /// 即使 management 为 CreateIfAbsent，本方法也绝不创建或修改 topic；运行期删除和漂移必须
     /// 暴露为错误并由 runtime 关闭 ingress。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `admin`: 已冻结 KafkaProxy 的管理端。
     /// - `limits`: runtime 的容量与 presence 约束。
@@ -134,6 +145,9 @@ impl WsKafkaTopicContract {
     ///
     /// 已成功观测后的 topic 缺失或属性漂移返回 TopicContract；broker、传输或权限导致的观测失败
     /// 保留底层错误 variant，由 runtime 的连续失败预算决定是否停止 ingress。
+    ///
+    /// 返回：本轮读取的全部 topic 符合契约时成功；首个失败立即返回，不修改 broker。
+    /// 该函数只报告观测结果，不直接关闭 ingress，也不把跨 topic 的逐次读取变成原子快照。
     pub async fn audit(
         &self,
         admin: &KafkaAdmin,
@@ -156,6 +170,13 @@ impl WsKafkaTopicContract {
     }
 
     /// 业务作用：开发创建模式下吸收 broker metadata 的短暂传播窗口。
+    ///
+    /// 参数说明：
+    /// - `admin`: 查询 topic 元数据及配置的管理端。
+    /// - `spec`: 需要等待可见的 topic 预期定义，此处只使用其名称。
+    ///
+    /// 返回：首次成功取得的描述；只读策略尝试一次，创建策略最多尝试一百次，失败间隔五十毫秒。
+    /// 重试不区分底层错误类型，全部失败时包装最后一个错误；不校验实际属性或限制每次查询的耗时。
     async fn describe_with_visibility_retry(
         &self,
         admin: &KafkaAdmin,
@@ -176,6 +197,7 @@ impl WsKafkaTopicContract {
                 Err(error) => last_error = Some(error),
             }
             if attempt + 1 < attempts {
+                // 创建后 metadata 传播可能滞后；仅在尚有尝试次数时等待，避免立即判定不可见。
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
@@ -187,14 +209,18 @@ impl WsKafkaTopicContract {
 
     /// 业务作用：只校验本地可判定的不变量。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `limits`: runtime 的容量与 presence 约束。
     ///
     /// # 错误
     ///
     /// topic、容量、生产 durability 或 assignment 上限非法时返回 TopicContract 错误。
+    ///
+    /// 返回：本地预期满足容量、保留时间、命名唯一性及管理策略约束时成功；否则返回首个契约错误。
+    /// 不修改预期值、不访问 broker，也不证明实际 topic 或生产者持久性配置已满足要求。
     pub fn validate(&self, limits: TopicContractLimits) -> nafka::Result<()> {
+        // 只读生产策略必须取得真实配置证据，否则无法确认保留时间与持久性要求。
         if matches!(self.management, TopicManagement::ValidateOnly) && !self.strict_describe_configs
         {
             return Err(topic_error("ValidateOnly 必须启用 strict_describe_configs"));
@@ -228,12 +254,14 @@ impl WsKafkaTopicContract {
                 return Err(topic_error(format!("topic 名重复: `{}`", spec.name)));
             }
         }
+        // 控制消息至少覆盖多个完整 presence 周期，避免单次快照丢失后目录缺少恢复依据。
         if self.control.retention_ms < min_control_retention {
             return Err(topic_error(format!(
                 "control retention_ms({}) 小于三倍 presence 间隔({min_control_retention})",
                 self.control.retention_ms
             )));
         }
+        // 只读生产策略还要求最低副本与同步副本冗余，不能沿用开发环境的低副本配置。
         if matches!(self.management, TopicManagement::ValidateOnly) {
             for spec in self.specs() {
                 if spec.replication_factor < 3 || spec.min_insync_replicas < 2 {
@@ -248,6 +276,10 @@ impl WsKafkaTopicContract {
     }
 
     /// 业务作用：以稳定顺序遍历 control、data 和 DLT 契约。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：依次借用控制、数据和所列死信 topic 的迭代器；不去重、不查询 broker，允许死信列表为空。
     fn specs(&self) -> impl Iterator<Item = &WsKafkaTopicSpec> {
         std::iter::once(&self.control)
             .chain(std::iter::once(&self.data))
@@ -256,6 +288,14 @@ impl WsKafkaTopicContract {
 }
 
 /// 业务作用：校验一个 topic 的本地预期值。
+///
+/// 参数说明：
+/// - `spec`: 待检查的名称、容量、副本和保留策略。
+/// - `required_message_bytes`: 完整记录连同路由和协议头必须能容纳的最小字节数。
+/// - `max_assignment_partitions`: 单个消费组允许管理的最大分区数。
+///
+/// 返回：基本值、delete 策略、分区与消息容量均满足约束时成功，否则返回契约错误。
+/// 不修改配置，不验证 broker 可用性或名称的全部 broker 语法约束。
 fn validate_spec(
     spec: &WsKafkaTopicSpec,
     required_message_bytes: usize,
@@ -282,12 +322,14 @@ fn validate_spec(
     }
     let partitions = usize::try_from(spec.partitions)
         .map_err(|_| topic_error(format!("topic `{}` 分区数无法转换", spec.name)))?;
+    // 分区数量不能超过运行时 assignment 容量，否则消费者无法完整承担该 topic。
     if partitions > max_assignment_partitions {
         return Err(topic_error(format!(
             "topic `{}` 分区数({partitions}) 超过 assignment 上限({max_assignment_partitions})",
             spec.name
         )));
     }
+    // 只容纳 payload 不足以交付完整记录，topic 限制必须覆盖 header 和协议预算。
     if spec.max_message_bytes < required_message_bytes {
         return Err(topic_error(format!(
             "topic `{}` max.message.bytes({}) 小于 record+header 预算({required_message_bytes})",
@@ -298,6 +340,14 @@ fn validate_spec(
 }
 
 /// 业务作用：把 broker 实际值与冻结契约逐项核验。
+///
+/// 参数说明：
+/// - `expected`: 已通过本地校验的 topic 预期定义。
+/// - `actual`: 管理端为同一 topic 获取的当前描述。
+/// - `strict_configs`: 是否同时要求清理策略、保留时间、最小同步副本和消息容量符合要求。
+///
+/// 返回：分区数、副本因子以及启用时的配置检查全部满足后成功；缺失或漂移返回契约错误。
+/// 消息容量允许实际值更大，其余受检项必须精确匹配；不检查实时 ISR 数或分区领导者健康。
 fn validate_actual(
     expected: &WsKafkaTopicSpec,
     actual: &TopicDescription,
@@ -319,6 +369,7 @@ fn validate_actual(
             expected.name, expected.replication_factor, actual.replication_factor
         )));
     }
+    // 未启用配置读取时仅能确认拓扑属性，不能把此成功结果当作全部持久性配置已核实。
     if !strict_configs {
         return Ok(());
     }
@@ -353,6 +404,16 @@ fn validate_actual(
 }
 
 /// 业务作用：校验一个配置项；消息上限允许 broker 实际值更大。
+///
+/// 参数说明：
+/// - `expected`: 预期 topic 定义，用于错误中标明配置归属。
+/// - `actual`: 包含 broker 实际配置值的描述。
+/// - `key`: 要核对的固定配置键。
+/// - `expected_value`: 冻结契约要求的字符串或非负整数文本。
+/// - `allow_greater`: 为 true 时按 usize 比较下限，否则执行字符串精确匹配。
+///
+/// 返回：实际值存在且满足比较规则时成功；缺失、null、数值解析失败或不匹配返回契约错误。
+/// 错误包含配置键和比较值，不适用于承载秘密的任意配置项。
 fn validate_config(
     expected: &WsKafkaTopicSpec,
     actual: &TopicDescription,
@@ -385,11 +446,23 @@ fn validate_config(
 }
 
 /// 业务作用：构造稳定 TopicContract 错误。
+///
+/// 参数说明：
+/// - `message`: 当前契约不成立的具体原因。
+///
+/// 返回：保留原因文本的 `NafkaError::TopicContract`，供运行时与短暂 broker 观测失败区分。
 fn topic_error(message: impl Into<String>) -> NafkaError {
     NafkaError::TopicContract(message.into())
 }
 
 /// 业务作用：给底层错误补充 topic 归因并收敛为 TopicContract。
+///
+/// 参数说明：
+/// - `topic`: 启动创建或描述阶段失败的 topic 名称。
+/// - `error`: 管理端返回的底层错误。
+///
+/// 返回：包含 topic 和底层错误显示文本的契约错误，原错误分类不再保留。
+/// 运行期审计需区分短暂观测失败时，不应通过此方法改写错误分类。
 fn contract_error(topic: &str, error: NafkaError) -> NafkaError {
     topic_error(format!("topic `{topic}` 查询或创建失败: {error}"))
 }

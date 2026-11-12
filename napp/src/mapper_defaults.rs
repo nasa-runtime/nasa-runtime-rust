@@ -4,7 +4,10 @@ struct MapperDefaults(namapper_core::MapperDefaultsOwner);
 
 impl crate::ManagedResource for MapperDefaults {
     /// 业务作用：在资源清理边界撤销当前应用的默认 codec 和指标入口。
-    /// 参数说明：`_context` 为宿主共享预算，本操作不执行 I/O。
+    ///
+    /// 参数说明：
+    /// - `_context`：`_context` 为宿主共享预算。
+    ///
     /// 返回：当前 owner 的默认槽已撤下。
     fn shutdown<'a>(
         &'a mut self,
@@ -17,7 +20,11 @@ impl crate::ManagedResource for MapperDefaults {
 
 impl crate::Application {
     /// 业务作用：在启动登记窗口安装 Mapper 算法与观测默认值，并纳入回滚和停机。
-    /// 参数说明：`codec` 为无独立生命周期的编码策略；`metrics` 为现有观测出口。
+    ///
+    /// 参数说明：
+    /// - `codec`：`codec` 为无独立生命周期的编码策略。
+    /// - `metrics`：`metrics` 为现有观测出口。
+    ///
     /// 返回：两个槽均可占用且资源登记成功；任一失败立即撤销本次占用。
     pub fn configure_mapper_defaults(
         &self,

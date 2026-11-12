@@ -52,7 +52,9 @@ pub struct NacosService {
 
 impl Default for ManagedNacosConfig {
     /// 业务作用：提供不包含任何凭据或隐式服务枚举的连接基线。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：服务端地址和服务绑定需要显式配置。
     fn default() -> Self {
         Self {
@@ -113,7 +115,9 @@ struct RemoteInstance {
 
 impl RemoteInstance {
     /// 业务作用：保留后端实例的管理属性和所有权，转换为中性发现记录。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：健康、启用、持久性、cluster 和 metadata 均来自同一远端记录。
     fn into_instance(self) -> Instance {
         Instance::new(self.ip, self.port)
@@ -128,7 +132,10 @@ impl RemoteInstance {
 
 impl ManagedNacos {
     /// 业务作用：校验并创建独立命名连接，凭据、namespace 和 group 不与其他连接共享。
-    /// 参数说明：`config` 使用 Nacos HTTP API，server_addr 多项必须属于同一集群；空 namespace 等同 public。
+    ///
+    /// 参数说明：
+    /// - `config`：使用 Nacos HTTP API，server_addr 多项必须属于同一集群；空 namespace 等同 public。
+    ///
     /// 返回：没有后台任务或网络副作用的 adapter；不支持的配置在构造时拒绝。
     pub fn new(mut config: ManagedNacosConfig) -> Result<Self> {
         // 后端将空 namespace 和 public 指向同一空间，必须在生成请求与身份键之前统一，避免重复监督同一实例。
@@ -198,7 +205,10 @@ impl ManagedNacos {
     }
 
     /// 业务作用：选择同集群下一个控制面地址，不把不同业务环境混作高可用节点。
-    /// 参数说明：`path` 为相对于显式 Nacos 根路径的 API 路径。
+    ///
+    /// 参数说明：
+    /// - `path`：为相对于显式 Nacos 根路径的 API 路径。
+    ///
     /// 返回：使用同一 namespace/group 的请求 URL。
     fn url(&self, path: &str) -> Result<Url> {
         let index = self.cursor.fetch_add(1, Ordering::Relaxed) % self.servers.len();
@@ -208,7 +218,9 @@ impl ManagedNacos {
     }
 
     /// 业务作用：按需取得本连接认证信息，避免另起脱离 owner 的定时刷新。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：有效 token 或认证错误；缓存命中不产生新的服务健康证据。
     async fn token(&self) -> Result<Option<String>> {
         if self.config.username.is_empty() {
@@ -261,8 +273,14 @@ impl ManagedNacos {
     }
 
     /// 业务作用：发送一次有作用域的 Nacos 操作，并对已失效 token 撤销本地缓存。
-    /// 参数说明：`method`、`path`、`params` 是确定的 API 请求，`admission` 只用于注册及续约写入。
-    /// 返回：经字节限额检查的 data；错误响应不向上层暴露正文。
+    ///
+    /// 参数说明：
+    /// - `method`：本次 Nacos API 动词；POST 使用表单，其它使用 query。
+    /// - `path`：追加到已绑定服务端作用域的 API 路径。
+    /// - `params`：本次固定 API 字段及值，不作为错误正文输出。
+    /// - `admission`：注册或续约等写入发送前复验发布权的可选门禁。
+    ///
+    /// 返回：操作 code=0 且 data 存在并可解码时返回数据；鉴权、传输、协议或缺失字段失败时返回受控错误。鉴权拒绝会撤销 token 缓存，不自动重试本次操作；发送后失败可能代表结果未知。
     async fn call<T: serde::de::DeserializeOwned>(
         &self,
         method: Method,
@@ -318,7 +336,10 @@ impl ManagedNacos {
     }
 
     /// 业务作用：将本地服务别名映射到固定后端名和 cluster 条件。
-    /// 参数说明：`service` 是连接中明确声明的服务别名。
+    ///
+    /// 参数说明：
+    /// - `service`：是连接中明确声明的服务别名。
+    ///
     /// 返回：不可跨 namespace/group 的服务绑定。
     fn binding(&self, service: &str) -> Result<&NacosService> {
         self.config
@@ -328,7 +349,10 @@ impl ManagedNacos {
     }
 
     /// 业务作用：建立当前连接的公共查询作用域。
-    /// 参数说明：`service` 是已确认的后端服务名。
+    ///
+    /// 参数说明：
+    /// - `service`：是已确认的后端服务名。
+    ///
     /// 返回：namespace、group、service 三个明确参数。
     fn scope(&self, service: &str) -> Vec<(&'static str, String)> {
         vec![
@@ -339,7 +363,10 @@ impl ManagedNacos {
     }
 
     /// 业务作用：按绑定服务读取流量发现实例，不将隐藏的禁用实例解释为注册缺失。
-    /// 参数说明：`service` 是本地绑定别名。
+    ///
+    /// 参数说明：
+    /// - `service`：是本地绑定别名。
+    ///
     /// 返回：client API 确认的流量集合；权限、协议与容量错误均拒绝，空集合不提供写侧所有权证据。
     async fn instances(&self, service: &str) -> Result<Vec<Instance>> {
         let binding = self.binding(service)?;
@@ -364,8 +391,13 @@ impl ManagedNacos {
     }
 
     /// 业务作用：读取服务范围内的完整管理证据，保留供上层复验的特定缺失状态。
-    /// 参数说明：`path` 与 `params` 限定已绑定服务，`service_detail` 指定服务详情的 400 协议入口。
-    /// 返回：HTTP 状态和有界协议响应；鉴权失效撤销 token，权限或传输失败不能作为空证据。
+    ///
+    /// 参数说明：
+    /// - `path`：已绑定服务范围内的管理 API 路径。
+    /// - `params`：限定目标服务与实例的查询字段。
+    /// - `service_detail`：true 使用保留 400 的服务详情协议入口，false 使用保留 404 的证据入口。
+    ///
+    /// 返回：返回接纳的 HTTP 状态与已解码 envelope；详情入口保留 400，其它入口保留 404。鉴权失败撤销 token 并报错，其它协议 code 留给上层裁决，不能据此假定业务成功或空证据。
     async fn admin_evidence(
         &self,
         path: &str,
@@ -413,7 +445,10 @@ impl ManagedNacos {
     }
 
     /// 业务作用：定位原 cluster 的精确注册记录，并拒绝清理或续约其他进程的实例。
-    /// 参数说明：`plan` 包含 owner 写入的所有权 metadata。
+    ///
+    /// 参数说明：
+    /// - `plan`：包含 owner 写入的所有权 metadata。
+    ///
     /// 返回：完整管理属性的自有实例或协议明确缺失；端点、实例类型或所有权不符为冲突，取证失败原样返回。
     async fn owned_instance(&self, plan: &RegistrationPlan) -> Result<Option<Instance>> {
         // client 列表会隐藏禁用实例；写侧必须读取管理事实，取证失败不能放行写入或宣称已注销。
@@ -461,7 +496,10 @@ impl ManagedNacos {
     }
 
     /// 业务作用：首次发布前核验 HTTP 写入可能覆盖的全部 cluster，防止同服务端点被另一 owner 接管。
-    /// 参数说明：`plan` 指定绑定服务和拟发布端点。
+    ///
+    /// 参数说明：
+    /// - `plan`：指定绑定服务和拟发布端点。
+    ///
     /// 返回：完整管理列表中端点不存在，或服务被协议明确确认为缺失时通过；冲突、权限、畸形和超限均拒绝。
     async fn ensure_registration_vacant(&self, plan: &RegistrationPlan) -> Result<()> {
         let scope = self.scope(&self.binding(&plan.service)?.name);
@@ -523,7 +561,10 @@ impl ManagedNacos {
     }
 
     /// 业务作用：生成只包含精确注册键的操作参数。
-    /// 参数说明：`plan` 是冻结的最终注册计划。
+    ///
+    /// 参数说明：
+    /// - `plan`：是冻结的最终注册计划。
+    ///
     /// 返回：不携带旧管理属性的注册键参数。
     fn instance_params(&self, plan: &RegistrationPlan) -> Result<Vec<(&'static str, String)>> {
         let mut params = self.scope(&self.binding(&plan.service)?.name);
@@ -546,7 +587,9 @@ impl ManagedNacos {
 #[async_trait::async_trait]
 impl ManagedProvider for ManagedNacos {
     /// 业务作用：声明 Nacos 命名读写与后端健康证据能力。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：服务枚举仅限显式绑定。
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -557,7 +600,9 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：用真实服务作用域查询验证认证及访问能力。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：空服务可以成功；不申请全局服务目录权限。
     async fn prepare(&self) -> Result<()> {
         for alias in self.config.services.keys() {
@@ -567,7 +612,10 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：取得同一服务最新完整后端证据。
-    /// 参数说明：`service` 是显式服务绑定。
+    ///
+    /// 参数说明：
+    /// - `service`：是显式服务绑定。
+    ///
     /// 返回：有实例、空实例和失败分别表达。
     async fn observe(&self, service: &str) -> Result<ProviderSnapshot> {
         Ok(ProviderSnapshot {
@@ -577,14 +625,19 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：枚举本连接允许使用的服务别名。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：配置绑定列表，不执行管理 API 全目录扫描。
     async fn services(&self) -> Result<Vec<String>> {
         Ok(self.config.services.keys().cloned().collect())
     }
 
     /// 业务作用：阻止未绑定服务、过滤范围外 cluster 及不支持的写侧设置。
-    /// 参数说明：`plan` 是最终注册事实。
+    ///
+    /// 参数说明：
+    /// - `plan`：是最终注册事实。
+    ///
     /// 返回：本 adapter 可以完整表达该计划时通过。
     fn validate_registration(&self, plan: &RegistrationPlan) -> Result<()> {
         let binding = self.binding(&plan.service)?;
@@ -609,7 +662,10 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：预检不同连接别名是否指向同一个真实注册键。
-    /// 参数说明：`plan` 为已校验注册。
+    ///
+    /// 参数说明：
+    /// - `plan`：为已校验注册。
+    ///
     /// 返回：按规范化服务器集合、namespace、group、service 和端点组成的写入身份；cluster 不构成独立写入范围。
     fn registration_key(&self, plan: &RegistrationPlan) -> String {
         let servers: Vec<_> = self.servers.iter().map(Url::as_str).collect();
@@ -628,7 +684,10 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：识别指向同一 Nacos 查询集合的别名，避免同一进程发布相互矛盾的协议端点。
-    /// 参数说明：`service` 是明确服务绑定。
+    ///
+    /// 参数说明：
+    /// - `service`：是明确服务绑定。
+    ///
     /// 返回：含服务器、namespace、group、服务和 cluster 过滤的安全查询键。
     fn service_key(&self, service: &str) -> Result<String> {
         let binding = self.binding(service)?;
@@ -646,7 +705,11 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：仅发布无冲突的新实例，不重放旧管理属性覆盖已有记录。
-    /// 参数说明：`plan` 是冻结注册，`admission` 在鉴权及核对后复验发布权。
+    ///
+    /// 参数说明：
+    /// - `plan`：是冻结注册
+    /// - `admission`：在鉴权及核对后复验发布权。
+    ///
     /// 返回：明确接纳或失败；传输结果不明由 owner 保留。
     async fn register(
         &self,
@@ -683,7 +746,12 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：续约既有临时实例，使用 heartBeat 避免覆盖 enabled、weight 和 metadata。
-    /// 参数说明：`plan` 为已有实例，`ready` 为本地资格，`admission` 保护实际心跳提交。
+    ///
+    /// 参数说明：
+    /// - `plan`：为已有实例
+    /// - `ready`：为本地资格
+    /// - `admission`：保护实际心跳提交。
+    ///
     /// 返回：缺失、禁用或零权重时拒绝续约，不自动重新注册。
     async fn renew(
         &self,
@@ -718,21 +786,30 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：为临时实例请求受管保活，持久实例不冒充心跳所有权。
-    /// 参数说明：`plan` 决定实例类型。
+    ///
+    /// 参数说明：
+    /// - `plan`：决定实例类型。
+    ///
     /// 返回：临时实例每五秒续约，持久实例由服务端健康机制管理。
     fn renewal_interval(&self, plan: &RegistrationPlan) -> Option<Duration> {
         plan.instance.ephemeral.then(|| Duration::from_secs(5))
     }
 
     /// 业务作用：允许原临时实例重复发送相同心跳，恢复短暂响应丢失后的保活。
-    /// 参数说明：`plan` 必须保持原实例身份与临时实例属性。
+    ///
+    /// 参数说明：
+    /// - `plan`：必须保持原实例身份与临时实例属性。
+    ///
     /// 返回：临时实例允许协调续约；每次仍复验所有权和管理资格，不覆盖注册属性。
     fn supports_idempotent_renewal(&self, plan: &RegistrationPlan) -> bool {
         plan.instance.ephemeral
     }
 
     /// 业务作用：区分不存在、不健康与管理端摘流。
-    /// 参数说明：`plan` 指向精确实例所有权。
+    ///
+    /// 参数说明：
+    /// - `plan`：指向精确实例所有权。
+    ///
     /// 返回：完整状态事实，查询错误不伪装成缺失。
     async fn inspect(&self, plan: &RegistrationPlan) -> Result<RegistrationEvidence> {
         Ok(match self.owned_instance(plan).await? {
@@ -744,7 +821,10 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：核对当前所有权后删除精确实例，不清理其他 owner 的记录。
-    /// 参数说明：`plan` 保留原注册身份。
+    ///
+    /// 参数说明：
+    /// - `plan`：保留原注册身份。
+    ///
     /// 返回：已缺失或删除成功；Nacos 无条件删除 API 不提供跨进程 CAS 保证。
     async fn deregister(&self, plan: &RegistrationPlan) -> Result<()> {
         if self.owned_instance(plan).await?.is_none() {
@@ -762,7 +842,9 @@ impl ManagedProvider for ManagedNacos {
     }
 
     /// 业务作用：释放本连接 HTTP 池和 token，不留下独立续约任务。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：后续请求被传输层拒绝；在途操作已由 owner 取消。
     async fn close(&self) -> Result<()> {
         self.transport.close();

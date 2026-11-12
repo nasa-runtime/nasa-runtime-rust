@@ -38,7 +38,8 @@ impl PgSagaStore {
 
     /// 业务作用：在指定 datasource 上创建并复验参与方 gate 结构。
     ///
-    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：是启动期已注册的数据源名称。
     ///
     /// 返回：结构完整时成功；名称、连接、DDL 或历史摘要门禁失败时返回脱敏错误。
     pub async fn ensure_participant_schema_for(
@@ -54,7 +55,8 @@ impl PgSagaStore {
     /// 业务作用：复用调用方已持有的 PostgreSQL 连接创建并复验参与方 gate，使 schema
     /// 互斥权覆盖完整 DDL 与摘要门禁。
     ///
-    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    /// 参数说明：
+    /// - `connection`：是调用方已取得 schema 互斥权的连接。
     ///
     /// 返回：结构完整时成功；DDL 或历史摘要门禁失败时返回脱敏错误。
     pub async fn ensure_participant_schema_on_connection(

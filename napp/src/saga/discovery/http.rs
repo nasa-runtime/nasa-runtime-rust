@@ -9,28 +9,37 @@ pub(in crate::saga) struct SagaHttpResponse {
 
 impl SagaHttpResponse {
     /// 业务作用：向调用协议暴露已完整接收的响应状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：状态只用于业务裁决，不代表数据库事务已经提交。
     pub(in crate::saga) fn status(&self) -> reqwest::StatusCode {
         self.status
     }
 
     /// 业务作用：让业务协议继续执行其更小的收据尺寸限制。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已经读取的真实字节数，不信任可缺失的 Content-Length。
     pub(in crate::saga) fn content_length(&self) -> Option<u64> {
         Some(self.body.len() as u64)
     }
 
     /// 业务作用：移交在原期限内完整取得的收据正文。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：正文已经通过传输边界限制，不再持有网络资源。
     pub(in crate::saga) async fn bytes(self) -> ApplicationResult<Vec<u8>> {
         Ok(self.body)
     }
 
     /// 业务作用：按业务收据类型解码有限正文，不再延长网络预算。
-    /// 参数说明：类型参数指定当前协议的响应结构。
+    ///
+    /// 参数说明: 无。
+    /// 执行条件：类型参数指定当前协议的响应结构。
+    ///
     /// 返回：类型合法的完整 JSON；错误不回显上游正文。
     pub(in crate::saga) async fn json<T: serde::de::DeserializeOwned>(
         self,
@@ -40,7 +49,10 @@ impl SagaHttpResponse {
 }
 
 /// 业务作用：限制完整收据内存，缺失长度头或分块响应也不能绕过边界。
-/// 参数说明：`response` 为已经提交请求后收到的响应，读取仍在外层原预算内。
+///
+/// 参数说明：
+/// - `response`：`response` 为已经提交请求后收到的响应。
+///
 /// 返回：最多四 MiB 的收据；超限和不完整正文拒绝作为成功证据。
 async fn receive(mut response: reqwest::Response) -> ApplicationResult<SagaHttpResponse> {
     const LIMIT: usize = 4 * 1024 * 1024;
@@ -62,11 +74,17 @@ async fn receive(mut response: reqwest::Response) -> ApplicationResult<SagaHttpR
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(SagaHttpResponse { status, body })
+    Ok(SagaHttpResponse {
+        status,
+        body,
+    })
 }
 
 /// 业务作用：隐藏 URL、凭据和上游正文，保留投递结果不确定的调用边界。
-/// 参数说明：`message` 是固定诊断。
+///
+/// 参数说明：
+/// - `message`：`message` 是固定诊断。
+///
 /// 返回：当前业务运行阶段的错误。
 fn failure(message: &'static str) -> ApplicationError {
     saga_error(ApplicationPhase::Running, message)
@@ -77,7 +95,9 @@ struct AbortOnDrop(tokio::task::AbortHandle);
 #[cfg(feature = "discovery-runtime")]
 impl Drop for AbortOnDrop {
     /// 业务作用：调用方放弃等待时取消唯一收据任务，避免请求脱离宿主继续占用资源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：取消不代表远端事务未执行。
     fn drop(&mut self) {
         self.0.abort();
@@ -86,7 +106,10 @@ impl Drop for AbortOnDrop {
 
 impl ManagedHttpTarget {
     /// 业务作用：在实际 HTTP 提交处复验发现资格，并在原期限内收齐有界响应正文。
-    /// 参数说明：`request` 含冻结的路径、认证和剩余期限；没有更短期限时采用目标的有限上限。
+    ///
+    /// 参数说明：
+    /// - `request`：`request` 含冻结的路径、认证和剩余期限。
+    ///
     /// 返回：完整收据；已提交后的错误保持结果不明，不自动重放业务请求。
     pub(in crate::saga) async fn send(
         &self,

@@ -24,9 +24,11 @@ pub enum ApplicationState {
 impl ApplicationState {
     /// 业务作用：把原子存储值保守映射为公开状态。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `value`：StateCell 中读取的原始整数；未知值按 Failed 处理。
+    ///
+    /// 返回：已知编码对应的状态；其它编码统一返回 Failed，避免误报可用。
     fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::Starting,
@@ -49,15 +51,19 @@ pub enum ApplicationMode {
 
 /// 使用原子值发布公开生命周期状态的共享单元。
 pub(crate) struct StateCell {
+    /// Runner 提交的原始状态，公开 Ready 还受 activation 约束。
     value: AtomicU8,
+    /// 仅保留最新状态的通知通道，不是完整状态迁移日志。
     changes: watch::Sender<ApplicationState>,
+    /// Ready 提交后开放的单次执行许可，停机拒绝由其它生命周期门禁承担。
     activation: CancellationToken,
 }
 
 impl StateCell {
     /// 业务作用：创建初始为 Starting 的状态单元，并建立不会丢失最新状态的进程内通知通道。
     ///
-    /// 参数说明：`activation` 为领域准入与受管任务共用的启动许可。
+    /// 参数说明：
+    /// - `activation`：`activation` 为领域准入与受管任务共用的启动许可。
     ///
     /// 返回：状态只允许由 Runner 推进、观察者只能订阅的共享单元。
     pub(crate) fn new(activation: CancellationToken) -> Self {
@@ -70,7 +76,9 @@ impl StateCell {
     }
 
     /// 业务作用：以 Acquire 语义读取生命周期，只在启动许可生效后对外呈现 Ready。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前公开状态；Ready 已写入但许可尚未发布的短暂区间仍返回 Starting。
     pub(crate) fn load(&self) -> ApplicationState {
         let state = ApplicationState::from_u8(self.value.load(Ordering::Acquire));
@@ -82,13 +90,13 @@ impl StateCell {
         }
     }
 
-    /// 业务作用：以 CAS 执行唯一合法状态转换，并在成功后唤醒等待开放或停机边界的受管任务。
+    /// 业务作用：按调用方的前置状态提交生命周期变化，成功后发布 Ready 许可及状态通知。
     ///
     /// 参数说明：
     /// - `expected`：调用方要求的唯一前置状态。
-    /// - `next`：转换成功后发布的新状态。
+    /// - `next`：调用方按生命周期规则选定的新状态；本方法不另校验状态转换图。
     ///
-    /// 返回：CAS 成功且最新状态已经发布时完成；前置状态不匹配返回统一生命周期错误。
+    /// 返回：CAS 成功并发布通知后完成；前置状态不匹配时不写状态、不开放许可，返回生命周期错误。
     pub(crate) fn transition(
         &self,
         expected: ApplicationState,
@@ -129,7 +137,9 @@ impl StateCell {
     }
 
     /// 业务作用：向领域准备阶段提供与 Ready 发布相同的执行许可。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只由宿主状态转换开放的信号。
     #[cfg(feature = "ws-client")]
     pub(crate) fn activation_token(&self) -> CancellationToken {
@@ -141,24 +151,30 @@ impl StateCell {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum TerminalIntent {
+    /// 尚无终止事件成功提交。
     Undecided = 0,
+    /// 有限任务正常完成。
     BatchCompleted = 1,
+    /// 服务收到正常停止请求。
     ServiceStop = 2,
+    /// 有限任务未完成便收到停止请求。
     BatchInterrupted = 3,
+    /// 启动或运行失败触发终止。
     Failure = 4,
 }
 
 /// 保存 first-trigger-wins 终止意图的原子单元。
 pub(crate) struct TerminalCell {
+    /// 首次成功提交的终止意图编码，后续事件不覆盖。
     value: AtomicU8,
 }
 
 impl TerminalCell {
     /// 业务作用：创建尚未提交终止意图的单元。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；初值为 Undecided。
+    /// 返回：初值为 Undecided 的原子单元，供首次终止事件竞争提交。
     pub(crate) fn new() -> Self {
         Self {
             value: AtomicU8::new(TerminalIntent::Undecided as u8),
@@ -167,11 +183,14 @@ impl TerminalCell {
 
     /// 业务作用：尝试提交首次终止意图；返回 false 表示已有事件获胜。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `intent`：Runner 已分类的非 Undecided 意图。
+    ///
+    /// 返回：尚未决定且本次成功提交时为 true；已有意图时为 false，原意图不变。
     pub(crate) fn try_set(&self, intent: TerminalIntent) -> bool {
         debug_assert_ne!(intent, TerminalIntent::Undecided);
+        // 首个终止事件决定主要退出原因；后续清理或信号不能覆盖已提交的意图。
         self.value
             .compare_exchange(
                 TerminalIntent::Undecided as u8,
@@ -184,9 +203,9 @@ impl TerminalCell {
 
     /// 业务作用：以 Acquire 语义读取已经提交的终止意图。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；未知原始值按 Undecided 保守处理。
+    /// 返回：当前已提交的意图；初值及未知编码映射为 Undecided，不据此推断清理完成。
     pub(crate) fn load(&self) -> TerminalIntent {
         match self.value.load(Ordering::Acquire) {
             1 => TerminalIntent::BatchCompleted,

@@ -2,45 +2,29 @@ use crate::{
     common::remote::grpc::nacos_grpc_service::ServerRequestHandler, nacos_proto::v2::Payload,
 };
 use async_trait::async_trait;
-use tracing::{error, info};
+use tracing::info;
 
 pub(crate) struct DefaultHandler;
 
 #[async_trait]
 impl ServerRequestHandler for DefaultHandler {
+    /// 业务作用：记录没有专用处理器的服务端请求并停止分派，避免把未知推送当作可执行操作。
+    ///
+    /// 参数说明：
+    /// - `request`：无法匹配已知处理器的 Payload；其内容不构成可信业务指令。
+    ///
+    /// 返回：始终为空，不向服务端声明业务执行成功或创建新的处理规则。
     async fn request_reply(&self, request: Payload) -> Option<Payload> {
-        let p_type;
-        let r_body;
-        let r_type;
-        let client_ip;
-        let headers;
-
-        if let Some(body) = request.body {
-            p_type = body.type_url;
-            r_body = String::from_utf8(body.value).unwrap_or_else(|e| {
-                error!("unknown payload convert to string failed. {}", e);
-                Default::default()
-            })
-        } else {
-            r_body = Default::default();
-            p_type = Default::default();
-        }
-
-        if let Some(meta_data) = request.metadata {
-            r_type = meta_data.r#type;
-            client_ip = meta_data.client_ip;
-            headers = meta_data.headers;
-        } else {
-            r_type = Default::default();
-            client_ip = Default::default();
-            headers = Default::default();
-        }
-
+        // 未知推送的正文、类型和请求头可能包含配置或凭据，只记录规模，不执行字符串转换。
+        let payload_bytes = request.body.as_ref().map_or(0, |body| body.value.len());
+        let header_count = request
+            .metadata
+            .as_ref()
+            .map_or(0, |metadata| metadata.headers.len());
         info!(
-            "unknown server request. type: {}, client_ip: {}, headers:{:?}, payload: {}, payload_type: {}",
-            r_type, client_ip, headers, r_body, p_type
+            payload_bytes,
+            header_count, "Nacos gRPC 未知服务端请求已忽略"
         );
-
-        return None;
+        None
     }
 }

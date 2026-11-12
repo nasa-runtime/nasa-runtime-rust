@@ -50,7 +50,7 @@ CREATE TABLE records (
 );
 ```
 
-`zcf/application.yml`：
+主配置（非空 `APP_CONFIG_FILE` 指定的路径，缺省为 `zcf/application.yml`）：
 
 ```yaml
 application:

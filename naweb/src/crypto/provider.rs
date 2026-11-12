@@ -31,9 +31,9 @@ pub enum CryptoDirection {
 impl CryptoDirection {
     /// 业务作用：返回 HKDF 合同使用的固定小写方向文本。
     ///
-    /// # 返回
+    /// 返回：请求返回 `request`，响应返回 `response`。
     ///
-    /// 请求返回 `request`，响应返回 `response`。
+    /// 参数说明: 无。
     pub const fn as_key_label(self) -> &'static str {
         match self {
             Self::Request => "request",
@@ -58,13 +58,11 @@ pub struct CryptoExecutionContext {
 impl std::fmt::Debug for CryptoExecutionContext {
     /// 业务作用：输出不含密钥材料的操作摘要。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CryptoExecutionContext")
@@ -104,13 +102,11 @@ pub struct SecretBytes {
 impl SecretBytes {
     /// 业务作用：接管 provider 已解密的拥有字节。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `bytes`: 尚未交给 JSON extractor 的敏感明文。
     ///
-    /// # 返回
-    ///
-    /// 返回 best-effort 清零容器。
+    /// 返回：返回 best-effort 清零容器。
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes: Zeroizing::new(bytes),
@@ -119,9 +115,9 @@ impl SecretBytes {
 
     /// 业务作用：把明文移动给 request body 重写阶段。
     ///
-    /// # 返回
+    /// 返回：返回拥有字节；移动后容器不再保留副本。
     ///
-    /// 返回拥有字节；移动后容器不再保留副本。
+    /// 参数说明: 无。
     pub fn into_vec(self) -> Vec<u8> {
         let mut bytes = self.bytes;
         // 所有权直接转交给下一阶段，避免 `to_vec` 在大请求上额外制造一份同时驻留的敏感明文。
@@ -134,13 +130,11 @@ impl SecretBytes {
 impl std::fmt::Debug for SecretBytes {
     /// 业务作用：只输出明文长度，避免调试链泄露内容。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回脱敏格式化结果。
+    /// 返回：返回脱敏格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SecretBytes")
@@ -164,28 +158,26 @@ pub type CryptoFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait WebCryptoProvider: Send + Sync + 'static {
     /// 业务作用：返回注册表使用的稳定 provider ID。
     ///
-    /// # 返回
+    /// 返回：返回非空、有限长度的 ASCII 标识，不得包含地址和 secret。
     ///
-    /// 返回非空、有限长度的 ASCII 标识，不得包含地址和 secret。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str;
 
     /// 业务作用：返回启动审计使用的静态能力集合。
     ///
-    /// # 返回
+    /// 返回：返回 provider 能安全执行的算法边界。
     ///
-    /// 返回 provider 能安全执行的算法边界。
+    /// 参数说明: 无。
     fn capabilities(&self) -> CryptoCapabilities;
 
     /// 业务作用：解密协议层已经严格验证的输入。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 拥有全部密文、辅助字段、nonce 与 AAD，大小已由协议层限制。
     /// - `context`: 固定请求快照解析的方向、租户、密钥域和 key handle。
     ///
-    /// # 返回
-    ///
-    /// 成功返回敏感明文；算法、tag 和底层错误必须收敛，禁止 plaintext fallback。
+    /// 返回：成功返回敏感明文；算法、tag 和底层错误必须收敛，禁止 plaintext fallback。
     fn decrypt<'a>(
         &'a self,
         input: DecryptInput,
@@ -194,14 +186,12 @@ pub trait WebCryptoProvider: Send + Sync + 'static {
 
     /// 业务作用：加密通过响应合同检查的明文。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 拥有敏感明文、响应 nonce 与规范化 AAD 的有界输入。
     /// - `context`: 固定请求快照解析的响应方向与同一 key handle。
     ///
-    /// # 返回
-    ///
-    /// 成功返回协议层待编码密文；资源或算法故障一律 fail closed。
+    /// 返回：成功返回协议层待编码密文；资源或算法故障一律 fail closed。
     fn encrypt<'a>(
         &'a self,
         input: EncryptInput,
@@ -219,15 +209,13 @@ pub struct LocalCryptoProvider {
 impl LocalCryptoProvider {
     /// 业务作用：建立本地纯算法 provider。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `id`: 注册表稳定 ID，建议按部署能力区分。
     /// - `executor`: 所有同步算法共享的有界阻塞执行器。
     /// - `allow_insecure_legacy_private_operations`: 仅受控迁移环境可显式开启的 RSA 私钥风险门。
     ///
-    /// # 返回
-    ///
-    /// 返回不可变 provider；风险门关闭时 legacy RSA/RSA_AES 审计和执行都应被拒绝。
+    /// 返回：返回不可变 provider；风险门关闭时 legacy RSA/RSA_AES 审计和执行都应被拒绝。
     pub fn new(
         id: &'static str,
         executor: CryptoCpuExecutor,
@@ -244,19 +232,19 @@ impl LocalCryptoProvider {
 impl WebCryptoProvider for LocalCryptoProvider {
     /// 业务作用：返回构造时声明的稳定 ID。
     ///
-    /// # 返回
+    /// 返回：返回注册表索引文本。
     ///
-    /// 返回注册表索引文本。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str {
         self.id
     }
 
     /// 业务作用：声明本地 provider 的静态算法能力。
     ///
-    /// # 返回
-    ///
-    /// modern 与 legacy AES 始终可用；legacy 私钥能力只有编译期 feature 与运行时风险门
+    /// 返回：modern 与 legacy AES 始终可用；legacy 私钥能力只有编译期 feature 与运行时风险门
     /// 同时开启时可见。
+    ///
+    /// 参数说明: 无。
     fn capabilities(&self) -> CryptoCapabilities {
         CryptoCapabilities {
             modern_aead: true,
@@ -268,14 +256,12 @@ impl WebCryptoProvider for LocalCryptoProvider {
 
     /// 业务作用：在有界阻塞执行器中执行本地解密。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 协议层验证后的拥有输入，闭包结束时统一释放。
     /// - `context`: 固定 key 与方向元数据，不跨快照重新解析。
     ///
-    /// # 返回
-    ///
-    /// 返回敏感明文；所有底层错误统一为认证失败，避免形成算法 oracle。
+    /// 返回：返回敏感明文；所有底层错误统一为认证失败，避免形成算法 oracle。
     fn decrypt<'a>(
         &'a self,
         input: DecryptInput,
@@ -292,14 +278,12 @@ impl WebCryptoProvider for LocalCryptoProvider {
 
     /// 业务作用：在有界阻塞执行器中执行本地加密。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 已限制大小的拥有明文和协议元数据。
     /// - `context`: 固定 key 与方向元数据，不跨快照重新选择 active key。
     ///
-    /// # 返回
-    ///
-    /// 返回待协议编码密文；随机源或算法故障一律关闭响应。
+    /// 返回：返回待协议编码密文；随机源或算法故障一律关闭响应。
     fn encrypt<'a>(
         &'a self,
         input: EncryptInput,
@@ -317,15 +301,13 @@ impl WebCryptoProvider for LocalCryptoProvider {
 
 /// 业务作用：执行按 key 算法分派的同步解密。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `input`: 协议层有界输入。
 /// - `context`: 固定 key 和派生域。
 /// - `allow_private`: legacy 私钥风险门，只能来自启动配置。
 ///
-/// # 返回
-///
-/// 成功返回明文，任何底层差异统一映射为认证失败。
+/// 返回：成功返回明文，任何底层差异统一映射为认证失败。
 fn decrypt_local(
     input: DecryptInput,
     context: CryptoExecutionContext,
@@ -383,15 +365,13 @@ fn decrypt_local(
 
 /// 业务作用：执行按 key 算法分派的同步加密。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `input`: 协议层有界明文、nonce 与 AAD。
 /// - `context`: 固定 key 和派生域。
 /// - `allow_private`: legacy 私钥风险门，只能来自启动配置。
 ///
-/// # 返回
-///
-/// 成功返回密文与辅助字段，所有底层错误统一收敛。
+/// 返回：成功返回密文与辅助字段，所有底层错误统一收敛。
 fn encrypt_local(
     input: EncryptInput,
     context: CryptoExecutionContext,

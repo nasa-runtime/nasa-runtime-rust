@@ -40,7 +40,9 @@ pub(super) enum SagaApiStartFailure {
 
 impl SagaApiStartFailure {
     /// 业务作用：将唯一创建裁决投影到 HTTP 状态，不公开数据库错误。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：调用方可用于参数更正、幂等冲突或暂时重试的标准 HTTP 状态。
     #[cfg(feature = "web")]
     pub(super) fn http_status(self) -> axum::http::StatusCode {
@@ -56,7 +58,9 @@ impl SagaApiStartFailure {
     }
 
     /// 业务作用：将唯一创建裁决投影为 gRPC status，并为请求摘要冲突保留稳定机器原因。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：对应 HTTP 业务语义的标准 status；原始存储错误保持隐藏。
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     pub(super) fn grpc_status(self) -> nagrpc::Status {
@@ -131,7 +135,9 @@ pub(super) struct SagaApiAuditPage {
 
 impl ManagedApiFailure {
     /// 业务作用：统一映射只读和管理操作的 HTTP 失败语义，隐藏驱动与数据库细节。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与业务拒绝类型对应的标准 HTTP 状态。
     #[cfg(feature = "web")]
     pub(super) fn http_status(self) -> axum::http::StatusCode {
@@ -147,7 +153,9 @@ impl ManagedApiFailure {
     }
 
     /// 业务作用：统一映射只读和管理操作的 gRPC 失败语义，CAS 竞争与确定性状态拒绝保持可区分。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：参数、权限、存在性、容量、并发、状态或暂时故障对应的标准 status。
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     pub(super) fn grpc_status(self) -> nagrpc::Status {
@@ -167,7 +175,13 @@ impl ManagedApiFailure {
 
 impl SagaOrchestratorApi {
     /// 业务作用：统一读取 Registry 定义，权限检查先于键存在性和数据库查询。
-    /// 参数说明：`actor` 为认证主体，`tenant`、`workflow` 与 `version` 是不可变定义键。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 为认证主体。
+    /// - `tenant`：目标定义所属租户，先按主体租户范围授权。
+    /// - `workflow`：该租户下的流程名，必须命中主体允许的流程范围。
+    /// - `version`：指定不可变定义的业务版本，须通过正整数版本校验。
+    ///
     /// 返回：合法授权命中返回保留的定义事实；非法键、越权、不存在或存储异常返回封闭分类。
     pub(super) async fn get_definition_record(
         &self,
@@ -190,7 +204,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：以同一权限和业务身份规则读取实例，跨租户请求不获得存在性信息。
-    /// 参数说明：`actor` 为认证主体，`tenant` 与 `saga` 组成目标实例键。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 为认证主体。
+    /// - `tenant`：目标实例所属租户，必须命中主体租户范围。
+    /// - `saga`：该租户下的实例标识，授权通过后才校验与查询。
+    ///
     /// 返回：合法授权命中返回完整行；非法身份、越权、不存在或存储失败使用封闭分类。
     pub(super) async fn get_instance(
         &self,
@@ -210,7 +229,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：统一绑定管理权限、动作、幂等身份和 CAS，审计与状态变更只由同一核心事务执行。
-    /// 参数说明：`actor` 为认证主体，`action` 来自固定协议路由，`request` 提供实例、原因和并发前置条件。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 为认证主体。
+    /// - `action`：`action` 来自固定协议路由。
+    /// - `request`：`request` 提供实例、原因和并发前置条件。
+    ///
     /// 返回：事务成功后回读实例；不满足权限、状态或版本时不产生部分管理事实。
     pub(super) async fn administer_instance(
         &self,
@@ -259,7 +283,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：统一校验审计授权和页游标，保证 HTTP 与 gRPC 按相同事实顺序继续读取。
-    /// 参数说明：`actor` 是已认证主体，`request` 定位审计范围和页面，`key` 为共享 token 权威。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是已认证主体。
+    /// - `request`：`request` 定位审计范围和页面。
+    /// - `key`：`key` 为共享 token 权威。
+    ///
     /// 返回：合法查询返回有界事实与下一页 token；越权或伪造游标在数据库读取前拒绝。
     pub(super) async fn query_audit(
         &self,
@@ -310,7 +339,13 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：统一执行创建授权、身份与定义校验，并在数据库事务内复验同一 Catalog 资格。
-    /// 参数说明：`actor` 是已认证主体，`request` 是完整业务意图，`trace` 为受信链路上下文，`state` 提供生命周期和执行权威。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是已认证主体。
+    /// - `request`：`request` 是完整业务意图。
+    /// - `trace`：`trace` 为受信链路上下文。
+    /// - `state`：`state` 提供生命周期和执行权威。
+    ///
     /// 返回：首次提交或相同摘要重放返回相同实例；参数、权限、定义或摘要不匹配时拒绝，失败不产生半完成实例。
     pub(super) async fn start_instance(
         &self,
@@ -381,7 +416,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：统一执行授权、过滤校验、keyset 解析和有界检索，保持 HTTP 与 gRPC 的分页语义相同。
-    /// 参数说明：`actor` 是已认证主体，`request` 是协议无关过滤条件，`key` 为跨副本分页签名权威。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是已认证主体。
+    /// - `request`：`request` 是协议无关过滤条件。
+    /// - `key`：`key` 为跨副本分页签名权威。
+    ///
     /// 返回：返回一页摘要和可跨协议继续的 token；越权、非法过滤或游标在读取前拒绝，存储异常返回暂不可用。
     pub(super) async fn query_instances(
         &self,
@@ -484,7 +524,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：在读取实例是否存在之前完成租户和操作授权，所有协议使用相同缺省拒绝政策。
-    /// 参数说明：`actor` 是已认证主体，`tenant` 为目标租户，`permission` 为固定业务权限。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是已认证主体。
+    /// - `tenant`：`tenant` 为目标租户。
+    /// - `permission`：`permission` 为固定业务权限。
+    ///
     /// 返回：租户范围和权限同时命中时成功，否则不允许访问业务存储。
     pub(super) fn authorize(
         actor: &SagaApiActor,
@@ -501,7 +546,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：将 definition 与 capability 管理权同时约束到租户和 workflow，不能通过协议切换扩大范围。
-    /// 参数说明：`actor` 是已认证主体，`tenant` 与 `workflow` 共同定位完整业务授权目标。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是已认证主体。
+    /// - `tenant`：目标租户，要求主体具备该租户或通配范围以及 registry 权限。
+    /// - `workflow`：目标流程名，在租户权限通过后再匹配主体流程范围或通配值。
+    ///
     /// 返回：registry 权限与 workflow 范围全部命中时成功，否则拒绝。
     pub(super) fn authorize_registry(
         actor: &SagaApiActor,
@@ -517,7 +567,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：为实例和审计查询签发绑定完整过滤范围的同一格式游标，允许经授权的协议适配器共用分页权威。
-    /// 参数说明：`key` 是跨副本一致的秘密材料，`scope` 是规范化过滤条件，`cursor` 是内部 keyset。
+    ///
+    /// 参数说明：
+    /// - `key`：`key` 是跨副本一致的秘密材料。
+    /// - `scope`：`scope` 是规范化过滤条件。
+    /// - `cursor`：`cursor` 是内部 keyset。
+    ///
     /// 返回：正文和认证摘要均为规范小写十六进制的不透明 token。
     pub(super) fn page_token(key: &[u8; 32], scope: &str, cursor: &str) -> String {
         let canonical = format!("nasaga-page\0{}\0{}{}", scope.len(), scope, cursor);
@@ -526,7 +581,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：在数据库访问前复验 token 的范围、大小与认证摘要，禁止跨查询复用或伪造游标。
-    /// 参数说明：`key` 与 `scope` 是当前查询权威，`token` 为空表示第一页。
+    ///
+    /// 参数说明：
+    /// - `key`：跨副本一致的 32 字节游标签名材料，用于重算认证摘要。
+    /// - `scope`：当前查询的规范化过滤范围，须与签发时完全一致。
+    /// - `token`：`token` 为空表示第一页。
+    ///
     /// 返回：规范且认证成功时返回可选内部游标；格式、范围或材料不匹配时拒绝。
     pub(super) fn parse_page_token(
         key: &[u8; 32],
@@ -560,7 +620,12 @@ impl SagaOrchestratorApi {
 
 impl SagaOrchestratorApi {
     /// 业务作用：以统一 owner、地址政策和数据库时钟登记逐实例能力。
-    /// 参数说明：`actor` 是主体，`activation` 是路由政策，`descriptor` 是能力合同。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是主体。
+    /// - `activation`：`activation` 是路由政策。
+    /// - `descriptor`：`descriptor` 是能力合同。
+    ///
     /// 返回：成功返回持久租约；越权、非法地址或存储异常拒绝登记。
     pub(super) async fn register_capability_record(
         &self,
@@ -610,7 +675,11 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：以统一授权和不可变摘要约束发布 definition。
-    /// 参数说明：`actor` 是主体，`artifact` 是已验证签名的流程定义。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是主体。
+    /// - `artifact`：`artifact` 是已验证签名的流程定义。
+    ///
     /// 返回：返回首次或幂等发布记录；同键异摘要与越权拒绝写入。
     pub(super) async fn publish_definition_record(
         &self,
@@ -652,7 +721,15 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：统一复验 definition 键、workflow owner 和激活证据，再由唯一事务执行生命周期动作。
-    /// 参数说明：`actor` 是认证主体，`key` 定位定义，`target` 与 `operation` 固定动作、CAS 和审计，`identity/activation` 为协调者权威。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是认证主体。
+    /// - `key`：租户、流程名及不可变定义版本组成的目标键。
+    /// - `target`：期望进入的定义生命周期状态，Active 额外要求激活证据。
+    /// - `operation`：提供幂等身份、CAS 前置版本和审计原因的生命周期操作。
+    /// - `identity`：执行激活核验的协调服务身份，用于限定能力来源。
+    /// - `activation`：能力寻址、来源与探测等激活约束，不激活时不创建该门禁。
+    ///
     /// 返回：成功返回持久记录；越权、无记录、证据不足或并发拒绝不改变生命周期。
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn change_definition_record(
@@ -708,7 +785,12 @@ impl SagaOrchestratorApi {
     }
 
     /// 业务作用：在任何协议落库前用独立 Ed25519 seal 复验原始 definition 文档和 workflow 授权。
-    /// 参数说明：`actor` 是认证主体，`keys` 是受信签名公钥，`signed` 保存未经改写的文档及签名。
+    ///
+    /// 参数说明：
+    /// - `actor`：`actor` 是认证主体。
+    /// - `keys`：`keys` 是受信签名公钥。
+    /// - `signed`：`signed` 保存未经改写的文档及签名。
+    ///
     /// 返回：成功返回完整领域 artifact；格式、摘要、签名、身份或 seal 不成立时返回封闭 Catalog 错误。
     pub(super) fn validate_signed_definition(
         actor: &SagaApiActor,

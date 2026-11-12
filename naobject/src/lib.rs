@@ -39,6 +39,11 @@ pub struct ObjectKey(Arc<str>);
 
 impl ObjectKey {
     /// 业务作用：校验并构造 key。拒绝空 key、绝对路径、控制字符、`.`/`..` 段、空段与超过 1024 字节。
+    ///
+    /// 参数说明：
+    /// - `value`：相对于 bucket 的原始对象 key，保留大小写与合法字符。
+    ///
+    /// 返回：非空、最多 1024 字节、无前导斜线、控制字符、空路径段及点特殊段时接管原值；否则返回 InvalidKey，不检查远端对象是否存在。
     pub fn new(value: impl Into<Arc<str>>) -> Result<Self, ObjectStoreError> {
         let value = value.into();
         if value.is_empty()
@@ -55,6 +60,10 @@ impl ObjectKey {
     }
 
     /// 业务作用：返回原始相对 key。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用构造时验证的原始 key，不进行 URL 编码。
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -108,20 +117,40 @@ pub struct GetObject {
 #[async_trait::async_trait]
 pub trait ObjectStore: Send + Sync {
     /// 业务作用：上传一个有界对象。
+    ///
+    /// 参数说明：
+    /// - `request`：包含稳定 key、完整正文、可选媒体类型及覆盖策略的上传请求。
+    ///
+    /// 返回：成功返回上传后的元数据；超容量、条件创建冲突或依赖失败返回分类错误。取消或传输失败不证明远端未写入，实现须明确施加缓冲上限。
     async fn put(&self, request: PutObject) -> Result<ObjectMetadata, ObjectStoreError>;
     /// 业务作用：下载一个有界对象。
+    ///
+    /// 参数说明：
+    /// - `key`：需要读取的已校验相对对象 key。
+    ///
+    /// 返回：成功返回完整且受实现容量上限约束的正文与元数据，缺失、超限或读取失败返回错误，不返回部分正文。
     async fn get(&self, key: &ObjectKey) -> Result<GetObject, ObjectStoreError>;
     /// 业务作用：只读取元数据。
+    ///
+    /// 参数说明：
+    /// - `key`：需要查询元数据的相对对象 key。
+    ///
+    /// 返回：成功返回元数据，缺失或查询失败返回错误；不下载正文，因此不能在本调用中复核正文摘要。
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStoreError>;
     /// 业务作用：幂等删除；不存在也算成功。
+    ///
+    /// 参数说明：
+    /// - `key`：需要幂等删除的相对对象 key。
+    ///
+    /// 返回：删除确认或对象不存在时成功，其它失败返回错误；取消或传输失败不证明远端仍保留对象。
     async fn delete(&self, key: &ObjectKey) -> Result<(), ObjectStoreError>;
 }
 
 /// S3 credential；Debug 永不输出任何 credential。
 pub struct S3Credentials {
-    /// Access key ID。
+    /// 访问凭据的 key ID。
     pub access_key_id: SecretBytes,
-    /// Secret access key。
+    /// 访问凭据的密钥材料。
     pub secret_access_key: SecretBytes,
     /// 可选 STS session token。
     pub session_token: Option<SecretBytes>,
@@ -129,6 +158,11 @@ pub struct S3Credentials {
 
 impl fmt::Debug for S3Credentials {
     /// 业务作用：只展示 credential 字段是否存在，永不输出实际认证字节。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收凭据摘要的格式化器。
+    ///
+    /// 返回：写出字段占位符和 session token 是否存在；格式化写出失败返回错误，不输出任何凭据材料。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("S3Credentials")
@@ -163,6 +197,14 @@ pub struct S3Options {
 
 impl S3Options {
     /// 业务作用：创建生产保守缺省：10 秒、16 MiB、强制 SHA-256 metadata。
+    ///
+    /// 参数说明：
+    /// - `endpoint`：支持路径前缀的 S3 根 URL。
+    /// - `bucket`：采用 path-style 访问的 bucket 名。
+    /// - `region`：SigV4 作用域使用的 region。
+    /// - `credentials`：签名所需访问 ID、密钥和可选会话 token。
+    ///
+    /// 返回：返回十秒请求超时、16 MiB 缓冲上限且 GET 要求 SHA-256 元数据的选项；不验证、不建连。
     pub fn new(
         endpoint: impl Into<String>,
         bucket: impl Into<String>,
@@ -215,6 +257,11 @@ pub enum ObjectStoreError {
 
 impl fmt::Display for ObjectStoreError {
     /// 业务作用：输出稳定错误分类，不附带 endpoint、credential、key 或远端正文。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收错误说明的格式化器。
+    ///
+    /// 返回：输出枚举分类及其中的长度或状态码；格式化失败返回错误，不拼接 URL、key、凭据或远端正文。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "object store error: {self:?}")
     }
@@ -309,7 +356,9 @@ impl ObjectOutcome {
     const fn from_error(error: &ObjectStoreError) -> Self {
         match error {
             ObjectStoreError::NotFound => Self::NotFound,
-            ObjectStoreError::ObjectTooLarge { .. } => Self::TooLarge,
+            ObjectStoreError::ObjectTooLarge {
+                ..
+            } => Self::TooLarge,
             ObjectStoreError::AlreadyExists => Self::AlreadyExists,
             ObjectStoreError::Closed
             | ObjectStoreError::InvalidKey
@@ -568,7 +617,9 @@ pub struct S3ObjectStore {
 
 impl S3ObjectStore {
     /// 业务作用：以签名的 HEAD bucket 证明当前凭据可访问配置目标，不创建或删除对象。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：远端确认成功时就绪；权限不足、目标不存在或网络失败原样归类，不返回远端正文。
     pub async fn health_check(&self) -> Result<(), ObjectStoreError> {
         let mut url = self.endpoint.clone();
@@ -594,6 +645,11 @@ impl S3ObjectStore {
     }
 
     /// 业务作用：校验配置并构造 adapter。
+    ///
+    /// 参数说明：
+    /// - `options`：接管的 S3 连接、凭据、缓冲、校验及超时选项。
+    ///
+    /// 返回：配置、URL、凭据与有界参数合法且 HTTP 客户端构建成功时返回适配器；失败返回 InvalidConfiguration。禁止重定向，HTTP 仅允许代码指定的本机主机值，不验证服务可用性、bucket 存在或凭据授权。
     pub fn new(options: S3Options) -> Result<Self, ObjectStoreError> {
         if !valid_bucket(&options.bucket)
             || options.region.is_empty()
@@ -662,6 +718,11 @@ impl S3ObjectStore {
     }
 
     /// 业务作用：在保留 endpoint 前缀的前提下，以独立 path segment 追加 bucket 与已校验对象 key。
+    ///
+    /// 参数说明：
+    /// - `key`：已验证的相对对象 key，各段由 URL 库编码。
+    ///
+    /// 返回：返回在原 endpoint 路径后按段追加 bucket 与 key 的 URL；路径无法追加时返回配置错误，不发起请求。
     fn object_url(&self, key: &ObjectKey) -> Result<reqwest::Url, ObjectStoreError> {
         let mut url = self.endpoint.clone();
         let mut segments = url
@@ -677,6 +738,14 @@ impl S3ObjectStore {
     }
 
     /// 业务作用：构造 SigV4 canonical request、派生签名密钥并附加全部认证 header。
+    ///
+    /// 参数说明：
+    /// - `method`：参与 SigV4 规范请求的 HTTP 方法。
+    /// - `url`：本适配器已经构造的对象 URL。
+    /// - `payload_hash`：调用方计算的正文 SHA-256 十六进制摘要。
+    /// - `metadata_sha256`：上传时同时写入的可选对象摘要元数据。
+    ///
+    /// 返回：返回带时间、摘要、认证与可选会话 token 的请求构造器，不发送请求；无法生成主机或签名材料时返回配置错误。请求头构造错误也可能延迟到发送时返回，不提供完整请求已可执行的确认。
     fn signed(
         &self,
         method: reqwest::Method,
@@ -772,6 +841,13 @@ impl S3ObjectStore {
     }
 
     /// 业务作用：从响应头提取并校验有界 ETag、SHA-256 与已知对象大小。
+    ///
+    /// 参数说明：
+    /// - `key`：本次操作的相对对象 key。
+    /// - `headers`：服务端响应头。
+    /// - `size`：由上传正文、下载计数或 HEAD 长度得出的对象大小。
+    ///
+    /// 返回：成功返回传入大小、key、可选 ETag 与格式合法的摘要；头部文本、ETag 或摘要格式非法返回 InvalidResponse。不要求摘要存在，也不读取正文以验证一致性。
     fn metadata(
         &self,
         key: &ObjectKey,
@@ -806,8 +882,14 @@ impl S3ObjectStore {
 /// 内层实现：只负责协议与校验，结局记账由 `ObjectStore` 包装层统一完成。
 impl S3ObjectStore {
     /// 业务作用：校验对象与 Content-Type 上限，写入内容摘要并执行覆盖或 CreateOnly 上传。
+    ///
+    /// 参数说明：
+    /// - `request`：待上传的完整对象与覆盖策略。
+    ///
+    /// 返回：本地容量和媒体类型合法后执行签名 PUT；2xx 返回大小及本地摘要，412 映射 AlreadyExists，其它状态或传输失败返回分类错误。成功状态后的元数据校验也可能失败，失败不证明远端未写入。
     async fn put_inner(&self, request: PutObject) -> Result<ObjectMetadata, ObjectStoreError> {
         let object_size = request.body.len();
+        // 在签名和网络发送前拒绝超限正文，保持该适配器的单对象容量边界。
         if object_size > self.options.max_object_bytes {
             return Err(ObjectStoreError::ObjectTooLarge {
                 actual: object_size as u64,
@@ -828,6 +910,7 @@ impl S3ObjectStore {
         if let Some(content_type) = &request.content_type {
             http = http.header(reqwest::header::CONTENT_TYPE, content_type);
         }
+        // 由远端条件写判定不存在性，不能先 HEAD 再无条件 PUT 以免并发创建互相覆盖。
         if request.mode == PutMode::CreateOnly {
             http = http.header(reqwest::header::IF_NONE_MATCH, "*");
         }
@@ -849,6 +932,11 @@ impl S3ObjectStore {
     }
 
     /// 业务作用：在 Content-Length 与流式累计两层限制下下载对象，并按配置复核 SHA-256。
+    ///
+    /// 参数说明：
+    /// - `key`：需要读取的已校验相对对象 key。
+    ///
+    /// 返回：成功返回容量内完整正文；摘要存在时总是复核，缺失时按 require_checksum 决定是否拒绝。404、其它非成功状态、超限、元数据或传输错误均失败，不返回部分正文。
     async fn get_inner(&self, key: &ObjectKey) -> Result<GetObject, ObjectStoreError> {
         let url = self.object_url(key)?;
         let response = self
@@ -885,6 +973,7 @@ impl S3ObjectStore {
             .map_err(|_| ObjectStoreError::Transport)?
         {
             let actual = body.len().saturating_add(chunk.len());
+            // 追加前复验累计容量，缺失或不可信的长度头不能使正文缓冲无界增长。
             if actual > self.options.max_object_bytes {
                 return Err(ObjectStoreError::ObjectTooLarge {
                     actual: actual as u64,
@@ -900,10 +989,18 @@ impl S3ObjectStore {
             None if self.options.require_checksum => return Err(ObjectStoreError::MissingChecksum),
             None => {}
         }
-        Ok(GetObject { metadata, body })
+        Ok(GetObject {
+            metadata,
+            body,
+        })
     }
 
     /// 业务作用：发送签名 HEAD 请求并把远端元数据投影为经过边界校验的对象摘要。
+    ///
+    /// 参数说明：
+    /// - `key`：需要查询元数据的已校验相对对象 key。
+    ///
+    /// 返回：成功状态、可解析 Content-Length、容量与元数据格式均通过后返回元数据；404 或其它异常分类失败。不要求 SHA-256 必须存在，也不验证正文摘要。
     async fn head_inner(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStoreError> {
         let url = self.object_url(key)?;
         let response = self
@@ -933,6 +1030,11 @@ impl S3ObjectStore {
     }
 
     /// 业务作用：发送签名 DELETE；成功与不存在都映射为幂等成功。
+    ///
+    /// 参数说明：
+    /// - `key`：需要删除的已校验相对对象 key。
+    ///
+    /// 返回：2xx 或 404 时成功，其它状态或传输失败返回分类错误；不读取远端错误正文，也不在失败时推断远端执行结果。
     async fn delete_inner(&self, key: &ObjectKey) -> Result<(), ObjectStoreError> {
         let url = self.object_url(key)?;
         let response = self
@@ -1033,6 +1135,11 @@ fn object_outcome<T>(result: &Result<T, ObjectStoreError>) -> ObjectOutcome {
 }
 
 /// 业务作用：按 S3 DNS-compatible 规则校验 bucket 名，额外拒绝 IPv4 字面量。
+///
+/// 参数说明：
+/// - `bucket`：待用于 path-style URL 的 bucket 名。
+///
+/// 返回：长度 3 至 63、仅小写字母数字点或连字符、首尾字母数字、无连续点且不能解析成 IPv4 时返回 true；不覆盖所有服务端命名保留规则。
 fn valid_bucket(bucket: &str) -> bool {
     (3..=63).contains(&bucket.len())
         && bucket.bytes().all(|byte| {
@@ -1051,6 +1158,12 @@ fn valid_bucket(bucket: &str) -> bool {
 }
 
 /// 业务作用：计算一轮 HMAC-SHA256，并用可清零缓冲承载 SigV4 派生密钥。
+///
+/// 参数说明：
+/// - `key`：当前签名阶段的原始密钥字节。
+/// - `data`：需要认证的当前作用域或请求摘要数据。
+///
+/// 返回：成功返回 HMAC-SHA256 的 32 字节清零缓冲，密钥构造失败映射为配置错误；不输出材料。
 fn hmac(key: &[u8], data: &[u8]) -> Result<Zeroizing<Vec<u8>>, ObjectStoreError> {
     let mut mac =
         HmacSha256::new_from_slice(key).map_err(|_| ObjectStoreError::InvalidConfiguration)?;
@@ -1059,11 +1172,21 @@ fn hmac(key: &[u8], data: &[u8]) -> Result<Zeroizing<Vec<u8>>, ObjectStoreError>
 }
 
 /// 业务作用：返回空请求体的 SHA-256 hex，用于 GET/HEAD/DELETE 的 SigV4 payload hash。
+///
+/// 参数说明: 无。
+///
+/// 返回：返回空字节串 SHA-256 的小写十六进制字符串，供无正文请求签名使用。
 fn empty_sha256() -> String {
     hex::encode(Sha256::digest([]))
 }
 
 /// 业务作用：读取可选标准 header，并拒绝非文本值。
+///
+/// 参数说明：
+/// - `headers`：服务端返回的响应头集合。
+/// - `name`：需要读取的类型化头部名称。
+///
+/// 返回：响应头缺失时返回 None；存在且可按 HeaderValue 文本规则读取时返回字符串副本，否则返回 InvalidResponse。不复验重复头或字段业务语义。
 fn optional_header(
     headers: &reqwest::header::HeaderMap,
     name: reqwest::header::HeaderName,
@@ -1080,6 +1203,12 @@ fn optional_header(
 }
 
 /// 业务作用：读取可选扩展 header，并拒绝非文本值。
+///
+/// 参数说明：
+/// - `headers`：服务端返回的响应头集合。
+/// - `name`：需要读取的静态头部名称。
+///
+/// 返回：响应头缺失时返回 None；存在且可按 HeaderValue 文本规则读取时返回字符串副本，否则返回 InvalidResponse。不复验重复头或字段业务语义。
 fn optional_header_name(
     headers: &reqwest::header::HeaderMap,
     name: &'static str,

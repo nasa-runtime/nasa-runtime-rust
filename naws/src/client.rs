@@ -26,6 +26,11 @@ use crate::wire::{encode_frame, frame_type, ping, wire_mode, FrameCodec};
 const MAX_CLIENT_RUNTIME_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 /// 业务作用：保证计时器既不会因零间隔忙循环，也不会因极端时长溢出。
+///
+/// 参数说明：
+/// - `duration`：调用方配置的连接超时或重连等待时长。
+///
+/// 返回：收敛到 1 毫秒至 365 天之间的时长，不创建计时器或等待任务。
 fn bounded_client_duration(duration: Duration) -> Duration {
     duration.clamp(Duration::from_millis(1), MAX_CLIENT_RUNTIME_DURATION)
 }
@@ -98,30 +103,53 @@ pub struct ClientObservation {
     pub last_failure_ago: Option<Duration>,
 }
 
-/// 保存内部共享状态；用于在多个调用路径之间复用数据。
+/// 客户端固定连接参数与各运行代共享的生命周期状态。
 struct Inner {
+    /// 每次握手使用的原生 TCP 地址。
     addr: String,
+    /// AUTH 请求中的端点路径，由服务端决定是否接受。
     endpoint: String,
+    /// 各次握手复用的认证材料，不通过观测接口暴露。
     token: String,
+    /// 可选设备声明，空字符串不写入握手字段。
     device_id: String,
+    /// 可选客户端版本声明，不在本地进行协商。
     version: String,
+    /// 是否创建定时 PING 与 PONG 超时检测任务。
     auto_heartbeat: bool,
+    /// 每次建连与认证共享的总等待上限。
     connect_timeout: Duration,
+    /// 帧正文上限，包含类型与模式字节，也用于激活前的事件缓冲预算。
     max_frame: usize,
+    /// 已编码待发送帧的数量上限。
     queue_capacity: usize,
+    /// 取消表示允许发送与业务回调；自动重连不会重新关闭该屏障。
     events_ready: CancellationToken,
+    /// 本代 supervisor、writer 与 heartbeat 尚未退出的数量。
     active_tasks: AtomicUsize,
+    /// 同步回调发生并已被隔离的 panic 累计次数。
     callback_failures: AtomicUsize,
+    /// 最近一次认证发布时刻，断开后保留历史事实。
     last_authenticated: Mutex<Option<tokio::time::Instant>>,
+    /// 当前连接最近一次 PONG 时刻，认证发布时清空。
     last_pong: Mutex<Option<tokio::time::Instant>>,
+    /// 最近一次固定类别的失败事实及本地时刻。
     last_failure: Mutex<Option<(ClientFailure, tokio::time::Instant)>>,
+    /// 按事件名匹配的本地同步回调；不表示服务端订阅。
     handlers: Mutex<HashMap<String, EventCallback>>,
+    /// 每次已认证连接正常进入断连清理时使用的回调。
     on_disconnect: Mutex<Option<DisconnectCallback>>,
+    /// 当前写任务的发送通道，同时作为连接发布与撤销的串行保护锁。
     outbox: Mutex<Option<mpsc::Sender<Bytes>>>,
+    /// 最近认证响应中的会话标识，在断连清理或本代结束时撤销。
     session_id: Mutex<Option<String>>,
+    /// 本地认证连接已发布的事实，不保证对端实时存活。
     connected: AtomicBool,
+    /// 首连成功后是否在断连时进入退避重试。
     auto_reconnect: bool,
+    /// 首次重试及重新认证成功后的退避起点。
     reconnect_min: Duration,
+    /// 连续重连失败时指数退避的时长上限。
     reconnect_max: Duration,
     /// close() 置位:停止自动重连。
     closed: AtomicBool,
@@ -137,7 +165,10 @@ struct Inner {
 
 impl Inner {
     /// 业务作用：撤销本地认证连接，与宿主最终接流裁决串行化。
-    /// 参数说明：`closing` 表示同时禁止自动重连。
+    ///
+    /// 参数说明：
+    /// - `closing`：`closing` 表示同时禁止自动重连。
+    ///
     /// 返回：发送队列与连接事实同时撤销；未观察到的远端故障仍由协议任务报告。
     fn invalidate_connection(&self, closing: bool) {
         let mut outbox = self.outbox.lock().unwrap();
@@ -147,15 +178,20 @@ impl Inner {
         self.connected.store(false, Ordering::Release);
         *outbox = None;
     }
-    /// 业务作用：释放运行门禁并**唤醒** `wait_closed` 等待者。所有 `running→false` 的出口(首连失败、
-    /// 握手期被 close、supervisor 退出)都必须走它,否则 `close_and_wait` 会丢唤醒永久挂起
-    ///。
+    /// 业务作用：在本代收尾完成后释放运行门禁，让关闭等待者观察退出事实。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：清除 running 并唤醒已登记的等待者；调用前必须确认 owner 与全部子任务已退出。
     fn release_running(&self) {
         self.running.store(false, Ordering::Release);
         self.running_done.notify_waiters();
     }
     /// 业务作用：记录固定类别的最近失败，供本地观测区分连接与业务回调证据。
-    /// 参数说明：`failure` 为不携带秘密材料的类别。
+    ///
+    /// 参数说明：
+    /// - `failure`：`failure` 为不携带秘密材料的类别。
+    ///
     /// 返回：替换最近失败事实，不创建任务或触发重试。
     fn record_failure(&self, failure: ClientFailure) {
         *self.last_failure.lock().unwrap() = Some((failure, tokio::time::Instant::now()));
@@ -165,17 +201,22 @@ impl Inner {
 /// 维护客户端连接状态；用于发送消息、订阅事件和管理重连。
 #[derive(Clone)]
 pub struct Client {
+    /// 所有克隆句柄共享的配置、连接门禁与观测事实。
     inner: Arc<Inner>,
 }
 
 /// 保存客户端构造参数；用于逐步配置连接、鉴权和重连策略。
 pub struct ClientBuilder {
+    /// 尚未冻结到客户端的连接参数与初始状态。
     inner: Inner,
 }
 
 impl Client {
     /// 业务作用：在认证连接仍有效的本地保护范围内完成宿主接流裁决。
-    /// 参数说明：`publish` 必须是短小同步操作，不阻塞、不重入本客户端、不执行业务回调。
+    ///
+    /// 参数说明：
+    /// - `publish`：持有发送通道锁期间执行的短小同步裁决，不得重入发送、关闭或本方法，否则会等待自身持有的锁。
+    ///
     /// 返回：连接已认证且 owner 和发送队列仍有效时执行并返回 Some，否则不执行；不证明远端此刻存活。
     pub fn with_authenticated_connection<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
         let outbox = self.inner.outbox.lock().unwrap();
@@ -189,10 +230,12 @@ impl Client {
         }
         Some(publish())
     }
-    /// 业务作用：创建客户端 builder。
+    /// 业务作用：准备原生 TCP 客户端的握手、容量与重连配置。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `addr`: TCP 服务端地址,例如 `127.0.0.1:19091`。
+    ///
+    /// 返回：默认开启心跳、关闭自动重连且无需额外激活的 builder；不解析地址或建立连接。
     pub fn builder(addr: impl Into<String>) -> ClientBuilder {
         ClientBuilder {
             inner: Inner {
@@ -231,18 +274,28 @@ impl Client {
         }
     }
 
-    /// 业务作用：返回当前对象的 connected 状态。
+    /// 业务作用：观察本地是否仍保留认证成功的连接事实。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：认证发布后为 true，关闭或任务退出时撤销；不保证远端实时可用，也不表示全部任务已退出。
     pub fn is_connected(&self) -> bool {
         self.inner.connected.load(Ordering::Acquire)
     }
 
-    /// 业务作用：读取 session id 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：取得最近一次认证响应发布的会话标识副本。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：对端提供的可选标识；断连清理时置空，主动 close 到清理完成之间仍可能读到旧值。
     pub fn session_id(&self) -> Option<String> {
         self.inner.session_id.lock().unwrap().clone()
     }
 
     /// 业务作用：建立本代连接 owner 并等待首次认证，首连成功后才允许自动重连。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：认证响应或连接错误；取消等待会取消本代，运行门禁在全部子任务退出后释放。
     pub async fn connect(&self) -> Result<AuthResponse, ClientError> {
         let cancel = {
@@ -306,7 +359,9 @@ impl Client {
     }
 
     /// 业务作用：分别读取连接、认证、PONG 与失败事实，不把任务存活视为远端可用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：有界本地快照；事件时间与计数不是跨字段原子采样。
     pub fn observation(&self) -> ClientObservation {
         let failure = *self.inner.last_failure.lock().unwrap();
@@ -328,28 +383,36 @@ impl Client {
     }
 
     /// 业务作用：宿主放行后允许分发准备期间有界缓冲的业务事件。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：开放业务回调；不会重新建立已关闭连接。
     pub fn activate(&self) {
         self.inner.events_ready.cancel();
     }
 
     /// 业务作用：观察连接 owner 是否仍持有运行责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只有全部子任务退出后才为 false。
     pub fn is_running(&self) -> bool {
         self.inner.running.load(Ordering::Acquire)
     }
 
     /// 业务作用：观察本客户端仍存活的 supervisor、writer 和 heartbeat 数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：任务计数，不以 connected 标志代替退出证据。
     pub fn active_tasks(&self) -> usize {
         self.inner.active_tasks.load(Ordering::Acquire)
     }
 
     /// 业务作用：提供固定维度的业务回调异常累计值。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：被隔离的 callback panic 次数，不包含业务消息内容。
     pub fn callback_failures(&self) -> usize {
         self.inner.callback_failures.load(Ordering::Acquire)
@@ -357,9 +420,11 @@ impl Client {
 
     /// 业务作用：注册某事件的接收回调(可在 connect 前或后调)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `event`: 客户端需要监听的业务事件名,匹配服务端下发的 `Message.events`。
-    /// - `f`: 客户端收到该事件消息时执行的业务回调。
+    /// - `f`: 读循环同步执行的回调，不应阻塞；panic 会被隔离并记录。
+    ///
+    /// 返回：替换同名事件的本地回调；不向服务端发送订阅，不改变已被读循环取出的回调副本。
     pub fn on_event<F>(&self, event: impl Into<String>, f: F)
     where
         F: Fn(Message) + Send + Sync + 'static,
@@ -373,8 +438,10 @@ impl Client {
 
     /// 业务作用：注册断开连接回调；用于连接关闭后通知调用方清理状态。
     ///
-    /// # 参数
-    /// - `f`: 客户端连接断开后执行的业务回调。
+    /// 参数说明：
+    /// - `f`: 已认证连接退出并清理会话后同步执行的回调，不应阻塞重连流程。
+    ///
+    /// 返回：替换原回调；首连失败不触发该通知，回调 panic 被隔离，取消执行器不保证回调执行。
     pub fn on_disconnect<F>(&self, f: F)
     where
         F: Fn() + Send + Sync + 'static,
@@ -385,7 +452,10 @@ impl Client {
     /* ============================== 发送 ============================== */
 
     /// 业务作用：将合法业务信封编码后提交给当前连接的有界发送队列。
-    /// 参数说明：`msg` 是完整消息信封，按 BITPACK_TLV 编码为 EVENT 帧。
+    ///
+    /// 参数说明：
+    /// - `msg`：`msg` 是完整消息信封。
+    ///
     /// 返回：true 仅证明本地入队；未激活、关闭、帧超限或队列已满均拒绝，不承诺远端执行。
     pub fn send_message(&self, msg: &Message) -> bool {
         if self.inner.closed.load(Ordering::Acquire) || !self.inner.events_ready.is_cancelled() {
@@ -429,45 +499,53 @@ impl Client {
         }
     }
 
-    /// 业务作用：业务事件(无路由,仅触发服务端 handler)。
+    /// 业务作用：发送不带投递目标的事件，交由服务端事件处理器与准入策略处理。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `event`: 业务事件名。
     /// - `payload`: 事件 payload 字节。
+    ///
+    /// 返回：true 仅表示编码帧进入本地队列；未激活、关闭、超限或队列不可用时为 false。
     pub fn send(&self, event: &str, payload: &[u8]) -> bool {
         self.send_message(&base(event, payload))
     }
 
-    /// 业务作用：私聊:发给指定 uid 的所有 session。
+    /// 业务作用：提交按用户标识选择会话的投递请求，最终权限与路由由服务端决定。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `event`: 业务事件名。
     /// - `payload`: 事件 payload 字节。
-    /// - `uids`: 目标用户 ID 列表,服务端会投递到这些用户的所有 session。
+    /// - `uids`: 请求投递的用户标识列表，本函数不验证成员身份或授予投递权限。
+    ///
+    /// 返回：true 仅表示本地入队；false 表示发送准入或容量检查拒绝，不代表目标在线或已收到。
     pub fn send_to_uid(&self, event: &str, payload: &[u8], uids: &[&str]) -> bool {
         let mut m = base(event, payload);
         m.uids = Some(uids.iter().map(|u| Some(u.to_string())).collect());
         self.send_message(&m)
     }
 
-    /// 业务作用：群聊:发给群成员。
+    /// 业务作用：提交以订阅标识筛选目标的投递请求，不在客户端确认订阅权限。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `event`: 业务事件名。
     /// - `payload`: 事件 payload 字节。
-    /// - `group`: 目标群组名。
+    /// - `group`: 写入协议 group 字段的订阅标识，是否允许转发由服务端策略判断。
+    ///
+    /// 返回：true 仅表示本地入队；未激活、关闭、超限或队列不可用时为 false，不确认任何目标送达。
     pub fn send_to_group(&self, event: &str, payload: &[u8], group: &str) -> bool {
         let mut m = base(event, payload);
         m.group = Some(group.to_string());
         self.send_message(&m)
     }
 
-    /// 业务作用：端点级广播。
+    /// 业务作用：提交以端点路径筛选目标的广播请求，由服务端决定准入及实际投递范围。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `event`: 业务事件名。
     /// - `payload`: 事件 payload 字节。
     /// - `endpoints`: 目标 endpoint 路径列表。
+    ///
+    /// 返回：true 仅表示本地入队；发送准入或容量拒绝时为 false，不证明端点存在或广播成功。
     pub fn send_to_endpoint(&self, event: &str, payload: &[u8], endpoints: &[&str]) -> bool {
         let mut m = base(event, payload);
         m.routers = Some(endpoints.iter().map(|e| Some(e.to_string())).collect());
@@ -480,7 +558,9 @@ impl Client {
     /// 可能短暂返回 "already connected",直到旧 supervisor 收尾。`is_connected()` **不是** join 屏障
     /// (它在 close() 里被同步清,但 supervisor 仍在收尾)——要确定性重连请用 `close_and_wait()`
     /// 或 `wait_closed()` 等门禁真正释放后再 connect。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同步撤销发送准入并通知本代取消，实际退出仍需等待连接 owner。
     pub fn close(&self) {
         let token = self.inner.cancel.lock().unwrap();
@@ -488,8 +568,11 @@ impl Client {
         token.cancel();
     }
 
-    /// 业务作用：等 supervisor、writer 与 heartbeat 全部退出并释放运行门禁。此后 `connect()` 不会再返回
-    /// "already connected"。未在运行则立即返回。
+    /// 业务作用：等待 owner 与全部连接任务归还运行责任，供调用方安排后续连接。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：观察到 running 为 false 后结束；本函数不触发关闭，也不替调用方保留下一次连接的运行权。
     pub async fn wait_closed(&self) {
         loop {
             // 先登记 notified 再查门禁,避免「查到 running=true → 漏掉 guard 的 notify → 永久挂起」。
@@ -501,7 +584,11 @@ impl Client {
         }
     }
 
-    /// 业务作用：关闭并等待全部连接任务收尾——确定性重连屏障:`close_and_wait().await` 后即可安全 `connect()`。
+    /// 业务作用：禁止本代自动重连并等待全部连接任务退出，避免旧会话覆盖后续连接状态。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：运行门禁已被观察为释放；未发送帧可被丢弃，并发调用方仍须协调下一次 connect。
     pub async fn close_and_wait(&self) {
         self.close();
         self.wait_closed().await;
@@ -511,8 +598,10 @@ impl Client {
 impl ClientBuilder {
     /// 业务作用：设置客户端连接的 endpoint。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `ep`: 鉴权请求携带的 endpoint,默认 `/ws`。
+    ///
+    /// 返回：保存端点值的 builder；不校验端点是否存在，连接时由服务端决定是否接受。
     pub fn endpoint(mut self, ep: impl Into<String>) -> Self {
         self.inner.endpoint = ep.into();
         self
@@ -520,8 +609,10 @@ impl ClientBuilder {
 
     /// 业务作用：设置客户端鉴权令牌；用于握手阶段携带身份信息。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `t`: 业务鉴权 token,会写入 AuthRequest。
+    ///
+    /// 返回：持有认证材料的 builder；不在本地验证令牌，后续每次重连使用同一份值。
     pub fn token(mut self, t: impl Into<String>) -> Self {
         self.inner.token = t.into();
         self
@@ -529,8 +620,10 @@ impl ClientBuilder {
 
     /// 业务作用：设置客户端设备标识；用于服务端区分同一用户的不同终端。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `d`: 设备 ID,会写入 AuthRequest。
+    ///
+    /// 返回：保存设备标识的 builder；空字符串在握手时省略，不赋予设备身份可信性。
     pub fn device_id(mut self, d: impl Into<String>) -> Self {
         self.inner.device_id = d.into();
         self
@@ -538,8 +631,10 @@ impl ClientBuilder {
 
     /// 业务作用：设置客户端版本号；用于握手和兼容性判断。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `v`: 客户端版本号,会写入 AuthRequest。
+    ///
+    /// 返回：保存版本声明的 builder；空字符串在握手时省略，本函数不执行兼容性协商。
     pub fn version(mut self, v: impl Into<String>) -> Self {
         self.inner.version = v.into();
         self
@@ -547,8 +642,10 @@ impl ClientBuilder {
 
     /// 业务作用：设置是否自动发送心跳；用于保持长连接活跃。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `on`: `true` 表示握手成功后由客户端定时发送 PING。
+    ///
+    /// 返回：保存心跳策略的 builder；关闭时既不自动发 PING，也不启动客户端 PONG 超时检测。
     pub fn auto_heartbeat(mut self, on: bool) -> Self {
         self.inner.auto_heartbeat = on;
         self
@@ -556,8 +653,10 @@ impl ClientBuilder {
 
     /// 业务作用：设置连接超时时间；用于限制建立连接的等待窗口。
     ///
-    /// # 参数
-    /// - `d`: TCP 连接和 AUTH 首次握手的超时时间。
+    /// 参数说明：
+    /// - `d`: 每次连接的 TCP 建连、AUTH 写出与响应等待共享的总时长。
+    ///
+    /// 返回：保存超时配置的 builder；build 时限制在 1 毫秒至 365 天之间，重连也使用该时长。
     pub fn connect_timeout(mut self, d: Duration) -> Self {
         self.inner.connect_timeout = d;
         self
@@ -565,8 +664,10 @@ impl ClientBuilder {
 
     /// 业务作用：开启断线自动重连(指数退避 min..max)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `on`: `true` 表示首连成功后的断线由 supervisor 自动重连。
+    ///
+    /// 返回：保存重连策略的 builder；首连失败直接结束，重连阶段认证拒绝仍会退避重试，close 可终止本代。
     pub fn auto_reconnect(mut self, on: bool) -> Self {
         self.inner.auto_reconnect = on;
         self
@@ -574,9 +675,11 @@ impl ClientBuilder {
 
     /// 业务作用：设置重连退避区间；用于控制断线重连频率。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `min`: 首次或最小重连退避时间。
     /// - `max`: 指数退避增长后的最大等待时间。
+    ///
+    /// 返回：保存两个时长的 builder；build 时各自收敛到合法范围并保证 max 不小于 min，不增加随机抖动。
     pub fn reconnect_backoff(mut self, min: Duration, max: Duration) -> Self {
         self.inner.reconnect_min = min;
         self.inner.reconnect_max = max;
@@ -584,7 +687,11 @@ impl ClientBuilder {
     }
 
     /// 业务作用：限制出站队列和单帧大小，使长连接资源可纳入宿主容量预算。
-    /// 参数说明：`queue_capacity` 为待发送帧数；`max_frame_bytes` 为单帧正文上限。
+    ///
+    /// 参数说明：
+    /// - `queue_capacity`：`queue_capacity` 为待发送帧数。
+    /// - `max_frame_bytes`：`max_frame_bytes` 为单帧正文上限。
+    ///
     /// 返回：容量收敛为有限正值的 builder。
     pub fn capacity(mut self, queue_capacity: usize, max_frame_bytes: usize) -> Self {
         self.inner.queue_capacity = queue_capacity.clamp(1, 4096);
@@ -593,7 +700,9 @@ impl ClientBuilder {
     }
 
     /// 业务作用：让认证后事件等待宿主激活，期间保持协议控制帧处理。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：带有界事件缓冲的 builder；缓冲耗尽时断开，不提前调用业务。
     pub fn start_suspended(mut self) -> Self {
         self.inner.events_ready = CancellationToken::new();
@@ -601,14 +710,21 @@ impl ClientBuilder {
     }
 
     /// 业务作用：让发送和业务回调等待调用方统一发布启动许可，协议控制帧仍可处理。
-    /// 参数说明：`ready` 的取消表示许可发布；共享许可时仅由宿主取消，不逐项调用 activate。
+    ///
+    /// 参数说明：
+    /// - `ready`：`ready` 的取消表示许可发布。
+    ///
     /// 返回：使用指定屏障的 builder，许可发布前的事件仍受缓冲容量限制。
     pub fn activation_barrier(mut self, ready: CancellationToken) -> Self {
         self.inner.events_ready = ready;
         self
     }
 
-    /// 业务作用：完成 builder 装配并返回可运行对象。
+    /// 业务作用：冻结连接参数并规范化超时与退避范围，供后续 connect 使用。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：可共享的未连接客户端；不创建后台任务，不验证地址、认证材料或服务端端点。
     pub fn build(mut self) -> Client {
         self.inner.connect_timeout = bounded_client_duration(self.inner.connect_timeout);
         self.inner.reconnect_min = bounded_client_duration(self.inner.reconnect_min);
@@ -626,7 +742,9 @@ impl ClientBuilder {
 struct ConnectWaitGuard(Option<CancellationToken>);
 impl Drop for ConnectWaitGuard {
     /// 业务作用：首连等待被丢弃时撤销本代连接请求。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：触发取消，不直接释放运行门禁。
     fn drop(&mut self) {
         if let Some(token) = &self.0 {
@@ -634,18 +752,27 @@ impl Drop for ConnectWaitGuard {
         }
     }
 }
+/// 将 owner 退出与最后一个子任务退出汇合为一次运行门禁释放。
 struct RunCompletion {
+    /// 独立收尾 owner 已结束或被执行器销毁。
     owner_exited: bool,
+    /// 本代已经释放运行门禁，禁止后续旧任务重复撤销新状态。
     released: bool,
 }
+/// 一个 connect 运行代的取消与最终收尾责任。
 struct ClientRun {
+    /// 各连接代共享的客户端状态，仅在本代门禁有效时发布连接。
     inner: Arc<Inner>,
+    /// 本次 connect 创建的令牌，不能用于取消下一代。
     cancel: CancellationToken,
+    /// 汇合 owner 与所有子任务退出的串行保护状态。
     completion: Mutex<RunCompletion>,
 }
 impl ClientRun {
     /// 业务作用：收尾 owner 和全部连接任务归还责任后才释放本代运行门禁。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：执行器销毁与正常退出均可完成本地收口，旧任务不能覆盖下一代连接状态。
     fn finish_if_idle(&self) {
         let mut completion = self.completion.lock().unwrap();
@@ -662,13 +789,18 @@ impl ClientRun {
         self.inner.release_running();
     }
 }
+/// 独立收尾任务持有的运行代守卫，异常销毁也必须撤销发送。
 struct ClientOwner {
+    /// 本代运行状态与最终门禁释放责任。
     run: Arc<ClientRun>,
+    /// supervisor 正常结束且子任务已等待完毕的事实。
     completed: bool,
 }
 impl Drop for ClientOwner {
     /// 业务作用：收尾任务完成或被执行器销毁时关闭本代发送，并保留子任务的退出责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：最后一个任务归还后释放门禁，异常销毁记录连接中断，不宣称消息送达。
     fn drop(&mut self) {
         self.run.inner.invalidate_connection(true);
@@ -680,10 +812,13 @@ impl Drop for ClientOwner {
         self.run.finish_if_idle();
     }
 }
+/// 单个子任务的计数责任，随 future 释放以覆盖尚未轮询的取消路径。
 struct ActiveClientTask(Arc<ClientRun>);
 impl Drop for ActiveClientTask {
     /// 业务作用：任务实际退出时归还计数，panic 路径同样可观察。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：减少本代存活任务计数；最后一个任务归还且收尾 owner 已退出后才解除门禁。
     fn drop(&mut self) {
         // 任意连接任务失去运行责任都会撤销认证事实；先取得同一发布锁，避免接流裁决使用旧证据。
@@ -695,7 +830,13 @@ impl Drop for ActiveClientTask {
 }
 
 /// 业务作用：串行写出本连接的帧，连接取消时立即释放写半边。
-/// 参数说明：`wh` 是独占写半边；`rx` 是有界队列；`cancel` 仅属于本次连接；`inner` 留存失败事实。
+///
+/// 参数说明：
+/// - `wh`：`wh` 是独占写半边。
+/// - `rx`：`rx` 是有界队列。
+/// - `cancel`：`cancel` 仅属于本次连接。
+/// - `inner`：`inner` 留存失败事实。
+///
 /// 返回：关闭或写失败后结束；已入队帧不提升为远端确认。
 async fn writer_task(
     mut wh: OwnedWriteHalf,
@@ -705,21 +846,42 @@ async fn writer_task(
 ) {
     let _stop = cancel.clone().drop_guard();
     loop {
-        let bytes = tokio::select! {biased; _=cancel.cancelled()=>break, item=rx.recv()=>match item {Some(bytes)=>bytes,None=>break}};
-        tokio::select! {biased; _=cancel.cancelled()=>break, result=wh.write_all(&bytes)=>if result.is_err(){inner.record_failure(ClientFailure::Write);break}}
+        let bytes = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            item = rx.recv() => match item {
+                Some(bytes) => bytes,
+                None => break,
+            },
+        };
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            result = wh.write_all(&bytes) => if result.is_err() {
+                inner.record_failure(ClientFailure::Write);
+                break;
+            },
+        }
     }
 }
 
 type ClientFramed = FramedRead<tokio::net::tcp::OwnedReadHalf, FrameCodec>;
+/// 一次认证连接的读取半边与独立子任务，重连前须结束旧连接任务。
 struct ConnectionSession {
+    /// 带帧长度限制的原生 TCP 读取端。
     framed: ClientFramed,
+    /// 仅取消本次连接，不取消整个自动重连运行代。
     cancel: CancellationToken,
+    /// writer 与可选 heartbeat 的等待句柄。
     handles: Vec<tokio::task::JoinHandle<()>>,
+    /// 本连接最近的 PONG 时刻，认证后以当前时刻开始超时计时。
     pong: Arc<Mutex<tokio::time::Instant>>,
 }
 impl ConnectionSession {
     /// 业务作用：旧连接子任务退出后才允许重连发布新通道。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：writer 和 heartbeat 均取得 join 证据。
     async fn stop(&mut self) {
         self.cancel.cancel();
@@ -730,7 +892,9 @@ impl ConnectionSession {
 }
 impl Drop for ConnectionSession {
     /// 业务作用：异常离开连接时撤销本连接任务，顶层 tracker 继续保留等待责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：请求停止剩余子任务，不发布新连接状态。
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -741,7 +905,13 @@ impl Drop for ConnectionSession {
 }
 
 /// 业务作用：在同一启动截止点内完成 TCP 与认证，再创建本连接的 writer/heartbeat。
-/// 参数说明：`inner` 为固定参数；`run_cancel` 为本次运行令牌；`tasks` 跟踪所有子任务；`run` 保留本代退出责任。
+///
+/// 参数说明：
+/// - `inner`：`inner` 为固定参数。
+/// - `run_cancel`：`run_cancel` 为本次运行令牌。
+/// - `tasks`：`tasks` 跟踪所有子任务。
+/// - `run`：`run` 保留本代退出责任。
+///
 /// 返回：已认证会话；失败前不发布 outbox，握手取消时直接释放两半连接。
 async fn establish_once(
     inner: Arc<Inner>,
@@ -750,7 +920,11 @@ async fn establish_once(
     run: &Arc<ClientRun>,
 ) -> Result<(AuthResponse, ConnectionSession), ClientError> {
     let deadline = tokio::time::Instant::now() + inner.connect_timeout;
-    let stream = tokio::select! {biased; _=run_cancel.cancelled()=>return Err(ClientError::Disconnected), result=tokio::time::timeout_at(deadline,TcpStream::connect(&inner.addr))=>result.map_err(|_|ClientError::Timeout)??};
+    let stream = tokio::select! {
+        biased;
+        _ = run_cancel.cancelled() => return Err(ClientError::Disconnected),
+        result = tokio::time::timeout_at(deadline, TcpStream::connect(&inner.addr)) => result.map_err(|_| ClientError::Timeout)??,
+    };
     let (read_half, mut write_half) = stream.into_split();
     let mut framed = FramedRead::new(read_half, FrameCodec::new(inner.max_frame));
     let req = AuthRequest {
@@ -765,8 +939,18 @@ async fn establish_once(
         .map_err(|_| ClientError::Protocol("invalid auth request".into()))?;
     let auth = encode_frame(frame_type::AUTH, wire_mode::VARINT, &payload);
     // 握手阶段直接持有写半边，取消 future 不留下尚未纳入 owner 的 writer。
-    tokio::select! {biased; _=run_cancel.cancelled()=>return Err(ClientError::Disconnected), result=tokio::time::timeout_at(deadline,write_half.write_all(&auth))=>result.map_err(|_|ClientError::Timeout)??};
-    let frame = tokio::select! {biased; _=run_cancel.cancelled()=>return Err(ClientError::Disconnected), result=tokio::time::timeout_at(deadline,framed.next())=>result.map_err(|_|ClientError::Timeout)?.ok_or(ClientError::Disconnected)??};
+    tokio::select! {
+        biased;
+        _ = run_cancel.cancelled() => return Err(ClientError::Disconnected),
+        result = tokio::time::timeout_at(deadline, write_half.write_all(&auth)) => result.map_err(|_| ClientError::Timeout)??,
+    };
+    let frame = tokio::select! {
+        biased;
+        _ = run_cancel.cancelled() => return Err(ClientError::Disconnected),
+        result = tokio::time::timeout_at(deadline, framed.next()) => result
+            .map_err(|_| ClientError::Timeout)?
+            .ok_or(ClientError::Disconnected)??,
+    };
     if frame.typ != frame_type::AUTH_RESP || frame.mode != wire_mode::VARINT {
         return Err(ClientError::Protocol("invalid AUTH_RESP frame".into()));
     }
@@ -831,7 +1015,11 @@ async fn establish_once(
 }
 
 /// 业务作用：持续处理控制帧，激活前有界缓冲业务帧，断线或本连接取消时退出。
-/// 参数说明：`session` 属于当前连接；`inner` 提供固定回调和宿主激活屏障。
+///
+/// 参数说明：
+/// - `session`：`session` 属于当前连接。
+/// - `inner`：`inner` 提供固定回调和宿主激活屏障。
+///
 /// 返回：读循环停止，不自行发布下一代连接。
 async fn read_loop(session: &mut ConnectionSession, inner: &Arc<Inner>) {
     let mut pending = VecDeque::new();
@@ -846,10 +1034,11 @@ async fn read_loop(session: &mut ConnectionSession, inner: &Arc<Inner>) {
             }
             buffered_bytes = 0;
         }
-        let item = tokio::select! {biased;
-            _=session.cancel.cancelled()=>break,
-            _=inner.events_ready.cancelled(),if !pending.is_empty()=>continue,
-            item=session.framed.next()=>item,
+        let item = tokio::select! {
+            biased;
+            _ = session.cancel.cancelled() => break,
+            _=inner.events_ready.cancelled(),if !pending.is_empty() => continue,
+            item = session.framed.next() => item,
         };
         let frame = match item {
             Some(Ok(frame)) => frame,
@@ -900,7 +1089,14 @@ async fn read_loop(session: &mut ConnectionSession, inner: &Arc<Inner>) {
 }
 
 /// 业务作用：串行管理首连与重连，旧会话退出后才能发布新会话。
-/// 参数说明：`inner` 为本代状态；`cancel` 可终止握手和退避；`tasks` 持有子任务；`answer` 交付首连结果；`run` 保留退出责任。
+///
+/// 参数说明：
+/// - `inner`：`inner` 为本代状态。
+/// - `cancel`：`cancel` 可终止握手和退避。
+/// - `tasks`：`tasks` 持有子任务。
+/// - `answer`：`answer` 交付首连结果。
+/// - `run`：`run` 保留退出责任。
+///
 /// 返回：本代监督任务结束，最终门禁由外层 owner 在 tracker 排空后释放。
 async fn supervisor(
     inner: Arc<Inner>,
@@ -935,7 +1131,11 @@ async fn supervisor(
             return;
         }
         loop {
-            tokio::select! {biased; _=cancel.cancelled()=>return,_=tokio::time::sleep(backoff)=>{}}
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(backoff) => {},
+            }
             match establish_once(inner.clone(), &cancel, &tasks, &run).await {
                 Ok((_, next)) => {
                     session = next;
@@ -958,8 +1158,10 @@ async fn supervisor(
 
 /// 业务作用：执行断连清理；用于关闭会话状态并触发回调。
 ///
-/// # 参数
-/// - `inner`: 已解析的内部值或被包装对象。
+/// 参数说明：
+/// - `inner`: 当前运行代的共享状态，调用方已经停止本连接的 writer 与 heartbeat。
+///
+/// 返回：撤销认证连接与会话标识后同步通知断连回调；回调 panic 被计数并隔离，不停止后续重连裁决。
 fn on_disconnect_cleanup(inner: &Arc<Inner>) {
     inner.invalidate_connection(false);
     *inner.session_id.lock().unwrap() = None; // 断连清旧 session_id,避免误用
@@ -976,11 +1178,15 @@ fn on_disconnect_cleanup(inner: &Arc<Inner>) {
 
 /// 业务作用：分发收到的消息；用于按事件名调用注册的处理器。
 ///
-/// # 参数
-/// - `inner`: 已解析的内部值或被包装对象。
-/// - `msg`: 业务消息体或事件载荷。
+/// 参数说明：
+/// - `inner`: 提供事件处理器与回调失败计数的客户端状态。
+/// - `msg`: 已解码信封，各命中回调分别取得完整消息副本。
+///
+/// 返回：按消息中的事件顺序同步调用处理器，重复事件可重复调用；未知事件忽略，单个回调 panic 不阻断其余回调。
 fn dispatch(inner: &Arc<Inner>, msg: Message) {
-    let Some(events) = &msg.events else { return };
+    let Some(events) = &msg.events else {
+        return;
+    };
     // 先把命中的回调 clone 出来再**释放锁**,避免回调内再注册 handler 造成自锁死。
     let cbs: Vec<EventCallback> = {
         let handlers = inner.handlers.lock().unwrap();
@@ -1002,7 +1208,14 @@ fn dispatch(inner: &Arc<Inner>, msg: Message) {
 }
 
 /// 业务作用：本连接独立发送心跳并检测未获 PONG 的半开状态。
-/// 参数说明：`tx` 仅属于本连接；`period` 为周期；`cancel` 是连接令牌；`pong` 保存本连接最近响应；`inner` 留存失败事实。
+///
+/// 参数说明：
+/// - `tx`：`tx` 仅属于本连接。
+/// - `period`：`period` 为周期。
+/// - `cancel`：`cancel` 是连接令牌。
+/// - `pong`：`pong` 保存本连接最近响应。
+/// - `inner`：`inner` 留存失败事实。
+///
 /// 返回：取消、发送失败或超过两个周期未获响应时关闭本连接，不读取新连接的 connected 状态。
 async fn heartbeat_task(
     tx: mpsc::Sender<Bytes>,
@@ -1015,7 +1228,11 @@ async fn heartbeat_task(
     let mut ticker = tokio::time::interval(period);
     ticker.tick().await;
     loop {
-        tokio::select! {biased;_=cancel.cancelled()=>break,_=ticker.tick()=>{}}
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = ticker.tick() => {},
+        }
         if pong.lock().unwrap().elapsed() > period.saturating_mul(2) {
             inner.record_failure(ClientFailure::Heartbeat);
             break;
@@ -1028,7 +1245,10 @@ async fn heartbeat_task(
 }
 
 /// 业务作用：将握手失败映射为固定类别，避免通过观测输出远端返回文本。
-/// 参数说明：`error` 为首连或重连失败。
+///
+/// 参数说明：
+/// - `error`：`error` 为首连或重连失败。
+///
 /// 返回：认证、协议或普通连接类别。
 fn connect_failure(error: &ClientError) -> ClientFailure {
     match error {
@@ -1040,11 +1260,13 @@ fn connect_failure(error: &ClientError) -> ClientFailure {
 
 /* ============================== helpers ============================== */
 
-/// 业务作用：构造基础消息帧；用于统一客户端外发事件格式。
+/// 业务作用：为客户端发送入口构造仅含单个事件及正文的消息信封。
 ///
-/// # 参数
+/// 参数说明：
 /// - `event`: 客户端要发送到 endpoint 的业务事件名。
 /// - `payload`: 业务事件的原始 payload 字节。
+///
+/// 返回：持有事件名和正文副本的 Message，其余字段取默认值；未进行编码、目标校验或队列投递。
 fn base(event: &str, payload: &[u8]) -> Message {
     Message {
         events: Some(vec![Some(event.to_string())]),
@@ -1055,8 +1277,10 @@ fn base(event: &str, payload: &[u8]) -> Message {
 
 /// 业务作用：把空字符串转换为空选项；用于清理握手参数。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`: 待写入握手信封的设备标识或版本声明。
+///
+/// 返回：空字符串对应 None，其余内容原样复制为 Some；不裁剪空白或验证业务格式。
 fn opt(s: &str) -> Option<String> {
     if s.is_empty() {
         None
@@ -1065,10 +1289,12 @@ fn opt(s: &str) -> Option<String> {
     }
 }
 
-/// 业务作用：心跳周期 = 服务端 timeout 的一半(至少 1s,缺省 30s)。
+/// 业务作用：根据认证响应的心跳超时推导客户端 PING 周期，约束计时器范围。
 ///
-/// # 参数
-/// - `timeout_ms`: 超时时间毫秒数。
+/// 参数说明：
+/// - `timeout_ms`: 服务端声明的心跳超时，单位为毫秒。
+///
+/// 返回：非正值采用 30 秒；正值取一半并限制在 1 秒至 365 天，极短服务端超时不保证被该周期满足。
 fn heartbeat_period(timeout_ms: i64) -> Duration {
     if timeout_ms <= 0 {
         Duration::from_secs(30)

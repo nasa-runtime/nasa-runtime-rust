@@ -10,7 +10,10 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 业务作用：只求值配置中心引导依赖，并将 nacos.imports 放在 yml.imports 之前。
-/// 参数说明：`loader` 已固定环境、目录与读取权限。
+///
+/// 参数说明：
+/// - `loader`：已固定环境、目录与读取权限的严格加载器，用于准备本地来源及求值引导依赖。
+///
 /// 返回：经过严格声明校验的计划和连接设置；不读取远端业务文档。
 pub fn prepare(loader: &ConfigLoader) -> anyhow::Result<(PreparedLoad, NacosBootstrap)> {
     let mut plan = loader.prepare()?;
@@ -24,6 +27,7 @@ pub fn prepare(loader: &ConfigLoader) -> anyhow::Result<(PreparedLoad, NacosBoot
     let value = if enabled && plan.contains(&section) {
         plan.bootstrap(std::slice::from_ref(&section))?[&section].clone()
     } else {
+        // 关闭远端能力时保护整段配置，只保留开关提示，避免无关连接表达式仍被求值。
         plan = plan
             .protect(section)
             .with_hint(path, naml::strict::ValueHint::Scalar);
@@ -82,6 +86,7 @@ pub fn prepare(loader: &ConfigLoader) -> anyhow::Result<(PreparedLoad, NacosBoot
     let boot: NacosBootstrap = naml::strict::bind(value)?;
     plan = plan.prepend_imports(boot.nacos_imports())?;
     let refs = references(&plan, &boot)?;
+    // 开关与远端来源必须一致，不能在关闭状态访问 Nacos，也不能把空的远端声明视为启用成功。
     anyhow::ensure!(
         enabled != refs.is_empty(),
         "config-boot: nacos enablement and imports disagree"
@@ -90,12 +95,17 @@ pub fn prepare(loader: &ConfigLoader) -> anyhow::Result<(PreparedLoad, NacosBoot
 }
 
 /// 业务作用：在网络请求前归一化并检查重复的远端身份。
-/// 参数说明：`plan` 为固定顺序；`boot` 提供缺省分组和格式。
+///
+/// 参数说明：
+/// - `plan`：已经固定导入顺序的来源计划，不在此处重新读取或重排声明。
+/// - `boot`：引导配置，提供远端引用的默认分组和内容格式。
+///
 /// 返回：无重复的有序远端引用，不解释 data_id 中的文件通配符。
 pub fn references(plan: &PreparedLoad, boot: &NacosBootstrap) -> anyhow::Result<Vec<ConfigRef>> {
     let refs = crate::nacos_refs(plan.imports(), &boot.group, boot.file_extension.as_deref())?;
     let mut identities = BTreeSet::new();
     for reference in &refs {
+        // 同一身份重复出现会使包匹配和覆盖次序产生歧义，在网络访问前统一拒绝。
         anyhow::ensure!(
             !reference.data_id.trim().is_empty()
                 && identities.insert((reference.group.clone(), reference.data_id.clone())),
@@ -106,7 +116,12 @@ pub fn references(plan: &PreparedLoad, boot: &NacosBootstrap) -> anyhow::Result<
 }
 
 /// 业务作用：首拉只取得远端文本，随后由 naml 按完整计划一次合并和求值。
-/// 参数说明：`plan` 是同一轮已经读取的引导；`client` 为已鉴权客户端；`boot` 为冻结连接设置。
+///
+/// 参数说明：
+/// - `plan`：本轮已准备的本地来源与导入顺序，消费后生成完整候选。
+/// - `client`：已经完成连接与鉴权的配置中心客户端，负责获取声明的远端文本。
+/// - `boot`：本轮冻结的引导设置，提供远端引用的默认分组和格式。
+///
 /// 返回：来源齐全、格式与身份一致的完整候选；任何网络错误保持失败语义。
 pub async fn load(
     plan: PreparedLoad,
@@ -118,7 +133,12 @@ pub async fn load(
 }
 
 /// 业务作用：将订阅包与声明逐一匹配，拒绝多余、乱序或格式不一致的材料。
-/// 参数说明：`plan` 是本轮固定引导；`bundle` 仅携带已取得的文档；`boot` 为默认分组和格式。
+///
+/// 参数说明：
+/// - `plan`：本轮固定的本地来源和导入顺序，决定候选装配次序。
+/// - `bundle`：按声明顺序取得的远端文档包，仅允许可选来源明确缺失。
+/// - `boot`：提供默认分组和内容格式的引导设置，必须与准备计划时一致。
+///
 /// 返回：本地与远端共同装配的完整候选，可选缺失只允许明确没有文档。
 pub fn assemble(
     plan: PreparedLoad,
@@ -137,6 +157,7 @@ pub fn assemble(
             let Some(doc) = docs.peek().filter(|doc| {
                 doc.source.data_id == expected.data_id && doc.source.group == expected.group
             }) else {
+                // 只有声明允许缺失时才能继续，必需来源缺失或乱序不得生成不完整候选。
                 anyhow::ensure!(
                     expected.optional,
                     "config-boot: required remote source missing"
@@ -145,6 +166,7 @@ pub fn assemble(
             };
             let format =
                 ConfigFormat::from_extension(expected.file_extension.as_deref().unwrap_or("yaml"))?;
+            // 文档携带的格式不能覆盖本地声明，否则同一文本可能被按不同语义解析。
             anyhow::ensure!(
                 doc.source
                     .file_extension
@@ -165,6 +187,7 @@ pub fn assemble(
             docs.next();
         }
     }
+    // 拒绝计划之外的剩余材料，防止无声明的远端文档进入候选配置。
     anyhow::ensure!(
         docs.next().is_none(),
         "config-boot: unexpected remote source"

@@ -7,8 +7,38 @@
 -- 安全不变量：根必须先进入 CANCELLING；RUNNING shard 仅记录协作式取消，不直接伪造完成；只有全部 shard 终态后才关闭根。
 
 local state = redis.call('HGET', KEYS[1], 'state')
+-- 缺失根没有取消权威；不能用迟到请求重新创建已回收的批次。
+if not state then
+    return redis.error_reply('ERR Fanout cancellation root is absent')
+end
 if state == 'SUCCEEDED' or state == 'PARTIAL_FAILED' or state == 'FAILED' or state == 'CANCELLED' then
     return {'ALREADY_COMPLETED', state}
+end
+if state ~= 'CREATING' and state ~= 'COMMITTED' and state ~= 'WAITING_CHILDREN' and state ~= 'CANCELLING' then
+    return redis.error_reply('ERR Fanout cancellation state is invalid')
+end
+local total = tonumber(redis.call('HGET', KEYS[1], 'shardTotal'))
+local expected = tonumber(ARGV[4])
+local count = tonumber(ARGV[5])
+local retention = tonumber(ARGV[3])
+local rescan = tonumber(ARGV[7])
+local cursor = 0
+if state == 'CANCELLING' then
+    cursor = tonumber(redis.call('HGET', KEYS[1], 'cancelCursor') or '0')
+end
+-- Redis 脚本失败不会撤销先前写入，完整参数和键对必须在发布 CANCELLING 之前核验。
+if #ARGV ~= 7 or redis.call('HGET', KEYS[1], 'fanoutId') ~= ARGV[1]
+        or not total or total < 0 or total > 9007199254740991 or total ~= math.floor(total)
+        or not cursor or cursor < 0 or cursor > total or cursor ~= math.floor(cursor)
+        or not expected or expected < 0 or expected > total or expected ~= math.floor(expected)
+        or not count or count < 0 or count > total - expected or count ~= math.floor(count)
+        or #KEYS ~= 7 + count * 2 or (count == 0 and expected < total)
+        or not retention or retention <= 0 or retention > 9007199254740991 or retention ~= math.floor(retention)
+        or not rescan or rescan <= 0 or rescan > 9007199254740991 or rescan ~= math.floor(rescan) then
+    return redis.error_reply('ERR Fanout cancellation arguments are invalid')
+end
+if cursor ~= expected then
+    return {'STALE', tostring(cursor)}
 end
 local time = redis.call('TIME')
 local now = time[1] * 1000 + math.floor(time[2] / 1000)
@@ -16,9 +46,6 @@ if state ~= 'CANCELLING' then
     -- start_run.lua 会拒绝 CANCELLING 根，因此必须先发布保护态再撤销各 shard。
     redis.call('HSET', KEYS[1], 'state', 'CANCELLING', 'cancelReason', ARGV[2], 'cancelCursor', 0)
 end
-local cursor = tonumber(redis.call('HGET', KEYS[1], 'cancelCursor') or '0')
-if cursor ~= tonumber(ARGV[4]) then return {'STALE', tostring(cursor)} end
-local count = tonumber(ARGV[5])
 for index = 1, count do
     local seq = cursor + index - 1
     local member = ARGV[1] .. ':' .. seq
@@ -43,7 +70,6 @@ for index = 1, count do
     end
 end
 local nextCursor = cursor + count
-local total = tonumber(redis.call('HGET', KEYS[1], 'shardTotal') or '0')
 if nextCursor < total then
     redis.call('HSET', KEYS[1], 'cancelCursor', nextCursor, 'nextWatchAt', now)
     redis.call('ZADD', KEYS[2], now, ARGV[1])

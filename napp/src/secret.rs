@@ -61,10 +61,18 @@ pub enum SecretResolveError {
 }
 
 impl fmt::Display for SecretResolveError {
-    /// 业务作用：输出 secret ID 与结构化原因，永不包含解析出的敏感值。
+    /// 业务作用：将材料解析错误写为可展示的原因，沿用构造方提供的 ID 与摘要。
+    ///
+    /// 参数说明：
+    /// - `formatter`：错误文本的输出目标。
+    ///
+    /// 返回：写出成功则完成，输出失败则传播格式化错误；本方法不再次脱敏，公开变体的构造方须保证摘要不含秘密。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SecretResolveError::MalformedSpec { id, detail } => {
+            SecretResolveError::MalformedSpec {
+                id,
+                detail,
+            } => {
                 write!(formatter, "secret `{id}` spec is malformed: {detail}")
             }
             SecretResolveError::Resolve(error) => write!(formatter, "{error}"),
@@ -78,8 +86,11 @@ impl std::error::Error for SecretResolveError {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SecretKeyConfig {
+    /// 所有片段有序拼接后采用的解码方式。
     encoding: EncodingConfig,
+    /// 解码后允许保留的材料字节上限。
     max_bytes: usize,
+    /// 按声明顺序参与拼接的材料来源。
     fragments: Vec<FragmentConfig>,
 }
 
@@ -87,13 +98,21 @@ struct SecretKeyConfig {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum EncodingConfig {
+    /// 拼接结果直接作为材料字节。
     Raw,
+    /// 拼接完成后统一执行 Base64 解码。
     Base64AfterConcat,
+    /// 拼接完成后统一执行十六进制解码。
     HexAfterConcat,
 }
 
 impl From<EncodingConfig> for SecretEncoding {
     /// 业务作用：将声明式配置枚举映射到解析器的实际拼接后编码策略。
+    ///
+    /// 参数说明：
+    /// - `value`：配置反序列化已识别的材料编码方式。
+    ///
+    /// 返回：对应的解析策略；此处不拼接片段，也不解码材料。
     fn from(value: EncodingConfig) -> Self {
         match value {
             EncodingConfig::Raw => SecretEncoding::Raw,
@@ -107,20 +126,37 @@ impl From<EncodingConfig> for SecretEncoding {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum FragmentConfig {
+    /// 从候选配置的点分路径读取字符串。
     ConfigPath(String),
+    /// 从指定环境变量读取片段。
     Env(String),
+    /// 从指定文件读取片段。
     File(PathBuf),
-    Provider { provider: String, key: String },
+    /// 从已配置的外部材料提供器读取片段。
+    Provider {
+        /// 提供器配置中的稳定名称。
+        provider: String,
+        /// 传给该提供器解析的材料键。
+        key: String,
+    },
 }
 
 impl From<FragmentConfig> for SecretFragmentRef {
-    /// 业务作用：将配置 fragment 标签转换为解析器使用的路径、环境变量或文件引用。
+    /// 业务作用：将材料片段声明转换为解析器识别的来源引用，保留外部提供器身份。
+    ///
+    /// 参数说明：
+    /// - `value`：配置路径、环境变量、文件或提供器键的声明。
+    ///
+    /// 返回：保留来源和键的片段引用；不访问文件、环境或提供器，不验证材料是否存在。
     fn from(value: FragmentConfig) -> Self {
         match value {
             FragmentConfig::ConfigPath(path) => SecretFragmentRef::ConfigPath(Arc::from(path)),
             FragmentConfig::Env(name) => SecretFragmentRef::Env(Arc::from(name)),
             FragmentConfig::File(path) => SecretFragmentRef::File(path),
-            FragmentConfig::Provider { provider, key } => SecretFragmentRef::Provider {
+            FragmentConfig::Provider {
+                provider,
+                key,
+            } => SecretFragmentRef::Provider {
                 provider: Arc::from(provider),
                 key: Arc::from(key),
             },
@@ -129,6 +165,11 @@ impl From<FragmentConfig> for SecretFragmentRef {
 }
 
 /// 业务作用：从原始树的 `secrets` 段解析出全部 [`SecretSpec`];无 `secrets` 段时返回空。
+///
+/// 参数说明：
+/// - `raw`：尚未脱敏的完整候选配置，仅在此读取声明结构。
+///
+/// 返回：全部声明有效时返回有序材料规格；非法 ID、结构、片段数量或递归引用导致整批拒绝，不读取材料。
 pub(crate) fn parse_specs(raw: &Value) -> Result<Vec<SecretSpec>, SecretResolveError> {
     let Some(secrets) = raw.get("secrets") else {
         return Ok(Vec::new());
@@ -160,6 +201,7 @@ pub(crate) fn parse_specs(raw: &Value) -> Result<Vec<SecretSpec>, SecretResolveE
                 detail: format!("fragment count exceeds the hard limit of {MAX_SECRET_FRAGMENTS}"),
             });
         }
+        // 材料声明不能引用声明自身，否则读取结果与后续脱敏会互相影响。
         if config.fragments.iter().any(|fragment| {
             matches!(
                 fragment,
@@ -187,7 +229,10 @@ pub(crate) fn parse_specs(raw: &Value) -> Result<Vec<SecretSpec>, SecretResolveE
 }
 
 /// 业务作用：将 secret ID 限制为有界 ASCII 层级标识，避免空分段、路径穿越与控制字符。
-/// 参数说明：`value` 为声明 ID 或已移除协议前缀的引用 ID。
+///
+/// 参数说明：
+/// - `value`：`value` 为声明 ID 或已移除协议前缀的引用 ID。
+///
 /// 返回：非空、不超过 128 字节且每个路径分段合法时为真，不读取任何材料。
 pub(crate) fn valid_secret_id(value: &str) -> bool {
     !value.is_empty()
@@ -202,7 +247,13 @@ pub(crate) fn valid_secret_id(value: &str) -> bool {
         })
 }
 
-/// 业务作用：按点分路径在树中取**标量字符串**;非字符串或不存在返回 `None`(禁止引用子树/递归 spec)。
+/// 业务作用：按材料声明的点分路径读取字符串叶子，不把整个配置子树作为材料。
+///
+/// 参数说明：
+/// - `raw`：用于材料解析的配置树；调用方负责限制可引用的子树。
+/// - `path`：按点拆分的对象键路径，不将点转义或解释为数组下标。
+///
+/// 返回：路径对应字符串时复制为共享字符串；缺失、非对象中间节点或非字符串叶子返回 None。
 fn lookup_scalar(raw: &Value, path: &str) -> Option<Arc<str>> {
     let mut current = raw;
     for segment in path.split('.') {
@@ -214,7 +265,13 @@ fn lookup_scalar(raw: &Value, path: &str) -> Option<Arc<str>> {
     }
 }
 
-/// 业务作用：把点分路径处的标量替换为 `<redacted>`;路径不存在则忽略(只脱敏已解析成功的 fragment)。
+/// 业务作用：遮蔽配置树中指定对象键的值，使普通配置读者不能直接取得该位置的材料。
+///
+/// 参数说明：
+/// - `redacted`：待发布的配置副本，在找到目标键时原地替换。
+/// - `path`：材料声明引用的点分对象路径。
+///
+/// 返回：无返回值；存在的目标键替换为 `<redacted>`，路径缺失或中间节点不能按对象访问时保持原样。
 fn redact_path(redacted: &mut Value, path: &str) {
     let segments: Vec<&str> = path.split('.').collect();
     let Some((last, parents)) = segments.split_last() else {
@@ -296,7 +353,11 @@ fn write_canonical_json(value: &Value, output: &mut Vec<u8>) {
 }
 
 /// 业务作用：同步准备当前活跃消费者的本地材料，并从完整候选中脱敏全部配置片段。
-/// 参数说明：`raw` 为合并后的原始候选树，`generation` 为材料与配置共同的发布代次。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为合并后的原始候选树。
+/// - `generation`：`generation` 为材料与配置共同的发布代次。
+///
 /// 返回：全部活跃材料成功后返回同代快照和脱敏树；结构、用途或材料解析失败时拒绝，旧视图由调用方保留。
 pub fn resolve_and_redact(
     raw: &Value,
@@ -317,7 +378,10 @@ pub fn resolve_and_redact(
 }
 
 /// 业务作用：为材料解析和文件观察建立同一活跃消费者投影，禁用计划不取得外部材料所有权。
-/// 参数说明：`raw` 为同代完整原始配置，业务与已启用计划的共享引用均保留。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为同代完整原始配置。
+///
 /// 返回：经过全量结构校验的活跃声明；独属于禁用用途的声明被排除，不读取任何材料。
 pub(crate) fn active_specs(raw: &Value) -> Result<Vec<SecretSpec>, SecretResolveError> {
     let mut specs = parse_specs(raw)?;
@@ -330,7 +394,10 @@ pub(crate) fn active_specs(raw: &Value) -> Result<Vec<SecretSpec>, SecretResolve
 }
 
 /// 业务作用：按组件用途投影新观测凭据，使应用不物化 controller 或未启用出口的材料。
-/// 参数说明：`raw` 为同代完整配置；框架用途之外的业务 locator 按活跃消费者处理。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为同代完整配置。
+///
 /// 返回：只有非活跃组件引用且没有活跃消费者的 secret ID；所有 config_path 仍统一脱敏。
 fn inactive_component_secrets(raw: &Value) -> Result<BTreeSet<String>, SecretResolveError> {
     let mut classified = BTreeSet::new();
@@ -398,7 +465,11 @@ fn inactive_component_secrets(raw: &Value) -> Result<BTreeSet<String>, SecretRes
 }
 
 /// 业务作用：保留框架观测用途之外的业务凭据引用，避免按 ID 排除时误伤共享材料。
-/// 参数说明：`raw` 是完整候选树；`ids` 接收业务显式引用的 ID。
+///
+/// 参数说明：
+/// - `raw`：`raw` 是完整候选树。
+/// - `ids`：`ids` 接收业务显式引用的 ID。
+///
 /// 返回：不读取材料；跳过 secret 定义及已单独裁决的观测、provider 子树。
 fn collect_business_locators(raw: &Value, ids: &mut BTreeSet<String>) {
     let Some(root) = raw.as_object() else {
@@ -427,7 +498,11 @@ fn collect_business_locators(raw: &Value, ids: &mut BTreeSet<String>) {
 }
 
 /// 业务作用：收集声明中的 secret locator，不读取环境或文件内容。
-/// 参数说明：`value` 为用途限定子树，`ids` 接收稳定 ID。
+///
+/// 参数说明：
+/// - `value`：`value` 为用途限定子树。
+/// - `ids`：`ids` 接收稳定 ID。
+///
 /// 返回：无返回值；非 locator 字符串不被解释为材料。
 fn collect_locators(value: &Value, ids: &mut BTreeSet<String>) {
     match value {
@@ -451,7 +526,10 @@ fn collect_locators(value: &Value, ids: &mut BTreeSet<String>) {
 }
 
 /// 业务作用：判断候选是否需要外部材料，同步引导只做结构校验和脱敏。
-/// 参数说明：`raw` 为原始树。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为原始树。
+///
 /// 返回：存在 provider fragment 时返回 true；非法声明直接拒绝。
 pub(crate) fn requires_async(raw: &Value) -> Result<bool, SecretResolveError> {
     Ok(parse_specs(raw)?.iter().any(|spec| {
@@ -462,7 +540,10 @@ pub(crate) fn requires_async(raw: &Value) -> Result<bool, SecretResolveError> {
 }
 
 /// 业务作用：在首次材料消费之前构造只含脱敏值的结构视图，不访问任何外部 provider。
-/// 参数说明：`raw` 为原始候选。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为原始候选。
+///
 /// 返回：已经移除 ConfigPath 明文的副本；结构非法时拒绝。
 pub(crate) fn redact_structure(raw: &Value) -> Result<Value, SecretResolveError> {
     let mut tree = raw.clone();
@@ -499,14 +580,20 @@ enum BootstrapToken {
 }
 
 /// 业务作用：在消费者与凭据读取前校验 provider 声明的结构和容量。
-/// 参数说明：`raw` 为候选配置；未启用声明不读取引导材料。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为候选配置。
+///
 /// 返回：声明合法时成功；未知类型、缺失字段和越界配置拒绝。
 pub(crate) fn validate_provider_plans(raw: &Value) -> Result<(), SecretResolveError> {
     parse_provider_plans(raw).map(|_| ())
 }
 
 /// 业务作用：解析有界 provider 计划，确保未被引用的启用项也具有完整声明。
-/// 参数说明：`raw` 为原始配置树。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为原始配置树。
+///
 /// 返回：只含配置的计划表；不访问环境变量、文件或网络。
 fn parse_provider_plans(raw: &Value) -> Result<BTreeMap<String, ProviderPlan>, SecretResolveError> {
     let plans: BTreeMap<String, ProviderPlan> = raw
@@ -566,7 +653,11 @@ fn parse_provider_plans(raw: &Value) -> Result<BTreeMap<String, ProviderPlan>, S
 }
 
 /// 业务作用：从显式本地信任根建立 provider，并异步解析同代材料。
-/// 参数说明：`raw` 为有界候选；`generation` 为发布代次。
+///
+/// 参数说明：
+/// - `raw`：`raw` 为有界候选。
+/// - `generation`：`generation` 为发布代次。
+///
 /// 返回：全量材料成功才返回；最多 16 个 provider、256 个 secret，远端 I/O 有 15 秒总预算。
 pub(crate) async fn resolve_async(
     raw: &Value,
@@ -577,7 +668,10 @@ pub(crate) async fn resolve_async(
         .iter()
         .flat_map(|spec| spec.fragments.iter())
         .filter_map(|fragment| match fragment {
-            SecretFragmentRef::Provider { provider, .. } => Some(provider.as_ref()),
+            SecretFragmentRef::Provider {
+                provider,
+                ..
+            } => Some(provider.as_ref()),
             _ => None,
         })
         .collect();
@@ -664,7 +758,10 @@ pub(crate) async fn resolve_async(
 }
 
 /// 业务作用：为 provider 配置和准备失败生成不包含信任根细节的原因。
-/// 参数说明：`detail` 为固定摘要。
+///
+/// 参数说明：
+/// - `detail`：`detail` 为固定摘要。
+///
 /// 返回：仅归属秘密配置的结构错误。
 fn provider_error(detail: &'static str) -> SecretResolveError {
     SecretResolveError::MalformedSpec {

@@ -94,7 +94,7 @@ nasa::yml::nacos::reject_legacy_config_fields(&boot_value)?;
 
 ## YML 配置与使用
 
-`config-boot` 读取启动期 `nacos:` 段。手动兼容入口可以把它放在 `zcf/bootstrap.yml`；Application 默认从 `zcf/application.yml` 取得，严格工厂也可显式指定主路径。下表中的默认值用于兼容 `NacosBootstrap`；严格 map import 必须显式提供布尔 `optional`，不能依赖表中的缺省值。
+`config-boot` 读取启动期 `nacos:` 段。手动兼容入口可以把它放在 `zcf/bootstrap.yml`；Application 优先从非空环境变量 `APP_CONFIG_FILE` 指定的主文件取得，未设置或为空时使用 `zcf/application.yml`，严格工厂也可显式指定主路径。下表中的默认值用于兼容 `NacosBootstrap`；严格 map import 必须显式提供布尔 `optional`，不能依赖表中的缺省值。
 
 完整示例：
 

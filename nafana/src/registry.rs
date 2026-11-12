@@ -41,6 +41,11 @@ pub struct MonitorConflict {
 
 impl std::fmt::Display for MonitorConflict {
     /// 业务作用：人类可读的冲突描述,方便直接进日志。
+    ///
+    /// 参数说明：
+    /// - `f`：接收冲突说明的标准格式化输出目标。
+    ///
+    /// 返回：写入包含 group 和 command 的冲突说明；输出目标拒绝写入时透传格式化错误。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -57,11 +62,19 @@ type Entry = (CommandParams, Arc<Command>);
 static REGISTRY: OnceLock<Mutex<BTreeMap<CommandKey, Entry>>> = OnceLock::new();
 
 /// 业务作用：返回全局注册表(懒初始化)。
+///
+/// 参数说明: 无。
+///
+/// 返回：进程唯一注册表的共享引用；首次访问创建空表，不主动注册命令。
 fn registry() -> &'static Mutex<BTreeMap<CommandKey, Entry>> {
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 /// 业务作用：取得注册表锁；一次持锁 panic 不应永久破坏指标与业务请求。
+///
+/// 参数说明: 无。
+///
+/// 返回：持有注册表的互斥守卫；锁中毒时继续使用已有条目，避免丢弃已注册指标身份。
 fn lock_registry() -> std::sync::MutexGuard<'static, BTreeMap<CommandKey, Entry>> {
     registry()
         .lock()
@@ -76,10 +89,12 @@ fn lock_registry() -> std::sync::MutexGuard<'static, BTreeMap<CommandKey, Entry>
 /// `build` 在注册表锁内执行,保证同 key 并发首建只创建一次(Command 构造是纯内存 + 一次
 /// tokio::spawn,锁内代价可忽略)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `key`: 注册表键(group + command)。
 /// - `params`: 归一化后的参数指纹,用于一致性比对。
 /// - `build`: 首建闭包,只在 key 不存在时被调用一次。
+///
+/// 返回：新键完成一次构造并注册，同键同参数复用原实例；参数冲突返回详情和原实例且不覆盖记录。
 pub(crate) fn get_or_register(
     key: CommandKey,
     params: CommandParams,
@@ -110,6 +125,10 @@ pub(crate) fn get_or_register(
 
 /// 业务作用：快照全部命令(已按 (group, command) 排序);clone Arc 列表后立即放锁,
 /// 调用方再逐个 snapshot,避免攥着注册表锁去锁各命令的滚动窗口。
+///
+/// 参数说明: 无。
+///
+/// 返回：按 group、command 有序的共享命令副本列表；返回前释放注册表锁，不冻结命令内部计数。
 pub(crate) fn all() -> Vec<Arc<Command>> {
     lock_registry()
         .values()

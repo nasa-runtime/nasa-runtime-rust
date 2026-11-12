@@ -25,7 +25,10 @@ pub struct SagaHttpCredentials {
 
 impl SagaHttpCredentials {
     /// 业务作用：在配置准备阶段校验 HMAC 材料，避免无效候选影响当前请求。
-    /// 参数说明：`hex_key` 必须是 256 位小写十六进制 key。
+    ///
+    /// 参数说明：
+    /// - `hex_key`：必须是 256 位小写十六进制 key。
+    ///
     /// 返回：合法材料对应的不可变凭据快照；非法编码返回脱敏配置错误。
     pub fn from_hex_key(hex_key: &str) -> Result<Self, SagaHttpMessageAuthError> {
         let key = decode_fixed_hex(hex_key).ok_or_else(SagaHttpMessageAuthError::configuration)?;
@@ -45,7 +48,11 @@ impl SagaHttpCredentials {
     }
 
     /// 业务作用：准备新出站凭据并保留有界的旧入站验签窗口，候选未发布时不改变当前权威。
-    /// 参数说明：`hex_key` 是新材料，`overlap` 为本地单调时钟上的旧 key 保留期限，最长一小时。
+    ///
+    /// 参数说明：
+    /// - `hex_key`：是新材料
+    /// - `overlap`：为本地单调时钟上的旧 key 保留期限，最长一小时。
+    ///
     /// 返回：完整候选快照；非法 key、零期限或超过八份仍有效的旧材料时拒绝候选，不提前丢弃旧窗口。
     pub fn rotated(
         &self,
@@ -75,14 +82,18 @@ impl SagaHttpCredentials {
     }
 
     /// 业务作用：让 capability 绑定当前实际出站 key 的不可逆合同摘要，避免 Registry 凭据掩盖结果凭据错配。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前 HMAC 材料的域分离 SHA-256，不暴露 key 或可重放的请求签名。
     pub fn current_result_contract(&self) -> &str {
         &self.current_result_contract
     }
 
     /// 业务作用：让 Catalog 使用与入站验签相同的旧 key 截止时刻判断结果凭据是否可接受。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前与尚在重叠窗口内的合同摘要；过期旧 key 不进入激活证据。
     pub fn accepted_result_contracts(&self) -> BTreeSet<String> {
         let now = Instant::now();
@@ -100,14 +111,18 @@ impl SagaHttpCredentials {
 /// 业务作用：让所有入站和出站认证器从同一受信配置快照读取当前凭据。
 pub trait SagaHttpCredentialSource: Send + Sync {
     /// 业务作用：取得一次认证操作完整使用的不可变凭据集合。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已通过配置准备校验的快照；调用期间不能混用两代 key。
     fn credentials(&self) -> Arc<SagaHttpCredentials>;
 }
 
 impl SagaHttpCredentialSource for SagaHttpCredentials {
     /// 业务作用：为固定 key 使用者提供与动态认证器一致的快照读取边界。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前固定凭据的独立不可变快照。
     fn credentials(&self) -> Arc<SagaHttpCredentials> {
         Arc::new(self.clone())
@@ -185,7 +200,11 @@ impl SagaHttpMessageAuthenticator {
     }
 
     /// 业务作用：绑定受信凭据快照来源，使既有认证器克隆在下一次请求观察原子轮换。
-    /// 参数说明：`source` 只提供已校验材料，`max_clock_skew_ms` 限制签名时钟偏差。
+    ///
+    /// 参数说明：
+    /// - `source`：只提供已校验材料
+    /// - `max_clock_skew_ms`：限制签名时钟偏差。
+    ///
     /// 返回：偏差窗口非零时返回认证器；零窗口拒绝装配。
     pub fn from_source(
         source: Arc<dyn SagaHttpCredentialSource>,

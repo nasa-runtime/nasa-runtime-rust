@@ -31,7 +31,12 @@ pub struct ParsedDocument {
 
 impl SourceDocument {
     /// 业务作用：封装已经读取的文档，避免装配阶段再次打开来源。
-    /// 参数说明：`name` 是调用方身份；`format` 固定格式；`bytes` 为完整输入。
+    ///
+    /// 参数说明：
+    /// - `name`：是调用方身份
+    /// - `format`：固定格式
+    /// - `bytes`：为完整输入。
+    ///
     /// 返回：尚未解析的独立文档。
     pub fn new(name: impl Into<String>, format: ConfigFormat, bytes: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -42,15 +47,25 @@ impl SourceDocument {
     }
 
     /// 业务作用：按严格文档子集解析，丢弃包含正文的后端错误。
-    /// 参数说明：`source_id` 是本轮编号；`policy` 指定解析及取消预算。
+    ///
+    /// 参数说明：
+    /// - `source_id`：是本轮编号
+    /// - `policy`：指定解析及取消预算。
+    ///
     /// 返回：完整映射文档；编码、重复键、格式或预算失败则拒绝。
     pub fn parse(&self, source_id: usize, policy: &LoadPolicy) -> Result<ParsedDocument> {
         self.parse_with_prior(source_id, policy, 0, 0)
     }
 
-    /// 业务作用：在一轮装配已消耗的预算上解析下一来源，覆盖旧字段不能退回解析成本。
-    /// 参数说明：`source_id` 为本轮来源编号；`policy` 为固定策略；`prior_nodes/prior_text` 为此前累计消耗。
-    /// 返回：完整映射及本来源实际新增消耗，超限时不构造后续节点或返回部分文档。
+    /// 业务作用：在整轮装配已经消耗的预算上解析下一份完整配置来源。
+    ///
+    /// 参数说明：
+    /// - `source_id`：附加到诊断及解析结果的本轮来源编号。
+    /// - `policy`：本轮固定的格式、容量及取消策略。
+    /// - `prior_nodes`：此前来源已经消耗的累计节点数，覆盖旧字段不返还。
+    /// - `prior_text`：此前来源已经消耗的累计文本字节数。
+    ///
+    /// 返回：成功返回完整根映射、原始来源摘要及本次新增消耗；取消、来源大小、编码、语法、根类型或累计预算不满足时返回带来源编号的错误，不返回部分文档。
     pub(super) fn parse_with_prior(
         &self,
         source_id: usize,
@@ -141,7 +156,9 @@ impl SourceDocument {
 
 impl ParsedDocument {
     /// 业务作用：只读借用已解析树供调用方执行受信来源约束。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：包含原值的树引用，调用方不得直接写入日志。
     pub fn tree(&self) -> &Value {
         &self.value
@@ -150,7 +167,10 @@ impl ParsedDocument {
 
 impl fmt::Debug for SourceDocument {
     /// 业务作用：避免文档的默认格式化输出正文和来源名。
-    /// 参数说明：`f` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：为格式化目标。
+    ///
     /// 返回：格式和字节规模。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SourceDocument")
@@ -162,7 +182,10 @@ impl fmt::Debug for SourceDocument {
 
 impl fmt::Debug for ParsedDocument {
     /// 业务作用：已解析文档不在默认诊断中暴露值或摘要。
-    /// 参数说明：`f` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：为格式化目标。
+    ///
     /// 返回：数值来源身份和输入规模。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ParsedDocument")
@@ -181,7 +204,11 @@ struct ParseBudget<'a> {
 }
 
 /// 业务作用：复用有界 YAML 解析器读取外部文档，不把原始键解释为配置路径。
-/// 参数说明：`bytes` 为完整正文；`policy` 仅提供解析预算与取消状态。
+///
+/// 参数说明：
+/// - `bytes`：为完整正文
+/// - `policy`：仅提供解析预算与取消状态。
+///
 /// 返回：唯一文档的原始值；编码、重复键、标签、别名或预算非法时拒绝，错误不含正文。
 pub(crate) fn parse_yaml_value(bytes: &[u8], policy: &LoadPolicy) -> Result<Value> {
     policy.check_cancelled()?;
@@ -203,7 +230,10 @@ pub(crate) fn parse_yaml_value(bytes: &[u8], policy: &LoadPolicy) -> Result<Valu
 
 impl ParseBudget<'_> {
     /// 业务作用：在分配下一个树节点之前检查深度和总量。
-    /// 参数说明：`path` 是即将构建的节点路径。
+    ///
+    /// 参数说明：
+    /// - `path`：是即将构建的节点路径。
+    ///
     /// 返回：预算和取消权威均允许时成功。
     fn node(&mut self, path: &ConfigPath) -> Result<()> {
         self.policy.check_cancelled()?;
@@ -218,7 +248,11 @@ impl ParseBudget<'_> {
     }
 
     /// 业务作用：累计解析文本及锚点副本的标量表示，限制别名展开的总规模。
-    /// 参数说明：`bytes` 为本次文本字节数；`path` 是字段位置。
+    ///
+    /// 参数说明：
+    /// - `bytes`：为本次文本字节数
+    /// - `path`：是字段位置。
+    ///
     /// 返回：累计规模在预算内时成功，超限或计数溢出时拒绝继续构建。
     fn text(&mut self, bytes: usize, path: &ConfigPath) -> Result<()> {
         self.text_bytes = self
@@ -233,7 +267,11 @@ impl ParseBudget<'_> {
     }
 
     /// 业务作用：限制单个字符串或键的大小，不将非字符串标量套用文本单值限额。
-    /// 参数说明：`value` 为已确认的字符串或键；`path` 是字段位置。
+    ///
+    /// 参数说明：
+    /// - `value`：为已确认的字符串或键
+    /// - `path`：是字段位置。
+    ///
     /// 返回：单值长度与累计文本均在预算内时成功。
     fn string(&mut self, value: &str, path: &ConfigPath) -> Result<()> {
         if value.len() > self.policy.limits.string_bytes {
@@ -243,7 +281,10 @@ impl ParseBudget<'_> {
     }
 
     /// 业务作用：让通用 Serde 后端传播安全分类而不携带原值。
-    /// 参数说明：`error` 是已分类的拒绝原因。
+    ///
+    /// 参数说明：
+    /// - `error`：是已分类的拒绝原因。
+    ///
     /// 返回：后端需要的错误载体。
     fn fail<E: serde::de::Error>(&mut self, error: ConfigError) -> E {
         self.failure = Some(error);
@@ -251,7 +292,11 @@ impl ParseBudget<'_> {
     }
 
     /// 业务作用：保存锚点或展开别名之前计入全部新节点、键与标量文本。
-    /// 参数说明：`value` 是将要复制的子树；`path` 是目标位置。
+    ///
+    /// 参数说明：
+    /// - `value`：是将要复制的子树
+    /// - `path`：是目标位置。
+    ///
     /// 返回：整棵子树均在预算内时成功。
     fn copy(&mut self, value: &Value, path: &ConfigPath) -> Result<()> {
         self.node(path)?;
@@ -284,7 +329,10 @@ struct Seed<'a, 'p, 's> {
 
 impl Seed<'_, '_, '_> {
     /// 业务作用：为不提供词法 token 的后端累计原生标量文本，避免数值来源绕过装配预算。
-    /// 参数说明：`bytes` 为标量规范化表示长度；JSON 已按原文计费，不重复累计。
+    ///
+    /// 参数说明：
+    /// - `bytes`：为标量规范化表示长度；JSON 已按原文计费，不重复累计。
+    ///
     /// 返回：累计预算允许时成功，超限时保存脱敏拒绝原因。
     fn scalar_text<E: serde::de::Error>(&mut self, bytes: usize) -> std::result::Result<(), E> {
         if self.json_source.is_none() {
@@ -299,7 +347,10 @@ impl Seed<'_, '_, '_> {
 impl<'de> DeserializeSeed<'de> for Seed<'_, '_, '_> {
     type Value = Value;
     /// 业务作用：在递归入口施加树预算，并依据 JSON 原始语法保持数字与业务映射的类型区别。
-    /// 参数说明：`deserializer` 是已选择格式的解码器。
+    ///
+    /// 参数说明：
+    /// - `deserializer`：是已选择格式的解码器。
+    ///
     /// 返回：单节点及其完整子树，失败只保留安全原因。
     fn deserialize<D: serde::Deserializer<'de>>(
         self,
@@ -354,7 +405,13 @@ impl<'de> DeserializeSeed<'de> for Seed<'_, '_, '_> {
 }
 
 /// 业务作用：把借用 JSON 片段的错误换算回完整来源，不输出局部坐标或正文。
-/// 参数说明：`error` 为脱敏错误；`source` 为完整来源；`fragment` 为其借用片段；`local` 为片段内位置，缺失时定位片段首字符。
+///
+/// 参数说明：
+/// - `error`：为脱敏错误
+/// - `source`：为完整来源
+/// - `fragment`：为其借用片段
+/// - `local`：为片段内位置，缺失时定位片段首字符。
+///
 /// 返回：保留已有全局位置，或附加从一开始的来源行号与 UTF-8 字节列；片段不属于来源时不伪造位置。
 fn json_position(
     error: ConfigError,
@@ -389,7 +446,10 @@ fn json_position(
 }
 
 /// 业务作用：按固定数值范围解释已校验的 JSON 数字，不受下游 Serde 数字表示影响。
-/// 参数说明：`text` 是一份完整且语法合法的 JSON 数值 token。
+///
+/// 参数说明：
+/// - `text`：是一份完整且语法合法的 JSON 数值 token。
+///
 /// 返回：i64/u64 整数或有限 f64，保留负零；整数越界或浮点非有限时返回脱敏格式错误。
 fn json_number(text: &str) -> Result<Value> {
     if text == "-0" || text.contains(['.', 'e', 'E']) {
@@ -406,41 +466,58 @@ fn json_number(text: &str) -> Result<Value> {
 impl<'de> Visitor<'de> for Seed<'_, '_, '_> {
     type Value = Value;
     /// 业务作用：提供不含输入内容的格式期待。
-    /// 参数说明：`f` 是格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：是格式化目标。
+    ///
     /// 返回：通用配置节点描述。
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "configuration value")
     }
     /// 业务作用：保留 null 与缺失节点的区别。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：预算内的显式 null，累计超限时拒绝。
     fn visit_unit<E: serde::de::Error>(mut self) -> std::result::Result<Value, E> {
         self.scalar_text(4)?;
         Ok(Value::Null)
     }
     /// 业务作用：保持文档布尔值的原始类型。
-    /// 参数说明：`value` 是文档值。
+    ///
+    /// 参数说明：
+    /// - `value`：是文档值。
+    ///
     /// 返回：预算内的布尔节点，累计超限时拒绝。
     fn visit_bool<E: serde::de::Error>(mut self, value: bool) -> std::result::Result<Value, E> {
         self.scalar_text(value.to_string().len())?;
         Ok(value.into())
     }
     /// 业务作用：保持有符号整数精度。
-    /// 参数说明：`value` 是文档值。
+    ///
+    /// 参数说明：
+    /// - `value`：是文档值。
+    ///
     /// 返回：预算内的整数节点，累计超限时拒绝。
     fn visit_i64<E: serde::de::Error>(mut self, value: i64) -> std::result::Result<Value, E> {
         self.scalar_text(value.to_string().len())?;
         Ok(value.into())
     }
     /// 业务作用：保持无符号整数精度。
-    /// 参数说明：`value` 是文档值。
+    ///
+    /// 参数说明：
+    /// - `value`：是文档值。
+    ///
     /// 返回：预算内的整数节点，累计超限时拒绝。
     fn visit_u64<E: serde::de::Error>(mut self, value: u64) -> std::result::Result<Value, E> {
         self.scalar_text(value.to_string().len())?;
         Ok(value.into())
     }
     /// 业务作用：拒绝不能由配置树表示的非有限数。
-    /// 参数说明：`value` 是文档浮点值。
+    ///
+    /// 参数说明：
+    /// - `value`：是文档浮点值。
+    ///
     /// 返回：预算内的有限数字；非有限值或累计超限时拒绝。
     fn visit_f64<E: serde::de::Error>(mut self, value: f64) -> std::result::Result<Value, E> {
         let number = Number::from_f64(value).ok_or_else(|| {
@@ -451,7 +528,10 @@ impl<'de> Visitor<'de> for Seed<'_, '_, '_> {
         Ok(Value::Number(number))
     }
     /// 业务作用：有界接收文本并保持其原始内容。
-    /// 参数说明：`value` 是文档文本。
+    ///
+    /// 参数说明：
+    /// - `value`：是文档文本。
+    ///
     /// 返回：文本节点或预算错误。
     fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Value, E> {
         if let Err(error) = self.budget.string(value, &self.path) {
@@ -460,7 +540,10 @@ impl<'de> Visitor<'de> for Seed<'_, '_, '_> {
         Ok(value.into())
     }
     /// 业务作用：复用文本限额处理已取得所有权的文本。
-    /// 参数说明：`value` 是文档文本。
+    ///
+    /// 参数说明：
+    /// - `value`：是文档文本。
+    ///
     /// 返回：不再克隆的文本节点。
     fn visit_string<E: serde::de::Error>(self, value: String) -> std::result::Result<Value, E> {
         if let Err(error) = self.budget.string(&value, &self.path) {
@@ -469,7 +552,10 @@ impl<'de> Visitor<'de> for Seed<'_, '_, '_> {
         Ok(Value::String(value))
     }
     /// 业务作用：逐元素构建数组，不按不可信 size_hint 预分配。
-    /// 参数说明：`sequence` 是数组访问者。
+    ///
+    /// 参数说明：
+    /// - `sequence`：是数组访问者。
+    ///
     /// 返回：预算内的完整数组。
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> std::result::Result<Value, A::Error> {
         let mut values = Vec::new();
@@ -483,7 +569,10 @@ impl<'de> Visitor<'de> for Seed<'_, '_, '_> {
         Ok(Value::Array(values))
     }
     /// 业务作用：在重复键信息丢失前拒绝同源冲突。
-    /// 参数说明：`mapping` 是映射访问者。
+    ///
+    /// 参数说明：
+    /// - `mapping`：是映射访问者。
+    ///
     /// 返回：键唯一的映射，不允许后值悄悄吞掉重复声明。
     fn visit_map<A: MapAccess<'de>>(self, mut mapping: A) -> std::result::Result<Value, A::Error> {
         let mut values = Map::new();
@@ -511,7 +600,11 @@ impl<'de> Visitor<'de> for Seed<'_, '_, '_> {
 }
 
 /// 业务作用：拒绝会与字段路径简写发生歧义的文档键。
-/// 参数说明：`key` 是原始键；`parent` 是父路径。
+///
+/// 参数说明：
+/// - `key`：是原始键
+/// - `parent`：是父路径。
+///
 /// 返回：可无歧义引用的键，严格入口不隐式展开字面点号。
 fn validate_key(key: &str, parent: &ConfigPath) -> Result<()> {
     if key.is_empty()
@@ -526,7 +619,11 @@ fn validate_key(key: &str, parent: &ConfigPath) -> Result<()> {
 }
 
 /// 业务作用：按事件逐节点解析 YAML，避免先构建无约束的别名树。
-/// 参数说明：`text` 是 UTF-8 文档；`budget` 共享节点和深度预算。
+///
+/// 参数说明：
+/// - `text`：是 UTF-8 文档
+/// - `budget`：共享节点和深度预算。
+///
 /// 返回：唯一 YAML 文档的树；非法或重复指令、未知标签和超限输入均拒绝。
 fn parse_yaml(text: &str, budget: &mut ParseBudget<'_>) -> Result<Value> {
     // 指令在文档内累积并检查重复，不能因后续声明丢失已有的默认 handle 重定义。
@@ -542,7 +639,10 @@ fn parse_yaml(text: &str, budget: &mut ParseBudget<'_>) -> Result<Value> {
     let mut parser = YamlReader {
         parser: Parser::new_from_str_with_options(text, options),
         source: text,
-        position: SourcePosition { line: 1, column: 1 },
+        position: SourcePosition {
+            line: 1,
+            column: 1,
+        },
     };
     let result = (|| {
         let mut root = None;
@@ -591,7 +691,12 @@ struct YamlReader<'a> {
 }
 
 /// 业务作用：使块标量的最后内容行按物理来源收尾，EOF 本身不产生换行字节。
-/// 参数说明：`value` 为解码文本；`span` 为块内容的原文范围与起始缩进；`source` 为完整输入。
+///
+/// 参数说明：
+/// - `value`：为解码文本
+/// - `span`：为块内容的原文范围与起始缩进
+/// - `source`：为完整输入。
+///
 /// 返回：仅移除没有内容行结束符依据的单个 LF；真实内容换行及已结束的空行保持原值。
 fn yaml_block_eof(value: &mut Cow<'_, str>, span: Span, source: &str) {
     if span.end.byte_offset() != Some(source.len()) || source.ends_with(['\r', '\n']) {
@@ -625,7 +730,10 @@ fn yaml_block_eof(value: &mut Cow<'_, str>, span: Span, source: &str) {
 }
 
 /// 业务作用：屏蔽 YAML 后端可能携带原文的错误。
-/// 参数说明：`parser` 为流式解析状态。
+///
+/// 参数说明：
+/// - `parser`：为流式解析状态。
+///
 /// 返回：下一个语法事件；后端嵌套上限映射为 Limit，其余解析失败只保留格式类别与位置。
 fn next_event<'a>(parser: &mut YamlReader<'a>) -> Result<Event<'a>> {
     parser
@@ -658,7 +766,14 @@ fn next_event<'a>(parser: &mut YamlReader<'a>) -> Result<Event<'a>> {
 }
 
 /// 业务作用：有界构建 YAML 子树并在别名复制前计费。
-/// 参数说明：`parser` 提供事件；`event` 是首事件；`budget` 是共享限额；`path` 为节点；`anchors` 仅保留已完整定义的锚点。
+///
+/// 参数说明：
+/// - `parser`：提供事件
+/// - `event`：是首事件
+/// - `budget`：是共享限额
+/// - `path`：为节点
+/// - `anchors`：仅保留已完整定义的锚点。
+///
 /// 返回：完整子树，不允许自循环锚点和未知标签。
 fn yaml_node(
     parser: &mut YamlReader<'_>,
@@ -764,7 +879,10 @@ fn yaml_node(
 }
 
 /// 业务作用：按完整解析后的 URI 识别允许的 YAML 标准类型，避免 handle 重定义改变类型边界。
-/// 参数说明：`tag` 为解析器展开指令后的前缀与后缀，两段共同组成标签身份。
+///
+/// 参数说明：
+/// - `tag`：为解析器展开指令后的前缀与后缀，两段共同组成标签身份。
+///
 /// 返回：精确匹配的标准类型名；未知 URI 返回 None，不分配完整 URI 副本。
 fn yaml_tag_name(tag: &Tag) -> Option<&'static str> {
     ["str", "int", "bool", "null", "float", "map", "seq"]
@@ -778,7 +896,12 @@ fn yaml_tag_name(tag: &Tag) -> Option<&'static str> {
 }
 
 /// 业务作用：统一显式与隐式 YAML 标量的类型和范围，显式类型标签优先于引号风格。
-/// 参数说明：`text` 为文本；`style` 为引号风格；`tag` 为显式标签。
+///
+/// 参数说明：
+/// - `text`：为文本
+/// - `style`：为引号风格
+/// - `tag`：为显式标签。
+///
 /// 返回：有限标量或格式/不支持错误。
 fn yaml_scalar(text: &str, style: ScalarStyle, tag: Option<&Tag>) -> Result<Value> {
     let null = matches!(text, "" | "~" | "null" | "Null" | "NULL");
@@ -832,7 +955,10 @@ fn yaml_scalar(text: &str, style: ScalarStyle, tag: Option<&Tag>) -> Result<Valu
 }
 
 /// 业务作用：将整数语法与数值范围分开，确保非法普通文本保留字符串、合法越界整数明确拒绝。
-/// 参数说明：`text` 是可含一个前置符号的十进制或 0b/0o/0x 基数文本。
+///
+/// 参数说明：
+/// - `text`：是可含一个前置符号的十进制或 0b/0o/0x 基数文本。
+///
 /// 返回：完整语法匹配时给出负号、基数和无符号数字片段，否则不认定为整数。
 fn integer_lexeme(text: &str) -> Option<(bool, u32, &str)> {
     let negative = text.starts_with('-');
@@ -851,7 +977,10 @@ fn integer_lexeme(text: &str) -> Option<(bool, u32, &str)> {
 }
 
 /// 业务作用：有符号或无符号整数直接进入树，避免经过浮点丢失精度。
-/// 参数说明：`text` 是可含前置符号的十进制或 0b/0o/0x 基数整数文本。
+///
+/// 参数说明：
+/// - `text`：是可含前置符号的十进制或 0b/0o/0x 基数整数文本。
+///
 /// 返回：负数限于 i64、非负数限于 u64；非法语法或超出范围时拒绝。
 fn parse_integer(text: &str) -> Result<Value> {
     let (negative, radix, digits) =
@@ -871,7 +1000,12 @@ fn parse_integer(text: &str) -> Result<Value> {
 }
 
 /// 业务作用：将后端字节范围转换为安全行列信息，不保留文档片段。
-/// 参数说明：`error` 是稳定类别；`text` 为本轮输入；`span` 为后端提供的字节范围。
+///
+/// 参数说明：
+/// - `error`：是稳定类别
+/// - `text`：为本轮输入
+/// - `span`：为后端提供的字节范围。
+///
 /// 返回：可用位置附加到错误，缺失位置时保留原诊断。
 fn text_error(error: ConfigError, text: &str, span: Option<std::ops::Range<usize>>) -> ConfigError {
     let Some(span) = span else {

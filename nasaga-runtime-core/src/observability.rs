@@ -272,10 +272,15 @@ impl From<SagaStoreMetrics> for SagaOperationalMetrics {
 
 /// 业务作用：渲染带冻结流程版本和固定 quantile 的生命周期 gauge，保持标签集合低基数。
 ///
-/// 参数说明：`output` 是目标文本，`name` 是固定指标名，`workflow` 与 `version` 来自 definition，
-/// `quantile` 是固定分位，`micros` 是持久样本值。
+/// 参数说明：
+/// - `output`：接收指标文本的现有缓冲。
+/// - `name`：调用方指定的固定指标名。
+/// - `workflow`：来自冻结 definition 的工作流身份。
+/// - `version`：definition 的业务定义版本。
+/// - `quantile`：调用方提供的固定分位标签文本。
+/// - `micros`：持久样本微秒值，转为秒后输出。
 ///
-/// 返回：无返回值；格式写入内存字符串不会向调用方传播失败。
+/// 返回：无返回值；向已有文本追加秒单位样本，workflow 中反斜线与双引号被转义，不转义换行或验证指标名及 quantile，调用方须提供受控值。
 fn labeled_gauge(
     output: &mut String,
     name: &str,
@@ -311,16 +316,38 @@ pub(crate) fn record_action_rate_rejection() {
 }
 
 /// 业务作用：输出一个无 label 的 Prometheus counter。
+///
+/// 参数说明：
+/// - `output`：接收指标文本的现有缓冲。
+/// - `name`：受控的固定指标名。
+/// - `value`：调用方读取的累计计数值。
+///
+/// 返回：无返回值；追加 counter TYPE 声明与整数样本，不验证名称或读取原子计数。
 fn counter(output: &mut String, name: &str, value: u64) {
     let _ = writeln!(output, "# TYPE {name} counter\n{name} {value}");
 }
 
 /// 业务作用：输出一个无 label 的 Prometheus gauge。
+///
+/// 参数说明：
+/// - `output`：接收指标文本的现有缓冲。
+/// - `name`：受控的固定指标名。
+/// - `value`：调用方读取的当前状态值。
+///
+/// 返回：无返回值；追加 gauge TYPE 声明与整数样本，不验证名称或采集状态。
 fn gauge(output: &mut String, name: &str, value: u64) {
     let _ = writeln!(output, "# TYPE {name} gauge\n{name} {value}");
 }
 
 /// 业务作用：以 Prometheus summary 的 `_count`/`_sum` 形式输出累计耗时。
+///
+/// 参数说明：
+/// - `output`：接收指标文本的现有缓冲。
+/// - `name`：受控的固定指标名。
+/// - `count`：累计观测次数。
+/// - `micros_sum`：累计耗时微秒和，输出时转换为秒。
+///
+/// 返回：无返回值；追加 summary TYPE、count 与保留六位小数的秒数 sum，不输出 quantile 或验证 count 与 sum 一致。
 fn summary(output: &mut String, name: &str, count: u64, micros_sum: u64) {
     let seconds_sum = micros_sum as f64 / 1_000_000.0;
     let _ = writeln!(

@@ -17,18 +17,22 @@ pub struct PgSagaTransactionRunner {
 impl PgSagaTransactionRunner {
     /// 业务作用：创建绑定已校验 datasource 的 PostgreSQL Saga 事务执行器。
     ///
-    /// 参数说明：`datasource` 是 store、Inbox 与 Outbox 共享的 qualifier。
+    /// 参数说明：
+    /// - `datasource`：是 store、Inbox 与 Outbox 共享的 qualifier。
     ///
     /// 返回：不建连的轻量执行器；后续操作只在该 datasource 建立事务。
     fn new(datasource: natx_pgsql::DatasourceRef) -> Self {
-        Self { datasource }
+        Self {
+            datasource,
+        }
     }
 }
 
 impl SagaTransactionRunner for PgSagaTransactionRunner {
     /// 业务作用：执行 PostgreSQL Saga 原子链并保留提交、回滚与结果不确定分类。
     ///
-    /// 参数说明：`operation` 是必须与 Inbox claim、Saga 事实和 Outbox append 同事务的操作。
+    /// 参数说明：
+    /// - `operation`：是必须与 Inbox claim、Saga 事实和 Outbox append 同事务的操作。
     ///
     /// 返回：提交明确成功时返回业务值；业务拒绝保留原错误，其它阶段返回封闭分类。
     fn run<'a, T, E>(
@@ -117,7 +121,8 @@ impl PgSagaBackend {
 
     /// 业务作用：创建绑定命名 PostgreSQL datasource 的完整 Saga 后端并复验各角色同源。
     ///
-    /// 参数说明：`datasource` 是启动期登记的 PostgreSQL datasource 名称。
+    /// 参数说明：
+    /// - `datasource`：是启动期登记的 PostgreSQL datasource 名称。
     ///
     /// 返回：名称合法时返回同源组合；非法名称在数据库 I/O 前失败。
     pub fn with_datasource(datasource: impl AsRef<str>) -> anyhow::Result<Self> {
@@ -142,31 +147,55 @@ impl SagaBackend for PgSagaBackend {
     type TransactionRunner = PgSagaTransactionRunner;
 
     /// 业务作用：读取组合内的 PostgreSQL Saga store。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用已绑定的数据源 PostgreSQL Saga store，不新建连接或转移关闭权。
     fn store(&self) -> &Self::Store {
         &self.store
     }
 
     /// 业务作用：读取与 Saga store 同源的 PostgreSQL Inbox。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用组合内的 PostgreSQL Inbox，不执行去重或开启事务。
     fn inbox(&self) -> &Self::Inbox {
         &self.inbox
     }
 
     /// 业务作用：读取与 Saga store 同源的 PostgreSQL Outbox。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用组合内的 PostgreSQL Outbox，不写入或投递事件。
     fn outbox(&self) -> &Self::Outbox {
         &self.outbox
     }
 
     /// 业务作用：读取绑定相同 datasource 的 PostgreSQL 事务执行器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用组合内已绑定的事务执行器，本次读取不开始或提交事务。
     fn transaction_runner(&self) -> &Self::TransactionRunner {
         &self.transaction_runner
     }
 
     /// 业务作用：读取完整后端共享的 datasource qualifier。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用组合内共享的不可变 qualifier，不返回连接信息或取得数据库资源。
     fn datasource_ref(&self) -> &natx_pgsql::DatasourceRef {
         &self.datasource
     }
 
     /// 业务作用：声明完整后端固定使用 PostgreSQL driver。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回固定 PostgreSQL 驱动标识，不探测实际数据库连接。
     fn driver(&self) -> natx_pgsql::DatabaseDriver {
         natx_pgsql::DatabaseDriver::PostgreSql
     }
@@ -184,7 +213,8 @@ impl SagaBackendFactory for PgSagaBackend {
 
     /// 业务作用：为 PostgreSQL 运行入口构造命名 datasource 组合。
     ///
-    /// 参数说明：`datasource` 是 Saga、Inbox 与 Outbox 共享的 qualifier。
+    /// 参数说明：
+    /// - `datasource`：是 Saga、Inbox 与 Outbox 共享的 qualifier。
     ///
     /// 返回：名称合法时返回同源后端；否则在 I/O 前返回基础设施分类。
     fn backend_for(datasource: &str) -> Result<Self, SagaBackendError> {

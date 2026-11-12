@@ -53,7 +53,11 @@ struct WatchEntry {
 }
 
 impl WatchEntry {
-    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：为一个服务建立尚未初始化订阅的共享目录项。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 removed 为 false、订阅单元为空的 Arc；不调用发现后端或创建任务。
     fn new() -> Arc<Self> {
         Arc::new(Self {
             removed: AtomicBool::new(false),
@@ -62,10 +66,12 @@ impl WatchEntry {
     }
 }
 
-/// 业务作用：传输错误短期降级窗口是否仍在生效(`now < until`)。锁只在此瞬间持有,不跨 await。
+/// 业务作用：检查实例观察当前是否仍处于传输错误触发的短期降级窗口。
 ///
-/// # 参数
-/// - `state`: 实例索引当前持有的快照状态。
+/// 参数说明：
+/// - `state`：持有降级截止点的订阅状态。
+///
+/// 返回：存在截止点且当前单调时刻严格早于它时返回 true，否则 false；锁只短暂持有，锁中毒时 panic。
 fn transport_window_active(state: &WatchState) -> bool {
     state
         .transport_degraded_until
@@ -100,15 +106,22 @@ pub(crate) struct InstanceSource {
 
 impl InstanceSource {
     /// 业务作用：识别已经由公共 owner 管理有效期的观察源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：受管源要求每个 attempt 重新选址并复验发送许可。
     pub(crate) fn managed(&self) -> bool {
         self.discovery.requires_admission()
     }
 
-    /// 业务作用：在实例有效性保护范围内提交实际 HTTP 传输。
-    /// 参数说明：`service` 与 `instance` 是本次候选，`submit` 只能同步提交。
-    /// 返回：路由已撤销时直接报告发现失败，不记为业务实例传输故障。
+    /// 业务作用：委托发现后端在其候选资格边界内同步提交传输。
+    ///
+    /// 参数说明：
+    /// - `service`：本次选中的逻辑服务名。
+    /// - `instance`：需要由后端复验的目标实例。
+    /// - `submit`：仅同步启动传输、不阻塞或重入发现接口的回调。
+    ///
+    /// 返回：后端准入成功时返回成功，失败映射为带服务名的 DiscoveryFailed；本层不额外实现候选时效校验，旧后端可直接执行回调。
     pub(crate) fn submit(
         &self,
         service: &str,
@@ -123,7 +136,16 @@ impl InstanceSource {
             })
     }
 
-    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：组装服务实例观察目录、缓存策略和后台任务持有者。
+    ///
+    /// 参数说明：
+    /// - `discovery`：负责发现及订阅的共享后端。
+    /// - `watch`：服务容量、轮询、缓存及重建策略。
+    /// - `metrics`：记录观察及降级事件的共享指标。
+    /// - `no_instance`：决定发现失败时是否可使用非空旧快照的策略。
+    /// - `background`：统一管理准入、在途调用及观察任务关闭的持有者。
+    ///
+    /// 返回：返回空订阅目录和空 TTL 缓存；保存依赖，不校验选项或启动订阅。
     pub(crate) fn new(
         discovery: Arc<dyn DiscoveryClient>,
         watch: RestWatchOptions,
@@ -142,12 +164,15 @@ impl InstanceSource {
         }
     }
 
-    /// 业务作用：取某服务当前实例快照(可能为空 = 权威无实例;由 client 决定是否 `NoAvailableInstance`)。
+    /// 业务作用：按后端能力取得服务快照，并在本地订阅回收后重新建立观察。
     ///
-    /// 循环是为支持「churn 回收后复活」:若取到的 entry 已被 [`mark_removed`](Self::mark_removed) 标记,
-    /// 就换一个全新 entry 重来。init 完成后复查 `removed`,杜绝 init-in-flight 的 orphan task。
+    /// 参数说明：
+    /// - `service`：本次逻辑请求需要实例的服务名。
+    ///
+    /// 返回：受管准入后端直接发现；其它后端优先使用有效 watch，否则使用发现缓存。返回可为空的共享列表；关闭、容量或发现失败返回错误。初始化后复验 removed，发现已回收时终止刚生成的任务后重取目录项。
     pub(crate) async fn instances(&self, service: &str) -> Result<Arc<Vec<Instance>>> {
         let _call = self.background.enter()?;
+        // 受管后端自行持有时效与撤权证据，绕过本地 watch 缓存，避免旧快照延长路由资格。
         if self.discovery.requires_admission() {
             // 受管源已经合并观察并维护证据期限，不能再叠加 REST 缓存宽限。
             return self
@@ -218,12 +243,13 @@ impl InstanceSource {
         }
     }
 
-    /// 业务作用：把被标记 `removed` 的 entry 换成全新 entry —— 仅当 map 里【还是它】(Arc 身份 CAS),避免覆盖别人刚装的新 entry。
-    /// 旧 entry 的 task 在调用本函数前已被 abort(mark_removed 或 instances 的复查)。
+    /// 业务作用：仅在服务目录仍持有已观察的旧项时替换为待初始化的新项。
     ///
-    /// # 参数
-    /// - `service`: 服务名,用于服务发现或注册中心查询。
-    /// - `removed_entry`: 本轮刷新中被移除的实例条目。
+    /// 参数说明：
+    /// - `service`：需恢复观察的服务名。
+    /// - `removed_entry`：调用方观察到已被回收的旧目录项。
+    ///
+    /// 返回：指针仍匹配时替换，目录已变化或缺失时无操作，不覆盖其它调用已建立的新项。
     fn revive(&self, service: &str, removed_entry: &Arc<WatchEntry>) {
         if let dashmap::mapref::entry::Entry::Occupied(mut occ) =
             self.watch_states.entry(service.to_string())
@@ -234,13 +260,18 @@ impl InstanceSource {
         }
     }
 
-    /// 业务作用：启动一次 watch:成功则播种快照 + spawn 自带退避重建的 pump,返回 `WatchState`;失败返回 `Err`(不写 cell)。
+    /// 业务作用：在后台持有者的执行边界内建立订阅并接管其消费任务。
     ///
-    /// # 参数
-    /// - `service`: 服务名,用于服务发现或注册中心查询。
+    /// 参数说明：
+    /// - `service`：需建立实例变化订阅的服务名。
+    ///
+    /// 返回：成功返回初始共享快照及任务终止句柄；后端建立或任务接纳失败返回错误。订阅 guard 转入消费任务，不在此保证初始化期间服务尚未被回收。
     async fn try_start_watch(&self, service: &str) -> anyhow::Result<WatchState> {
         let opts = WatchOptions::new().with_poll_interval(self.watch.poll_interval);
-        let ServiceWatch { guard, receiver } = self
+        let ServiceWatch {
+            guard,
+            receiver,
+        } = self
             .background
             .run(async {
                 self.discovery
@@ -279,10 +310,12 @@ impl InstanceSource {
         })
     }
 
-    /// 业务作用：降级路径:discover + 短 TTL cache(+ stale-if-error)。
+    /// 业务作用：在 watch 退化时按 TTL 缓存发现结果，并按策略使用错误宽限。
     ///
-    /// # 参数
-    /// - `service`: 服务名,用于服务发现或注册中心查询。
+    /// 参数说明：
+    /// - `service`：要查询或复用缓存的逻辑服务。
+    ///
+    /// 返回：有效缓存直接返回；发现成功缓存完整列表，包括空列表。失败仅在策略允许且旧列表非空、宽限仍覆盖本次调用起始时刻时复用，否则返回错误。期限与比较采用发起前时刻，不承诺返回时仍处于该期限内。
     async fn discover_ttl(&self, service: &str) -> Result<Arc<Vec<Instance>>> {
         self.background.with_open(|| Ok(()))?;
         // 进入降级即记一次 watch_fallback(watch 不可用 / 中断)。
@@ -339,10 +372,12 @@ impl InstanceSource {
         }
     }
 
-    /// 业务作用：服务名超 grace 移出启发式索引时回收其 watch(,由 client 的 index 刷新循环驱动):
-    /// 标记 `removed` + abort 已 init 的 pump(其 `task` 被 cancel → `ServiceWatchGuard` 随之 drop,释放后端订阅);
-    /// **in-flight init**(cell 尚空)的 task 由该 init 完成后 [`instances`](Self::instances) 的 removed 复查自行 abort。
-    /// 同时清掉降级 TTL 缓存。**不删 map entry**(删了会和正在 init 的 get 抢、漏 task);被请求时 `instances()` 会复活。
+    /// 业务作用：标记服务观察已移除，终止已发布任务并清理发现缓存。
+    ///
+    /// 参数说明：
+    /// - `service`：索引已确认需要回收的服务规范名。
+    ///
+    /// 返回：已有项设置 removed，已初始化任务发送 abort，TTL 缓存移除；不直接删除目录项，使在途初始化仍能复验回收标记。
     pub(crate) fn mark_removed(&self, service: &str) {
         if let Some(entry) = self.watch_states.get(service) {
             entry.removed.store(true, Ordering::Release);
@@ -353,18 +388,23 @@ impl InstanceSource {
         self.ttl_cache.remove(service);
     }
 
-    /// 业务作用：二阶段安全 prune(墓碑回收):删除「已标记 `removed` **且非本轮刚标记**」的 entry —— 给一轮
-    /// refresh 的 grace,避开本轮刚 mark、可能正被显式调用复活的 entry。`retain` 在 shard 锁下与 `revive` 串行,
-    /// 配合 `instances()` 的「持 Arc 复查 removed 自 abort」杜绝 init-in-flight orphan(与「立即 remove」的老路不同)。
+    /// 业务作用：在回收目录时为本轮刚标记项保留一轮墓碑。
+    ///
+    /// 参数说明：
+    /// - `just_marked`：本轮刚标记、需要暂留回收证据的服务名集合。
+    ///
+    /// 返回：删除其它已标记项，保留未移除和集合内项；不执行网络或等待任务退出。
     pub(crate) fn prune_removed_except(&self, just_marked: &std::collections::HashSet<&str>) {
         self.watch_states
             .retain(|k, e| !e.removed.load(Ordering::Acquire) || just_marked.contains(k.as_str()));
     }
 
-    /// 业务作用：内部调用对该 service 发生【传输错误】(连接/超时)时调用(传输错误应触发该 service 快速刷新/恢复,
-    /// 而非等下一轮 poll)。开一个【短期降级窗口】(长度 = `ttl_fallback`):窗口内后续请求走 discover+TTL 拿新数据,
-    /// **过窗自动回 watch 快照热路径** —— 不动 pump 自己的 `degraded`,避免一次瞬时抖动把 service 永久降级。
-    /// 同时清 TTL 缓存避免继续用旧数据。空实例列表不是错误,不在此触发(由调用方过滤)。
+    /// 业务作用：为发生传输错误的服务开启临时发现路径并撤销 TTL 快照。
+    ///
+    /// 参数说明：
+    /// - `service`：本次连接或超时失败涉及的服务名。
+    ///
+    /// 返回：已有观察状态时设置长度为 ttl_fallback 的降级窗口，清除该服务缓存并记指标；不改变 pump 的 degraded 状态，窗口到期可回 watch。
     pub(crate) fn mark_transport_error(&self, service: &str) {
         if let Some(entry) = self.watch_states.get(service) {
             if let Some(state) = entry.cell.get() {
@@ -376,9 +416,13 @@ impl InstanceSource {
         self.metrics.transport_error_refresh();
     }
 
-    /// 业务作用：abort 所有 watch pump(`RemoteRuntime` drop / 运行时 reset 调用),避免后台任务泄漏。
-    /// 同时把每个 entry 标记 `removed`:让此刻正在 init(cell 尚空)的 get 完成后自 abort,收掉 init-in-flight 的 task。
+    /// 业务作用：关闭后台调用准入并标记全部服务观察为已回收。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：先关闭后台持有者，再标记目录并请求终止已初始化任务；在途初始化由调用方完成后的 removed 复验收口，不在此等待异步任务全部退出。
     pub(crate) fn abort_all(&self) {
+        // 先关闭准入，防止遍历回收目录时又有新调用登记尚未纳入清理的观察任务。
         self.background.close();
         for entry in self.watch_states.iter() {
             entry.value().removed.store(true, Ordering::Release);
@@ -389,21 +433,21 @@ impl InstanceSource {
     }
 }
 
-/// 业务作用：watch pump:消费一条订阅直到中断,然后按退避重建。期间持有 `ServiceWatchGuard`(只要求 Send)保订阅存活。
+/// 业务作用：持续接收服务订阅快照，在订阅中断后按有界退避重新建立。
 ///
-/// `degraded` 在「订阅中断、等待重建」时置 true,让 `instances()` 暂走 discover+TTL;重建成功置回 false。
+/// 参数说明：
+/// - `discovery`：用于重建订阅的共享发现后端。
+/// - `service`：固定的目标服务名。
+/// - `opts`：重建时复用的后端订阅选项。
+/// - `backoff_min`：重建最小退避，内部至少采用一毫秒。
+/// - `backoff_max`：重建最大退避，内部至少等于最小退避。
+/// - `snapshot`：向请求路径发布完整实例列表的共享快照。
+/// - `degraded`：控制请求路径是否改用发现缓存的状态标志。
+/// - `metrics`：记录订阅中断等事件的共享指标。
+/// - `init_guard`：首条已建立订阅的生命周期句柄。
+/// - `init_rx`：首条订阅的初值和后续最新快照接收端。
 ///
-/// # 参数
-/// - `discovery`: 服务发现客户端或运行时实例。
-/// - `service`: 服务名,用于服务发现或注册中心查询。
-/// - `opts`: 运行选项,用于控制客户端或调度器行为。
-/// - `backoff_min`: 实例刷新失败后的最小退避时间。
-/// - `backoff_max`: 实例刷新失败后的最大退避时间。
-/// - `snapshot`: presence 或服务实例快照。
-/// - `degraded`: 当前实例列表是否处于降级状态。
-/// - `metrics`: 实例刷新和路由过程记录的指标对象。
-/// - `init_guard`: 控制首次初始化只执行一次的保护标记。
-/// - `init_rx`: 等待首次实例加载完成的通知接收端。
+/// 返回：正常持续运行直到外部取消或异常展开；建立成功先发布初值再解除降级，断线或重建失败进入降级并退避。收到更新且连接已稳定后才重置退避，丢弃 guard 按后端合同取消订阅。
 #[allow(clippy::too_many_arguments)]
 async fn pump_loop(
     discovery: Arc<dyn DiscoveryClient>,
@@ -435,7 +479,10 @@ async fn pump_loop(
             // 首轮:用传入订阅(connect 已确认 watch 可用且已播种)。
             Some(sub) => sub,
             None => match discovery.watch_with_options(&service, opts.clone()).await {
-                Ok(ServiceWatch { guard, receiver }) => (guard, receiver),
+                Ok(ServiceWatch {
+                    guard,
+                    receiver,
+                }) => (guard, receiver),
                 Err(e) => {
                     tracing::warn!(service = %service, error = %e, "rest-discovery: watch 重建失败,退避后重试");
                     degraded.store(true, Ordering::Release);
@@ -447,6 +494,7 @@ async fn pump_loop(
         };
 
         // 订阅活跃:先刷一次当前值,清降级标志;guard 持有到本轮订阅结束。
+        // 初值必须先发布再开放 watch 热路径，避免请求读到上一条订阅遗留的快照。
         snapshot.store(Arc::new(rx.borrow_and_update().clone()));
         degraded.store(false, Ordering::Release);
         let _hold_guard = guard;

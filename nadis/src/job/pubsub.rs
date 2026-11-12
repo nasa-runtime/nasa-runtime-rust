@@ -20,22 +20,29 @@ pub(crate) enum FanoutSignal {
 
 /// 每个 Job source 独占的 RESP3 Pub/Sub lane；连接内不执行普通控制命令。
 pub(crate) struct JobPubSubLane {
+    /// 保持专用订阅连接存活，其退出不影响普通命令连接的所有权。
     _connection: Conn,
+    /// 当前订阅代次的有界 Push 队列及完整性标记。
     inbox: JobPushInbox,
+    /// 已确认的回执频道集合，用于区分回执唤醒与分片通知。
     receipt_channels: HashSet<String>,
 }
 
 /// RESP3 Push 的有界接收端；容量耗尽意味当前订阅代次已不再完整。
 struct JobPushInbox {
+    /// 唯一接收端，容量固定且发送端不会阻塞 Redis driver。
     receiver: tokio::sync::mpsc::Receiver<redis::PushInfo>,
+    /// 任一次入队失败后永久置位，要求废弃当前订阅代次。
     overflowed: Arc<AtomicBool>,
+    /// 入队失败时唤醒等待者，避免队列失效后继续等待消息。
     overflow_notify: Arc<tokio::sync::Notify>,
 }
 
 impl JobPushInbox {
     /// 业务作用：建立不阻塞 Redis driver 的有界 Push 通道，并把溢出显式转换为代次失效信号。
     ///
-    /// 参数说明：`capacity` 是启动期按固定订阅桶数计算的队列上限。
+    /// 参数说明：
+    /// - `capacity`：按固定订阅桶数计算的队列上限，零值按一条容量建立。
     ///
     /// 返回：Redis 连接使用的非阻塞 sender 与唯一 receiver；队列满或 receiver 关闭时唤醒监督器重建订阅。
     fn new(capacity: usize) -> (Arc<dyn redis::aio::AsyncPushSender>, Self) {
@@ -98,8 +105,12 @@ impl JobPushInbox {
 impl JobPubSubLane {
     /// 业务作用：在执行器声明 `fanoutReady` 前订阅全部固定桶频道，并等待每条订阅命令确认。
     ///
-    /// 参数说明：`client` 为 source 客户端，`keyspace` 为固定桶布局，`mode` 为 namespace 冻结模式，
-    /// `node_identity`/`executor_id` 分别定位通知与回执频道。
+    /// 参数说明：
+    /// - `client`：当前 source 客户端，提供专用连接与订阅确认超时。
+    /// - `keyspace`：已冻结的固定桶布局，决定必须确认的全部频道。
+    /// - `mode`：命名空间冻结的广播或分片订阅模式。
+    /// - `node_identity`：接收分片通知的稳定节点身份。
+    /// - `executor_id`：接收回执唤醒的本次启动执行器身份。
     ///
     /// 返回：全部频道确认后返回可拉取信号的 lane；任一 RESP3/ACL/命令失败时拒绝 source 启动。
     pub(crate) async fn start(
@@ -136,11 +147,12 @@ impl JobPubSubLane {
         })
     }
 
-    /// 业务作用：等待下一条业务信号，忽略订阅确认 Push，并在连接断开时立即撤销 source 准入。
+    /// 业务作用：区分回执与通知信号，忽略非消息 Push，并将断线和通道失效报告给 source 监督器。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：通知或回执携带原始信封；断线、通道关闭或畸形 Push 返回错误，不把非权威消息当成功。
+    /// 返回：消息字段数和频道 UTF-8 校验通过后返回原始信封，内容仍由消费者验证；
+    /// 断线、通道失效或结构错误返回错误，当前函数不直接改变 source 准入。
     pub(crate) async fn next_signal(&mut self) -> Result<FanoutSignal> {
         loop {
             let push = self.inbox.recv().await?;
@@ -183,9 +195,14 @@ impl JobPubSubLane {
 
 /// 业务作用：按 namespace 冻结模式发出单频道订阅并等待 Redis ACK，Cluster 不跨 slot 合并频道。
 ///
-/// 参数说明：`connection` 为 RESP3 lane，`mode` 选择 SUBSCRIBE 或 SSUBSCRIBE，`channel` 为单个固定桶频道。
+/// 参数说明：
+/// - `connection`：只承载订阅的专用 RESP3 连接。
+/// - `inbox`：当前订阅代次的 Push 接收端，提供确认与失效事件。
+/// - `mode`：选择 SUBSCRIBE 或 SSUBSCRIBE 的冻结模式。
+/// - `channel`：本次必须取得确认的单个固定桶频道。
+/// - `timeout_ms`：命令返回后的确认等待上限；零值使用三十秒。
 ///
-/// 返回：Redis 接受订阅时成功；命令、ACL 或协议不支持时返回错误。
+/// 返回：收到对应模式与频道的确认后成功；命令失败、连接断开、通道失效或确认超时返回错误。
 async fn subscribe(
     connection: &mut Conn,
     inbox: &mut JobPushInbox,
@@ -242,9 +259,10 @@ async fn subscribe(
 
 /// 业务作用：把 RESP3 Push 字段转换为原始字节，不对业务信封执行有损文本转换。
 ///
-/// 参数说明：`value` 为 Push 中的 channel 或 payload 字段。
+/// 参数说明：
+/// - `value`：Push 中的频道或信封字段，字符串表示才具有原始字节语义。
 ///
-/// 返回：字符串或 bulk 字节原样返回；其它类型返回空字节并由上层合同校验拒绝。
+/// 返回：复制字符串或 bulk 的原始字节；其它类型返回空字节，调用方仍须验证频道匹配及业务信封。
 fn value_bytes(value: &redis::Value) -> Vec<u8> {
     match value {
         redis::Value::BulkString(bytes) => bytes.clone(),

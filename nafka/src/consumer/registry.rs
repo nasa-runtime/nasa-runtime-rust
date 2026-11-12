@@ -24,6 +24,10 @@ struct ActivationLease {
 
 impl ActivationLease {
     /// 业务作用：放弃释放：owner 线程去向不明时，宁可永久占住该 client 也不放行第二个运行时。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：租约不再通过 Drop 释放，进程激活表保留该 client；已转交或已放弃的租约再次调用无效果。
     fn leak_on_uncertain_stop(&mut self) {
         std::mem::forget(self.client.take());
     }
@@ -34,11 +38,13 @@ impl ActivationLease {
 /// 直接丢弃 `stop_until` 的结果会让租约随 `Drop` 释放，而线程可能仍然存活——
 /// 此时第二个同名 client 就能并发启动，违反「同 client 单激活」。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `started`: 已经 spawn 的 owner 句柄。
 /// - `deadline`: 回滚总截止时刻。
 /// - `lease`: 本次启动持有的激活租约。
+///
+/// 返回：等待全部停止尝试结束；任一失败则永久保留静态激活占位并记录错误，全部成功时保留租约供调用方退出时释放。
 async fn rollback_started(
     started: &std::collections::BTreeMap<String, Arc<GroupHandle>>,
     deadline: std::time::Instant,
@@ -59,14 +65,17 @@ async fn rollback_started(
 impl ActivationLease {
     /// 业务作用：原子占用指定 client 的激活租约。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `client`: 静态收集项绑定的客户端实例名。
     ///
     /// # 错误
     ///
     /// 该 client 已被另一个存活运行时占用时返回注册错误。
+    ///
+    /// 返回：首次占位成功时返回可自动归还的进程内租约，重复占位返回 Registry；不向 Kafka 或注册中心申请分布式租约。
     fn acquire(client: &str) -> Result<Self> {
+        // 检查与插入使用同一锁，避免并发启动都观察到空闲后分别开放同名静态消费者。
         let inserted = ACTIVATED_CLIENTS
             .get_or_init(|| Mutex::new(BTreeSet::new()))
             .lock()
@@ -84,6 +93,10 @@ impl ActivationLease {
     }
 
     /// 业务作用：启动成功后把租约交给运行时，由 shutdown 负责释放。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：转交仍被占用的 client 名，使当前守卫析构不再归还；没有可转交的租约时因违反内部生命周期约束而 panic。
     fn into_owner(mut self) -> String {
         self.client.take().expect("租约只能转交一次")
     }
@@ -91,6 +104,10 @@ impl ActivationLease {
 
 impl Drop for ActivationLease {
     /// 业务作用：启动未走到成功分支时归还租约，避免失败的一次 start 永久占住 client 名。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仍由本守卫持有的激活占位被释放；已转交运行时或因退出不确定而放弃释放时保持现有占位。
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
             release_activation(&client);
@@ -100,13 +117,14 @@ impl Drop for ActivationLease {
 
 /// 业务作用：释放一个静态收集激活租约。
 ///
-/// 由 `KafkaProxy::shutdown` 在所有 owner 线程退出、运行时进入 Stopped 后调用
-///。不释放会让同一进程再也无法用相同 collected client
-/// 重建运行时，热重载与 restart 型运维流程都会被永久拒绝。
+/// 正常关闭须在全部 owner 退出后调用；启动回滚也可由仍持有租约的守卫调用。
+/// 退出结果不确定时不能释放，否则同名消费者可能被重复激活。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `client`: 启动时占用的客户端实例名。
+///
+/// 返回：从进程激活集合移除目标，未初始化或目标缺席时无副作用；本函数不验证线程是否退出，调用方必须持有释放权。
 pub(crate) fn release_activation(client: &str) {
     if let Some(activated) = ACTIVATED_CLIENTS.get() {
         activated
@@ -162,9 +180,11 @@ pub struct ConsumerRegistryBuilder {
 impl ConsumerRegistryBuilder {
     /// 业务作用：创建空注册 builder。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `proxy`: 所属运行时。
+    ///
+    /// 返回：绑定现有源的空注册器；不激活静态消费者、不创建 owner，后续 start 至少需要一个已登记消费者。
     pub(crate) fn new(proxy: KafkaProxy) -> Self {
         Self {
             proxy,
@@ -175,7 +195,10 @@ impl ConsumerRegistryBuilder {
     }
 
     /// 业务作用：登记有状态单条消费者并冻结其路由声明。
-    /// 参数说明：consumer 为已完成业务依赖注入的实例。
+    ///
+    /// 参数说明：
+    /// - `consumer`：consumer 为已完成业务依赖注入的实例。
+    ///
     /// 返回：持有冻结路由的注册器；组身份不满足共同边界时为 Config，其它元数据非法或 handler id 重复时为 Registry。
     pub fn register<C: SingleConsumer>(mut self, consumer: C) -> Result<Self> {
         let erased = erase_single(consumer)?;
@@ -184,7 +207,10 @@ impl ConsumerRegistryBuilder {
     }
 
     /// 业务作用：登记有状态批消费者并冻结其路由声明。
-    /// 参数说明：consumer 为已完成业务依赖注入的实例。
+    ///
+    /// 参数说明：
+    /// - `consumer`：consumer 为已完成业务依赖注入的实例。
+    ///
     /// 返回：持有冻结路由的注册器；组身份不满足共同边界时为 Config，其它元数据非法、按键批模式或 handler id 重复时为 Registry。
     pub fn register_batch<C: BatchConsumer>(mut self, consumer: C) -> Result<Self> {
         let erased = erase_batch(consumer)?;
@@ -193,7 +219,10 @@ impl ConsumerRegistryBuilder {
     }
 
     /// 业务作用：登记在 poll 栈内同步借用原文的少拷贝消费者。
-    /// 参数说明：consumer 为已完成本地路由和 outbox 注入的同步 handler。
+    ///
+    /// 参数说明：
+    /// - `consumer`：consumer 为已完成本地路由和 outbox 注入的同步 handler。
+    ///
     /// 返回：持有冻结路由的注册器；组身份不满足共同边界时为 Config，其它元数据非法或 handler id 重复时为 Registry。
     pub fn register_passthrough<C: PassthroughConsumer>(mut self, consumer: C) -> Result<Self> {
         let meta = passthrough_meta(&consumer)?;
@@ -205,7 +234,11 @@ impl ConsumerRegistryBuilder {
         Ok(self)
     }
 
-    /// 业务作用：激活与当前配置 `client_name` 匹配的静态属性宏消费者。
+    /// 业务作用：收集并构造与当前配置 client_name 匹配的静态属性宏消费者，交由后续启动统一激活。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：包含匹配消费者的注册器；重复收集或构造、身份冲突返回错误，此时尚未取得进程激活租约或开始消费。
     ///
     /// # 错误
     ///
@@ -215,15 +248,17 @@ impl ConsumerRegistryBuilder {
         self.with_collected_for(&client)
     }
 
-    /// 业务作用：激活与指定客户端名匹配的静态属性宏消费者。
+    /// 业务作用：按指定客户端名精确收集静态消费者，并冻结为待启动声明。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `client`: 属性宏声明的客户端实例名。
     ///
     /// # 错误
     ///
     /// 重复调用、client 为空、静态构造失败或 handler id 重复时返回注册错误。
+    ///
+    /// 返回：构造并登记全部匹配项的注册器；无匹配也保存目标名，实际激活占位在 start 取得，任一构造失败则不启动消费。
     pub fn with_collected_for(mut self, client: &str) -> Result<Self> {
         if self.collected_client.is_some() {
             return Err(NafkaError::Registry("静态 consumer 已经激活".into()));
@@ -267,6 +302,10 @@ impl ConsumerRegistryBuilder {
     ///
     /// 成功仅表示本地 consumer 已构造并通过 startup gate，不表示 broker join 或 assignment 就绪。
     ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：组与激活租约登记完成、消费门开放后的生命周期句柄；失败关闭启动门并等待已创建 owner 退出，退出不确定时保留激活占位。
+    ///
     /// # 错误
     ///
     /// route 冲突、group 无法解析、静态 client 已被另一运行时激活或 owner 构造失败时返回错误。
@@ -307,7 +346,9 @@ impl ConsumerRegistryBuilder {
             }
             let plan = plans.entry(group.clone()).or_insert_with(|| GroupPlan {
                 group,
-                mode: OwnerMode::Subscribe { topics: Vec::new() },
+                mode: OwnerMode::Subscribe {
+                    topics: Vec::new(),
+                },
                 typed: Vec::new(),
                 passthrough: Vec::new(),
             });
@@ -327,7 +368,9 @@ impl ConsumerRegistryBuilder {
             }
             let plan = plans.entry(group.clone()).or_insert_with(|| GroupPlan {
                 group,
-                mode: OwnerMode::Subscribe { topics: Vec::new() },
+                mode: OwnerMode::Subscribe {
+                    topics: Vec::new(),
+                },
                 typed: Vec::new(),
                 passthrough: Vec::new(),
             });
@@ -339,7 +382,10 @@ impl ConsumerRegistryBuilder {
         }
         for plan in plans.values_mut() {
             ensure_group_route_kind(plan)?;
-            if let OwnerMode::Subscribe { topics } = &mut plan.mode {
+            if let OwnerMode::Subscribe {
+                topics,
+            } = &mut plan.mode
+            {
                 topics.sort();
                 topics.dedup();
             }
@@ -411,6 +457,7 @@ impl ConsumerRegistryBuilder {
             },
         ))
         .await;
+        // 全部本地构造均成功才允许发布组表，单个失败时先封闭共同启动门再等待资源收口。
         if let Some(error) = startup_results.into_iter().find_map(Result::err) {
             startup_gate.abort();
             let deadline = std::time::Instant::now()
@@ -464,6 +511,7 @@ impl ConsumerRegistryBuilder {
                 }
             }
         };
+        // 登记未成功不能保留可消费的后台 owner，回滚也必须保住静态 client 的唯一激活权。
         if let Err(error) = commit_result {
             startup_gate.abort();
             let deadline = std::time::Instant::now()
@@ -484,28 +532,32 @@ impl ConsumerRegistryBuilder {
 
     /// 业务作用：加入一个擦除类型化消费者并检查 id 唯一性。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `consumer`: 已冻结元数据的擦除消费者。
     ///
     /// # 错误
     ///
     /// handler id 已注册时返回错误。
+    ///
+    /// 返回：身份在当前注册器内唯一时追加消费者；冲突返回 Registry 且列表不变，此时不做最终组与路由冲突裁决。
     fn push_typed(&mut self, consumer: Arc<dyn ErasedConsumer>) -> Result<()> {
         self.ensure_unique_id(consumer.meta().id)?;
         self.typed.push(consumer);
         Ok(())
     }
 
-    /// 业务作用：检查 typed 与 passthrough 两类 handler id 的全局唯一性。
+    /// 业务作用：检查当前注册器内 typed 与 passthrough 两类 handler id 的共同唯一性。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `candidate`: 待加入 id。
     ///
     /// # 错误
     ///
     /// id 已存在时返回注册错误。
+    ///
+    /// 返回：两类已登记消费者中均无精确同名 id 时成功；重复时返回 Registry，不占用名字或检查其它运行时。
     fn ensure_unique_id(&self, candidate: &str) -> Result<()> {
         let exists = self.typed.iter().any(|item| item.meta().id == candidate)
             || self
@@ -523,8 +575,12 @@ impl ConsumerRegistryBuilder {
 }
 
 /// 业务作用：在开放消费前拒绝同组混合消息所有权模型或执行顺序域。
-/// 参数说明：plan 为已合并全部路由的组计划。
+///
+/// 参数说明：
+/// - `plan`：plan 为已合并全部路由的组计划。
+///
 /// 返回：全部路由所有权和顺序域一致时成功，否则返回 Registry。
+///
 /// typed 路由将记录物化后交给业务执行资源，passthrough 只能在 poll 栈内借用；混用无法维持同组的既定交付责任。
 fn ensure_group_route_kind(plan: &GroupPlan) -> Result<()> {
     // 顺序域属于整个分区，不能让不同事件在同一个 key 上绕过彼此的串行约束。
@@ -551,7 +607,12 @@ fn ensure_group_route_kind(plan: &GroupPlan) -> Result<()> {
 }
 
 /// 业务作用：将默认、命名或广播声明解析为实际消费与提交使用的组身份。
-/// 参数说明：config 为冻结源配置；spec 为路由的组规则；instance 为进程广播实例身份。
+///
+/// 参数说明：
+/// - `config`：config 为冻结源配置。
+/// - `spec`：spec 为路由的组规则。
+/// - `instance`：instance 为进程广播实例身份。
+///
 /// 返回：通过共同边界校验的原文组名；默认组缺失或最终身份非法时为 Config，旧广播声明非法时为 Registry。
 fn resolve_group(
     config: &crate::config::KafkaConfig,
@@ -563,7 +624,10 @@ fn resolve_group(
             NafkaError::Config("GroupSpec::Default 无法解析: config.group_id 未配置".into())
         })?,
         GroupSpec::Named(group) => group.clone(),
-        GroupSpec::StableBroadcast { scope, instance_id } => crate::broadcast_group(
+        GroupSpec::StableBroadcast {
+            scope,
+            instance_id,
+        } => crate::broadcast_group(
             scope,
             &instance_id
                 .clone()
@@ -597,9 +661,11 @@ fn resolve_group(
 
 /// 业务作用：生成或读取本进程广播实例标识。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `config`: 冻结顶层配置。
+///
+/// 返回：依配置、环境变量、进程临时身份优先级取得原文后，仅保留字母数字及 ._-，其它字符替换为 - 并截取 96 字符；不保证跨进程唯一。
 fn broadcast_instance(config: &crate::config::KafkaConfig) -> String {
     broadcast_identity_instance(config)
         .chars()
@@ -615,7 +681,10 @@ fn broadcast_instance(config: &crate::config::KafkaConfig) -> String {
 }
 
 /// 业务作用：取得未经净化的广播实例声明，供共同编码保留完整身份。
-/// 参数说明：config 为冻结配置，配置优先于环境变量，缺省使用本进程临时身份。
+///
+/// 参数说明：
+/// - `config`：config 为冻结配置。
+///
 /// 返回：精确身份原文；最终身份是否合法由所选组算法在建组前验证。
 fn broadcast_identity_instance(config: &crate::config::KafkaConfig) -> String {
     static PROCESS_INSTANCE: OnceLock<String> = OnceLock::new();
@@ -638,9 +707,11 @@ fn broadcast_identity_instance(config: &crate::config::KafkaConfig) -> String {
 
 /// 业务作用：固定 FNV-1a 64 位哈希，保证广播 group 派生在协议演进期间可复现。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `bytes`: 原始 scope 字节。
+///
+/// 返回：按固定初值及 wrapping 乘法计算的 64 位标识，用于区分净化后的广播作用域；不提供密码学抗碰撞或认证能力。
 fn stable_hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
@@ -649,20 +720,26 @@ fn stable_hash(bytes: &[u8]) -> u64 {
 
 /// 业务作用：向 subscribe plan 合并 topic。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `mode`: 仅允许 subscribe 模式。
 /// - `topics`: route topic 列表。
+///
+/// 返回：追加 topic 副本到订阅计划，排序去重由后续启动步骤统一完成；固定分配模式违反内部前置条件并 panic。
 fn add_topics(mode: &mut OwnerMode, topics: &[String]) {
     match mode {
-        OwnerMode::Subscribe { topics: all } => all.extend_from_slice(topics),
-        OwnerMode::Assign { .. } => unreachable!("registry start 只构造 subscribe plan"),
+        OwnerMode::Subscribe {
+            topics: all,
+        } => all.extend_from_slice(topics),
+        OwnerMode::Assign {
+            ..
+        } => unreachable!("registry start 只构造 subscribe plan"),
     }
 }
 
 /// 业务作用：按统一 client 标签发布注册表规模，供启动登记与停机归零使用。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `inner`: 指标出口。
 /// - `routes`: `(group, topic, event)` 三元组数量。
@@ -689,6 +766,15 @@ pub(crate) fn publish_registry_gauges(
 }
 
 /// 业务作用：将 `(group, topic, event)` 写入全局路由集合，并对重复注册返回可定位的稳定错误。
+///
+/// 参数说明：
+/// - `routes`：本次启动各消费者共用的路由身份集合，不跨运行时共享。
+/// - `group`：解析完成的消费组身份。
+/// - `topic`：该路由订阅的精确 topic 名。
+/// - `event`：用于匹配记录的精确事件名。
+/// - `id`：当前 handler 标识，仅用于重复路由诊断。
+///
+/// 返回：首次出现的三元组加入集合并成功；重复返回 Registry，已有集合内容不变，不开放业务路由。
 fn ensure_route_unique(
     routes: &mut BTreeSet<(String, String, String)>,
     group: &str,
@@ -719,12 +805,12 @@ pub struct ConsumerRuntime {
 }
 
 impl std::fmt::Debug for ConsumerRuntime {
-    /// 业务作用：输出已启动 group 与所属运行时状态；不含配置凭据。
+    /// 业务作用：输出该句柄冻结的组列表及所属客户端名，不展开连接配置。
     ///
-    /// `start()` 返回 `Result<ConsumerRuntime>`，缺少 `Debug` 会让调用方无法使用
-    /// `unwrap_err` / `expect_err` 之类的标准写法。
+    /// 参数说明：
+    /// - `f`：接收运行句柄身份摘要的格式化目标。
     ///
-    /// - `f`: 调用方提供的格式化缓冲区。
+    /// 返回：写入身份摘要或传递格式化错误；不查询实时健康或表示这些组当前仍在线。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConsumerRuntime")
             .field("groups", &self.groups)
@@ -736,10 +822,12 @@ impl std::fmt::Debug for ConsumerRuntime {
 impl ConsumerRuntime {
     /// 业务作用：由启动器构造生命周期句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `proxy`: 所属运行时。
     /// - `groups`: 已启动 resolved group 列表。
+    ///
+    /// 返回：共享源与冻结组列表的句柄；构造本身不启动或校验 owner，也不对输入组名排序。
     #[allow(dead_code)]
     pub(crate) fn new(proxy: KafkaProxy, groups: Vec<String>) -> Self {
         Self {
@@ -749,11 +837,19 @@ impl ConsumerRuntime {
     }
 
     /// 业务作用：返回稳定排序的 resolved group 列表。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：启动时冻结的组名切片，不随后续 stop_group 或 assign 更新，实时状态须通过所属源查询。
     pub fn groups(&self) -> &[String] {
         &self.groups
     }
 
     /// 业务作用：返回所属运行时句柄。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前消费者集合所属 KafkaProxy 的借用，供统一控制与关闭；不创建新源或改变任何组生命周期。
     pub fn kafka(&self) -> &KafkaProxy {
         &self.proxy
     }
@@ -761,13 +857,14 @@ impl ConsumerRuntime {
 
 /// 业务作用：读取并校验 passthrough 消费者元数据。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `consumer`: 待读取一次元数据的同步借用 handler。
 ///
 /// # 错误
 ///
 /// id、event、topic 为空或 topic 重复时返回注册错误。
+///
 /// 返回：满足共同事件与命名组合同且 topic 不重复的元数据；组非法为 Config，其它元数据非法为 Registry，拒绝时不登记消费路由。
 fn passthrough_meta<C: PassthroughConsumer>(consumer: &C) -> Result<PassthroughMeta> {
     // 借用式入口也先冻结并验证命名组，不能比 typed 注册更晚接纳无效消费责任。
@@ -807,13 +904,11 @@ fn passthrough_meta<C: PassthroughConsumer>(consumer: &C) -> Result<PassthroughM
 
 /// 业务作用：返回类型化注册项的稳定 route 描述，供注册冲突校验复用。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `meta`: 冻结消费者元数据。
 ///
-/// # 返回
-///
-/// 每个 topic 对应的 `(topic,event)` 列表。
+/// 返回：每个 topic 对应的 `(topic,event)` 列表。
 #[allow(dead_code)]
 pub(crate) fn typed_routes(meta: &ConsumerMeta) -> Vec<(&str, &str)> {
     meta.topics

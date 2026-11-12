@@ -24,10 +24,12 @@ use sha2::Sha256;
 
 // ---------- 密钥解析(Base64 DER) ----------
 
-/// 业务作用: 把 Base64 SPKI 公钥解析为 RSA 公钥对象，统一收敛配置错误。
+/// 业务作用：从标准 Base64 SPKI DER 解析 RSA 公钥。
 ///
-/// # 参数
-/// - `b64`: PEM 或密钥材料的 Base64 内容。
+/// 参数说明：
+/// - `b64`：不含 PEM 包装的 Base64 DER 文本。
+///
+/// 返回：成功返回公钥对象，Base64 或 DER 无效返回配置错误，不执行验签或独立的强度下限校验。
 fn parse_public(b64: &str) -> Result<RsaPublicKey> {
     let der = STANDARD
         .decode(b64)
@@ -36,10 +38,12 @@ fn parse_public(b64: &str) -> Result<RsaPublicKey> {
         .map_err(|e| CryptoError::config(format!("RSA 公钥 SPKI 解析失败: {e}")))
 }
 
-/// 业务作用: 把 Base64 PKCS#8 私钥解析为 RSA 私钥对象，统一收敛配置错误。
+/// 业务作用：从标准 Base64 PKCS8 DER 解析 RSA 私钥。
 ///
-/// # 参数
-/// - `b64`: PEM 或密钥材料的 Base64 内容。
+/// 参数说明：
+/// - `b64`：不含 PEM 包装的 Base64 DER 文本。
+///
+/// 返回：成功返回私钥对象，Base64 或 DER 无效返回配置错误，不执行私钥运算。
 fn parse_private(b64: &str) -> Result<RsaPrivateKey> {
     let der = STANDARD
         .decode(b64)
@@ -48,18 +52,12 @@ fn parse_private(b64: &str) -> Result<RsaPrivateKey> {
         .map_err(|e| CryptoError::config(format!("RSA 私钥 PKCS8 解析失败: {e}")))
 }
 
-/// 业务作用: 校验既有系统注入的 Base64 PKCS#8 RSA 私钥，并返回模数位数。
+/// 业务作用：检查既有 RSA 私钥编码和兼容入口允许的模数下限。
 ///
-/// 该入口只做启动期结构与最低强度检查，不执行私钥运算，也不返回或记录密钥材料。新生成密钥仍应
-/// 使用至少 2048 位；1024 位只为已经存在的 legacy Web 协议迁移期互通保留。
+/// 参数说明：
+/// - `private_key_b64`：标准 Base64 编码的 PKCS8 RSA 私钥 DER。
 ///
-/// # 参数
-///
-/// - `private_key_b64`: Base64 编码的 PKCS#8 RSA 私钥 DER。
-///
-/// # 返回
-///
-/// 合法且模数不少于 1024 位时返回实际位数，否则返回不含密钥内容的配置错误。
+/// 返回：解析成功且模数至少 1024 位时返回实际位数，否则返回配置错误；不执行解密，不意味着允许生成同等长度的新密钥。
 pub fn validate_rsa_private_key(private_key_b64: &str) -> Result<usize> {
     let key = parse_private(private_key_b64)?;
     let bits = key.n().bits();
@@ -70,9 +68,10 @@ pub fn validate_rsa_private_key(private_key_b64: &str) -> Result<usize> {
 }
 
 /// 业务作用：按 RSA 单块容量切分输入，空输入仍保留一个空块参与 padding。
+///
 /// 返回：顺序不变的字节切片集合；非空输入按 block 容量分段。
 ///
-/// # 参数
+/// 参数说明：
 /// - `data`: 待加密或待解密的原始字节。
 /// - `block`: 每个 RSA 分块允许处理的最大字节数。
 fn blocks_of(data: &[u8], block: usize) -> Vec<&[u8]> {
@@ -83,11 +82,13 @@ fn blocks_of(data: &[u8], block: usize) -> Vec<&[u8]> {
     }
 }
 
-/// 业务作用: 左补零到 `len` 字节(BigUint 的 big-endian 可能短于模数字节数)。
+/// 业务作用：把模幂结果左补零到所需模数宽度。
 ///
-/// # 参数
-/// - `bytes`: 原始字节切片。
-/// - `len`: RSA 模数字节数,也是补齐后的目标长度。
+/// 参数说明：
+/// - `bytes`：大端无符号整数的当前字节表示。
+/// - `len`：期望的最小字节宽度。
+///
+/// 返回：短于目标时返回左补零字节，否则原样返回；不截断超长输入。
 fn left_pad(mut bytes: Vec<u8>, len: usize) -> Vec<u8> {
     if bytes.len() < len {
         let mut p = vec![0u8; len - bytes.len()];
@@ -100,11 +101,13 @@ fn left_pad(mut bytes: Vec<u8>, len: usize) -> Vec<u8> {
 
 // ==================== 标准方向:公钥加密 / 私钥解密(PKCS1 v1.5 type-2,rsa 高层) ====================
 
-/// 业务作用: RSA 公钥加密(字符串输入,Base64 输出,自动分段)。
+/// 业务作用：用 RSA 公钥按 PKCS1 v1.5 type-2 分块加密 UTF-8 内容。
 ///
-/// # 参数
-/// - `content`: 要加密的 UTF-8 明文;长文本会按 RSA 明文块大小自动分段。
-/// - `public_key_b64`: Base64 编码的 X.509/SPKI RSA 公钥 DER。
+/// 参数说明：
+/// - `content`：按模数字节数减十一自动分块的原始 UTF-8 内容。
+/// - `public_key_b64`：标准 Base64 编码的 SPKI RSA 公钥 DER。
+///
+/// 返回：成功返回拼接密文块的标准 Base64；解析、模数预算或加密失败返回错误。空内容产生空密文，不附带分块身份或 AEAD 标签。
 pub fn encrypt_rsa_public(content: &str, public_key_b64: &str) -> Result<String> {
     let key = parse_public(public_key_b64)?;
     let k = key.size();
@@ -122,12 +125,13 @@ pub fn encrypt_rsa_public(content: &str, public_key_b64: &str) -> Result<String>
     Ok(b64_encode(&out))
 }
 
-/// 业务作用: RSA 私钥解密(Base64 密文输入,UTF-8 输出,自动分段)。
-/// ⚠ PKCS1v1.5 解密受 RUSTSEC-2023-0071(Marvin)影响,见模块文档。
+/// 业务作用：在显式启用兼容能力时用 RSA 私钥解开 type-2 分块密文。
 ///
-/// # 参数
-/// - `cipher_b64`: Base64 编码的 RSA 密文;解码后长度必须是 RSA 模数字节数的整数倍。
-/// - `private_key_b64`: Base64 编码的 PKCS8 RSA 私钥 DER。
+/// 参数说明：
+/// - `cipher_b64`：非空且解码长度为模数宽度整数倍的 Base64 密文。
+/// - `private_key_b64`：标准 Base64 编码的 PKCS8 RSA 私钥 DER。
+///
+/// 返回：成功返回拼接明文的 UTF-8 文本；解析、长度、填充、解密或 UTF-8 失败返回错误。此入口受 legacy-rsa-private 特性控制。
 #[cfg(feature = "legacy-rsa-private")]
 pub fn decrypt_rsa_private(cipher_b64: &str, private_key_b64: &str) -> Result<String> {
     let key = parse_private(private_key_b64)?;
@@ -146,11 +150,13 @@ pub fn decrypt_rsa_private(cipher_b64: &str, private_key_b64: &str) -> Result<St
     String::from_utf8(out).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
 }
 
-/// 业务作用: 默认构建拒绝 PKCS1 v1.5 私钥解密；受控迁移必须显式开启 `legacy-rsa-private`。
+/// 业务作用：在未启用兼容私钥能力时拒绝旧分块解密入口。
 ///
-/// # 参数
-/// - `cipher_b64`: Base64 编码的历史 RSA 密文。
-/// - `private_key_b64`: Base64 编码的 PKCS8 RSA 私钥 DER。
+/// 参数说明：
+/// - `_cipher_b64`：未被处理的旧密文。
+/// - `_private_key_b64`：未被解析的私钥文本。
+///
+/// 返回：始终返回要求启用 legacy-rsa-private 的配置错误，不执行任何密钥运算。
 #[cfg(not(feature = "legacy-rsa-private"))]
 pub fn decrypt_rsa_private(_cipher_b64: &str, _private_key_b64: &str) -> Result<String> {
     Err(CryptoError::config(
@@ -160,12 +166,14 @@ pub fn decrypt_rsa_private(_cipher_b64: &str, _private_key_b64: &str) -> Result<
 
 // ==================== ★ 私钥加密 / 公钥解密(PKCS1 type-1,低层 raw RSA) ====================
 
-/// 业务作用: 单块 PKCS1 type-1 私钥加密:`c = (00 01 FF.. 00 ‖ data)^d mod n`,输出 k 字节。
+/// 业务作用：构造 type-1 填充并执行单块 RSA 私钥指数运算。
 ///
-/// # 参数
-/// - `key`: 执行私钥指数运算的 RSA 私钥。
-/// - `data`: 单个明文分块,长度必须不超过 `k - 11`。
-/// - `k`: RSA 模数字节数。
+/// 参数说明：
+/// - `key`：提供私钥指数及模数的 RSA 密钥。
+/// - `data`：不超过模数宽度减十一的单块内容。
+/// - `k`：调用方已校验且与模数相同的字节宽度。
+///
+/// 返回：成功返回左补齐至模数宽度的运算结果，数据过长返回加密错误；此运算可被公钥恢复，不提供机密性。
 #[cfg(feature = "legacy-rsa-private")]
 fn private_encrypt_block(key: &RsaPrivateKey, data: &[u8], k: usize) -> Result<Vec<u8>> {
     // type-1 padding: 至少 8 个 0xFF,故 data.len() <= k-11
@@ -181,18 +189,20 @@ fn private_encrypt_block(key: &RsaPrivateKey, data: &[u8], k: usize) -> Result<V
     }
     em[ps_end] = 0x00;
     em[ps_end + 1..].copy_from_slice(data);
-    // c = em^d mod n
+    // 用私钥指数对填充后的整数执行模幂，并按模数宽度编码结果。
     let m = BigUint::from_bytes_be(&em);
     let c = m.modpow(key.d(), key.n());
     Ok(left_pad(c.to_bytes_be(), k))
 }
 
-/// 业务作用: 单块 type-1 公钥解密:`m = c^e mod n`,去 `00 01 FF.. 00` padding。
+/// 业务作用：执行 RSA 公钥指数运算并检查 type-1 填充。
 ///
-/// # 参数
-/// - `key`: 执行公钥指数运算的 RSA 公钥。
-/// - `block`: 单个 RSA 密文分块,长度应等于 `k`。
-/// - `k`: RSA 模数字节数。
+/// 参数说明：
+/// - `key`：用于模幂恢复的 RSA 公钥。
+/// - `block`：调用方已按模数宽度分好的字节块。
+/// - `k`：与模数对应的输出字节宽度。
+///
+/// 返回：type-1 头部、最小填充长度及分隔符有效时返回内容，否则返回解密错误；不在此检查密文整数的规范范围。
 fn public_decrypt_block(key: &RsaPublicKey, block: &[u8], k: usize) -> Result<Vec<u8>> {
     let m = BigUint::from_bytes_be(block).modpow(key.e(), key.n());
     let em = left_pad(m.to_bytes_be(), k);
@@ -210,12 +220,13 @@ fn public_decrypt_block(key: &RsaPublicKey, block: &[u8], k: usize) -> Result<Ve
     Ok(em[i + 1..].to_vec())
 }
 
-/// 业务作用: RSA **私钥加密**(字符串输入,Base64 输出,自动分段;PKCS1 type-1)。
-/// ⚠ 私钥加密是**签名语义、非机密**(公钥人人可解),仅为互通保真。
+/// 业务作用：在兼容能力开启时对 UTF-8 内容分块执行 RSA type-1 私钥运算。
 ///
-/// # 参数
-/// - `content`: 要做 type-1 私钥运算的 UTF-8 内容;长文本会自动分段。
-/// - `private_key_b64`: Base64 编码的 PKCS8 RSA 私钥 DER。
+/// 参数说明：
+/// - `content`：按模数宽度减十一分块的内容。
+/// - `private_key_b64`：标准 Base64 编码的 PKCS8 RSA 私钥 DER。
+///
+/// 返回：成功返回拼接块的 Base64，密钥或单块失败传播；公钥可恢复内容，不提供机密性。受 legacy-rsa-private 特性控制。
 #[cfg(feature = "legacy-rsa-private")]
 pub fn encrypt_rsa_private(content: &str, private_key_b64: &str) -> Result<String> {
     let key = parse_private(private_key_b64)?;
@@ -230,11 +241,13 @@ pub fn encrypt_rsa_private(content: &str, private_key_b64: &str) -> Result<Strin
     Ok(b64_encode(&out))
 }
 
-/// 业务作用: 默认构建拒绝历史 RSA 私钥 type-1 运算；受控迁移必须显式开启 `legacy-rsa-private`。
+/// 业务作用：在默认构建中拒绝旧 RSA 私钥 type-1 运算。
 ///
-/// # 参数
-/// - `content`: 待处理的历史协议文本。
-/// - `private_key_b64`: Base64 编码的 PKCS8 RSA 私钥 DER。
+/// 参数说明：
+/// - `_content`：不会执行运算的旧协议内容。
+/// - `_private_key_b64`：不会解析的私钥文本。
+///
+/// 返回：始终返回要求显式启用 legacy-rsa-private 的配置错误。
 #[cfg(not(feature = "legacy-rsa-private"))]
 pub fn encrypt_rsa_private(_content: &str, _private_key_b64: &str) -> Result<String> {
     Err(CryptoError::config(
@@ -242,11 +255,13 @@ pub fn encrypt_rsa_private(_content: &str, _private_key_b64: &str) -> Result<Str
     ))
 }
 
-/// 业务作用: RSA **公钥解密**(Base64 密文输入,UTF-8 输出,自动分段;type-1 unpad)。
+/// 业务作用：用 RSA 公钥逐块恢复 type-1 包装的 UTF-8 内容。
 ///
-/// # 参数
-/// - `cipher_b64`: Base64 编码的 type-1 RSA 密文;解码后长度必须是 RSA 模数字节数的整数倍。
-/// - `public_key_b64`: Base64 编码的 X.509/SPKI RSA 公钥 DER。
+/// 参数说明：
+/// - `cipher_b64`：非空且长度符合模数分块要求的 Base64 文本。
+/// - `public_key_b64`：标准 Base64 编码的 SPKI RSA 公钥 DER。
+///
+/// 返回：成功返回拼接明文；解析、分块、填充或 UTF-8 失败传播，不把此入口等同于标准消息签名验证。
 pub fn decrypt_rsa_public(cipher_b64: &str, public_key_b64: &str) -> Result<String> {
     let key = parse_public(public_key_b64)?;
     let k = key.size();
@@ -261,12 +276,13 @@ pub fn decrypt_rsa_public(cipher_b64: &str, public_key_b64: &str) -> Result<Stri
     String::from_utf8(out).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
 }
 
-/// 业务作用: RSA 密文合法性守卫——空密文 / 非完整 block 是非法密文,
-/// 不应解成空明文/截断。两个解密方向共用。
+/// 业务作用：在 RSA 分块解密前拒绝空密文或不完整块。
 ///
-/// # 参数
-/// - `ct`: 密文字节或密文文本。
-/// - `block_size`: RSA 分块加解密的单块字节数。
+/// 参数说明：
+/// - `ct`：已完成 Base64 解码的原始密文。
+/// - `block_size`：调用方必须保证非零的模数字节数。
+///
+/// 返回：密文非空且长度为块宽整数倍时成功，否则返回解密错误；不验证各块数学范围或填充。
 fn rsa_ciphertext_guard(ct: &[u8], block_size: usize) -> Result<()> {
     if ct.is_empty() {
         return Err(CryptoError::decrypt("RSA 密文不能为空"));
@@ -283,11 +299,13 @@ fn rsa_ciphertext_guard(ct: &[u8], block_size: usize) -> Result<()> {
 
 // ==================== 签名 / 验签(SHA256withRSA = PKCS1 v1.5) ====================
 
-/// 业务作用: RSA 私钥签名(SHA256withRSA,Base64 输出)。
+/// 业务作用：以 RSA 私钥对 UTF-8 内容生成 SHA-256 PKCS1 v1.5 签名。
 ///
-/// # 参数
-/// - `content`: 要签名的 UTF-8 内容。
-/// - `private_key_b64`: Base64 编码的 PKCS8 RSA 私钥 DER。
+/// 参数说明：
+/// - `content`：要签名的原始 UTF-8 文本。
+/// - `private_key_b64`：标准 Base64 编码的 PKCS8 RSA 私钥 DER。
+///
+/// 返回：返回签名字节的标准 Base64；密钥解析失败传播，不进行内容字符归一化。
 pub fn sign_rsa(content: &str, private_key_b64: &str) -> Result<String> {
     let key = parse_private(private_key_b64)?;
     let sk = SigningKey::<Sha256>::new(key);
@@ -295,12 +313,14 @@ pub fn sign_rsa(content: &str, private_key_b64: &str) -> Result<String> {
     Ok(b64_encode(&sig.to_bytes()))
 }
 
-/// 业务作用: RSA 公钥验签(SHA256withRSA)。出错即 false。
+/// 业务作用：以 RSA 公钥验证 UTF-8 内容的 SHA-256 PKCS1 v1.5 签名。
 ///
-/// # 参数
-/// - `content`: 原始 UTF-8 内容,必须与签名时输入一致。
-/// - `sign_b64`: Base64 编码的 RSA 签名值。
-/// - `public_key_b64`: Base64 编码的 X.509/SPKI RSA 公钥 DER。
+/// 参数说明：
+/// - `content`：与签名时完全相同的 UTF-8 内容。
+/// - `sign_b64`：标准 Base64 编码的签名字节。
+/// - `public_key_b64`：标准 Base64 编码的 SPKI RSA 公钥 DER。
+///
+/// 返回：验证通过返回 true，编码、密钥、签名结构或验证失败统一返回 false。
 pub fn verify_rsa(content: &str, sign_b64: &str, public_key_b64: &str) -> bool {
     let run = || -> Result<bool> {
         let key = parse_public(public_key_b64)?;
@@ -315,30 +335,26 @@ pub fn verify_rsa(content: &str, sign_b64: &str, public_key_b64: &str) -> bool {
     run().unwrap_or(false)
 }
 
-/// 业务作用: 从 Base64(SPKI)RSA 公钥取模数 `n` 与公钥指数 `e` 的**大端字节**(供 JWKS 发布 `n`/`e`,或作
-/// [`verify_rs256_components`] 的分量输入)。
+/// 业务作用：提取 RSA 公钥的模数和指数供协议交换使用。
 ///
-/// # 参数
-/// - `public_key_b64`: Base64 编码的 X.509/SPKI RSA 公钥 DER。
+/// 参数说明：
+/// - `public_key_b64`：标准 Base64 编码的 SPKI RSA 公钥 DER。
 ///
-/// # 返回
-/// `(modulus_be, exponent_be)` 两段大端字节(无前导零填充,与 JWKS `n`/`e` 的 base64url 解码结果对齐)。
+/// 返回：返回模数和指数的无前导填充大端字节；Base64 或公钥 DER 解析失败返回错误。
 pub fn rsa_public_components(public_key_b64: &str) -> Result<(Vec<u8>, Vec<u8>)> {
     let key = parse_public(public_key_b64)?;
     Ok((key.n().to_bytes_be(), key.e().to_bytes_be()))
 }
 
-/// 业务作用: RS256(RSASSA-PKCS1-v1_5 + SHA-256)**验签**,公钥用大端 `modulus`/`exponent` 字节(如 JWKS 的
-/// `n`/`e` base64url 解码结果)。用于 OAuth Resource Server 校验 access token 的签名。
+/// 业务作用：从大端公钥分量构造 RSA 公钥并验证 RS256 签名。
 ///
-/// 出错即 `false`(密钥分量非法、签名格式错、验签不通过都返回 `false`,绝不 panic);`message` 是
-/// JWT 的签名输入 `header_b64 "." payload_b64` 的原始字节(内部用 SHA-256 摘要)。
+/// 参数说明：
+/// - `message`：原始签名输入字节，例如 JWT 前两段的点号拼接。
+/// - `signature`：已完成协议解码的签名字节。
+/// - `modulus_be`：RSA 模数的无符号大端字节。
+/// - `exponent_be`：RSA 公钥指数的无符号大端字节。
 ///
-/// # 参数
-/// - `message`: 被签名的原始字节(JWT 签名输入)。
-/// - `signature`: 原始签名字节(JWT 第三段 base64url 解码结果)。
-/// - `modulus_be`: RSA 模数 `n` 的大端字节。
-/// - `exponent_be`: RSA 公钥指数 `e` 的大端字节。
+/// 返回：公钥、签名格式及验证均成功时为 true，其余返回 false；本入口不独立施加 2048 位模数下限或验证 JWT claims。
 pub fn verify_rs256_components(
     message: &[u8],
     signature: &[u8],
@@ -358,10 +374,13 @@ pub fn verify_rs256_components(
     run().unwrap_or(false)
 }
 
-/// 业务作用: 校验一组 JWKS RSA 公钥分量可构造为至少 2048 bit 的 RS256 公钥。
+/// 业务作用：在发布公钥分量前检查 RSA 结构及模数长度。
 ///
-/// 只检查公钥结构和最低强度，不做验签。Resource Server 在发布 JWKS last-good 快照前调用本函数，
-/// 避免把“base64url 可解码但数学上非法/过短”的 `n`/`e` 延迟到每个请求才发现。
+/// 参数说明：
+/// - `modulus_be`：RSA 模数的无符号大端字节。
+/// - `exponent_be`：RSA 公钥指数的无符号大端字节。
+///
+/// 返回：可构造为公钥且模数至少 2048 位时返回 true，否则 false；不验证签名或主体身份。
 pub fn validate_rs256_public_components(modulus_be: &[u8], exponent_be: &[u8]) -> bool {
     let n = BigUint::from_bytes_be(modulus_be);
     let e = BigUint::from_bytes_be(exponent_be);
@@ -372,11 +391,13 @@ pub fn validate_rs256_public_components(modulus_be: &[u8], exponent_be: &[u8]) -
 
 // ==================== RSA-OAEP(SHA-256 / MGF1) ====================
 
-/// 业务作用: RSA-OAEP 公钥加密(`RSA/ECB/OAEPWithSHA-256AndMGF1Padding`)。
+/// 业务作用：用 RSA-OAEP SHA-256 对单段 UTF-8 内容加密。
 ///
-/// # 参数
-/// - `content`: 要加密的 UTF-8 明文;OAEP 入口不做自动分段。
-/// - `public_key_b64`: Base64 编码的 X.509/SPKI RSA 公钥 DER。
+/// 参数说明：
+/// - `content`：必须落在单个 OAEP 块容量内的 UTF-8 内容。
+/// - `public_key_b64`：标准 Base64 编码的 SPKI RSA 公钥 DER。
+///
+/// 返回：返回密文的标准 Base64；公钥解析、容量或加密失败返回错误，不自动分块。
 pub fn encrypt_rsa_oaep(content: &str, public_key_b64: &str) -> Result<String> {
     let key = parse_public(public_key_b64)?;
     let mut rng = rand::rngs::OsRng;
@@ -386,11 +407,13 @@ pub fn encrypt_rsa_oaep(content: &str, public_key_b64: &str) -> Result<String> {
     Ok(b64_encode(&ct))
 }
 
-/// 业务作用: RSA-OAEP 私钥解密。
+/// 业务作用：用 RSA 私钥解开单块 OAEP SHA-256 密文。
 ///
-/// # 参数
-/// - `cipher_b64`: Base64 编码的 RSA-OAEP 密文。
-/// - `private_key_b64`: Base64 编码的 PKCS8 RSA 私钥 DER。
+/// 参数说明：
+/// - `cipher_b64`：标准 Base64 编码的 OAEP 密文。
+/// - `private_key_b64`：标准 Base64 编码的 PKCS8 RSA 私钥 DER。
+///
+/// 返回：成功返回 UTF-8 明文；密钥、Base64、OAEP 解密或 UTF-8 失败返回错误，不自动分块。
 pub fn decrypt_rsa_oaep(cipher_b64: &str, private_key_b64: &str) -> Result<String> {
     let key = parse_private(private_key_b64)?;
     let ct = STANDARD
@@ -404,10 +427,12 @@ pub fn decrypt_rsa_oaep(cipher_b64: &str, private_key_b64: &str) -> Result<Strin
 
 // ==================== 密钥对生成 ====================
 
-/// 业务作用: 生成 RSA 公私钥对,返回 `(私钥 Base64(PKCS8), 公钥 Base64(SPKI))`。`bits` >= 2048。
+/// 业务作用：按显式模数位数生成 RSA 密钥对并编码。
 ///
-/// # 参数
-/// - `bits`: RSA 模数位数;必须不小于 2048。
+/// 参数说明：
+/// - `bits`：不能小于 2048 的目标模数位数，计算预算由调用方限制。
+///
+/// 返回：返回私钥 PKCS8 和公钥 SPKI DER 的 Base64；位数过小、生成或编码失败返回错误，入口不设置位数上限。
 pub fn generate_rsa_key_pair(bits: usize) -> Result<(String, String)> {
     if bits < 2048 {
         return Err(CryptoError::config(format!(

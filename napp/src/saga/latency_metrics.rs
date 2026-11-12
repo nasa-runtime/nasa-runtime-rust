@@ -65,7 +65,8 @@ impl LegacyMetricsSource for SagaLatencyMetricsSource {
 
     /// 业务作用：为直接文本调用提供与结构化快照一致的阶段指标。
     ///
-    /// 参数说明：`output` 接收 Prometheus 文本。
+    /// 参数说明：
+    /// - `output`：`output` 接收 Prometheus 文本。
     ///
     /// 返回：追加同源文本；正常 exporter 使用结构化快照。
     fn render_prometheus(&self, output: &mut String) {

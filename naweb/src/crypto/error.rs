@@ -43,14 +43,12 @@ pub struct CryptoError {
 impl CryptoError {
     /// 业务作用：建立可在安全边界内传播的内部错误。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `kind`: 统一错误映射使用的稳定类别。
     /// - `internal_reason`: 受控内部原因，禁止包含 key、token、明文和完整密文。
     ///
-    /// # 返回
-    ///
-    /// 返回不泄露底层实现细节的错误值。
+    /// 返回：返回不泄露底层实现细节的错误值。
     pub const fn new(kind: CryptoErrorKind, internal_reason: &'static str) -> Self {
         Self {
             kind,
@@ -60,9 +58,9 @@ impl CryptoError {
 
     /// 业务作用：返回公开协议错误码。
     ///
-    /// # 返回
+    /// 返回：在可信密码上下文建立前收敛解析、key 与 tag 差异；大小、过期、重放和服务故障保留稳定类别。
     ///
-    /// 在可信密码上下文建立前收敛解析、key 与 tag 差异；大小、过期、重放和服务故障保留稳定类别。
+    /// 参数说明: 无。
     pub const fn public_code(&self) -> &'static str {
         match self.kind {
             CryptoErrorKind::Envelope | CryptoErrorKind::Key | CryptoErrorKind::Authentication => {
@@ -82,9 +80,9 @@ impl CryptoError {
 
     /// 业务作用：返回公开 HTTP 状态码。
     ///
-    /// # 返回
+    /// 返回：大小错误为 413，过期和重放为 409，资源与依赖故障为 503，其余未认证协议错误为 400。
     ///
-    /// 大小错误为 413，过期和重放为 409，资源与依赖故障为 503，其余未认证协议错误为 400。
+    /// 参数说明: 无。
     pub const fn status(&self) -> StatusCode {
         match self.kind {
             CryptoErrorKind::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -105,13 +103,11 @@ impl CryptoError {
 impl std::fmt::Display for CryptoError {
     /// 业务作用：输出不含底层密码详情的错误类别。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 错误链提供的输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "端点安全处理失败：{:?}", self.kind)
     }

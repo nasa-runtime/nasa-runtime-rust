@@ -59,7 +59,9 @@ pub struct RuntimeStatus {
 
 impl RuntimeObserver {
     /// 业务作用：同步读取容量、注册和连接证据摘要，不在探针或指标抓取时发起网络查询。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：owner 尚有状态时给出按当前身份代次裁决的有限摘要；所有资源释放后为空，不展示凭据、URL 或实例 metadata。
     pub fn snapshot(&self) -> Option<RuntimeStatus> {
         let core = self.core.upgrade()?;

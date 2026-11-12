@@ -1,6 +1,6 @@
 //! 路由级隔离、超时和监控属性宏。
 //!
-//! 宏在编译期把 async handler 包装进 `hystrix` 运行时命令，保留原函数签名，
+//! 宏在编译期把 async handler 包装进 `hystrix` 运行时命令，保留输入类型并统一响应类型，
 //! 并把并发拒绝、超时降级和指标采集接入统一 Dashboard。
 //!
 //! # 命令归属与应用实例
@@ -19,41 +19,41 @@ use syn::{parse_macro_input, FnArg, ItemFn, LitInt, LitStr};
 /// 属性不接受参数；函数必须同步、恰好接收一个 `FallbackContext`，并返回任意
 /// `IntoResponse`。具体参数和返回类型由生成代码交给 Rust 类型系统校验。
 ///
-/// # 参数说明
-///
+/// 参数说明：
 /// - `attr`: 属性参数，必须为空。
 /// - `item`: 被收集的同步终态响应函数。
 ///
-/// # 返回
-///
-/// 返回原函数与 linkme 描述项；签名不满足终态处理约束时返回定位明确的编译错误。
+/// 返回：原函数与静态 linkme 描述；依赖解析或函数形态不满足约束时生成编译错误，具体输入输出类型由编译器检查。
 #[proc_macro_attribute]
 pub fn global_fallback(attr: TokenStream, item: TokenStream) -> TokenStream {
     let root = match nasa_macro_support::runtime_root("hystrix", "hystrix") {
         Ok(root) => root,
-        Err(message) => return quote! { ::core::compile_error!(#message); }.into(),
+        Err(message) => {
+            return quote! {
+                ::core::compile_error!(#message);
+            }
+            .into()
+        }
     };
     expand_global_fallback(attr, item, root, "hystrix")
 }
 
 /// 业务作用：校验全局终态处理函数形态并生成组件级链接切片注册项。
 ///
-/// # 参数说明
-///
+/// 参数说明：
 /// - `attr`: 属性参数，必须为空。
 /// - `item`: 被注解函数的源码 token。
 /// - `root`: 当前依赖形态下的 hystrix 运行时根路径。
 /// - `component`: 编译错误中使用的组件名。
 ///
-/// # 返回
-///
-/// 返回可直接交给编译器的展开结果；失败时返回 `compile_error!`。
+/// 返回：保留原函数并注册同步响应转换入口的 token；拒绝属性参数、异步、泛型、unsafe、extern 或不符合约束的参数形态。
 fn expand_global_fallback(
     attr: TokenStream,
     item: TokenStream,
     root: proc_macro2::TokenStream,
     component: &str,
 ) -> TokenStream {
+    // 全局终态入口必须保持同步且可静态登记，不能携带需要应用生命周期管理的异步执行责任。
     if !attr.is_empty() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
@@ -121,62 +121,71 @@ fn expand_global_fallback(
     .into()
 }
 
-/// 业务作用：# `#[hystrix]` —— 给 axum handler 加 bulkhead 隔离 + 超时 + 监控(对标 Hystrix Command)
+/// 业务作用：将异步处理函数接入统一命令运行时，按可选并发和超时边界执行，并记录主请求与降级结局。
 ///
-/// 贴在 async handler 上,编译期改写成"先抢信号量(满→429)、再限时执行(超时→504)"的版本,
-/// 并把 QPS/延迟/并发/成功率上报 Dashboard(`/hystrix.stream`)。**所有参数全可省**。
+/// 参数说明：
+/// - `attr`：属性中的命令名、并发、超时、TPS 权重和局部降级配置 token，全部可省略。
+/// - `item`：被注解的异步函数源码；保留其可见性和输入类型，将返回类型统一转换为 Axum Response。
 ///
-/// ## 参数(全部可选)
-/// | 参数 | 类型 | 默认 | 含义 |
-/// |---|---|---|---|
-/// | `name` | 字符串 | 见下 | Dashboard 圈名/日志名。不写时:若本 fn 下方还贴着 `#[get_mapping]`/`#[post_mapping]`(要求 `#[hystrix]` 在它【上面】)→ 自动取其 path;否则取函数名 |
-/// | `max_concurrent` | 整数 | 不限并发 | 并发上限(信号量许可数)。不写 = 无 bulkhead、永不 429 |
-/// | `timeout_ms` | 整数 | 不超时 | 单请求超时(毫秒)。不写 = 永不 504 |
-/// | `tps` | 整数 | 0 | TPS 权重。0 = 不计入顶栏 TPS;>0 = 计入(weight=tps) |
-/// | `reject_response` | JSON 字符串 | 默认 429 壳 | **自定义限流返回**:bulkhead 满时返回这段 JSON,以 **HTTP 200** 发出 |
-/// | `timeout_response` | JSON 字符串 | 默认 504 壳 | **自定义超时返回**:超时时返回这段 JSON,以 **HTTP 200** 发出 |
-/// | `reject_fn` | 路径 | — | **函数式限流降级**:bulkhead 满时调该【零参 async fn】(返回任意 `IntoResponse`,可自定义 status/header/body)。与 `reject_response` 互斥 |
-/// | `timeout_fn` | 路径 | — | **函数式超时降级**:超时时调该【零参 async fn】。与 `timeout_response` 互斥 |
+/// 返回：包含受管命令槽、静态描述和执行包装的函数；参数未知、JSON 无效、降级声明冲突或函数非异步时产生编译错误。
+/// 具体响应与降级函数类型由编译器检查，命令目录身份和容量由运行时验证；失去受管归属后返回 503。
 ///
-/// `reject_response`/`timeout_response` 的内容在【编译期】就会校验是否合法 JSON(写错直接编译报错)。
-/// 不写则沿用默认壳(限流 429 / 超时 504,body 形如 `{"code":..,"message":..,"data":null}`)。
-/// `reject_fn`/`timeout_fn` 用【裸路径】写(可跨模块/跨 crate,如 `crate::fallback::busy`),目标须是【零参 async fn → impl IntoResponse】;
-/// 降级 fn 优先于静态串。互斥:`reject_fn` 与 `reject_response` 二选一、`timeout_fn` 与 `timeout_response` 二选一。
+/// # 属性选项
 ///
-/// ## 用法示例
+/// | 选项 | 缺省行为 | 作用 |
+/// |---|---|---|
+/// | `name` | 优先取下方 Mapping 属性的路径，否则用函数名 | 固定命令与观测身份；手动名称应为低基数常量 |
+/// | `max_concurrent` | 不启用并发隔离 | 主执行段的信号量容量，零也表示不隔离 |
+/// | `timeout_ms` | 不施加主执行期限 | 协作式超时毫秒数，零也表示不设期限 |
+/// | `tps` | 不计入全局 TPS | 大于零时按该权重统计主请求吞吐 |
+/// | `reject_response` | 尝试全局处理器，再使用内置 429 | 拒绝时以 HTTP 200 返回的合法 JSON，与 reject_fn 互斥 |
+/// | `timeout_response` | 尝试全局处理器，再使用内置 504 | 超时时以 HTTP 200 返回的合法 JSON，与 timeout_fn 互斥 |
+/// | `reject_fn` | 不配置局部函数 | 并发拒绝后的零参异步响应函数路径 |
+/// | `timeout_fn` | 不配置局部函数 | 主执行超时后的零参异步响应函数路径 |
+///
+/// 局部降级函数不占主业务信号量，也不继承主执行期限；调用方负责控制其自身外部调用。
+/// 主业务返回 5xx 只记失败，不触发这里的拒绝或超时降级。自动读取 Mapping 路径要求本属性位于 Mapping 属性上方。
+///
+/// # 使用示例
+///
 /// ```ignore
-/// #[hystrix]                                              // 空参 = 只采集监控指标(不拦截、不限时)
-/// #[hystrix(max_concurrent = 20, timeout_ms = 800)]       // bulkhead 20 并发 + 超时 800ms
-/// #[hystrix(name = "下载", max_concurrent = 5, timeout_ms = 3000, tps = 1)]
+/// // 只启用统计，受管 owner 的准入门禁仍然生效。
+/// #[hystrix]
+/// async fn inspect_resource() -> &'static str {
+///     "available"
+/// }
 ///
-/// // 自定义限流/超时返回(HTTP 200 + 你给的 JSON body):
+/// // 设置并发、期限和静态超时响应。
 /// #[hystrix(
 ///     max_concurrent = 20,
 ///     timeout_ms = 800,
-///     reject_response = r#"{"code":429,"message":"系统繁忙,请稍后","data":null}"#,
-///     timeout_response = r#"{"code":504,"message":"请求超时,请重试","data":null}"#
+///     timeout_response = r#"{"code":504,"message":"请求超时","data":null}"#
 /// )]
+/// async fn load_resource() -> &'static str {
+///     "ready"
+/// }
 ///
-/// // 函数式降级(零参 async fn,可自定义 status/header/body;可跨模块路径):
-/// #[hystrix(name = "order", max_concurrent = 50, timeout_ms = 800,
-///           reject_fn = crate::fb::busy, timeout_fn = crate::fb::late)]
-/// async fn get_order(/* ... */) -> Json</* ... */> { /* ... */ }
+/// // 局部降级函数不再叠加此属性，避免递归进入保护链。
+/// async fn busy() -> &'static str {
+///     "busy"
+/// }
 ///
-/// #[hystrix(timeout_ms = 500)]   // ← 与 Mapping 同贴时 hystrix 必须在【上面】,会自动取下方 path 当 name
-/// #[get_mapping("/spot/kline")]
-/// pub async fn kline(/* ... */) -> Json</* ... */> { /* ... */ }
+/// #[hystrix(max_concurrent = 10, reject_fn = busy)]
+/// async fn bounded_resource() -> &'static str {
+///     "ready"
+/// }
 /// ```
-///
-/// # 参数
-///
-/// - `attr`: `#[hystrix(...)]` 括号内的隔离、超时、降级和监控配置 token stream。
-/// - `item`: 被注解的 axum handler 函数 token stream。
 #[proc_macro_attribute]
 pub fn hystrix(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // ⓪ 运行时根路径发现:nasa → ::nasa::hystrix;旧依赖 → ::hystrix。
+    // 按实际依赖发现运行时根路径，兼容 nasa 门面与直接组件依赖及其重命名。
     let root = match nasa_macro_support::runtime_root("hystrix", "hystrix") {
         Ok(r) => r,
-        Err(msg) => return quote! { ::core::compile_error!(#msg); }.into(),
+        Err(msg) => {
+            return quote! {
+                ::core::compile_error!(#msg);
+            }
+            .into()
+        }
     };
     // axum 经运行时 __private 桥引用:业务无需直接依赖 axum。
     let axum = quote! { #root::__private::axum };
@@ -400,7 +409,7 @@ pub fn hystrix(attr: TokenStream, item: TokenStream) -> TokenStream {
         #root::Command::monitor(#name, "macro", #mc_opt, #to_opt, #tps_opt)
     };
 
-    // 自定义降级:三选一(fn 优先 → 静态串 → 空用默认壳)。fn 与静态串已在 1e 校验互斥;JSON 已在 1d 校验合法。
+    // 局部函数与静态响应已校验互斥；均未配置时由运行时选择全局处理器或内置响应。
     //   fn 分支:把降级 fn 路径包成无捕获闭包存到 Command。闭包必须【显式标注返回类型】为
     //   `Pin<Box<dyn Future<..>+Send>>`,这样 `Box::pin(async{})` 在 return 处强制成 dyn,
     //   才能匹配 set_*_fn 形参的 `Box<dyn Fn() -> Pin<Box<dyn Future>>>`(关联类型不参与隐式 coercion)。
@@ -439,13 +448,10 @@ pub fn hystrix(attr: TokenStream, item: TokenStream) -> TokenStream {
     //     #(#attrs)* = 把 attrs 这个列表里的每个属性逐个展开(`#( ... )*` 是"对列表重复展开"的语法)
     //     #vis #sig  = 拼出函数头(可见性 + 改过返回类型的签名，含 async/函数名/参数)
     //     #block / #name / #max_concurrent / #timeout_ms = 把对应变量的内容插进去
-    //   生成代码里：① 外部 crate(::std / ::axum)走【绝对路径】防同名遮蔽(宏卫生)；
-    //              ② 引用主 crate 自己的东西用 `::hystrix::Command`——这里的 `crate` 在【展开后】指
-    //                 "用这个宏的那个 crate"(即主 crate rust-simple-mvc)，所以能找到它的 hystrix 模块。
+    // 运行时与 Axum 通过已解析的依赖根路径和 __private 桥访问，避免依赖调用方的同名局部模块。
     let expanded = quote! {
         // 把原函数头上的其它属性、可见性、(改过返回类型的)签名拼回去 → 一个"返回 Response 的同名函数"。
-        // ★ #sig 里就带着【原函数的参数列表】——这就是参数透传的落点:新函数声明的参数和原来一模一样，
-        //   由 axum 照常提取参数填进来，下面 #block 直接用这些参数(见 ② 的 `async move #block` 会捕获它们)。
+        // 输入类型保持不变，解构模式可由包装器移入内层函数，外层仍按原类型完成参数提取。
         #(#attrs)*
         #vis #sig {
             // 静态描述持有代码，受管运行实例按 owner 代次缓存弱引用并在准备阶段校验。
@@ -471,7 +477,7 @@ pub fn hystrix(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             // ② 把【原函数体 #block】包成"无参闭包 → 产出 Response 的 future"，交给 Command::run_fn 执行。
             //    run_fn 内部:先 try_acquire(满→429)、再 timeout 限时跑这个 future(超时→504)、并把
-            //    成功/失败/超时/拒绝记入滚动窗口(→ Dashboard)。和 /heavy/slow 的 Command::run 完全同一套。
+            //    主请求和降级结局由统一运行时记账，中间件与属性入口共享统计与关闭边界。
             //    `move ||`           把上面 #sig 声明的参数 move 进闭包；
             //    `async move #block` 再把它们 move 进 future —— 参数透传收尾(axum 提取→#sig 声明→此处捕获→#block 使用)。
             //    into_response 把原返回类型(如 Json<...>)统一转成 Response(run_fn 要求执行体产出 Response)。
@@ -484,9 +490,19 @@ pub fn hystrix(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// 业务作用：返回类型中包含返回位置 `impl Trait` 时，不能把它直接写进局部变量类型标注。
+/// 业务作用：判断返回类型是否含 impl Trait，为处理函数包装选择合法的类型推断方式。
+///
+/// 参数说明：
+/// - `ty`：被注解函数的原始返回类型语法树。
+///
+/// 返回：类型 token 中出现 impl 标识时为 true，调用方据此避免将返回位置 impl Trait 放入局部变量类型。
 fn type_contains_impl_trait(ty: &syn::Type) -> bool {
     /// 业务作用：递归检查返回类型 token 树中是否出现 `impl` 关键字。
+    ///
+    /// 参数说明：
+    /// - `stream`：当前返回类型或嵌套分组的 token 流，不执行类型解析或名称查找。
+    ///
+    /// 返回：任一层出现 impl 标识时为 true，否则为 false；字符串内容不会被当作类型关键字。
     fn contains(stream: proc_macro2::TokenStream) -> bool {
         stream.into_iter().any(|tree| match tree {
             proc_macro2::TokenTree::Ident(ident) => ident == "impl",
@@ -498,13 +514,13 @@ fn type_contains_impl_trait(ty: &syn::Type) -> bool {
     contains(ty.to_token_stream())
 }
 
-/// 业务作用：属性名按【最后一个 path segment】匹配
-/// `#[get_mapping]` / `#[naweb::get_mapping]` / `#[nasa::web::get_mapping]` /
-/// `#[company_nasa::web::get_mapping]` 都能识别。
+/// 业务作用：按属性路径末段识别 Mapping 名称，兼容门面访问和依赖重命名后的多段路径。
 ///
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
-/// - `expected`: 协议或状态机期望值。
+/// 参数说明：
+/// - `attr`：仍保留在被注解函数上的完整属性语法树。
+/// - `expected`：需要匹配的末段属性名，例如 get_mapping。
+///
+/// 返回：路径末段与期望名称相同时为 true；不解析参数，也不验证该名称实际解析到哪个宏。
 fn attr_name_is(attr: &syn::Attribute, expected: &str) -> bool {
     attr.path()
         .segments
@@ -513,15 +529,12 @@ fn attr_name_is(attr: &syn::Attribute, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 业务作用：从一条 #[*_mapping(...)] 属性里抽出 path 字符串。
-/// 两种写法都支持：
-///   - 单串简写：#[get_mapping("/x")]                     → parse_args::<LitStr>
-///   - 具名写法：#[get_mapping(path = "/x", produces=..)] → parse_nested_meta 找 path/value
+/// 业务作用：从尚未展开的 Mapping 属性中提取静态路径，用作未显式命名命令的稳定身份。
 ///
-/// 取不到返回 None。
+/// 参数说明：
+/// - `attr`：Mapping 属性语法树，支持单个字符串或具名 path、value 字符串。
 ///
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
+/// 返回：已识别的路径或 None；具名扫描保留最后识别值，不向调用方传播扫描错误，整体属性合法性仍由 Mapping 宏检查。
 fn mapping_path(attr: &syn::Attribute) -> Option<String> {
     // ① 单串简写
     if let Ok(lit) = attr.parse_args::<LitStr>() {

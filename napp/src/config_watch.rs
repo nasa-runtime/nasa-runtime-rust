@@ -48,7 +48,13 @@ struct WatchPreparation {
 
 impl LocalWatch {
     /// 业务作用：建立无任务的文件观察 owner，未显式启用时不创建操作系统 watcher。
-    /// 参数说明：`raw` 为原始合并树，秘密声明尚未被脱敏；`source` 固定显式严格来源。
+    ///
+    /// 参数说明：
+    /// - `raw`：`raw` 为原始合并树。
+    /// - `source`：`source` 固定显式严格来源。
+    ///
+    /// 共同约束：秘密声明尚未被脱敏
+    ///
     /// 返回：已启用时建立当前依赖观察；目录挂载失败阻止启动。
     pub(crate) async fn new(
         raw: Value,
@@ -71,7 +77,9 @@ impl LocalWatch {
     }
 
     /// 业务作用：复制候选所需的观察身份和目录预算，不转移或关闭当前 watcher。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仅含内存状态及共享来源的准备输入，旧监听在后台准备期间仍有效。
     fn preparation(&self) -> WatchPreparation {
         let current = self.watcher.as_ref();
@@ -88,8 +96,10 @@ impl LocalWatch {
     }
 
     /// 业务作用：在线程池准备完整候选监听，使文件系统等待不占用业务线程。
+    ///
     /// 参数说明：
     /// - `raw`：尚未发布的完整候选树。
+    ///
     /// 返回：独立新监听或复用决定；失败不改变当前监听，后台准备没有安装权限。
     pub(crate) async fn prepare(&mut self, raw: &Value) -> ApplicationResult<PreparedWatch> {
         let preparation = self.preparation();
@@ -113,18 +123,26 @@ impl LocalWatch {
 
 impl WatchPreparation {
     /// 业务作用：在候选安装前建立独立的观察集合，失败不撤销当前有效监听。
-    /// 参数说明：`raw` 为待解析材料所属候选。
+    ///
+    /// 参数说明：
+    /// - `raw`：`raw` 为待解析材料所属候选。
+    ///
     /// 返回：至多追加 128 个材料依赖的新 watcher；严格来源另受共享目录预算约束，任一活跃目录不可观察时拒绝候选。
     fn prepare(&self, raw: &Value) -> ApplicationResult<PreparedWatch> {
         let settings = settings(raw)?;
         let observer = self.prepare_observer(raw, settings.enabled)?;
-        Ok(PreparedWatch { observer, settings })
+        Ok(PreparedWatch {
+            observer,
+            settings,
+        })
     }
 
     /// 业务作用：在当前观察仍有效时准备候选的目录和秘密依赖，失败不撤销旧监听。
+    ///
     /// 参数说明：
     /// - `raw`：已校验观察设置的完整候选树。
     /// - `enabled`：候选是否启用本地文件观察。
+    ///
     /// 返回：可在候选提交后安装的观察集合；任何目录或来源异常均拒绝候选。
     fn prepare_observer(&self, raw: &Value, enabled: bool) -> ApplicationResult<PreparedObserver> {
         if !enabled {
@@ -137,7 +155,10 @@ impl WatchPreparation {
             .iter()
             .flat_map(|spec| &spec.fragments)
             .filter_map(|fragment| match fragment {
-                nasecret::SecretFragmentRef::Provider { provider, .. } => Some(provider.clone()),
+                nasecret::SecretFragmentRef::Provider {
+                    provider,
+                    ..
+                } => Some(provider.clone()),
                 _ => None,
             })
             .collect::<std::collections::BTreeSet<_>>();
@@ -218,6 +239,7 @@ impl WatchPreparation {
 
 impl LocalWatch {
     /// 业务作用：在发布完成后替换有效观察集合，旧集合始终保留到新候选可用。
+    ///
     /// 参数说明：
     /// - `next`：`next` 为安装前已建立的观察。
     /// - `published`：`published` 表示有新视图发布。
@@ -244,9 +266,11 @@ impl LocalWatch {
     }
 
     /// 业务作用：按已完成的配置事务结果保留或替换监听，并在线程池回收不再使用的观察资源。
+    ///
     /// 参数说明：
     /// - `next`：尚未安装的候选监听。
     /// - `published`：调用方完成配置发布或拒绝后的结果。
+    ///
     /// 返回：保留原发布结果；拒绝时旧监听和周期不变，成功时先更新策略再等待旧监听释放。
     pub(crate) async fn finish(
         &mut self,
@@ -273,8 +297,10 @@ impl LocalWatch {
     }
 
     /// 业务作用：按已提交周期限定成功观察的有效期，避免长周期正常等待被误判为观察失联。
+    ///
     /// 参数说明：
     /// - `health`：独立本地配置观察的健康贡献项。
+    ///
     /// 返回：启用时发布有期限的 Ready；关闭时清除观察期限并记录关闭状态，不把主动关闭误判为失联。
     fn observe_ready(&self, health: &ReadinessContributor) {
         if !self.enabled {
@@ -301,7 +327,9 @@ struct WatchSettings {
 
 impl Default for WatchSettings {
     /// 业务作用：缺省关闭文件监听，显式开启后使用一秒周期补读。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无需创建观察资源的默认策略。
     fn default() -> Self {
         Self {
@@ -312,6 +340,7 @@ impl Default for WatchSettings {
 }
 
 /// 业务作用：校验本地观察策略后取得显式开关，避免编入 feature 就自动监听文件。
+///
 /// 参数说明：
 /// - `tree`：`tree` 为候选配置。
 ///
@@ -321,8 +350,10 @@ pub(crate) fn enabled(tree: &Value) -> ApplicationResult<bool> {
 }
 
 /// 业务作用：在任何观察或配置副作用前绑定并校验整份补读策略。
+///
 /// 参数说明：
 /// - `tree`：本地和远端合并后的候选树。
+///
 /// 返回：缺省策略或完整合法配置；未知字段、错误类型及不可用周期拒绝候选。
 fn settings(tree: &Value) -> ApplicationResult<WatchSettings> {
     let settings = tree
@@ -344,7 +375,10 @@ pub(crate) struct LocalConfigComponent {
 
 impl LocalConfigComponent {
     /// 业务作用：为没有活动 Nacos 驱动的应用准备来源中立的监听组件。
-    /// 参数说明：`components` 为声明目标集合。
+    ///
+    /// 参数说明：
+    /// - `components`：`components` 为声明目标集合。
+    ///
     /// 返回：尚未读取文件或创建线程的组件。
     pub(crate) fn new(components: Vec<ComponentId>) -> Self {
         Self {
@@ -357,14 +391,19 @@ impl LocalConfigComponent {
 
 impl ApplicationComponent for LocalConfigComponent {
     /// 业务作用：归属现有 Config 内部身份，不增加业务组件字符串。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定配置身份。
     fn id(&self) -> ComponentId {
         ComponentId::Config
     }
 
     /// 业务作用：只为独立本地 watch 注册健康；活动 Nacos 由其已有驱动统一接收文件事件。
-    /// 参数说明：`context` 提供最终初始配置和健康目录。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供最终初始配置和健康目录。
+    ///
     /// 返回：开关合法且模式支持时成功；Batch 不开放持续配置消费。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -401,7 +440,10 @@ impl ApplicationComponent for LocalConfigComponent {
     }
 
     /// 业务作用：建立当前监听集合并暂存唯一配置候选任务，等待宿主整体 Ready。
-    /// 参数说明：`context` 提供既有配置 applier 及停机责任登记。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供既有配置 applier 及停机责任登记。
+    ///
     /// 返回：全部目录可观察时成功；尚未开放候选安装。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -435,7 +477,9 @@ impl ApplicationComponent for LocalConfigComponent {
     }
 
     /// 业务作用：移交唯一配置驱动给宿主监督器。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：首次返回任务；未启用或重复取得时为空。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.task.take().map(|task| ("local-config-watch", task))
@@ -443,6 +487,7 @@ impl ApplicationComponent for LocalConfigComponent {
 }
 
 /// 业务作用：按单个合并信号和有效配置周期处理本地候选，不为事件风暴无限延迟刷新。
+///
 /// 参数说明：
 /// - `app`：`app` 为宿主。
 /// - `watcher`：`watcher` 为当前观察。
@@ -512,13 +557,18 @@ async fn run(
 struct WatchShutdown(CancellationToken);
 impl ShutdownAction for WatchShutdown {
     /// 业务作用：标识本地配置驱动的停止请求。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定名称。
     fn label(&self) -> &'static str {
         "local-config-watch"
     }
     /// 业务作用：关闭候选准入，任务退出由宿主监督器取得证明。
-    /// 参数说明：`_context` 为宿主剩余预算。
+    ///
+    /// 参数说明：
+    /// - `_context`：`_context` 为宿主剩余预算。
+    ///
     /// 返回：已请求停止；不把请求本身当作任务退出。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         self.0.cancel();
@@ -527,7 +577,9 @@ impl ShutdownAction for WatchShutdown {
 }
 impl Drop for WatchShutdown {
     /// 业务作用：启动回滚或执行器释放时收回候选准入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同步通知唯一任务停止。
     fn drop(&mut self) {
         self.0.cancel();
@@ -535,7 +587,10 @@ impl Drop for WatchShutdown {
 }
 
 /// 业务作用：按固定原因归类文件观察或结构错误，避免输出材料路径和值。
-/// 参数说明：`message` 为稳定错误摘要。
+///
+/// 参数说明：
+/// - `message`：`message` 为稳定错误摘要。
+///
 /// 返回：配置组件错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Config, ApplicationPhase::Running, message)

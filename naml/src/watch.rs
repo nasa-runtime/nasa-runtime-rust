@@ -40,7 +40,8 @@ pub(crate) struct WatchPathIdentity {
 impl WatchPathIdentity {
     /// 业务作用：同时保留声明路径、当前真实路径与符号链接节点，使真实文件修改和链接换代都可匹配。
     ///
-    /// 参数说明：`path` 是 loader 来源、应用依赖或 notify 事件路径。
+    /// 参数说明：
+    /// - `path`：是 loader 来源、应用依赖或 notify 事件路径。
     ///
     /// 返回：稳定逻辑路径、全部等价别名，以及必须观察的逻辑和真实父目录。
     pub(crate) fn new(path: &Path) -> Self {
@@ -67,7 +68,8 @@ impl WatchPathIdentity {
 
     /// 业务作用：判断一个操作系统事件路径是否与配置目标的任一逻辑或真实身份相交。
     ///
-    /// 参数说明：`targets` 是某一来源类别的路径身份集合。
+    /// 参数说明：
+    /// - `targets`：是某一来源类别的路径身份集合。
     ///
     /// 返回：任一身份相同时返回 `true`，否则返回 `false`。
     fn matches(&self, targets: &HashSet<PathBuf>) -> bool {
@@ -87,7 +89,9 @@ struct WatchTargets {
 impl WatchTargets {
     /// 业务作用：把 loader 来源与应用依赖归一成操作系统事件可比较的绝对路径集合。
     ///
-    /// 参数说明：`sources` 是 naml 本地来源；`dependencies` 是应用声明的附加文件。
+    /// 参数说明：
+    /// - `sources`：是 naml 本地来源
+    /// - `dependencies`：是应用声明的附加文件。
     ///
     /// 返回：按主文件、profile、附加依赖分组的精确目标集合。
     fn new(sources: &YmlLocalSources, dependencies: &[PathBuf]) -> Self {
@@ -116,7 +120,8 @@ impl WatchTargets {
 
     /// 业务作用：将 notify 的目录级事件收窄为真实配置目标，防止日志和临时文件触发换版。
     ///
-    /// 参数说明：`paths` 是单个 notify 事件携带的路径集合。
+    /// 参数说明：
+    /// - `paths`：是单个 notify 事件携带的路径集合。
     ///
     /// 返回：按来源类型分组的匹配事件；无目标命中时返回空集合。
     fn classify(&self, paths: &[PathBuf]) -> Vec<YmlWatchEvent> {
@@ -136,7 +141,10 @@ impl WatchTargets {
 
     /// 业务作用：为单一来源类别汇总命中的逻辑事件路径，避免一个底层事件重复返回同一路径。
     ///
-    /// 参数说明：`kind` 是来源类别；`observed` 是展开后的事件身份；`targets` 是目标身份集合。
+    /// 参数说明：
+    /// - `kind`：是来源类别
+    /// - `observed`：是展开后的事件身份
+    /// - `targets`：是目标身份集合。
     ///
     /// 返回：存在命中时返回分类事件，否则返回 `None`。
     fn classified_event(
@@ -152,7 +160,10 @@ impl WatchTargets {
             .filter(|path| seen.insert(path.logical.clone()))
             .map(|path| path.logical.clone())
             .collect::<Vec<_>>();
-        (!paths.is_empty()).then_some(YmlWatchEvent { kind, paths })
+        (!paths.is_empty()).then_some(YmlWatchEvent {
+            kind,
+            paths,
+        })
     }
 
     /// 业务作用：计算必须监听的父目录，既捕获原子 rename，又避免递归观察无关目录树。
@@ -175,7 +186,10 @@ pub struct YmlWatcher {
 impl YmlWatcher {
     /// 业务作用：建立精确配置 watcher，并把同步 notify 回调转换为中性 `YmlWatchEvent`。
     ///
-    /// 参数说明：`sources` 是 naml 来源；`dependencies` 是应用附加依赖；`handler` 接收过滤后的事件。
+    /// 参数说明：
+    /// - `sources`：是 naml 来源
+    /// - `dependencies`：是应用附加依赖
+    /// - `handler`：接收过滤后的事件。
     ///
     /// 返回：全部父目录成功挂载后返回 watcher；初始化或任一目录监听失败时返回错误。
     pub fn new(
@@ -237,7 +251,9 @@ impl YmlWatcher {
 
     /// 业务作用：在成功解析新配置后原子更新目标集合，并增量挂载新增目录、撤销失效目录。
     ///
-    /// 参数说明：`sources` 是新一轮 naml 来源；`dependencies` 是应用新解析出的附加依赖。
+    /// 参数说明：
+    /// - `sources`：是新一轮 naml 来源
+    /// - `dependencies`：是应用新解析出的附加依赖。
     ///
     /// 返回：新增目录全部监听成功时更新目标并返回成功；失败时保留旧目标和旧监听集合。
     pub fn reconcile(&mut self, sources: &YmlLocalSources, dependencies: &[PathBuf]) -> Result<()> {
@@ -297,7 +313,11 @@ impl YmlWatcher {
 
 /// 业务作用：递归展开路径中的符号链接，收集链接节点、重定向后的完整路径和最终真实路径。
 ///
-/// 参数说明：`path` 是本轮待展开路径；`aliases` 收集身份；`visited` 阻断链接环；`depth` 限制异常链。
+/// 参数说明：
+/// - `path`：是本轮待展开路径
+/// - `aliases`：收集身份
+/// - `visited`：阻断链接环
+/// - `depth`：限制异常链。
 ///
 /// 返回：无返回值；无法读取或超过链接深度时保留已经收集的安全身份。
 fn collect_watch_aliases(
@@ -357,7 +377,8 @@ fn collect_watch_aliases(
 
 /// 业务作用：把声明路径转换成绝对路径，同时保留影响符号链接父级语义的 `..` 分量。
 ///
-/// 参数说明：`path` 是绝对或相对配置路径。
+/// 参数说明：
+/// - `path`：是绝对或相对配置路径。
 ///
 /// 返回：绝对路径；相对路径以当前工作目录为基准，原有路径分量保持不变。
 fn absolute_watch_path(path: &Path) -> PathBuf {
@@ -372,7 +393,8 @@ fn absolute_watch_path(path: &Path) -> PathBuf {
 
 /// 业务作用：在路径已确认不含未展开符号链接后消除词法冗余，匹配操作系统事件的标准路径形态。
 ///
-/// 参数说明：`path` 是已经完成符号链接感知扫描的绝对路径或链接节点前缀。
+/// 参数说明：
+/// - `path`：是已经完成符号链接感知扫描的绝对路径或链接节点前缀。
 ///
 /// 返回：移除 `.` 并折叠可消解 `..` 后的路径，不访问文件系统。
 fn lexically_normalize_watch_path(path: &Path) -> PathBuf {

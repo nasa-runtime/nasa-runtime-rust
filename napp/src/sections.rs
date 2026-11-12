@@ -50,10 +50,12 @@ const RESERVED_SECTIONS: &[(&str, ComponentId)] = &[
 /// 只输出配置段名与组件名，绝不输出段内的地址、用户名或密码；告警只描述框架组件不会消费该段，
 /// 不能断言业务代码没有通过 [`crate::Application::config`] 手动读取同名配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `components`：属性入口按源码顺序声明的组件列表。
 /// - `tree`：需要检查的完整配置树；调用点使用最终树，从而同时覆盖本地与远端 overlay 引入的段。
+///
+/// 返回：无返回值；每次调用为每个未声明组件的已存在保留段记录告警，不删除配置，也不拒绝启动。
 pub(crate) fn warn_undeclared_sections(components: &[ComponentId], tree: &Value) {
     for (path, owner) in RESERVED_SECTIONS {
         if section_at(tree, path).is_none() || components.contains(owner) {
@@ -191,9 +193,11 @@ pub(crate) fn validate_declared_sections(
 }
 
 /// 业务作用：在持久适配器配置中识别指向 SQLite 的来源，禁用的计划不要求后端存在。
+///
 /// 参数说明：
 /// - `value`：已限定为持久适配器的配置子树。
 /// - `tree`：用于解析具名来源及 default 单源的完整配置。
+///
 /// 返回：发现已启用的 SQLite 来源引用时为真，不产生连接或文件副作用。
 fn sqlite_adapter_reference(value: &Value, tree: &Value) -> bool {
     match value {
@@ -384,7 +388,8 @@ fn validate_managed_references(
 
 /// 业务作用：从候选配置识别不持有本地事务事实的 managed direct client，供资源引用门禁保持零存储。
 ///
-/// 参数说明：`tree` 是尚未建立连接的完整候选配置。
+/// 参数说明：
+/// - `tree`：`tree` 是尚未建立连接的完整候选配置。
 ///
 /// 返回：明确选择 managed client 且 `reliable_start` 关闭时返回 true；缺失字段不作推断。
 #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
@@ -408,7 +413,8 @@ fn saga_direct_client_without_storage(tree: &Value) -> bool {
 
 /// 业务作用：按 Saga 角色读取唯一需要本地持久化的 datasource 引用，不从无关角色字段猜测。
 ///
-/// 参数说明：`tree` 是同一代完整配置候选。
+/// 参数说明：
+/// - `tree`：`tree` 是同一代完整配置候选。
 ///
 /// 返回：协调、参与或可靠 client 角色声明的引用；direct client 与缺失配置返回空。
 #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
@@ -445,7 +451,8 @@ fn saga_storage_datasource_ref(tree: &Value) -> Option<&str> {
 
 /// 业务作用：从候选 MySQL 配置提取业务可引用的规范化 datasource 名称。
 ///
-/// 参数说明：`tree` 是已经通过 DB 段结构校验的候选配置。
+/// 参数说明：
+/// - `tree`：`tree` 是已经通过 DB 段结构校验的候选配置。
 ///
 /// 返回：单库形态只含 `default`，多库形态包含 map 的全部权威键，缺段时为空。
 #[cfg(any(
@@ -466,7 +473,8 @@ fn configured_datasource_names(tree: &Value) -> BTreeSet<&str> {
 
 /// 业务作用：从候选 Redis 配置提取 Application 查询边界允许的 canonical 名称与默认别名。
 ///
-/// 参数说明：`tree` 是已经通过 Redis 段结构与逐实例取值校验的候选配置。
+/// 参数说明：
+/// - `tree`：`tree` 是已经通过 Redis 段结构与逐实例取值校验的候选配置。
 ///
 /// 返回：扁平配置产生 `primary`/`default`，多实例配置保留命名键并为 `primary` 增加 `default`。
 #[cfg(any(feature = "cache", feature = "scheduling"))]
@@ -524,9 +532,12 @@ fn ensure_redis_reference(
 
 /// 业务作用：读取组件配置中的字符串引用，并让字段缺失继续采用各组件公开默认值。
 ///
-/// 参数说明：`tree`、`section` 与 `field` 指向已完成结构校验的候选配置位置。
+/// 参数说明：
+/// - `tree`：已完成结构校验的完整候选配置树。
+/// - `section`：根对象下的组件配置键，不按点分路径解释。
+/// - `field`：该组件对象下待读取的字符串字段名。
 ///
-/// 返回：字段存在且为字符串时返回借用；缺失时返回 `None`。
+/// 返回：字段存在且为字符串时返回借用；任一路径缺失、段不是对象或字段不是字符串时返回 None，不填入默认值。
 #[cfg(any(
     feature = "outbox",
     feature = "outbox-pgsql",
@@ -546,11 +557,13 @@ fn string_setting<'a>(tree: &'a Value, section: &str, field: &str) -> Option<&'a
 /// 用于区分“该组件相关配置未变，可把 applied_version 推进到新快照”与“配置已变但本版本无法热应用，
 /// 必须报 RestartRequired”。比较的是原始子树，因此新增未知字段同样算变化。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `component`：需要判断的组件身份。
 /// - `current`：当前已发布快照的配置树。
 /// - `candidate`：尚未发布的候选配置树。
+///
+/// 返回：该组件任一保留段的 JSON 值不同则为 true；全部相同或组件没有登记保留段时为 false，不判断外部材料变化。
 #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
 pub(crate) fn sections_changed(component: ComponentId, current: &Value, candidate: &Value) -> bool {
     RESERVED_SECTIONS
@@ -561,7 +574,9 @@ pub(crate) fn sections_changed(component: ComponentId, current: &Value, candidat
 
 /// 业务作用：按点分隔的固定配置路径读取子树，使独立组件可以只拥有共享根下的一个明确子段。
 ///
-/// 参数说明：`tree` 为完整配置树，`path` 为编译期固定路径。
+/// 参数说明：
+/// - `tree`：`tree` 为完整配置树。
+/// - `path`：`path` 为编译期固定路径。
 ///
 /// 返回：路径全部存在时返回对应子树；任一层缺失或不是对象时返回 `None`。
 fn section_at<'a>(tree: &'a Value, path: &str) -> Option<&'a Value> {
@@ -570,7 +585,12 @@ fn section_at<'a>(tree: &'a Value, path: &str) -> Option<&'a Value> {
 }
 
 /// 业务作用：把已变化的 secret 材料映射到实际引用它的配置目标。
-/// 参数说明：`component` 为目标；`tree` 为已校验配置；`changed` 为材料新增、移除或内容变化的 ID。
+///
+/// 参数说明：
+/// - `component`：`component` 为目标。
+/// - `tree`：`tree` 为已校验配置。
+/// - `changed`：`changed` 为材料新增、移除或内容变化的 ID。
+///
 /// 返回：目标配置引用变化 ID，或其字段参与变化 secret 的配置分片时为真。
 #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
 pub(crate) fn secrets_affect_component(
@@ -601,7 +621,11 @@ pub(crate) fn secrets_affect_component(
 }
 
 /// 业务作用：按公开 locator 与既有裸 ID 合同识别材料依赖，不解析或输出材料内容。
-/// 参数说明：`value` 为组件子树；`changed` 为变动的 secret ID 集合。
+///
+/// 参数说明：
+/// - `value`：`value` 为组件子树。
+/// - `changed`：`changed` 为变动的 secret ID 集合。
+///
 /// 返回：合法的完整 ID 精确命中时为真；不做子串、URL 解码或大小写折叠。
 #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
 fn contains_secret_reference(

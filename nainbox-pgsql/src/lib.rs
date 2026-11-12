@@ -158,7 +158,8 @@ impl PgInbox {
     /// 业务作用：复用调用方已持有的 PostgreSQL 连接创建 Inbox 表，使外层 schema
     /// 互斥权覆盖整个 DDL 操作。
     ///
-    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    /// 参数说明：
+    /// - `connection`：是调用方已取得 schema 互斥权的连接。
     ///
     /// 返回：表已存在或创建成功时完成；DDL 失败返回脱敏错误。
     pub async fn ensure_schema_on_connection(
@@ -402,11 +403,12 @@ impl nainbox_core::DurableInboxRetention for PgInbox {
 /// 业务作用：在已持有 advisory lock 的连接上执行分批删除与账目统计。
 ///
 /// 参数说明：
-/// - `connection`：持有会话级 advisory lock 的同一 PostgreSQL 连接。
-/// - `consumer_name`：目标消费命名空间。
-/// - `policy`：已复验的保留策略。
+/// - `connection`：已经由外层取得该保留 owner 会话锁的专用连接。
+/// - `consumer_name`：需要清理与统计的消费命名空间。
+/// - `policy`：已经通过保留窗口和批次上限复验的策略。
+/// - `deadline`：本轮所有数据库步骤共用的单调时钟截止时刻。
 ///
-/// 返回：本轮账目报告；删除或统计失败返回脱敏错误。
+/// 返回：正常结束返回 Completed 与账目；数据库步骤预算耗尽或超时返回 BudgetAbandon，已完成删除不撤销；查询或删除失败返回脱敏错误。截断时须由外层弃用 session，报告可能不包含回包未知的删除。
 async fn retention_round_locked(
     connection: &mut sqlx::PgConnection,
     consumer_name: &str,
@@ -482,11 +484,21 @@ async fn retention_round_locked(
 fn map_transaction_error(error: TxRunError<anyhow::Error>) -> anyhow::Error {
     match error {
         TxRunError::Rollback(error) => error,
-        TxRunError::RollbackOnly { .. } => InboxTransactionError::RollbackOnly.into(),
-        TxRunError::CommitRejected { .. } => InboxTransactionError::CommitRejected.into(),
-        TxRunError::CommitUncertain { .. } => InboxTransactionError::CommitUncertain.into(),
-        TxRunError::RollbackFailed { .. } => InboxTransactionError::RollbackFailed.into(),
-        TxRunError::Infrastructure { .. } => InboxTransactionError::Infrastructure.into(),
+        TxRunError::RollbackOnly {
+            ..
+        } => InboxTransactionError::RollbackOnly.into(),
+        TxRunError::CommitRejected {
+            ..
+        } => InboxTransactionError::CommitRejected.into(),
+        TxRunError::CommitUncertain {
+            ..
+        } => InboxTransactionError::CommitUncertain.into(),
+        TxRunError::RollbackFailed {
+            ..
+        } => InboxTransactionError::RollbackFailed.into(),
+        TxRunError::Infrastructure {
+            ..
+        } => InboxTransactionError::Infrastructure.into(),
     }
 }
 

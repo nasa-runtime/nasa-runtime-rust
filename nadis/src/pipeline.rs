@@ -17,16 +17,32 @@ use crate::client::RedisClient;
 use crate::config::PipelineCfg;
 use crate::error::{NasaRedisError, Result};
 
-/// hash field 原子自减脚本：HINCRBY 使用负 delta，余值不大于零时删除该 field。
-/// KEYS 为 key，ARGV 为 field、delta；返回删除前的自减结果。
-const H_DECR_BY_AND_DEL_LUA: &str = "local k = KEYS[1];\n\
-local hk = ARGV[1];\n\
-local delta = tonumber(ARGV[2]) or 1;\n\
-local v = redis.call('hincrby', k, hk, -delta);\n\
-if v <= 0 then\n\
-    redis.call('hdel', k, hk);\n\
-end\n\
-return v;";
+/// Hash 字段自减及非正余值删除脚本，KEYS 为键，ARGV 为字段与已校验可取负的 i64 减量。
+/// 步长和余值始终使用十进制文本，避免 Lua 数字舍入改变持久增量或回包；返回删除前的精确余值文本。
+const H_DECR_BY_AND_DEL_LUA: &str = r#"
+local k = KEYS[1]
+local hk = ARGV[1]
+local delta = ARGV[2]
+local increment
+-- 调用入口已校验有符号范围；这里只改变文本符号，不让完整整数经过 Lua 浮点数。
+if delta == '0' then
+    increment = '0'
+elseif string.sub(delta, 1, 1) == '-' then
+    increment = string.sub(delta, 2)
+else
+    increment = '-' .. delta
+end
+-- 精确回读要求 HGET 权限；先执行只读检查，避免因缺少读取权限而在减量之后留下失败结果。
+redis.call('HGET', k, hk)
+-- HINCRBY 负责整数合法性和溢出裁决；忽略其 Lua 数字回包，从持久字段读取精确十进制结果。
+redis.call('HINCRBY', k, hk, increment)
+local value = redis.call('HGET', k, hk)
+if value == '0' or string.sub(value, 1, 1) == '-' then
+    -- 先保留余值再删除字段，使最后一个字段被删时仍能返回本次更新结果。
+    redis.call('HDEL', k, hk)
+end
+return value
+"#;
 
 /// 单条命令的失败形态(经 oneshot 分发;RedisError 不 Clone,传输错误需广播给
 /// 整批 ticket,故自定义枚举承载)。
@@ -36,49 +52,80 @@ enum TicketErr {
     Server(redis::ServerError),
     /// 传输层失败(写出后断线/超时):该命令「可能已执行」。
     Unknown(String),
-    /// **确定未发送**:PipelineSession 未 execute 即 drop —— 命令从未进 dispatch。
+    /// 命令仍由会话缓冲区持有且尚未进入派发，释放尾批时保留确定未发送证据。
     NotSent,
 }
 
 /// 单条命令的类型化回执。execute 后调用 `await_result()` 取值。
 pub struct Ticket<T> {
     rx: oneshot::Receiver<std::result::Result<redis::Value, TicketErr>>,
+    /// 命令 helper 附加的回复合同，仅约束本张票据，不改变原始 enqueue 的类型转换。
+    reply_check: ReplyCheck,
     _t: std::marker::PhantomData<T>,
+}
+
+/// 本地命令票据的回复合同；异常回复不提供自动重放或副作用回滚证据。
+enum ReplyCheck {
+    /// 由调用方指定的 FromRedisValue 类型解释回复。
+    General,
+    /// PUBLISH 返回的非负订阅计数，不等同于业务消费确认。
+    PublishCount,
+    /// XADD 自动分配的非零完整身份。
+    StreamId,
+    /// XACK 确认量不能超过本次发送的 ID 数。
+    StreamAck {
+        /// 本命令实际提交的 ID 数量。
+        requested: usize,
+    },
 }
 
 impl<T: FromRedisValue> Ticket<T> {
     /// 业务作用：为空集合操作创建已完成的 ticket，不向 Redis 发送非法空命令。
-    /// 返回：可立即读取的预置结果，不占用会话条数或字节额度。
     ///
-    /// # 参数
-    /// - `v`: 待转换的值。
+    /// 参数说明：
+    /// - `v`：空输入对应的 Redis 响应值，按调用方期望的类型在读取 ticket 时转换。
+    ///
+    /// 返回：可立即读取的预置结果，不占用会话条数或字节额度；类型不匹配在读取时返回解析错误。
     fn ready(v: redis::Value) -> Ticket<T> {
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(Ok(v));
         Ticket {
             rx,
+            reply_check: ReplyCheck::General,
             _t: std::marker::PhantomData,
         }
     }
 
     /// 业务作用：消费本命令的 ticket 并读取已经送达的结果，本方法不会异步等待。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：就绪时返回命令结果或对应错误；尚未就绪时返回 SessionLimit 且 ticket 被消费。
+    /// 命令 helper 的回复合同先于通用类型转换，校验失败不证明远端未执行，也不自动重放。
     /// 通常应先等待 execute 完成；空输入的预置结果或已完成的后台封批可以更早就绪。
     pub fn await_result(mut self) -> Result<T> {
         match self.rx.try_recv() {
-            // 命令成功:Value 按值移交 FromRedisValue(redis 1.2 形态),类型化失败 = Parsing
-            Ok(Ok(v)) => Ok(T::from_redis_value(v)?),
-            // 确定性 server error / 传输 Unknown 已在 execute 阶段分类
+            Ok(Ok(v)) => {
+                // 类型可转换不等于命令证据成立；只复验本票据的合同，不能让同批其它命令承担约束。
+                match self.reply_check {
+                    ReplyCheck::General => {}
+                    ReplyCheck::PublishCount => crate::pubsub::check_publish_count_reply(&v)?,
+                    ReplyCheck::StreamId => crate::stream::check_stream_id_reply(&v, "*")?,
+                    ReplyCheck::StreamAck {
+                        requested,
+                    } => {
+                        crate::stream::check_stream_ack_reply(&v, requested)?;
+                    }
+                }
+                Ok(T::from_redis_value(v)?)
+            }
             Ok(Err(TicketErr::Server(e))) => Err(NasaRedisError::Redis(e.into())),
             Ok(Err(TicketErr::Unknown(msg))) => Err(NasaRedisError::ExecutionUnknown(msg)),
-            // 会话未 execute 即 drop —— **确定未发送**(区别于下面"可能已发"的取消场景)。
+            // 只有仍在会话缓冲区、尚未封批的命令有确定未发送证据；后台段不使用此结果。
             Ok(Err(TicketErr::NotSent)) => Err(NasaRedisError::NotExecuted(
-                "PipelineSession 未 execute 即丢弃,命令确定未发送".into(),
+                "PipelineSession 尾批尚未派发即被释放，命令确定未发送".into(),
             )),
-            // sender 被 drop(execute future 被取消 / 内部未送达):命令**可能已写到服务端执行**
-            // (写命令!)——按 `ExecutionUnknown` 处置(兑现文档 取消语义),
-            // 不能误报"内部不变量被破坏"，async 取消对应的是提交结果不确定。
+            // 结果通道消失无法证明远端未执行，必须保留不确定性，避免调用方据此重放写命令。
             Err(oneshot::error::TryRecvError::Closed) => Err(NasaRedisError::ExecutionUnknown(
                 "ticket 通道关闭(execute 被取消或未送达,命令可能已发到服务端执行)".into(),
             )),
@@ -110,12 +157,16 @@ pub struct PipelineSession {
     flush_chain: Option<JoinHandle<Result<()>>>,
     /// `false` 表示 `execute()` 是唯一提交点，达到会话上限时在入队前拒绝，不产生后台写出。
     auto_flush: bool,
+    /// 尾批已从会话移交派发；等待封批链期间仍为 false，取消时可确认剩余尾批未发送。
     executed: bool,
 }
 
 impl RedisClient {
-    /// 业务作用：创建显式批会话(self: &Arc 形态由调用方 clone 传入)。
+    /// 业务作用：创建共享当前客户端连接配置的显式 Pipeline 会话，达到阈值后可按段后台提交。
     ///
+    /// 参数说明：无。
+    ///
+    /// 返回：尚无命令的会话；创建不会连接或发送，后续封批使用独立 Pipeline lane，同 slot 各段依次派发。
     pub fn pipeline(self: &Arc<Self>) -> PipelineSession {
         PipelineSession {
             client: Arc::clone(self),
@@ -141,15 +192,15 @@ impl RedisClient {
 }
 
 impl PipelineSession {
-    /// 业务作用：入队任意命令(类型化 helper 的底座;也是 raw 逃生舱)。
+    /// 业务作用：接纳一条原始 Redis 命令并创建类型化票据，作为各命令 helper 的统一封批入口。
     ///
-    /// ⚠ cluster 分桶:本会话在 cluster 下按命令 key 的 slot 分桶并行发。typed helper 与
-    /// EVAL/EVALSHA/FCALL 系(key 在 numkeys 之后)均已正确取 key;**其它 key 不在 `arg[1]`、又非 EVAL 系的
-    /// 罕见命令**经 raw `enqueue` 入队时会按 `arg[1]` 算 slot,cluster 下可能误桶(返回 MOVED/CROSSSLOT,非静默
-    /// 错写)。这类命令请确保同 slot 或走 typed API。standalone 不分桶,不受影响。
+    /// 参数说明：
+    /// - `cmd`：完整命令及参数；调用方负责原始命令的键位置、同槽要求和服务端能力。
     ///
-    /// # 参数
-    /// - `cmd`: 底层 Redis 命令对象。
+    /// 返回：接纳后返回票据，不表示 Redis 已执行；延迟提交模式超过条数或参数字节额度时拒绝本条命令。
+    /// 自动封批模式按入队后的阈值封批，单条可超过字节阈值；没有 Tokio 上下文时暂留缓冲区直到 execute。
+    /// Cluster 按首键 slot 分桶，识别 EVAL/EVALSHA/FCALL 的 numkeys 布局；其它原始命令按首个参数作为键，
+    /// 不提供任意命令的键解析、跨槽拆分或全局顺序，特殊命令需由调用方选择适合的入口。
     pub fn enqueue<T: FromRedisValue>(&mut self, cmd: redis::Cmd) -> Result<Ticket<T>> {
         // 估算本命令参数字节(协议开销忽略;Arg 是 non_exhaustive,未知形态按 8 字节计)
         let sz: usize = cmd
@@ -187,17 +238,19 @@ impl PipelineSession {
         }
         Ok(Ticket {
             rx,
+            reply_check: ReplyCheck::General,
             _t: std::marker::PhantomData,
         })
     }
 
-    /// 业务作用：seal 当前批 → 后台 dispatch(滚动 auto-flush 的核心)。把当前 `cmds` 取走丢进一个 spawn 任务,**先
-    /// await 前一段的 flush 句柄**再发本段,从而跨段严格按 seal 顺序落库(避免 的乱序——这里是段级链式
-    /// 串行,不是逐命令 spawn)。本段各 ticket 在该任务内由 `dispatch_jobs` 回填;传输错误广播给本段 ticket。
-    /// 空批直接返回。
+    /// 业务作用：把当前缓冲批次交给后台提交链，在前段结束后派发本段，保持同 slot 的段间发送顺序。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：有执行上下文时移出当前批次、重置参数字节计数并更新链尾；空批不派发。
+    /// 没有 Tokio 上下文时保留原缓冲区，等待 execute；后台退出或传输失败由 execute 与对应 ticket 报告。
     fn seal_and_flush(&mut self) {
-        // helper 是同步的——若调用方在**无 tokio runtime** 的上下文攒批(罕见),无法后台 flush:不 seal,
-        // 保留缓冲并由 `execute().await`（必在 runtime 内）统一发出，既不 panic 也不提前报错。
+        // 无执行上下文时不能接手后台责任；保留缓冲，后续 execute 或会话析构仍可处理原票据。
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -209,42 +262,47 @@ impl PipelineSession {
         let client = Arc::clone(&self.client);
         let prev = self.flush_chain.take();
         self.flush_chain = Some(handle.spawn(async move {
-            // 先等前段落库(保序);保留**第一个**批级传输错误(prev 在前)。前段 task panic/cancel →
-            // JoinError 映射成 ExecutionUnknown(批级不确定,**不吞成 Ok**)。
+            // 前段结束后才发送本段；失败不能解释为未执行或自动重发，仍保留首个批级错误供调用方裁决。
             let prev_res = match prev {
                 Some(p) => p.await.unwrap_or_else(join_err_to_unknown),
                 None => Ok(()),
             };
-            let own = dispatch_jobs(&client, batch).await; // 段内 ticket 在此回填(含错误广播)
+            let own = dispatch_jobs(&client, batch).await;
             prev_res.and(own)
         }));
     }
 
-    // ── 常用类型化 helper(按需渐进扩充, 第 1 条同款纪律)──
+    // 类型化命令统一通过 enqueue 接纳。
 
-    /// 业务作用：Queues the Redis GET command and returns its ticket.
+    /// 业务作用：将单键字符串读取加入当前批次，按该命令的回包独立转换业务类型。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：待读取的 Redis 字符串键。
+    ///
+    /// 返回：接纳后返回票据，完成时键不存在为 None；会话拒绝直接返回错误，服务端及类型转换错误由票据报告。
     pub fn get<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Option<T>>> {
         self.enqueue(redis::cmd("GET").arg(key).to_owned())
     }
 
-    /// 业务作用：Queues the Redis SET command and returns its ticket.
+    /// 业务作用：将单键字符串覆盖写入当前批次，写入成功时由 Redis 清除该键原有过期时间。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：待写入的 Redis 键。
+    /// - `val`：编码为一个 Redis 参数的完整值。
+    ///
+    /// 返回：接纳后返回确认写入的票据；本地拒绝立即返回错误，远端错误及结果未知由票据报告，不自动重放。
     pub fn set<V: redis::ToSingleRedisArg>(&mut self, key: &str, val: V) -> Result<Ticket<()>> {
         self.enqueue(redis::cmd("SET").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：Queues the Redis HSET command and returns its ticket.
+    /// 业务作用：将 Hash 单字段写入当前批次，保留其它字段并区分新增与覆盖。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `field`：本次新增或覆盖的字段名。
+    /// - `val`：字段的新值，编码为一个 Redis 参数。
+    ///
+    /// 返回：接纳后返回票据，true 表示新增字段，false 表示覆盖已有字段；本地拒绝直接返回错误，执行错误由票据报告。
     pub fn h_set<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -254,11 +312,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HSET").arg(key).arg(field).arg(val).to_owned())
     }
 
-    /// 业务作用：Queues the Redis HGET command and returns its ticket.
+    /// 业务作用：将 Hash 单字段读取加入当前批次，不把字段缺失混同为空正文。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `field`：待读取的字段名。
+    ///
+    /// 返回：接纳后返回票据，键或字段不存在时为 None；本地拒绝直接返回错误，服务端及类型转换错误由票据报告。
     pub fn h_get<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -267,31 +327,35 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HGET").arg(key).arg(field).to_owned())
     }
 
-    /// 业务作用：Queues the Redis DEL command and returns its ticket.
+    /// 业务作用：将单键删除加入当前批次，键不存在时保持幂等的零删除结果。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：待删除的 Redis 键，不要求特定数据类型。
     ///
-    /// - `key`: 待删除的 Redis key。
+    /// 返回：接纳后返回实际删除数量的票据，单键结果为零或一；本地拒绝立即返回错误，执行失败或未知由票据报告。
     pub fn del(&mut self, key: &str) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("DEL").arg(key).to_owned())
     }
 
-    /// 业务作用：Queues the Redis INCRBY command and returns its ticket.
+    /// 业务作用：将整数键的原子增量操作加入当前批次，避免客户端读取后回写造成并发覆盖。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：保存有符号整数的 Redis 字符串键，缺失时以零为初值。
+    /// - `delta`：有符号增量，负数表示递减。
     ///
-    /// - `key`: 保存整数计数值的 Redis key。
-    /// - `delta`: 本次递增的整数步长，可为负值。
+    /// 返回：接纳后返回更新值的票据；本地拒绝立即返回错误，非整数内容或算术越界等服务端错误由票据报告。
     pub fn incr_by(&mut self, key: &str, delta: i64) -> Result<Ticket<i64>> {
         self.enqueue(redis::cmd("INCRBY").arg(key).arg(delta).to_owned())
     }
 
-    /// 业务作用：Queues the Redis ZADD command and returns its ticket.
+    /// 业务作用：将有序集合单成员的新增或分值更新加入当前批次。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `score`: 有序集合成员 score。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `score`：该成员的新排序分值，合法性由 Redis 校验。
+    /// - `member`：成员身份，编码为一个 Redis 参数。
+    ///
+    /// 返回：接纳后返回新增成员数的票据，更新既有成员分值返回零；本地拒绝立即报错，非法分值或执行错误由票据报告。
     pub fn z_add<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -307,90 +371,98 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：Queues the Redis XADD command and returns its ticket.
+    /// 业务作用：将一条字段消息追加请求加入当前批次，由 Redis 生成 Stream 记录 ID。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键，缺失时按 XADD 语义创建。
+    /// - `fields`：按给定顺序发送的字段名与二进制正文；有效消息应至少包含一对字段。
     ///
-    /// - `stream`: stream 所在的 Redis key。
-    /// - `fields`: 要写入 entry 的 field/bytes 列表；会使用 `"*"` 自动生成 entry id。
+    /// 返回：接纳后返回非零完整 ID 的字符串票据；本地拒绝立即报错，服务端或回复校验错误由票据报告，不自动重发追加请求。
     pub fn x_add(&mut self, stream: &str, fields: &[(&str, &[u8])]) -> Result<Ticket<String>> {
         let mut c = redis::cmd("XADD");
         c.arg(stream).arg("*");
         for (f, v) in fields {
             c.arg(*f).arg(*v);
         }
-        self.enqueue(c)
+        let mut ticket = self.enqueue(c)?;
+        ticket.reply_check = ReplyCheck::StreamId;
+        Ok(ticket)
     }
 
-    // ── 常用命令 typed helper(命名对齐 commands.rs,
-    //    底座仍是 enqueue;cluster 多 key 命令的跨 slot 由 Redis loud CROSSSLOT 兜底)──
+    // 多键命令仍由调用方保证同槽；本地封批不自动拆分单条命令。
 
-    // key / string
-    /// 业务作用：使用 PEXPIRE 设置相对过期时间，按毫秒提交。
-    /// 正的亚毫秒时长向上保留为 1ms，避免因截断为零而立即删除 key。
+    // 键和字符串命令。
+    /// 业务作用：将单键相对过期设置加入当前批次，保留正亚毫秒时长，避免截断为零造成立即删除。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：需要设置过期时间的 Redis 键。
+    /// - `ttl`：从服务端执行时刻起计算的存活时长；零表示立即过期，正亚毫秒按一毫秒处理。
     ///
-    /// - `key`: 需要设置相对过期时间的 Redis key。
-    /// - `ttl`: 从当前时间开始计算的存活时间；非零亚毫秒会按 1ms 下界处理。
+    /// 返回：时长超出有符号 64 位毫秒范围或会话拒绝时不入队并返回错误；接纳后的票据表示是否成功设置，执行失败由票据报告。
     pub fn expire(&mut self, key: &str, ttl: Duration) -> Result<Ticket<bool>> {
         let ms = crate::commands::duration_to_millis_floor1(ttl)?;
         self.enqueue(redis::cmd("PEXPIRE").arg(key).arg(ms).to_owned())
     }
 
-    /// 业务作用：绝对过期(epoch **秒**)→ `EXPIREAT`。对照 direct `commands.rs::expire_at_secs`。
+    /// 业务作用：将单键的秒级绝对过期设置加入当前批次，以 Redis 执行时的时钟裁决是否已到期。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：需要设置过期时间的 Redis 键。
+    /// - `unix_secs`：Unix 秒级时间戳，过去的时刻使已有键立即过期。
     ///
-    /// - `key`: 需要设置绝对过期时间的 Redis key。
-    /// - `unix_secs`: 秒级 Unix 时间戳，到达该时间后 key 过期。
+    /// 返回：接纳后返回是否成功设置的票据；本地拒绝立即报错，服务端时间范围或执行错误由票据报告。
     pub fn expire_at_secs(&mut self, key: &str, unix_secs: i64) -> Result<Ticket<bool>> {
         self.enqueue(redis::cmd("EXPIREAT").arg(key).arg(unix_secs).to_owned())
     }
 
-    /// 业务作用：绝对过期(epoch **毫秒**)→ `PEXPIREAT`。
-    /// (= `OP_EXPIRE_AT`→pexpireat)与 direct `commands.rs::expire_at_millis`。
+    /// 业务作用：将单键的毫秒级绝对过期设置加入当前批次，避免客户端等待改变业务截止时刻。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：需要设置过期时间的 Redis 键。
+    /// - `unix_ms`：Unix 毫秒时间戳，过去的时刻使已有键立即过期。
     ///
-    /// - `key`: 需要设置绝对过期时间的 Redis key。
-    /// - `unix_ms`: 毫秒级 Unix 时间戳，到达该时间后 key 过期。
+    /// 返回：接纳后返回是否成功设置的票据；本地拒绝立即报错，服务端执行错误由票据报告。
     pub fn expire_at_millis(&mut self, key: &str, unix_ms: i64) -> Result<Ticket<bool>> {
         self.enqueue(redis::cmd("PEXPIREAT").arg(key).arg(unix_ms).to_owned())
     }
 
-    /// 业务作用：PERSIST(去掉 TTL)。
+    /// 业务作用：将单键过期时间移除请求加入当前批次，使已有带期限的键转为无期限保存。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：需要移除 TTL 的 Redis 键。
     ///
-    /// - `key`: 需要移除 TTL、转为永久保存的 Redis key。
+    /// 返回：接纳后返回是否实际移除了期限的票据，键不存在或原本无期限为 false；本地及执行错误分别在入队或票据中报告。
     pub fn persist(&mut self, key: &str) -> Result<Ticket<bool>> {
         self.enqueue(redis::cmd("PERSIST").arg(key).to_owned())
     }
 
-    /// 业务作用：EXISTS(单 key)。
+    /// 业务作用：将单键存在性查询加入当前批次，观察服务端执行该命令时的状态。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：待检查的 Redis 键，不要求特定数据类型。
     ///
-    /// - `key`: 待检查是否存在的 Redis key。
+    /// 返回：接纳后返回存在性票据；本地拒绝立即报错，查询错误由票据报告，存在性结果不构成后续写入的原子前提。
     pub fn exists(&mut self, key: &str) -> Result<Ticket<bool>> {
         self.enqueue(redis::cmd("EXISTS").arg(key).to_owned())
     }
 
-    /// 业务作用：PTTL(ms;-1 无 TTL,-2 不存在)。
+    /// 业务作用：将单键毫秒剩余期限查询加入当前批次，保留无期限和不存在的不同状态。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：待查询剩余 TTL 的 Redis 键。
     ///
-    /// - `key`: 待查询剩余毫秒 TTL 的 Redis key。
+    /// 返回：接纳后返回有符号毫秒票据，-1 表示无 TTL，-2 表示键不存在；本地拒绝立即报错，查询错误由票据报告。
     pub fn pttl(&mut self, key: &str) -> Result<Ticket<i64>> {
         self.enqueue(redis::cmd("PTTL").arg(key).to_owned())
     }
 
-    /// 业务作用：SETNX(不存在才设)→ 是否设置成功。
+    /// 业务作用：将仅在键不存在时写入的原子条件请求加入当前批次，避免先查询再写入的竞争。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：待条件写入的 Redis 键。
+    /// - `val`：键不存在时写入的单个参数值。
+    ///
+    /// 返回：接纳后返回是否实际写入的票据；已有键保持原值并返回 false，本地拒绝或执行错误分别直接或通过票据报告。
     pub fn set_nx<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -399,12 +471,14 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SETNX").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：SET key val PX ttl_ms(带过期写)。
+    /// 业务作用：将字符串覆盖写入与毫秒 TTL 设置作为一条原子 SET 命令加入当前批次。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
-    /// - `ttl_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
+    /// 参数说明：
+    /// - `key`：待写入的 Redis 键。
+    /// - `val`：覆盖写入的单个参数值。
+    /// - `ttl_ms`：执行后存活的毫秒数，必须是 Redis 接受的正期限，零或越界值由服务端拒绝。
+    ///
+    /// 返回：接纳后返回写入确认票据；本地拒绝立即报错，非法 TTL、执行失败或结果未知由票据报告。
     pub fn set_ttl<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -421,20 +495,24 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：APPEND → 追加后长度。
+    /// 业务作用：将字符串尾部追加加入当前批次，缺失键按空字符串开始，已有值无需客户端读回。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标字符串键。
+    /// - `val`：待追加的单个二进制参数值。
+    ///
+    /// 返回：接纳后返回追加后的字节长度票据；本地拒绝立即报错，执行失败或结果未知由票据报告，不能据未知结果自动重发追加。
     pub fn append<V: redis::ToSingleRedisArg>(&mut self, key: &str, val: V) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("APPEND").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：GETSET → 旧值。
+    /// 业务作用：将读取旧字符串并覆盖新值的原子交换加入当前批次，成功后清除原键的 TTL。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标字符串键。
+    /// - `val`：替换旧值的单个参数值。
+    ///
+    /// 返回：接纳后返回旧值票据，原键不存在时为 None；本地拒绝立即报错，执行或旧值转换错误由票据报告，转换失败不回滚已发生的覆盖。
     pub fn get_set<T: FromRedisValue, V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -443,27 +521,33 @@ impl PipelineSession {
         self.enqueue(redis::cmd("GETSET").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：GETDEL → 取并删。
+    /// 业务作用：将读取字符串并删除对应键的原子请求加入当前批次，用于一次性取走持久值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：待读取并删除的字符串键。
+    ///
+    /// 返回：接纳后返回被删除值的票据，键不存在时为 None；本地拒绝立即报错，执行或类型转换错误由票据报告，转换失败不恢复已删除的数据。
     pub fn get_del<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Option<T>>> {
         self.enqueue(redis::cmd("GETDEL").arg(key).to_owned())
     }
 
-    /// 业务作用：STRLEN。
+    /// 业务作用：将字符串长度查询加入当前批次，只读取字节数量而不取回正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标字符串键。
     ///
-    /// - `key`: 字符串值所在的 Redis key。
+    /// 返回：接纳后返回字节长度票据，缺失键为零；本地拒绝立即报错，键类型不符或执行错误由票据报告。
     pub fn str_len(&mut self, key: &str) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("STRLEN").arg(key).to_owned())
     }
 
-    /// 业务作用：MGET(⚠ cluster 跨 slot → Redis CROSSSLOT)。空 keys 短路返回空数组。
+    /// 业务作用：将多个字符串键作为一条 MGET 加入批次，按输入顺序保留每个键的可选结果。
     ///
-    /// # 参数
-    /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
+    /// 参数说明：
+    /// - `keys`：有序键列表；Cluster 使用时调用方应提供同槽键，本入口不拆分这条多键命令。
+    ///
+    /// 返回：空输入立即得到空数组票据且不发送；非空接纳后返回逐键结果，缺失或非字符串键为 None。
+    /// 会话拒绝立即报错，服务端及类型转换错误由票据报告，不能据返回数组推断后续命令仍看到同一状态。
     pub fn mget<T: FromRedisValue>(&mut self, keys: &[&str]) -> Result<Ticket<Vec<Option<T>>>> {
         if keys.is_empty() {
             return Ok(Ticket::ready(redis::Value::Array(vec![])));
@@ -476,12 +560,13 @@ impl PipelineSession {
     }
 
     // hash
-    /// 业务作用：HDEL(多 field)→ 删除数。空 field 短路返回 0(:不发非法空 HDEL)。
+    /// 业务作用：将同一 Hash 的字段删除合并为一条命令，保留未指定的字段。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `fields`：待删除的字段名列表，重复或缺失字段不增加实际删除数。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `fields`: 待删除的 hash field 列表；空切片会返回预完成 ticket。
+    /// 返回：空字段列表立即得到零票据且不发送；非空接纳后返回实际删除数，会话拒绝立即报错，执行错误由票据报告。
     pub fn h_del(&mut self, key: &str, fields: &[&str]) -> Result<Ticket<u64>> {
         if fields.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -494,12 +579,14 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：HSETNX → 是否新建。
+    /// 业务作用：将 Hash 字段不存在时才写入的原子条件操作加入当前批次，保护已有字段值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标 Hash 键，缺失时可创建。
+    /// - `field`：待条件写入的字段名。
+    /// - `val`：字段不存在时写入的单个参数值。
+    ///
+    /// 返回：接纳后返回是否新增字段的票据；字段已有值时为 false，本地拒绝立即报错，执行错误由票据报告。
     pub fn h_set_nx<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -509,13 +596,14 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HSETNX").arg(key).arg(field).arg(val).to_owned())
     }
 
-    /// 业务作用：HINCRBY → 增后值。
+    /// 业务作用：将 Hash 整数字段的原子增量操作加入当前批次，避免并发计数被读改写覆盖。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `field`：保存有符号整数的字段，缺失时以零为初值。
+    /// - `delta`：有符号增量，负数表示递减。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `field`: 需要递增的 hash field。
-    /// - `delta`: 本次递增的整数步长，可为负值。
+    /// 返回：接纳后返回更新值的票据；会话拒绝立即报错，非整数内容、算术越界或其它执行错误由票据报告。
     pub fn h_incr_by(&mut self, key: &str, field: &str, delta: i64) -> Result<Ticket<i64>> {
         self.enqueue(
             redis::cmd("HINCRBY")
@@ -526,19 +614,24 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：HGETALL。
+    /// 业务作用：将 Hash 全字段读取加入当前批次，按调用方选择的容器类型转换完整字段集合。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：目标 Hash 键；该操作读取全部字段，不分页。
+    ///
+    /// 返回：接纳后返回完整响应的类型化票据，缺失键对应空集合；会话拒绝立即报错，执行或容器转换错误由票据报告。
     pub fn h_get_all<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<T>> {
         self.enqueue(redis::cmd("HGETALL").arg(key).to_owned())
     }
 
-    /// 业务作用：HMGET(多 field)。
+    /// 业务作用：将同一 Hash 的指定字段读取合并为一条命令，按请求顺序保留缺失位置。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `fields`: Hash 字段名列表,用于批量读取或删除。
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `fields`：有序字段名列表，重复字段也保留对应结果位置。
+    ///
+    /// 返回：空列表立即得到空数组票据且不发送；非空接纳后返回逐字段可选值，缺失位置为 None。
+    /// 会话拒绝立即报错，服务端及值类型转换错误由票据报告。
     pub fn h_mget<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -555,65 +648,77 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：HKEYS。
+    /// 业务作用：将 Hash 全字段名查询加入当前批次，不读取字段正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键；该操作一次返回所有字段名。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
+    /// 返回：接纳后返回字段名字符串列表的票据，缺失键为空列表；会话拒绝立即报错，执行或字段名 UTF-8 转换错误由票据报告。
     pub fn h_keys(&mut self, key: &str) -> Result<Ticket<Vec<String>>> {
         self.enqueue(redis::cmd("HKEYS").arg(key).to_owned())
     }
 
-    /// 业务作用：HLEN。
+    /// 业务作用：将 Hash 字段数量查询加入当前批次，不拉取字段名或正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
+    /// 返回：接纳后返回字段数量票据，缺失键为零；会话拒绝立即报错，类型不符或其它执行错误由票据报告。
     pub fn h_len(&mut self, key: &str) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("HLEN").arg(key).to_owned())
     }
 
     // list
-    /// 业务作用：LPUSH → push 后长度。
+    /// 业务作用：将单元素从列表头部入队的请求加入当前批次，缺失列表按 Redis 语义创建。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `val`：待插入头部的单个元素。
+    ///
+    /// 返回：接纳后返回插入后的列表长度票据；本地拒绝立即报错，执行失败或结果未知由票据报告，不自动重放入队。
     pub fn l_push<V: redis::ToSingleRedisArg>(&mut self, key: &str, val: V) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("LPUSH").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：RPUSH → push 后长度。
+    /// 业务作用：将单元素从列表尾部入队的请求加入当前批次，保留已有元素的先后顺序。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键，缺失时可创建。
+    /// - `val`：待追加到尾部的单个元素。
+    ///
+    /// 返回：接纳后返回插入后的列表长度票据；本地拒绝立即报错，执行失败或结果未知由票据报告，不自动重放入队。
     pub fn r_push<V: redis::ToSingleRedisArg>(&mut self, key: &str, val: V) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("RPUSH").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：LPOP。
+    /// 业务作用：将从列表头部移除并返回一个元素的请求加入当前批次，不等待新元素到达。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    ///
+    /// 返回：接纳后返回移出元素的票据，列表缺失时为 None；本地拒绝立即报错，执行或解码错误由票据报告，解码失败不恢复已移出的元素。
     pub fn l_pop<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Option<T>>> {
         self.enqueue(redis::cmd("LPOP").arg(key).to_owned())
     }
 
-    /// 业务作用：RPOP。
+    /// 业务作用：将从列表尾部移除并返回一个元素的请求加入当前批次，不等待新元素到达。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    ///
+    /// 返回：接纳后返回移出元素的票据，列表缺失时为 None；本地拒绝立即报错，执行或解码错误由票据报告，解码失败不恢复已移出的元素。
     pub fn r_pop<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Option<T>>> {
         self.enqueue(redis::cmd("RPOP").arg(key).to_owned())
     }
 
-    /// 业务作用：LRANGE。
+    /// 业务作用：将列表闭区间读取加入当前批次，保留所选元素从头到尾的顺序。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
-    /// - `stop`: Redis 区间或列表裁剪的终点。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `start`：包含在结果内的起始下标，零为头部，负数从尾部计算。
+    /// - `stop`：包含在结果内的结束下标，支持负索引，超出列表的边界由 Redis 截取。
+    ///
+    /// 返回：接纳后返回有序元素列表票据，缺失键或无交集区间为空；本地拒绝立即报错，执行或元素转换错误由票据报告。
     pub fn l_range<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -629,12 +734,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：LREM(count 0=全删,>0 头向尾,<0 尾向头)→ 删除数。
+    /// 业务作用：将列表中匹配值的定向删除加入当前批次，按数量参数限制删除范围。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `count`：正数从头部起删除至多该数量，负数从尾部起删除至多其绝对值数量，零表示全部匹配项。
+    /// - `val`：按 Redis 参数字节精确匹配的元素值。
+    ///
+    /// 返回：接纳后返回实际删除数票据，缺失键或无匹配项为零；本地拒绝立即报错，执行失败或结果未知由票据报告。
     pub fn l_rem<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -644,32 +751,36 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LREM").arg(key).arg(count).arg(val).to_owned())
     }
 
-    /// 业务作用：LLEN。
+    /// 业务作用：将列表长度查询加入当前批次，不取回元素正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标列表键。
     ///
-    /// - `key`: 列表所在的 Redis key。
+    /// 返回：接纳后返回元素数量票据，缺失列表为零；本地拒绝立即报错，键类型不符或其它执行错误由票据报告。
     pub fn l_len(&mut self, key: &str) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("LLEN").arg(key).to_owned())
     }
 
-    /// 业务作用：LTRIM。
+    /// 业务作用：将列表裁剪为指定闭区间的请求加入当前批次，删除保留范围之外的元素。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `start`：保留区间的包含式起点，负索引从列表尾部计算。
+    /// - `stop`：保留区间的包含式终点，-1 表示最后一个元素；空区间会移除全部元素。
     ///
-    /// - `key`: 列表所在的 Redis key。
-    /// - `start`: 保留区间起始下标，支持 Redis 负索引。
-    /// - `stop`: 保留区间结束下标，支持 Redis 负索引。
+    /// 返回：接纳后返回裁剪确认票据，列表缺失也可成功；本地拒绝立即报错，执行失败或结果未知由票据报告，不能凭未知结果安全重试相对索引裁剪。
     pub fn l_trim(&mut self, key: &str, start: isize, stop: isize) -> Result<Ticket<()>> {
         self.enqueue(redis::cmd("LTRIM").arg(key).arg(start).arg(stop).to_owned())
     }
 
     // set
-    /// 业务作用：SADD(单 member)→ 新增数。
+    /// 业务作用：将集合单成员加入请求放入当前批次，已有同值成员保持去重。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标集合键，缺失时可创建。
+    /// - `member`：按参数字节识别的成员值。
+    ///
+    /// 返回：接纳后返回新增数量票据，已有成员为零；会话拒绝立即报错，类型不符或其它执行错误由票据报告。
     pub fn s_add<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -678,11 +789,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SADD").arg(key).arg(member).to_owned())
     }
 
-    /// 业务作用：SREM(单 member)→ 删除数。
+    /// 业务作用：将集合单成员移除加入当前批次，保留其它成员。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标集合键。
+    /// - `member`：按参数字节匹配的待移除成员。
+    ///
+    /// 返回：接纳后返回实际移除数量票据，键或成员不存在时为零；会话拒绝立即报错，执行错误由票据报告。
     pub fn s_rem<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -691,28 +804,33 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SREM").arg(key).arg(member).to_owned())
     }
 
-    /// 业务作用：SCARD。
+    /// 业务作用：将集合成员数量查询加入当前批次，不取回成员正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标集合键。
     ///
-    /// - `key`: 集合所在的 Redis key。
+    /// 返回：接纳后返回成员数量票据，缺失键为零；会话拒绝立即报错，类型不符或其它执行错误由票据报告。
     pub fn s_card(&mut self, key: &str) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("SCARD").arg(key).to_owned())
     }
 
-    /// 业务作用：SMEMBERS。
+    /// 业务作用：将集合全成员读取加入当前批次，用于一次取得当前成员快照。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：目标集合键；该操作读取全部成员，不分页。
+    ///
+    /// 返回：接纳后返回成员列表票据，缺失键为空，结果顺序无保证；会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn s_members<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Vec<T>>> {
         self.enqueue(redis::cmd("SMEMBERS").arg(key).to_owned())
     }
 
-    /// 业务作用：SISMEMBER。
+    /// 业务作用：将集合单成员归属查询加入当前批次，按服务端执行时的成员状态回答。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标集合键。
+    /// - `member`：待核对的成员参数值。
+    ///
+    /// 返回：接纳后返回成员是否存在的票据，缺失键为 false；会话拒绝立即报错，执行错误由票据报告，不为后续操作提供原子保护。
     pub fn s_is_member<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -721,20 +839,24 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SISMEMBER").arg(key).arg(member).to_owned())
     }
 
-    /// 业务作用：SPOP(单个)。
+    /// 业务作用：将随机移出集合一个成员的请求加入当前批次，读取与移除在同一命令内完成。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：目标集合键。
+    ///
+    /// 返回：接纳后返回被移出成员的票据，缺失键为 None；会话拒绝立即报错，执行或解码错误由票据报告，解码失败不会恢复成员。
     pub fn s_pop<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Option<T>>> {
         self.enqueue(redis::cmd("SPOP").arg(key).to_owned())
     }
 
     // zset
-    /// 业务作用：ZREM(单 member)→ 删除数。
+    /// 业务作用：将有序集合的单成员移除加入当前批次，同时移除该成员的排序分值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `member`：待移除的成员身份，按参数字节匹配。
+    ///
+    /// 返回：接纳后返回实际移除数量票据，键或成员缺失时为零；会话拒绝立即报错，执行错误由票据报告。
     pub fn z_rem<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -743,20 +865,23 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZREM").arg(key).arg(member).to_owned())
     }
 
-    /// 业务作用：ZCARD。
+    /// 业务作用：将有序集合成员数量查询加入当前批次，不返回成员或分值正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
     ///
-    /// - `key`: 有序集合所在的 Redis key。
+    /// 返回：接纳后返回成员数量票据，缺失键为零；会话拒绝立即报错，类型不符或其它执行错误由票据报告。
     pub fn z_card(&mut self, key: &str) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("ZCARD").arg(key).to_owned())
     }
 
-    /// 业务作用：ZSCORE。
+    /// 业务作用：将有序集合单成员的分值查询加入当前批次，区分成员缺失与零分值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `member`：待查询分值的成员身份。
+    ///
+    /// 返回：接纳后返回可选浮点分值票据，键或成员不存在时为 None；会话拒绝立即报错，执行或分值转换错误由票据报告。
     pub fn z_score<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -765,11 +890,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZSCORE").arg(key).arg(member).to_owned())
     }
 
-    /// 业务作用：ZRANK。
+    /// 业务作用：将有序集合单成员的升序排名查询加入当前批次，以零表示排序中的首位。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `member`：待查询排名的成员身份。
+    ///
+    /// 返回：接纳后返回从零开始的可选排名票据，键或成员不存在时为 None；会话拒绝立即报错，执行错误由票据报告。
     pub fn z_rank<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -778,11 +905,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZRANK").arg(key).arg(member).to_owned())
     }
 
-    /// 业务作用：ZREVRANK。
+    /// 业务作用：将有序集合单成员的降序排名查询加入当前批次，以零表示反向排序中的首位。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `member`：待查询反向排名的成员身份。
+    ///
+    /// 返回：接纳后返回从零开始的可选降序排名票据，键或成员不存在时为 None；会话拒绝立即报错，执行错误由票据报告。
     pub fn z_rev_rank<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -791,23 +920,26 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZREVRANK").arg(key).arg(member).to_owned())
     }
 
-    /// 业务作用：ZCOUNT。
+    /// 业务作用：将有序集合分值闭区间的成员数量查询加入当前批次，不拉取匹配成员。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `min`：包含在统计范围内的分值下界。
+    /// - `max`：包含在统计范围内的分值上界，本入口不表达开区间。
     ///
-    /// - `key`: 有序集合所在的 Redis key。
-    /// - `min`: 统计区间的最小 score。
-    /// - `max`: 统计区间的最大 score。
+    /// 返回：接纳后返回匹配成员数量票据，缺失键或空区间为零；会话拒绝立即报错，非法分值或执行错误由票据报告。
     pub fn z_count(&mut self, key: &str, min: f64, max: f64) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("ZCOUNT").arg(key).arg(min).arg(max).to_owned())
     }
 
-    /// 业务作用：ZINCRBY → 增后分数。
+    /// 业务作用：将有序集合单成员的原子分值增量加入当前批次，避免客户端读改写覆盖并发变化。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `delta`: 计数、score 或 hash field 的增量。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `delta`：分值增量，负数表示递减，合法性由 Redis 校验。
+    /// - `member`：待更新成员，缺失时以零分值为初值创建。
+    ///
+    /// 返回：接纳后返回更新分值票据；会话拒绝立即报错，非法分值、执行失败或结果未知由票据报告，不自动重放增量。
     pub fn z_incr_by<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -823,12 +955,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZRANGEBYSCORE。
+    /// 业务作用：将有序集合分值闭区间读取加入当前批次，按分值升序返回匹配成员。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `min`: 允许的最小值或区间下界。
-    /// - `max`: 允许的最大值或区间上界。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `min`：包含在结果内的分值下界。
+    /// - `max`：包含在结果内的分值上界；本入口不分页，也不表达开区间。
+    ///
+    /// 返回：接纳后返回匹配成员列表票据，缺失键或空区间为空；会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn z_range_by_score<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -844,13 +978,15 @@ impl PipelineSession {
         )
     }
 
-    // stream / script
-    /// 业务作用：XDEL → 删除数。
+    // Stream 和脚本命令。
+    /// 业务作用：将指定 Stream 记录正文的删除加入当前批次，不将删除正文视为消费组确认。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键。
+    /// - `ids`：按原文发送的记录 ID 列表，不过滤空白，也不代替 Redis 校验 ID。
     ///
-    /// - `stream`: stream 所在的 Redis key。
-    /// - `ids`: 待删除的 entry id 列表；空切片会返回预完成 ticket。
+    /// 返回：空列表立即得到零票据且不发送；非空接纳后返回实际删除数，本地拒绝立即报错，执行错误由票据报告。
+    /// 本入口不核对分区权威或 PEL，调用方须保证被删正文不再用于业务恢复，并另行维护确认责任。
     pub fn x_del(&mut self, stream: &str, ids: &[&str]) -> Result<Ticket<u64>> {
         if ids.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -863,13 +999,16 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：XACK → ack 数。空 ids 短路返回 0。
+    /// 业务作用：将指定消费组的记录确认加入当前批次，从该组 PEL 移除已处理责任而保留 Stream 正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键。
+    /// - `group`：本次确认归属的消费组。
+    /// - `ids`：按原文发送的待确认 ID 列表，不过滤空白。
     ///
-    /// - `stream`: stream 所在的 Redis key。
-    /// - `group`: 消费组名称。
-    /// - `ids`: 待确认的 entry id 列表；空切片会返回预完成 ticket。
+    /// 返回：空列表立即得到零票据且不发送；非空接纳后返回实际从 PEL 移除的记录数，未在 PEL 中的 ID 不计数。
+    /// 仅接受不超过本次 ID 数量的非负 Redis 整数；本地拒绝立即报错，执行或回复校验错误由票据报告。
+    /// 本入口不验证业务完成或处理权威，回复异常不证明远端未确认。
     pub fn x_ack(&mut self, stream: &str, group: &str, ids: &[&str]) -> Result<Ticket<u64>> {
         if ids.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -879,25 +1018,31 @@ impl PipelineSession {
         for id in ids {
             c.arg(*id);
         }
-        self.enqueue(c)
+        let mut ticket = self.enqueue(c)?;
+        ticket.reply_check = ReplyCheck::StreamAck {
+            requested: ids.len(),
+        };
+        Ok(ticket)
     }
 
-    /// 业务作用：XLEN。
+    /// 业务作用：将 Stream 当前正文记录数量查询加入当前批次，避免将保存条数与消费责任数混用。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键。
     ///
-    /// - `stream`: stream 所在的 Redis key。
+    /// 返回：接纳后返回现存记录数量票据，缺失键为零；本地拒绝立即报错，执行错误由票据报告，结果不代表 PEL 数量。
     pub fn x_len(&mut self, stream: &str) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("XLEN").arg(stream).to_owned())
     }
 
     /// 业务作用：按精确 MAXLEN 裁剪 Stream，不使用近似裁剪标记 `~`。
-    /// 返回：携带删除 entry 数量的 ticket。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键。
+    /// - `maxlen`：裁剪时允许保留的最大记录数，零表示清空正文。
     ///
-    /// - `stream`: stream 所在的 Redis key。
-    /// - `maxlen`: 精确裁剪后允许保留的最大 entry 数；`0` 表示清空。
+    /// 返回：接纳后返回实际删除数量票据；本地拒绝立即报错，执行错误由票据报告。
+    /// 不检查消费组确认或分区权威，可能删去仍在 PEL 中的正文；调用方负责恢复所需数据的保留策略。
     pub fn x_trim_maxlen(&mut self, stream: &str, maxlen: u64) -> Result<Ticket<u64>> {
         self.enqueue(
             redis::cmd("XTRIM")
@@ -908,12 +1053,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：XTRIM MAXLEN **近似**(`~`,radix-tree 节点边界裁剪,吞吐优先)。需要精确条数用 `x_trim_maxlen`。
+    /// 业务作用：将按存储节点边界进行的 Stream 近似数量裁剪加入当前批次，允许少做细粒度删除。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键。
+    /// - `maxlen`：期望保留的记录数量阈值，实际数量可能高于它，不是硬容量上限。
     ///
-    /// - `stream`: stream 所在的 Redis key。
-    /// - `maxlen`: 近似裁剪后希望保留的最大 entry 数。
+    /// 返回：接纳后返回实际删除数量票据；本地拒绝立即报错，执行错误由票据报告。
+    /// 本入口不等待消费组确认，调用方须保护恢复所需的正文；需要精确数量边界时使用 x_trim_maxlen。
     pub fn x_trim_maxlen_approx(&mut self, stream: &str, maxlen: u64) -> Result<Ticket<u64>> {
         self.enqueue(
             redis::cmd("XTRIM")
@@ -925,12 +1072,15 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：EVAL(KEYS 同槽要求由调用方保证;EVAL 系已按真 key 路由)。
+    /// 业务作用：将一段 Lua 脚本及其显式键集合加入当前批次，按脚本的首键参与 Cluster 分桶。
     ///
-    /// # 参数
-    /// - `script`: Lua 脚本文本。
-    /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
-    /// - `args`: 命令或脚本参数列表。
+    /// 参数说明：
+    /// - `script`：交给 Redis 执行的 Lua 正文，调用方负责其安全性和副作用约束。
+    /// - `keys`：脚本访问的键列表，按顺序传入 KEYS；Cluster 下须满足同槽约束。
+    /// - `args`：按顺序传入 ARGV 的字符串参数。
+    ///
+    /// 返回：接纳后返回脚本结果的类型化票据；本地拒绝立即报错，脚本或转换错误由票据报告。
+    /// 脚本错误不保证撤销此前写入，结果未知也不能作为安全重放的依据。
     pub fn eval<T: FromRedisValue>(
         &mut self,
         script: &str,
@@ -948,12 +1098,15 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：EVALSHA(NOSCRIPT 时调用方需先 script_load / 退回 eval)。
+    /// 业务作用：将按摘要执行已缓存 Lua 脚本的请求加入当前批次，不隐式加载或重放脚本。
     ///
-    /// # 参数
-    /// - `sha`: Redis 脚本 SHA1 摘要。
-    /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
-    /// - `args`: 命令或脚本参数列表。
+    /// 参数说明：
+    /// - `sha`：目标脚本的 SHA1 摘要，须存在于实际执行节点的脚本缓存。
+    /// - `keys`：按顺序传入 KEYS 的访问键，Cluster 下须满足同槽约束。
+    /// - `args`：按顺序传入 ARGV 的字符串参数。
+    ///
+    /// 返回：接纳后返回脚本结果票据；本地拒绝立即报错，NOSCRIPT、脚本或转换错误由票据报告。
+    /// 调用方据明确的 NOSCRIPT 决定加载或改用 eval，不能把其它错误和未知结果当作安全重放证据。
     pub fn eval_sha<T: FromRedisValue>(
         &mut self,
         sha: &str,
@@ -974,47 +1127,53 @@ impl PipelineSession {
     // Redis 命令的类型化入队入口。
 
     // key(其余)
-    /// 业务作用：TTL(秒;-1 无 TTL,-2 不存在)。
+    /// 业务作用：将单键秒级剩余期限查询加入当前批次，保留无期限和键不存在的不同状态。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：待查询 TTL 的 Redis 键。
     ///
-    /// - `key`: 待查询剩余秒级 TTL 的 Redis key。
+    /// 返回：接纳后返回有符号秒数票据，-1 表示无 TTL，-2 表示键不存在；会话拒绝立即报错，查询错误由票据报告。
     pub fn ttl(&mut self, key: &str) -> Result<Ticket<i64>> {
         self.enqueue(redis::cmd("TTL").arg(key).to_owned())
     }
 
-    /// 业务作用：TYPE。
+    /// 业务作用：将单键存储类型查询加入当前批次，观察服务端执行该命令时的实际类型。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：待查询数据类型的 Redis 键。
     ///
-    /// - `key`: 待查询底层类型的 Redis key。
+    /// 返回：接纳后返回类型名称票据，键不存在时为 none；会话拒绝立即报错，查询或响应转换错误由票据报告。
     pub fn key_type(&mut self, key: &str) -> Result<Ticket<String>> {
         self.enqueue(redis::cmd("TYPE").arg(key).to_owned())
     }
 
-    /// 业务作用：KEYS(⚠ 全量扫描 + cluster 仅落单节点,生产慎用)。
+    /// 业务作用：将执行节点上匹配模式的全部键名查询加入当前批次，不提供游标分页或集群全节点遍历。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `pattern`：Redis glob 匹配模式；全量枚举会占用执行节点处理时间。
     ///
-    /// - `pattern`: Redis glob 模式，用于匹配当前节点上的 key。
+    /// 返回：接纳后返回匹配键名票据；会话拒绝立即报错，查询或 UTF-8 转换错误由票据报告，结果不构成集群完整键清单。
     pub fn keys(&mut self, pattern: &str) -> Result<Ticket<Vec<String>>> {
         self.enqueue(redis::cmd("KEYS").arg(pattern).to_owned())
     }
 
-    /// 业务作用：DUMP(序列化值)。
+    /// 业务作用：将单键的 Redis 内部格式导出加入当前批次，取得可用于相应恢复命令的值正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：待导出值的 Redis 键。
     ///
-    /// - `key`: 需要导出 Redis 内部序列化值的 key。
+    /// 返回：接纳后返回可选二进制票据，缺失键为 None；导出不包含键的 TTL，不能单独充当完整备份。
+    /// 会话拒绝立即报错，命令执行错误由票据报告。
     pub fn dump(&mut self, key: &str) -> Result<Ticket<Option<Vec<u8>>>> {
         self.enqueue(redis::cmd("DUMP").arg(key).to_owned())
     }
 
-    /// 业务作用：DEL(多 key)→ 删除数(⚠ cluster 跨 slot → CROSSSLOT)。空 keys 短路返回 0。
+    /// 业务作用：将多个键的删除合并为一条 DEL 加入当前批次，不逐键隐式拆分。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `keys`：待删除键列表，Cluster 使用时调用方应保证同槽；重复键不会重复计入实际删除数。
     ///
-    /// - `keys`: 待删除的一组 Redis key；空切片会返回预完成 ticket。
+    /// 返回：空列表立即得到零票据且不发送；非空接纳后返回实际删除键数，会话拒绝立即报错，执行错误由票据报告。
     pub fn del_multi(&mut self, keys: &[&str]) -> Result<Ticket<u64>> {
         if keys.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -1026,11 +1185,12 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：EXISTS(多 key)→ 存在计数(⚠ cluster 跨 slot)。空 keys 短路返回 0。
+    /// 业务作用：将多个键的存在性统计合并为一条 EXISTS 加入当前批次，保留重复参数的计数语义。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `keys`：待检查键列表，存在的重复键会按出现次数计数；Cluster 使用时调用方应保证同槽。
     ///
-    /// - `keys`: 待检查的一组 Redis key；空切片会返回预完成 ticket。
+    /// 返回：空列表立即得到零票据且不发送；非空接纳后返回匹配参数次数，会话拒绝立即报错，执行错误由票据报告。
     pub fn exists_multi(&mut self, keys: &[&str]) -> Result<Ticket<u64>> {
         if keys.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -1044,12 +1204,14 @@ impl PipelineSession {
     // (expire_at_secs 见上方 TTL 区块,统一单位语义)
 
     // string(其余)
-    /// 业务作用：SETRANGE → 修改后长度。
+    /// 业务作用：将字符串指定字节偏移处的覆盖写入加入当前批次，超出原长度的间隙由 Redis 补零。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `offset`: 列表、字符串或分页操作的偏移量。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标字符串键。
+    /// - `offset`：从零开始的字节偏移，须满足 Redis 偏移和字符串长度限制，服务端负责校验。
+    /// - `val`：从该偏移开始写入的单个二进制参数。
+    ///
+    /// 返回：接纳后返回写入后的字节长度票据；会话拒绝立即报错，非法偏移、类型不符或其它执行错误由票据报告。
     pub fn set_range<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -1065,13 +1227,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：GETRANGE。
+    /// 业务作用：将字符串字节闭区间读取加入当前批次，并将截取结果转换为 UTF-8 字符串。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标字符串键。
+    /// - `start`：包含式字节起点，负索引从尾部计算，不按字符边界对齐。
+    /// - `end`：包含式字节终点，超出正文的范围由 Redis 截取。
     ///
-    /// - `key`: 字符串值所在的 Redis key。
-    /// - `start`: 字节区间起始下标，支持 Redis 负索引。
-    /// - `end`: 字节区间结束下标，支持 Redis 负索引。
+    /// 返回：接纳后返回字符串票据，缺失键或空区间为空字符串；会话拒绝立即报错，执行错误或截断造成的非法 UTF-8 由票据报告。
     pub fn get_range(&mut self, key: &str, start: isize, end: isize) -> Result<Ticket<String>> {
         self.enqueue(
             redis::cmd("GETRANGE")
@@ -1082,33 +1245,35 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：DECRBY → 减后值。
+    /// 业务作用：将整数字符串的原子减量加入当前批次，把减法范围检查交给 Redis。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：保存有符号整数的字符串键，缺失时以零为初值。
+    /// - `delta`：待减去的有符号步长，负数表示增加；本入口原样传给 DECRBY，不在本地取负。
     ///
-    /// - `key`: 保存整数计数值的 Redis key。
-    /// - `delta`: 本次递减的正向步长。
+    /// 返回：接纳后返回更新值票据；会话拒绝立即报错，数值范围、非整数内容或其它执行错误由票据报告，不自动重放减量。
     pub fn decr_by(&mut self, key: &str, delta: i64) -> Result<Ticket<i64>> {
         self.enqueue(redis::cmd("DECRBY").arg(key).arg(delta).to_owned())
     }
 
-    /// 业务作用：INCRBYFLOAT → 增后值。
+    /// 业务作用：将字符串浮点计数的原子增量加入当前批次，避免客户端读取后覆盖并发更新。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：保存浮点数的字符串键，缺失时以零为初值。
+    /// - `delta`：有符号浮点增量，合法性及计算结果范围由 Redis 校验。
     ///
-    /// - `key`: 保存浮点计数值的 Redis key。
-    /// - `delta`: 本次递增的浮点步长，可为负值。
+    /// 返回：接纳后返回更新值票据；会话拒绝立即报错，非法数值、执行失败或结果未知由票据报告，不自动重放增量。
     pub fn incr_by_float(&mut self, key: &str, delta: f64) -> Result<Ticket<f64>> {
         self.enqueue(redis::cmd("INCRBYFLOAT").arg(key).arg(delta).to_owned())
     }
 
     /// 业务作用：将键值对作为一条原子 MSET 入队，空输入直接完成。
-    /// Cluster 下全部 key 必须位于同一 slot，否则返回 CROSSSLOT；跨 slot 写入可使用
-    /// `multi_set_split`，但后者不提供跨 key 原子性。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `pairs`：同一条 MSET 的键和字节值列表；Cluster 下全部键必须同槽，本入口不拆分。
     ///
-    /// - `pairs`: 要在单条 `MSET` 中写入的 key/value 字节对；空切片会返回预完成 ticket。
+    /// 返回：空列表立即得到完成票据且不发送；非空接纳后返回整条命令的确认票据，本地拒绝立即报错，执行错误由票据报告。
+    /// 跨槽分别写入可用 multi_set_split，但不再具备单条 MSET 的原子性。
     pub fn mset(&mut self, pairs: &[(&str, &[u8])]) -> Result<Ticket<()>> {
         if pairs.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -1121,11 +1286,12 @@ impl PipelineSession {
     }
 
     /// 业务作用：为每个键值对分别入队 SET，返回独立 ticket。
-    /// Cluster 按 key 路由到各 slot；各命令独立成功或失败，不提供整组写入的原子性。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `pairs`：按输入顺序分别提交的键和二进制值列表，允许不同键落在不同 slot。
     ///
-    /// - `pairs`: 要拆分为多条 `SET` 入队的 key/value 字节对。
+    /// 返回：全部接纳时返回逐项票据，空列表返回空向量；中途拒绝时返回错误，已接纳前缀不会撤销，其票据不随错误返回。
+    /// 前缀可能已封批或仍在会话缓冲区，错误不表示整组未执行；各命令独立执行，不提供跨键原子性。
     pub fn multi_set_split(&mut self, pairs: &[(&str, &[u8])]) -> Result<Vec<Ticket<()>>> {
         let mut tickets = Vec::with_capacity(pairs.len());
         for (k, v) in pairs {
@@ -1135,12 +1301,14 @@ impl PipelineSession {
     }
 
     // hash(其余)
-    /// 业务作用：HSET(多 field,= HMSET)。空 pairs 短路 no-op。
+    /// 业务作用：将同一 Hash 的多个字段更新合并为一条 HSET 加入当前批次，保留未指定字段。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键，缺失时可创建。
+    /// - `pairs`：字段名与字节值列表，按输入顺序构造同一条命令。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `pairs`: 要写入的 field/value 字节对；空切片会返回预完成 ticket。
+    /// 返回：空列表立即得到完成票据且不发送；非空接纳后返回执行确认票据，不暴露新增字段数量。
+    /// 会话拒绝立即报错，类型不符或其它执行错误由票据报告。
     pub fn h_m_set(&mut self, key: &str, pairs: &[(&str, &[u8])]) -> Result<Ticket<()>> {
         if pairs.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -1153,40 +1321,45 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：HEXISTS。
+    /// 业务作用：将 Hash 字段存在性查询加入当前批次，不读取字段值正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `field`：待检查的字段名。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `field`: 待检查是否存在的 hash field。
+    /// 返回：接纳后返回存在性票据，键或字段缺失时为 false；会话拒绝立即报错，执行错误由票据报告，不为后续写入提供原子条件。
     pub fn h_exists(&mut self, key: &str, field: &str) -> Result<Ticket<bool>> {
         self.enqueue(redis::cmd("HEXISTS").arg(key).arg(field).to_owned())
     }
 
-    /// 业务作用：HVALS。
+    /// 业务作用：将 Hash 的全部字段值读取加入当前批次，不返回字段名。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：目标 Hash 键；该操作读取全部值，不分页。
+    ///
+    /// 返回：接纳后返回字段值列表票据，缺失键为空，结果顺序无保证；会话拒绝立即报错，执行或值转换错误由票据报告。
     pub fn h_vals<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Vec<T>>> {
         self.enqueue(redis::cmd("HVALS").arg(key).to_owned())
     }
 
-    /// 业务作用：HRANDFIELD(单个)。
+    /// 业务作用：将 Hash 随机字段名读取加入当前批次，不删除字段也不读取其值。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
+    /// 返回：接纳后返回可选字段名票据，缺失键为 None；会话拒绝立即报错，执行或字段名 UTF-8 转换错误由票据报告。
     pub fn h_rand_field(&mut self, key: &str) -> Result<Ticket<Option<String>>> {
         self.enqueue(redis::cmd("HRANDFIELD").arg(key).to_owned())
     }
 
-    /// 业务作用：HINCRBYFLOAT → 增后值。
+    /// 业务作用：将 Hash 浮点字段的原子增量加入当前批次，保留同键其它字段。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `field`：保存浮点数的字段，缺失时以零为初值。
+    /// - `delta`：有符号浮点增量，合法性及结果范围由 Redis 校验。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `field`: 需要递增的 hash field。
-    /// - `delta`: 本次递增的浮点步长，可为负值。
+    /// 返回：接纳后返回更新值票据；会话拒绝立即报错，非法数值、执行失败或结果未知由票据报告，不自动重放增量。
     pub fn h_incr_by_float(&mut self, key: &str, field: &str, delta: f64) -> Result<Ticket<f64>> {
         self.enqueue(
             redis::cmd("HINCRBYFLOAT")
@@ -1197,30 +1370,36 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：HINCRBY 负增→ 减后值。
+    /// 业务作用：将 Hash 整数字段的减量转为可表示的负增量后入队，避免边界取负改变更新方向。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `field`：保存有符号整数的字段，缺失时以零为初值。
+    /// - `delta`：待减去的有符号步长，负数表示增加；i64 最小值无法转为同范围的增量。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `field`: 需要递减的 hash field。
-    /// - `delta`: 本次递减的正向步长，内部会转为负增量。
+    /// 返回：步长不可取负或会话拒绝时直接报错，不接纳本条命令；接纳后的票据返回更新值，执行错误由票据报告。
     pub fn h_decr_by(&mut self, key: &str, field: &str, delta: i64) -> Result<Ticket<i64>> {
+        // 取负必须先于入队完成范围校验，不能让极值在不同编译配置下变成异常或方向相反的持久更新。
+        let increment = delta.checked_neg().ok_or_else(|| {
+            NasaRedisError::Config("h_decr_by: delta 无法在 i64 范围内取负".into())
+        })?;
         self.enqueue(
             redis::cmd("HINCRBY")
                 .arg(key)
                 .arg(field)
-                .arg(-delta)
+                .arg(increment)
                 .to_owned(),
         )
     }
 
     // list(其余)
-    /// 业务作用：LPUSH(多值)→ push 后长度。空 vals 短路返回 0(no-op 哨兵,**非列表当前长度**; 避免非法命令)。
+    /// 业务作用：将一组值从列表左侧压入的命令加入当前批次，保留 Redis 逐个左插的顺序。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标列表键，缺失时由非空写入创建。
+    /// - `vals`：依次左插的值，最终从左到右的新增部分与输入顺序相反。
     ///
-    /// - `key`: 列表所在的 Redis key。
-    /// - `vals`: 要从左侧压入的一组字节值；空切片会返回预完成 ticket。
+    /// 返回：空输入直接返回值为零的完成票据，零不代表当前列表长度；非空接纳后返回更新长度票据，会话拒绝立即报错，执行失败或结果未知由票据报告。
     pub fn l_push_multi(&mut self, key: &str, vals: &[&[u8]]) -> Result<Ticket<u64>> {
         if vals.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -1233,12 +1412,13 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：RPUSH(多值)→ push 后长度。空 vals 短路返回 0(no-op 哨兵,**非列表当前长度**)。
+    /// 业务作用：将一组值按输入顺序追加到列表右侧的命令加入当前批次。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标列表键，缺失时由非空写入创建。
+    /// - `vals`：依次追加的值。
     ///
-    /// - `key`: 列表所在的 Redis key。
-    /// - `vals`: 要从右侧压入的一组字节值；空切片会返回预完成 ticket。
+    /// 返回：空输入直接返回值为零的完成票据，零不代表当前列表长度；非空接纳后返回更新长度票据，会话拒绝立即报错，执行失败或结果未知由票据报告。
     pub fn r_push_multi(&mut self, key: &str, vals: &[&[u8]]) -> Result<Ticket<u64>> {
         if vals.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -1251,11 +1431,13 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：仅在 key 已存在时执行 LPUSHX，ticket 返回操作后的列表长度。
+    /// 业务作用：将仅向已存在列表左侧插入值的 LPUSHX 命令加入当前批次，缺失键不创建。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键，存在性在服务端执行时判定。
+    /// - `val`：待插入的值，不进行成员去重。
+    ///
+    /// 返回：接纳后返回更新长度票据，缺失键为零；会话拒绝立即报错，类型或执行错误由票据报告。
     pub fn l_push_if_absent<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -1264,11 +1446,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPUSHX").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：RPUSHX。
+    /// 业务作用：将仅向已存在列表右侧追加值的 RPUSHX 命令加入当前批次，缺失键不创建。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键，存在性在服务端执行时判定。
+    /// - `val`：待追加的值，不进行成员去重。
+    ///
+    /// 返回：接纳后返回更新长度票据，缺失键为零；会话拒绝立即报错，类型或执行错误由票据报告。
     pub fn r_push_if_absent<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -1277,11 +1461,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("RPUSHX").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：LINDEX。
+    /// 业务作用：将按下标读取单个列表元素的命令加入当前批次，不移除该元素。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `index`: 列表下标、归档序号或字段位置。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `index`：从零开始的下标，负数从列表尾部倒数。
+    ///
+    /// 返回：接纳后返回可选元素票据，键缺失或下标越界时为 None；会话拒绝立即报错，执行或元素转换错误由票据报告。
     pub fn l_index<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1290,11 +1476,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LINDEX").arg(key).arg(index).to_owned())
     }
 
-    /// 业务作用：LPOS(首个匹配下标)。
+    /// 业务作用：将查询列表中首个匹配元素下标的命令加入当前批次，不改变列表。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `val`：按编码后的字节匹配的元素值。
+    ///
+    /// 返回：接纳后返回从零开始的可选下标票据，键或匹配元素缺失时为 None；会话拒绝立即报错，执行错误由票据报告。
     pub fn l_pos<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -1303,12 +1491,14 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPOS").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：LSET。
+    /// 业务作用：将替换列表指定位置元素的命令加入当前批次，不扩展列表长度。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `index`: 列表下标、归档序号或字段位置。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `index`：从零开始的位置，负数从尾部倒数。
+    /// - `val`：替换后的元素值。
+    ///
+    /// 返回：接纳后返回写入确认票据；会话拒绝立即报错，键缺失、位置越界或执行失败由票据报告。
     pub fn l_set<V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -1318,12 +1508,14 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LSET").arg(key).arg(index).arg(val).to_owned())
     }
 
-    /// 业务作用：LINSERT BEFORE → 插入后长度(-1=pivot 不存在)。
+    /// 业务作用：将向列表首个匹配基准元素之前插入新值的命令加入当前批次。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `pivot`: 列表插入使用的 pivot 元素。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键，缺失时不创建。
+    /// - `pivot`：从列表左侧起查找的基准元素。
+    /// - `val`：待插入的新值。
+    ///
+    /// 返回：接纳后返回更新长度票据，键缺失为零、基准元素不存在为负一；会话拒绝立即报错，执行失败或结果未知由票据报告。
     pub fn l_insert_before<P: redis::ToSingleRedisArg, V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -1340,12 +1532,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：LINSERT AFTER。
+    /// 业务作用：将向列表首个匹配基准元素之后插入新值的命令加入当前批次。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `pivot`: 列表插入使用的 pivot 元素。
-    /// - `val`: 要写入 Redis 或发送到下游的值。
+    /// 参数说明：
+    /// - `key`：目标列表键，缺失时不创建。
+    /// - `pivot`：从列表左侧起查找的基准元素。
+    /// - `val`：待插入的新值。
+    ///
+    /// 返回：接纳后返回更新长度票据，键缺失为零、基准元素不存在为负一；会话拒绝立即报错，执行失败或结果未知由票据报告。
     pub fn l_insert_after<P: redis::ToSingleRedisArg, V: redis::ToSingleRedisArg>(
         &mut self,
         key: &str,
@@ -1363,12 +1557,13 @@ impl PipelineSession {
     }
 
     // set(其余)
-    /// 业务作用：SADD(多 member)→ 新增数。空 members 短路返回 0。
+    /// 业务作用：将多个成员加入集合的命令加入当前批次，服务端按成员字节去重。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标集合键，缺失时由非空写入创建。
+    /// - `members`：待加入的成员；已有成员不计入新增数量。
     ///
-    /// - `key`: 集合所在的 Redis key。
-    /// - `members`: 要加入集合的一组成员字节值；空切片会返回预完成 ticket。
+    /// 返回：空输入直接返回零值完成票据；非空接纳后返回新增成员数量票据，会话拒绝立即报错，执行错误由票据报告。
     pub fn s_add_multi(&mut self, key: &str, members: &[&[u8]]) -> Result<Ticket<u64>> {
         if members.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -1381,12 +1576,13 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：SREM(多 member)→ 删除数。空 members 短路返回 0。
+    /// 业务作用：将从集合删除多个指定成员的命令加入当前批次，不存在的成员不影响其它删除。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标集合键。
+    /// - `members`：待删除的成员，重复项不会重复计数。
     ///
-    /// - `key`: 集合所在的 Redis key。
-    /// - `members`: 要移出集合的一组成员字节值；空切片会返回预完成 ticket。
+    /// 返回：空输入直接返回零值完成票据；非空接纳后返回实际删除数量票据，键缺失为零，会话拒绝立即报错，执行错误由票据报告。
     pub fn s_rem_multi(&mut self, key: &str, members: &[&[u8]]) -> Result<Ticket<u64>> {
         if members.is_empty() {
             return Ok(Ticket::ready(redis::Value::Int(0)));
@@ -1399,12 +1595,14 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：SMOVE(⚠ src/dst 须同 slot)。
+    /// 业务作用：将单个成员从源集合原子移至目标集合的命令加入当前批次。
     ///
-    /// # 参数
-    /// - `src`: 重命名、拷贝或迁移操作的源 key。
-    /// - `dst`: 重命名、拷贝或迁移操作的目标 key。
-    /// - `member`: 集合或有序集合成员。
+    /// 参数说明：
+    /// - `src`：源集合键。
+    /// - `dst`：目标集合键；Cluster 下调用方须保证与源键同槽。
+    /// - `member`：待移动的成员，目标中已存在时仍可从源删除。
+    ///
+    /// 返回：接纳后返回是否发生移动的票据，源中缺少成员时为 false；会话拒绝立即报错，类型、路由或执行错误由票据报告。
     pub fn s_move<V: redis::ToSingleRedisArg>(
         &mut self,
         src: &str,
@@ -1414,12 +1612,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SMOVE").arg(src).arg(dst).arg(member).to_owned())
     }
 
-    /// 业务作用：SMISMEMBER(多 member)→ 各是否成员。空 members 短路返回空数组。
+    /// 业务作用：将多个成员的集合归属查询加入当前批次，保留输入位置与结果位置的对应关系。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标集合键。
+    /// - `members`：逐项查询的成员，允许重复。
     ///
-    /// - `key`: 集合所在的 Redis key。
-    /// - `members`: 待批量判定的一组成员字节值；空切片会返回空结果 ticket。
+    /// 返回：空输入直接返回空结果完成票据；非空接纳后返回布尔数组票据，缺失键的各项为 false，会话拒绝立即报错，执行错误由票据报告。
     pub fn s_mis_member(&mut self, key: &str, members: &[&[u8]]) -> Result<Ticket<Vec<bool>>> {
         if members.is_empty() {
             return Ok(Ticket::ready(redis::Value::Array(vec![])));
@@ -1432,18 +1631,22 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：SRANDMEMBER(单个)。
+    /// 业务作用：将随机读取单个集合成员的命令加入当前批次，读取后保留成员。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：目标集合键。
+    ///
+    /// 返回：接纳后返回可选成员票据，键缺失时为 None；会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn s_rand_member<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Option<T>>> {
         self.enqueue(redis::cmd("SRANDMEMBER").arg(key).to_owned())
     }
 
-    /// 业务作用：SDIFF(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
+    /// 业务作用：将首个集合相对其余集合的差集查询加入当前批次，不写入结果集合。
     ///
-    /// # 参数
-    /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
+    /// 参数说明：
+    /// - `keys`：顺序有意义的集合键列表，首项为被减集合；Cluster 下须同槽。
+    ///
+    /// 返回：空输入直接返回空结果完成票据；非空接纳后返回无顺序保证的成员列表票据，缺失键按空集合处理，会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn s_diff<T: FromRedisValue>(&mut self, keys: &[&str]) -> Result<Ticket<Vec<T>>> {
         if keys.is_empty() {
             return Ok(Ticket::ready(redis::Value::Array(vec![])));
@@ -1455,10 +1658,12 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：SINTER(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
+    /// 业务作用：将多个集合的交集查询加入当前批次，不改变源集合。
     ///
-    /// # 参数
-    /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
+    /// 参数说明：
+    /// - `keys`：待求交集的集合键列表；Cluster 下须同槽。
+    ///
+    /// 返回：空输入直接返回空结果完成票据；非空接纳后返回无顺序保证的成员列表票据，任一缺失键使交集为空，会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn s_inter<T: FromRedisValue>(&mut self, keys: &[&str]) -> Result<Ticket<Vec<T>>> {
         if keys.is_empty() {
             return Ok(Ticket::ready(redis::Value::Array(vec![])));
@@ -1470,10 +1675,12 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：SUNION(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
+    /// 业务作用：将多个集合的并集查询加入当前批次，不写入结果集合。
     ///
-    /// # 参数
-    /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
+    /// 参数说明：
+    /// - `keys`：待求并集的集合键列表；Cluster 下须同槽。
+    ///
+    /// 返回：空输入直接返回空结果完成票据；非空接纳后返回去重且无顺序保证的成员列表票据，缺失键按空集合处理，会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn s_union<T: FromRedisValue>(&mut self, keys: &[&str]) -> Result<Ticket<Vec<T>>> {
         if keys.is_empty() {
             return Ok(Ticket::ready(redis::Value::Array(vec![])));
@@ -1486,13 +1693,14 @@ impl PipelineSession {
     }
 
     // zset(其余)
-    /// 业务作用：ZREMRANGEBYRANK → 删除数。
+    /// 业务作用：将按升序排名区间删除有序集合成员的命令加入当前批次。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `start`：从零开始的起始排名，包含该位置；负数从尾部倒数。
+    /// - `stop`：包含在删除范围内的结束排名，负数从尾部倒数。
     ///
-    /// - `key`: 有序集合所在的 Redis key。
-    /// - `start`: 要删除的排名起始下标，支持 Redis 负索引。
-    /// - `stop`: 要删除的排名结束下标，支持 Redis 负索引。
+    /// 返回：接纳后返回实际删除数量票据，缺失键或空区间为零；会话拒绝立即报错，执行失败或结果未知由票据报告。
     pub fn z_rem_range(&mut self, key: &str, start: isize, stop: isize) -> Result<Ticket<u64>> {
         self.enqueue(
             redis::cmd("ZREMRANGEBYRANK")
@@ -1503,13 +1711,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZREMRANGEBYLEX → 删除数。
+    /// 业务作用：将按成员字典序区间删除的命令加入当前批次，仅适用于成员分值相同的有序集合。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标有序集合键，调用方须保证成员具有相同分值。
+    /// - `min`：字节字典序下界，以 `[` 包含或 `(` 排除边界，`-` 表示无下界。
+    /// - `max`：字节字典序上界，以 `[` 包含或 `(` 排除边界，`+` 表示无上界。
     ///
-    /// - `key`: 有序集合所在的 Redis key。
-    /// - `min`: 字典序区间下界，使用 Redis lex 语法。
-    /// - `max`: 字典序区间上界，使用 Redis lex 语法。
+    /// 返回：接纳后返回实际删除数量票据，缺失键或空区间为零；会话拒绝立即报错，非法边界或执行错误由票据报告。
     pub fn z_rem_range_by_lex(&mut self, key: &str, min: &str, max: &str) -> Result<Ticket<u64>> {
         self.enqueue(
             redis::cmd("ZREMRANGEBYLEX")
@@ -1520,13 +1729,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZREMRANGEBYSCORE → 删除数。
+    /// 业务作用：将按闭合分值区间删除有序集合成员的命令加入当前批次。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `min`：包含在删除范围内的最低分值。
+    /// - `max`：包含在删除范围内的最高分值。
     ///
-    /// - `key`: 有序集合所在的 Redis key。
-    /// - `min`: 要删除的最小 score 边界。
-    /// - `max`: 要删除的最大 score 边界。
+    /// 返回：接纳后返回实际删除数量票据，缺失键或空区间为零；会话拒绝立即报错，非法数值或执行错误由票据报告。
     pub fn z_rem_range_by_score(&mut self, key: &str, min: f64, max: f64) -> Result<Ticket<u64>> {
         self.enqueue(
             redis::cmd("ZREMRANGEBYSCORE")
@@ -1537,12 +1747,13 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZMSCORE(多 member)。
+    /// 业务作用：将多个有序集合成员的分值查询加入当前批次，逐项保留输入顺序。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `members`：待查询的成员，重复项各占一个结果位置。
     ///
-    /// - `key`: 有序集合所在的 Redis key。
-    /// - `members`: 待批量查询 score 的成员字节值；空切片会返回空结果 ticket。
+    /// 返回：空输入直接返回空结果完成票据；非空接纳后返回可选分值数组票据，缺失成员对应 None，会话拒绝立即报错，执行或转换错误由票据报告。
     pub fn z_m_score(&mut self, key: &str, members: &[&[u8]]) -> Result<Ticket<Vec<Option<f64>>>> {
         if members.is_empty() {
             return Ok(Ticket::ready(redis::Value::Array(vec![])));
@@ -1555,13 +1766,14 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：ZLEXCOUNT。
+    /// 业务作用：将按成员字典序统计区间数量的命令加入当前批次，仅适用于成员分值相同的有序集合。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标有序集合键，调用方须保证成员具有相同分值。
+    /// - `min`：字典序下界，`[` 包含、`(` 排除，`-` 表示无下界。
+    /// - `max`：字典序上界，`[` 包含、`(` 排除，`+` 表示无上界。
     ///
-    /// - `key`: 有序集合所在的 Redis key。
-    /// - `min`: 字典序统计区间下界，使用 Redis lex 语法。
-    /// - `max`: 字典序统计区间上界，使用 Redis lex 语法。
+    /// 返回：接纳后返回匹配数量票据，缺失键或空区间为零；会话拒绝立即报错，非法边界或执行错误由票据报告。
     pub fn z_lex_count(&mut self, key: &str, min: &str, max: &str) -> Result<Ticket<u64>> {
         self.enqueue(
             redis::cmd("ZLEXCOUNT")
@@ -1572,12 +1784,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZRANGE(按下标)。
+    /// 业务作用：将按升序排名读取有序集合成员的命令加入当前批次，不返回分值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
-    /// - `stop`: Redis 区间或列表裁剪的终点。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `start`：从最低分成员起算的零基起始排名，包含该位置；负数从尾部倒数。
+    /// - `stop`：包含在读取范围内的结束排名，负数从尾部倒数。
+    ///
+    /// 返回：接纳后返回按分值、同分值按成员字节升序排列的票据，缺失键或空区间为空；会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn z_range<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1593,12 +1807,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZREVRANGE(按下标)。
+    /// 业务作用：将按降序排名读取有序集合成员的命令加入当前批次，不返回分值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
-    /// - `stop`: Redis 区间或列表裁剪的终点。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `start`：从最高分成员起算的零基起始排名，包含该位置；负数从该顺序尾部倒数。
+    /// - `stop`：包含在读取范围内的结束排名，负数从该顺序尾部倒数。
+    ///
+    /// 返回：接纳后返回按分值、同分值按成员字节降序排列的票据，缺失键或空区间为空；会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn z_rev_range<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1614,13 +1830,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZRANGE WITHSCORES → `(member, score)` 列表。
+    /// 业务作用：将按升序排名读取成员及其分值的命令加入当前批次，保持成员与分值配对。
     ///
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `start`：从最低分成员起算的零基起始排名，包含该位置；负数从尾部倒数。
+    /// - `stop`：包含在读取范围内的结束排名，负数从尾部倒数。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
-    /// - `stop`: Redis 区间或列表裁剪的终点。
+    /// 返回：接纳后返回按分值及同分成员字节升序排列的配对列表票据，缺失键或空区间为空；会话拒绝立即报错，执行或转换错误由票据报告。
     pub fn z_range_with_scores<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1637,13 +1854,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZREVRANGE WITHSCORES。
+    /// 业务作用：将按降序排名读取成员及其分值的命令加入当前批次，保持成员与分值配对。
     ///
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `start`：从最高分成员起算的零基起始排名，包含该位置；负数从该顺序尾部倒数。
+    /// - `stop`：包含在读取范围内的结束排名，负数从该顺序尾部倒数。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
-    /// - `stop`: Redis 区间或列表裁剪的终点。
+    /// 返回：接纳后返回按分值及同分成员字节降序排列的配对列表票据，缺失键或空区间为空；会话拒绝立即报错，执行或转换错误由票据报告。
     pub fn z_rev_range_with_scores<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1660,13 +1878,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZRANGEBYSCORE WITHSCORES。
+    /// 业务作用：将按闭合分值区间升序读取成员及分值的命令加入当前批次。
     ///
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `min`：包含在读取范围内的最低分值。
+    /// - `max`：包含在读取范围内的最高分值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `min`: 允许的最小值或区间下界。
-    /// - `max`: 允许的最大值或区间上界。
+    /// 返回：接纳后返回按分值及同分成员字节升序排列的配对列表票据，缺失键或空区间为空；会话拒绝立即报错，非法数值、执行或转换错误由票据报告。
     pub fn z_range_by_score_with_scores<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1683,12 +1902,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZREVRANGEBYSCORE(注意 max 在前)。
+    /// 业务作用：将按闭合分值区间降序读取成员的命令加入当前批次，命令参数按上界在前排列。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `max`: 允许的最大值或区间上界。
-    /// - `min`: 允许的最小值或区间下界。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `max`：包含在读取范围内的最高分值。
+    /// - `min`：包含在读取范围内的最低分值。
+    ///
+    /// 返回：接纳后返回按分值及同分成员字节降序排列的成员票据，缺失键或空区间为空；会话拒绝立即报错，非法数值、执行或转换错误由票据报告。
     pub fn z_rev_range_by_score<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1704,13 +1925,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZREVRANGEBYSCORE WITHSCORES。
+    /// 业务作用：将按闭合分值区间降序读取成员及分值的命令加入当前批次。
     ///
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `max`：包含在读取范围内的最高分值，在线路参数中位于下界之前。
+    /// - `min`：包含在读取范围内的最低分值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `max`: 允许的最大值或区间上界。
-    /// - `min`: 允许的最小值或区间下界。
+    /// 返回：接纳后返回按分值及同分成员字节降序排列的配对列表票据，缺失键或空区间为空；会话拒绝立即报错，非法数值、执行或转换错误由票据报告。
     pub fn z_rev_range_by_score_with_scores<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1727,12 +1949,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZRANGEBYLEX。
+    /// 业务作用：将按成员字典序区间升序读取的命令加入当前批次，仅适用于成员分值相同的有序集合。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `min`: 允许的最小值或区间下界。
-    /// - `max`: 允许的最大值或区间上界。
+    /// 参数说明：
+    /// - `key`：目标有序集合键，调用方须保证成员具有相同分值。
+    /// - `min`：字典序下界，`[` 包含、`(` 排除，`-` 表示无下界。
+    /// - `max`：字典序上界，`[` 包含、`(` 排除，`+` 表示无上界。
+    ///
+    /// 返回：接纳后返回按成员字节升序排列的票据，缺失键或空区间为空；会话拒绝立即报错，非法边界、执行或转换错误由票据报告。
     pub fn z_range_by_lex<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1748,12 +1972,13 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZPOPMIN(count 个)→ `(member, score)` 列表。
+    /// 业务作用：将按分值从低到高弹出有序集合成员的命令加入当前批次，读取同时移除成员。
     ///
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `count`：最多弹出的成员数，服务端校验数量范围。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 返回：接纳后返回被移除成员与分值的配对列表票据，缺失键为空；会话拒绝立即报错，执行或转换错误由票据报告，转换失败不会回滚弹出。
     pub fn z_pop_min<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1762,12 +1987,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZPOPMIN").arg(key).arg(count).to_owned())
     }
 
-    /// 业务作用：ZPOPMAX(count 个)。
+    /// 业务作用：将按分值从高到低弹出有序集合成员的命令加入当前批次，读取同时移除成员。
     ///
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `count`：最多弹出的成员数，服务端校验数量范围。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 返回：接纳后返回被移除成员与分值的配对列表票据，缺失键为空；会话拒绝立即报错，执行或转换错误由票据报告，转换失败不会回滚弹出。
     pub fn z_pop_max<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1776,21 +2002,24 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZPOPMAX").arg(key).arg(count).to_owned())
     }
 
-    /// 业务作用：ZRANDMEMBER(单个)。
+    /// 业务作用：将随机读取单个有序集合成员的命令加入当前批次，不删除成员也不返回分值。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    ///
+    /// 返回：接纳后返回可选成员票据，缺失键为 None；会话拒绝立即报错，执行或成员转换错误由票据报告。
     pub fn z_rand_member<T: FromRedisValue>(&mut self, key: &str) -> Result<Ticket<Option<T>>> {
         self.enqueue(redis::cmd("ZRANDMEMBER").arg(key).to_owned())
     }
 
     // stream / script / pubsub(其余)
-    /// 业务作用：按精确 MINID 裁剪 Stream，不使用 `~`；ticket 返回删除数量。
+    /// 业务作用：将按精确 ID 下界裁剪 Stream 正文的命令加入当前批次，不检查消费组的待确认记录。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键。
+    /// - `minid`：保留的最小 ID，严格小于它的条目会被删除；格式由 Redis 校验。
     ///
-    /// - `stream`: stream 所在的 Redis key。
-    /// - `minid`: 保留边界 id；小于该 id 的 entry 会被精确裁剪。
+    /// 返回：接纳后返回实际删除数量票据，缺失键为零；会话拒绝立即报错，执行错误由票据报告。调用方须自行保护尚需重读的正文。
     pub fn x_trim_minid(&mut self, stream: &str, minid: &str) -> Result<Ticket<u64>> {
         self.enqueue(
             redis::cmd("XTRIM")
@@ -1801,12 +2030,13 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：XTRIM MINID **近似**(`~`,吞吐优先)。需要精确边界用 `x_trim_minid`。
+    /// 业务作用：将按 ID 下界近似裁剪 Stream 的命令加入当前批次，以整块回收减少裁剪开销。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键。
+    /// - `minid`：保留的最小 ID，近似裁剪可能继续保留部分更早条目。
     ///
-    /// - `stream`: stream 所在的 Redis key。
-    /// - `minid`: 近似裁剪的保留边界 id。
+    /// 返回：接纳后返回实际删除数量票据；会话拒绝立即报错，执行错误由票据报告。该命令不检查待确认记录，不能单独保证消费恢复所需正文仍在。
     pub fn x_trim_minid_approx(&mut self, stream: &str, minid: &str) -> Result<Ticket<u64>> {
         self.enqueue(
             redis::cmd("XTRIM")
@@ -1818,30 +2048,40 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：SCRIPT FLUSH(⚠ cluster 下仅落单节点,非全节点;需全节点请 per-node)。
+    /// 业务作用：将清空 Lua 脚本缓存的命令加入显式会话；Cluster 下只作用于本批实际选中的节点。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：接纳后返回清空确认票据，会话拒绝立即报错，执行错误由票据报告；成功不保证集群其它节点缓存为空。
     pub fn script_flush(&mut self) -> Result<Ticket<()>> {
         self.enqueue(redis::cmd("SCRIPT").arg("FLUSH").to_owned())
     }
 
-    /// 业务作用：SCRIPT KILL(⚠ cluster 下仅落单节点)。
+    /// 业务作用：将终止当前 Lua 脚本的请求加入显式会话；Cluster 下只尝试本批实际选中的节点。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：接纳后返回终止确认票据；会话拒绝立即报错，无脚本运行、脚本已写入而不可终止或其它执行错误由票据报告。
     pub fn script_kill(&mut self) -> Result<Ticket<()>> {
         self.enqueue(redis::cmd("SCRIPT").arg("KILL").to_owned())
     }
 
-    /// 业务作用：SCRIPT LOAD → sha1。
+    /// 业务作用：将 Lua 脚本载入服务端缓存的命令加入显式会话，不执行脚本。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `script`：待缓存的 Lua 脚本文本。
     ///
-    /// - `script`: 需要加载到 Redis 脚本缓存中的 Lua 脚本文本。
+    /// 返回：接纳后返回脚本 SHA1 票据；会话拒绝立即报错，加载失败由票据报告。Cluster 下不广播加载，不能据此保证其它节点的 EVALSHA 可命中。
     pub fn script_load(&mut self, script: &str) -> Result<Ticket<String>> {
         self.enqueue(redis::cmd("SCRIPT").arg("LOAD").arg(script).to_owned())
     }
 
-    /// 业务作用：SCRIPT EXISTS(多 sha)→ 各是否已缓存。空 sha 短路返回空数组。
+    /// 业务作用：将按 SHA1 检查 Lua 脚本缓存的命令加入显式会话。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `shas`：待查询的脚本摘要，结果位置与输入位置对应。
     ///
-    /// - `shas`: 待检查是否存在于脚本缓存中的 SHA1 列表；空切片会返回空结果 ticket。
+    /// 返回：空输入直接返回空结果完成票据；非空接纳后返回缓存存在性票据，会话拒绝立即报错，执行错误由票据报告。Cluster 下只反映本批选中节点的当次状态。
     pub fn script_exists(&mut self, shas: &[&str]) -> Result<Ticket<Vec<bool>>> {
         if shas.is_empty() {
             return Ok(Ticket::ready(redis::Value::Array(vec![])));
@@ -1855,11 +2095,13 @@ impl PipelineSession {
     }
 
     // 支持 count 参数的批量弹出入口。
-    /// 业务作用：LPOP key count → 弹出的多个元素。
+    /// 业务作用：将从列表左端批量弹出元素的命令加入当前批次，返回顺序与弹出顺序一致。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `count`：最多弹出的元素数，在线路上保留原值交由 Redis 校验。
+    ///
+    /// 返回：接纳后返回元素列表票据，缺失键解码为空列表；会话拒绝立即报错，执行或转换错误由票据报告，转换失败不会回滚弹出，结果未知时不自动重放。
     pub fn l_pop_count<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1868,11 +2110,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPOP").arg(key).arg(count).to_owned())
     }
 
-    /// 业务作用：RPOP key count → 弹出的多个元素。
+    /// 业务作用：将从列表右端批量弹出元素的命令加入当前批次，返回顺序从尾部向前排列。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标列表键。
+    /// - `count`：最多弹出的元素数，在线路上保留原值交由 Redis 校验。
+    ///
+    /// 返回：接纳后返回元素列表票据，缺失键解码为空列表；会话拒绝立即报错，执行或转换错误由票据报告，转换失败不会回滚弹出，结果未知时不自动重放。
     pub fn r_pop_count<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1881,11 +2125,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("RPOP").arg(key).arg(count).to_owned())
     }
 
-    /// 业务作用：SPOP key count → 弹出的多个 member。
+    /// 业务作用：将随机移除集合中至多指定数量成员的命令加入当前批次。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标集合键。
+    /// - `count`：最多移除的成员数，超过集合大小时仅返回已有成员。
+    ///
+    /// 返回：接纳后返回不重复且无顺序保证的成员列表票据，缺失键为空；会话拒绝立即报错，执行或转换错误由票据报告，转换失败不会恢复已移除成员。
     pub fn s_pop_count<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1894,11 +2140,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SPOP").arg(key).arg(count).to_owned())
     }
 
-    /// 业务作用：SRANDMEMBER key count(count<0 允许重复)→ 多个 member。
+    /// 业务作用：将按指定数量随机读取集合成员的命令加入当前批次，保留原集合。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标集合键。
+    /// - `count`：正数表示最多返回该数量的不重复成员，负数表示允许重复并返回其绝对值个，零表示空结果。
+    ///
+    /// 返回：接纳后返回随机成员列表票据，缺失键为空；会话拒绝立即报错，非法数量、执行或成员转换错误由票据报告。
     pub fn s_rand_member_count<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1907,11 +2155,13 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SRANDMEMBER").arg(key).arg(count).to_owned())
     }
 
-    /// 业务作用：ZRANDMEMBER key count(count<0 允许重复)→ 多个 member。
+    /// 业务作用：将按指定数量随机读取有序集合成员的命令加入当前批次，不返回分值或删除成员。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `count`：正数表示最多返回该数量的不重复成员，负数表示允许重复并返回其绝对值个，零表示空结果。
+    ///
+    /// 返回：接纳后返回随机成员列表票据，缺失键为空；会话拒绝立即报错，非法数量、执行或成员转换错误由票据报告。
     pub fn z_rand_member_count<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1920,25 +2170,28 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZRANDMEMBER").arg(key).arg(count).to_owned())
     }
 
-    /// 业务作用：HRANDFIELD key count(count<0 允许重复)→ 多个 field。
+    /// 业务作用：将按指定数量随机读取 Hash 字段名的命令加入当前批次，不读取字段值或删除字段。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `count`：正数表示最多返回该数量的不重复字段，负数表示允许重复并返回其绝对值个，零表示空结果。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `count`: 随机返回的 field 数；负数允许重复。
+    /// 返回：接纳后返回字段名列表票据，缺失键为空；会话拒绝立即报错，非法数量、执行或字段名 UTF-8 转换错误由票据报告。
     pub fn h_rand_field_count(&mut self, key: &str, count: isize) -> Result<Ticket<Vec<String>>> {
         self.enqueue(redis::cmd("HRANDFIELD").arg(key).arg(count).to_owned())
     }
 
     // ── zset LIMIT 分页 / 区间字符串重载──
-    /// 业务作用：ZRANGEBYSCORE key min max LIMIT offset count(min/max 用 `(`/`[`/`-inf`/`+inf` 字符串语法表达开闭/无穷)。
+    /// 业务作用：将按分值区间升序分页读取成员的命令加入当前批次。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `min`: 允许的最小值或区间下界。
-    /// - `max`: 允许的最大值或区间上界。
-    /// - `offset`: 列表、字符串或分页操作的偏移量。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `min`：分值下界，数字默认包含，前缀 `(` 排除边界，支持 `-inf`。
+    /// - `max`：分值上界，数字默认包含，前缀 `(` 排除边界，支持 `+inf`。
+    /// - `offset`：跳过的匹配成员数量，应为非负；深分页仍须遍历被跳过的成员。
+    /// - `count`：最多返回的成员数，负数表示读取偏移后的全部匹配成员。
+    ///
+    /// 返回：接纳后返回按分值及同分成员字节升序排列的成员票据，缺失键或空页为空；会话拒绝立即报错，非法参数、执行或转换错误由票据报告。
     pub fn z_range_by_score_limit<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1959,14 +2212,16 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZREVRANGEBYSCORE key max min LIMIT offset count。
+    /// 业务作用：将按分值区间降序分页读取成员的命令加入当前批次，上界参数位于下界之前。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `max`: 允许的最大值或区间上界。
-    /// - `min`: 允许的最小值或区间下界。
-    /// - `offset`: 列表、字符串或分页操作的偏移量。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标有序集合键。
+    /// - `max`：分值上界，数字默认包含，前缀 `(` 排除边界，支持 `+inf`。
+    /// - `min`：分值下界，数字默认包含，前缀 `(` 排除边界，支持 `-inf`。
+    /// - `offset`：在降序匹配结果中跳过的数量，应为非负；深分页仍须遍历被跳过的成员。
+    /// - `count`：最多返回的成员数，负数表示读取偏移后的全部匹配成员。
+    ///
+    /// 返回：接纳后返回按分值及同分成员字节降序排列的成员票据，缺失键或空页为空；会话拒绝立即报错，非法参数、执行或转换错误由票据报告。
     pub fn z_rev_range_by_score_limit<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -1987,14 +2242,16 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：ZRANGEBYLEX key min max LIMIT offset count(min/max 用 `[`/`(`/`-`/`+` lex 语法)。
+    /// 业务作用：将按字典序区间升序分页读取成员的命令加入当前批次，仅适用于成员分值相同的有序集合。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `min`: 允许的最小值或区间下界。
-    /// - `max`: 允许的最大值或区间上界。
-    /// - `offset`: 列表、字符串或分页操作的偏移量。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标有序集合键，调用方须保证成员具有相同分值。
+    /// - `min`：字典序下界，`[` 包含、`(` 排除，`-` 表示无下界。
+    /// - `max`：字典序上界，`[` 包含、`(` 排除，`+` 表示无上界。
+    /// - `offset`：跳过的匹配成员数量，应为非负；深分页仍须遍历被跳过的成员。
+    /// - `count`：最多返回的成员数，负数表示读取偏移后的全部匹配成员。
+    ///
+    /// 返回：接纳后返回按成员字节升序排列的票据，缺失键或空页为空；会话拒绝立即报错，非法参数、执行或转换错误由票据报告。
     pub fn z_range_by_lex_limit<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -2016,12 +2273,14 @@ impl PipelineSession {
     }
 
     // ── stream 读重载──
-    /// 业务作用：XRANGE key start end(`-`/`+` 表全范围)→ `Vec<(id, fields)>` 由调用方类型化。
+    /// 业务作用：将按 ID 升序读取 Stream 区间的命令加入当前批次，不改变消费组游标或待确认记录。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
-    /// - `end`: Redis 区间、时间窗口或解析范围的终点。
+    /// 参数说明：
+    /// - `key`：目标 Stream 键。
+    /// - `start`：读取下界，支持 `-` 表示无下界；具体 ID 默认包含，前缀 `(` 表示排除。
+    /// - `end`：读取上界，支持 `+` 表示无上界；具体 ID 默认包含，前缀 `(` 表示排除。
+    ///
+    /// 返回：接纳后返回由 T 解码的条目及字段集合票据，缺失键产生空响应；会话拒绝立即报错，非法 ID、执行或转换错误由票据报告。
     pub fn x_range<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -2031,13 +2290,15 @@ impl PipelineSession {
         self.enqueue(redis::cmd("XRANGE").arg(key).arg(start).arg(end).to_owned())
     }
 
-    /// 业务作用：XRANGE key start end COUNT n。
+    /// 业务作用：将带数量上限的 Stream 升序区间读取加入当前批次，不登记消息消费责任。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
-    /// - `end`: Redis 区间、时间窗口或解析范围的终点。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标 Stream 键。
+    /// - `start`：ID 下界，`-` 表示无下界，前缀 `(` 排除该 ID。
+    /// - `end`：ID 上界，`+` 表示无上界，前缀 `(` 排除该 ID。
+    /// - `count`：最多返回的条目数，服务端校验范围。
+    ///
+    /// 返回：接纳后返回由 T 解码的升序条目票据，缺失键产生空响应；会话拒绝立即报错，参数、执行或转换错误由票据报告。
     pub fn x_range_count<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -2056,12 +2317,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：XREVRANGE key end start。
+    /// 业务作用：将按 ID 降序读取 Stream 区间的命令加入当前批次，上界在线路参数中先发送。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `end`: Redis 区间、时间窗口或解析范围的终点。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
+    /// 参数说明：
+    /// - `key`：目标 Stream 键。
+    /// - `end`：ID 上界，`+` 表示无上界，具体 ID 默认包含，前缀 `(` 表示排除。
+    /// - `start`：ID 下界，`-` 表示无下界，具体 ID 默认包含，前缀 `(` 表示排除。
+    ///
+    /// 返回：接纳后返回由 T 解码的降序条目票据，缺失键产生空响应；会话拒绝立即报错，参数、执行或转换错误由票据报告，不改变消费组状态。
     pub fn x_rev_range<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -2077,13 +2340,15 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：XREVRANGE key end start COUNT n。
+    /// 业务作用：将带数量上限的 Stream 降序区间读取加入当前批次，不改变消费组状态。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
-    /// - `end`: Redis 区间、时间窗口或解析范围的终点。
-    /// - `start`: Redis 区间、时间窗口或解析范围的起点。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `key`：目标 Stream 键。
+    /// - `end`：ID 上界，`+` 表示无上界，前缀 `(` 排除该 ID。
+    /// - `start`：ID 下界，`-` 表示无下界，前缀 `(` 排除该 ID。
+    /// - `count`：最多返回的条目数，服务端校验范围。
+    ///
+    /// 返回：接纳后返回由 T 解码的降序条目票据，缺失键产生空响应；会话拒绝立即报错，参数、执行或转换错误由票据报告。
     pub fn x_rev_range_count<T: FromRedisValue>(
         &mut self,
         key: &str,
@@ -2102,27 +2367,34 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：Redis Pub/Sub `PUBLISH` → 收到的订阅者数。classic Pub/Sub 在 pipeline 中也让位,
-    /// 频道发布只保留 `publish_channel`;`publish` 方法名留给 stream 事件发布。
+    /// 业务作用：将 Redis Pub/Sub 频道广播加入当前批次，消息不持久化，也不等待订阅者完成业务处理。
     ///
-    /// # 参数
-    /// - `channel`: Redis 发布订阅使用的频道名称。
-    /// - `message`: 业务消息体或事件载荷。
+    /// 参数说明：
+    /// - `channel`：接收广播的频道名。
+    /// - `message`：按单个 Redis 参数编码的消息体。
+    ///
+    /// 返回：接纳后返回仅接受非负 Integer 的订阅计数票据；会话拒绝立即报错，执行失败、结果未知或回复不符由票据报告。
+    /// 数量不等同于业务消费确认；Cluster 下仅统计被路由节点上的订阅者，回复异常不触发自动重放。
     pub fn publish_channel<V: redis::ToSingleRedisArg>(
         &mut self,
         channel: &str,
         message: V,
     ) -> Result<Ticket<u64>> {
-        self.enqueue(redis::cmd("PUBLISH").arg(channel).arg(message).to_owned())
+        let mut ticket =
+            self.enqueue(redis::cmd("PUBLISH").arg(channel).arg(message).to_owned())?;
+        ticket.reply_check = ReplyCheck::PublishCount;
+        Ok(ticket)
     }
 
-    /// 业务作用：发布 stream 事件(event-field wire),写 `XADD <stream> * <event> <StreamEnvelope JSON>`。
-    /// 空 stream/event 或 message 序列化为 JSON null → `Config` 错。
+    /// 业务作用：将包含业务信封的 Stream 事件追加加入当前批次，沿用直接发布入口的校验和编码。
     ///
-    /// # 参数
-    /// - `stream`: XADD 写入的 Redis Stream key。
-    /// - `event`: entry field 名,订阅侧按该值分发 handler。
-    /// - `message`: 业务消息体或事件载荷。
+    /// 参数说明：
+    /// - `stream`：目标 Stream 键，同时写入信封 topic，不能为空。
+    /// - `event`：条目的字段名，供消费侧选择处理器，不能为空。
+    /// - `message`：序列化为信封 data 的业务值，不允许 JSON null。
+    ///
+    /// 返回：校验、编码或会话拒绝时立即报错；接纳后返回非零完整 XADD ID 的字符串票据。
+    /// 执行或回复校验错误由票据报告，结果未知不自动重放。
     pub fn publish<T: serde::Serialize>(
         &mut self,
         stream: &str,
@@ -2132,21 +2404,25 @@ impl PipelineSession {
         // 校验 + 信封编码走 stream 模块的**共享 helper**(与 `RedisClient::publish` 同一路径,
         // 逐字节一致);这里只负责把 XADD 排进 pipeline。
         let body = crate::stream::stream_publish_body(stream, event, message)?;
-        self.enqueue(
+        let mut ticket = self.enqueue(
             redis::cmd("XADD")
                 .arg(stream)
                 .arg("*")
                 .arg(event)
                 .arg(body)
                 .to_owned(),
-        )
+        )?;
+        ticket.reply_check = ReplyCheck::StreamId;
+        Ok(ticket)
     }
 
-    /// 业务作用：使用默认 event = `STREAM_EVENT`(`"msg"`)发布一条 stream 消息。
+    /// 业务作用：使用默认事件字段 STREAM_EVENT 将业务信封追加到 Stream 的命令加入当前批次。
     ///
-    /// # 参数
-    /// - `stream`: XADD 写入的 Redis Stream key。
-    /// - `message`: 业务消息体或事件载荷。
+    /// 参数说明：
+    /// - `stream`：非空的目标 Stream 键。
+    /// - `message`：序列化为信封 data 的业务值，不允许 JSON null。
+    ///
+    /// 返回：校验、编码或会话拒绝时立即报错；接纳后返回 XADD ID 字符串票据，执行或解码错误由票据报告。
     pub fn publish_default<T: serde::Serialize>(
         &mut self,
         stream: &str,
@@ -2155,12 +2431,14 @@ impl PipelineSession {
         self.publish(stream, crate::stream::STREAM_EVENT, message)
     }
 
-    /// 业务作用：兼容旧 pipeline 命名,语义同 [`Self::publish`]。
+    /// 业务作用：通过与 publish 相同的校验和编码，将指定事件的业务信封追加加入当前批次。
     ///
-    /// # 参数
-    /// - `stream`: XADD 写入的 Redis Stream key。
-    /// - `event`: entry field 名,订阅侧按该值分发 handler。
-    /// - `data`: 待序列化进 StreamEnvelope 的业务对象。
+    /// 参数说明：
+    /// - `stream`：非空的目标 Stream 键。
+    /// - `event`：非空的事件字段名。
+    /// - `data`：序列化为信封 data 的业务值，不允许 JSON null。
+    ///
+    /// 返回：校验、编码或会话拒绝时立即报错；接纳后返回 XADD ID 字符串票据，执行或解码错误由票据报告。
     pub fn publish_stream<T: serde::Serialize>(
         &mut self,
         stream: &str,
@@ -2170,11 +2448,13 @@ impl PipelineSession {
         self.publish(stream, event, data)
     }
 
-    /// 业务作用：兼容旧 pipeline 命名,语义同 [`Self::publish_default`]。
+    /// 业务作用：使用默认事件字段将业务信封追加加入当前批次，复用 publish_default 的接纳与错误语义。
     ///
-    /// # 参数
-    /// - `stream`: XADD 写入的 Redis Stream key。
-    /// - `data`: 待序列化进 StreamEnvelope 的业务对象。
+    /// 参数说明：
+    /// - `stream`：非空的目标 Stream 键。
+    /// - `data`：序列化为信封 data 的业务值，不允许 JSON null。
+    ///
+    /// 返回：校验、编码或会话拒绝时立即报错；接纳后返回 XADD ID 字符串票据，执行或解码错误由票据报告。
     pub fn publish_stream_default<T: serde::Serialize>(
         &mut self,
         stream: &str,
@@ -2183,15 +2463,20 @@ impl PipelineSession {
         self.publish_default(stream, data)
     }
 
-    /// 业务作用：用单 key Lua 原子地将 hash field 自减 delta，余值不大于零时删除 field。
-    /// 返回：携带自减后余值的 ticket；删除 field 不改变该返回值。
+    /// 业务作用：将单键 Lua 自减及非正余值删字段的操作加入当前批次，脚本内的读改写不与其它命令交错。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键，也是脚本的唯一 KEYS 路由键。
+    /// - `field`：待更新的字段，缺失时以零为初值。
+    /// - `delta`：有符号减量，负数表示增加；i64 最小值无法转为 HINCRBY 的增量。
     ///
-    /// - `key`: 哈希结构所在的 Redis key，也是脚本的唯一 KEYS 路由键。
-    /// - `field`: 需要递减并按余值决定是否删除的 hash field。
-    /// - `delta`: 本次递减的正向步长。
+    /// 返回：不可取负的步长或会话拒绝立即报错；接纳后返回删除前余值的票据，字段被删除不改变结果。
+    /// 非法字段值、结果溢出或脚本执行失败由票据报告；Redis 脚本错误不回滚已经完成的命令，结果未知时不得自动重放。
     pub fn h_decr_by_and_del(&mut self, key: &str, field: &str, delta: i64) -> Result<Ticket<i64>> {
+        // 反向增量必须能由 HINCRBY 表示；先拒绝不可取负步长，避免已接纳命令和容量裁决受到无效更新影响。
+        delta.checked_neg().ok_or_else(|| {
+            NasaRedisError::Config("h_decr_by_and_del: delta 无法在 i64 范围内取负".into())
+        })?;
         self.enqueue(
             redis::cmd("EVAL")
                 .arg(H_DECR_BY_AND_DEL_LUA)
@@ -2203,25 +2488,25 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：`h_decr_by_and_del` delta=1。
+    /// 业务作用：将 Hash 字段减一并在非正余值时删除的单键脚本加入当前批次，复用有符号减量入口。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `field`：待更新字段，缺失时以零为初值。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `field`: 需要递减 `1` 并按余值决定是否删除的 hash field。
+    /// 返回：接纳后返回删除前精确余值票据；会话拒绝立即报错，字段值、溢出或脚本错误由票据报告。需要 HGET、HINCRBY 及实际删除时的 HDEL 权限，脚本错误不承诺回滚。
     pub fn h_decr_by_and_del_one(&mut self, key: &str, field: &str) -> Result<Ticket<i64>> {
         self.h_decr_by_and_del(key, field, 1)
     }
 
-    /// 业务作用：使用 HEXPIRE 为单个 hash field 设置秒级有效期，需要 Redis 7.4 或更高版本。
-    /// Duration 按整秒截断，亚秒时长变为零并立即过期。返回单 field 状态码数组：
-    /// 1 表示设置成功，2 表示已删除，0 表示条件未满足，-2 表示 field 不存在。
+    /// 业务作用：将单个 Hash 字段的相对过期设置加入当前批次，要求服务端支持 HEXPIRE。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `field`：待设置有效期的字段。
+    /// - `ttl`：从服务端执行时起算的有效期，按整秒截断；不足一秒变为零并立即删除字段。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `field`: 需要设置 field 级过期时间的 hash field。
-    /// - `ttl`: field 级相对过期时间，发送给 Redis 时取秒级。
+    /// 返回：秒数超过 i64 范围或会话拒绝时立即报错；接纳后返回单项状态数组票据，1 表示设置、2 表示删除、-2 表示字段缺失，执行错误由票据报告。需要 Redis 7.4 或更高版本。
     pub fn h_expire(&mut self, key: &str, field: &str, ttl: Duration) -> Result<Ticket<Vec<i64>>> {
         let seconds = crate::commands::duration_to_redis_seconds(ttl)?;
         self.enqueue(
@@ -2235,13 +2520,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：HEXPIRE 多 field。空 fields 短路空数组。
+    /// 业务作用：将同一 Hash 的多个字段过期设置合为一条命令加入当前批次。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 Hash 键。
+    /// - `fields`：待设置有效期的字段列表，结果位置与参数位置对应。
+    /// - `ttl`：从服务端执行时起算的有效期，按整秒截断；不足一秒时删除已存在的目标字段。
     ///
-    /// - `key`: 哈希结构所在的 Redis key。
-    /// - `fields`: 需要设置 field 级过期时间的 hash field 列表；空切片会返回空结果 ticket。
-    /// - `ttl`: field 级相对过期时间，发送给 Redis 时取秒级。
+    /// 返回：空输入直接返回空结果完成票据；非空输入在秒数越界或会话拒绝时立即报错，接纳后返回状态数组票据，1 为设置、2 为删除、-2 为缺失，执行错误由票据报告。需要 Redis 7.4 或更高版本。
     pub fn h_expire_multi(
         &mut self,
         key: &str,
@@ -2261,13 +2547,14 @@ impl PipelineSession {
     }
 
     // search feature 提供 RedisJSON 与 RediSearch 命令。
-    /// 业务作用：JSON.SET(RedisJSON)。
+    /// 业务作用：将按路径写入 RedisJSON 文档的命令加入当前批次，JSON 与路径合法性由服务端校验。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 JSON 文档键，创建新文档时路径须指向根。
+    /// - `path`：要替换或新增值的 RedisJSON 路径。
+    /// - `json`：待写入的 JSON 文本，不在本地重新编码。
     ///
-    /// - `key`: RedisJSON 文档所在的 Redis key。
-    /// - `path`: RedisJSON 路径，例如 `$` 或 `$.items[0]`。
-    /// - `json`: 要写入该路径的 JSON 文本。
+    /// 返回：接纳后返回单位类型票据；会话拒绝立即报错，执行错误由票据报告。单位结果不区分 OK 与未能新增路径的空响应，不能作为路径确已更新的数量证明。
     #[cfg(feature = "search")]
     pub fn json_set(&mut self, key: &str, path: &str, json: &str) -> Result<Ticket<()>> {
         self.enqueue(
@@ -2279,37 +2566,38 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：JSON.GET。
+    /// 业务作用：将按路径读取 RedisJSON 文档的命令加入当前批次，不在本地解析返回的 JSON 正文。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 JSON 文档键。
+    /// - `path`：RedisJSON 查询路径，匹配形态由路径语法决定。
     ///
-    /// - `key`: RedisJSON 文档所在的 Redis key。
-    /// - `path`: RedisJSON 路径，例如 `$` 或 `$.items[0]`。
+    /// 返回：接纳后返回可选字符串票据，服务端空响应为 None；会话拒绝立即报错，路径、执行或字符串转换错误由票据报告。
     #[cfg(feature = "search")]
     pub fn json_get(&mut self, key: &str, path: &str) -> Result<Ticket<Option<String>>> {
         self.enqueue(redis::cmd("JSON.GET").arg(key).arg(path).to_owned())
     }
 
-    /// 业务作用：JSON.DEL → 删除的路径数。
+    /// 业务作用：将删除 RedisJSON 指定路径的命令加入当前批次，根路径删除可移除整个文档键。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 JSON 文档键。
+    /// - `path`：待删除的 RedisJSON 路径，允许匹配多个位置。
     ///
-    /// - `key`: RedisJSON 文档所在的 Redis key。
-    /// - `path`: 要删除的 RedisJSON 路径。
+    /// 返回：接纳后返回删除数量票据，缺失键或无匹配时为零；会话拒绝立即报错，路径或执行错误由票据报告，结果未知时不自动重放。
     #[cfg(feature = "search")]
     pub fn json_del(&mut self, key: &str, path: &str) -> Result<Ticket<u64>> {
         self.enqueue(redis::cmd("JSON.DEL").arg(key).arg(path).to_owned())
     }
 
-    /// 业务作用：以整数 delta 执行 JSON.NUMINCRBY，保持数量字段的整数表示。
-    /// 整数增量不经过 f64，避免 RedisJSON 将字段转为浮点表示后无法解码为 `i64/u64`。
-    /// 浮点自增请显式用 [`Self::json_num_incr_by_f64`]。
+    /// 业务作用：将整数步长的 JSON 数值增量加入当前批次，参数直接编码为十进制整数，避免本地先转为 f64。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 JSON 文档键。
+    /// - `path`：待递增的数值路径，可匹配多个位置。
+    /// - `delta`：有符号整数步长；最终数值形态和范围由 RedisJSON 的现值及运算规则决定。
     ///
-    /// - `key`: RedisJSON 文档所在的 Redis key。
-    /// - `path`: 需要递增的 RedisJSON 数值路径。
-    /// - `delta`: 本次递增的整数步长，可为负值。
+    /// 返回：接纳后返回按字符串转换的服务端结果票据，不保证任意现值都保持整数类型；会话拒绝立即报错，执行或转换错误由票据报告，结果未知不自动重放。
     #[cfg(feature = "search")]
     pub fn json_num_incr_by(
         &mut self,
@@ -2326,14 +2614,14 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：JSON.NUMINCRBY(**浮点** delta)。⚠ 会保留/制造 JSON 浮点形态(`"x":6.0`),整数 typed 字段勿用——
-    /// 那会破坏 serde 读回(见 [`Self::json_num_incr_by`])。仅当字段本身就是浮点时用。
+    /// 业务作用：将浮点步长的 JSON 数值增量加入当前批次，适用于允许浮点结果的业务字段。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `key`：目标 JSON 文档键。
+    /// - `path`：待递增的数值路径，可匹配多个位置。
+    /// - `delta`：有符号浮点步长，数值合法性由 RedisJSON 校验。
     ///
-    /// - `key`: RedisJSON 文档所在的 Redis key。
-    /// - `path`: 需要递增的 RedisJSON 数值路径。
-    /// - `delta`: 本次递增的浮点步长，可为负值。
+    /// 返回：接纳后返回按字符串转换的服务端结果票据；会话拒绝立即报错，执行或转换错误由票据报告。结果可能为浮点表示，调用方不能假定仍可解码为整数业务字段。
     #[cfg(feature = "search")]
     pub fn json_num_incr_by_f64(
         &mut self,
@@ -2350,44 +2638,48 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：FT.SEARCH(原样 query;typed 解析见 search 模块)。
+    /// 业务作用：将 RediSearch 查询加入当前批次，保留服务端默认查询选项和原始响应结构。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `index`：目标 RediSearch 索引名称。
+    /// - `query`：完整查询表达式，调用方负责转义或使用类型化构建器处理非可信输入。
     ///
-    /// - `index`: RediSearch 索引名称。
-    /// - `query`: 要传给 `FT.SEARCH` 的查询字符串。
+    /// 返回：接纳后返回原始 Redis 响应票据；会话拒绝立即报错，索引、查询或执行错误由票据报告，不自动转换为业务文档。
     #[cfg(feature = "search")]
     pub fn ft_search(&mut self, index: &str, query: &str) -> Result<Ticket<redis::Value>> {
         self.enqueue(redis::cmd("FT.SEARCH").arg(index).arg(query).to_owned())
     }
 
-    /// 业务作用：FT.AGGREGATE。
+    /// 业务作用：将 RediSearch 聚合查询的基础入口加入当前批次，不附加聚合步骤或分页选项。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `index`：目标 RediSearch 索引名称。
+    /// - `query`：完整查询表达式，调用方负责参数语义及非可信输入处理。
     ///
-    /// - `index`: RediSearch 索引名称。
-    /// - `query`: 要传给 `FT.AGGREGATE` 的聚合查询字符串。
+    /// 返回：接纳后返回原始 Redis 响应票据；会话拒绝立即报错，索引、查询或执行错误由票据报告。需要其它聚合参数时使用 ft_aggregate_args。
     #[cfg(feature = "search")]
     pub fn ft_aggregate(&mut self, index: &str, query: &str) -> Result<Ticket<redis::Value>> {
         self.enqueue(redis::cmd("FT.AGGREGATE").arg(index).arg(query).to_owned())
     }
 
-    /// 业务作用：FT.DROPINDEX。
+    /// 业务作用：将删除 RediSearch 索引的命令加入当前批次，保留底层文档键。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `index`：待删除的索引名称。
     ///
-    /// - `index`: 要删除的 RediSearch 索引名称。
+    /// 返回：接纳后返回删除确认票据；会话拒绝立即报错，索引不存在或执行失败由票据报告，不将索引删除解释为文档已删除。
     #[cfg(feature = "search")]
     pub fn ft_drop_index(&mut self, index: &str) -> Result<Ticket<()>> {
         self.enqueue(redis::cmd("FT.DROPINDEX").arg(index).to_owned())
     }
 
-    /// 业务作用：删除 RediSearch 索引，dd 为 true 时同时删除索引中的文档。
+    /// 业务作用：将删除 RediSearch 索引并可选删除已索引文档的命令加入当前批次。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `index`：待删除的索引名称。
+    /// - `dd`：为 true 时发送 DD 删除已索引文档，为 false 时保留文档键。
     ///
-    /// - `index`: 要删除的 RediSearch 索引名称。
-    /// - `dd`: 是否同时删除索引关联的文档。
+    /// 返回：接纳后返回删除确认票据；会话拒绝立即报错，执行错误由票据报告。DD 按服务端已索引集合删除，不能保证尚未完成索引的文档也被移除。
     #[cfg(feature = "search")]
     pub fn ft_drop_index_dd(&mut self, index: &str, dd: bool) -> Result<Ticket<()>> {
         let mut c = redis::cmd("FT.DROPINDEX");
@@ -2398,24 +2690,25 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：FT.INFO。
+    /// 业务作用：将查询 RediSearch 索引状态和统计信息的命令加入当前批次。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `index`：待观察的索引名称。
     ///
-    /// - `index`: 要查询元信息的 RediSearch 索引名称。
+    /// 返回：接纳后返回原始元信息票据，内容反映服务端当次状态；会话拒绝立即报错，索引不存在或执行失败由票据报告。
     #[cfg(feature = "search")]
     pub fn ft_info(&mut self, index: &str) -> Result<Ticket<redis::Value>> {
         self.enqueue(redis::cmd("FT.INFO").arg(index).to_owned())
     }
 
     // ── FT 原样 args 透传──
-    /// 业务作用：在 FT.SEARCH 的 index 之后原样追加参数，由调用方负责 SORTBY、LIMIT、
-    /// DIALECT、RETURN 和 FILTER 等参数的顺序与安全性；非可信输入应使用类型化查询构建器。
+    /// 业务作用：将 RediSearch 查询及原样选项加入当前批次，不猜测或重排参数边界。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `index`：目标 RediSearch 索引名称。
+    /// - `args`：索引名之后的完整参数序列，须包含查询表达式；调用方负责 SORTBY、LIMIT、DIALECT、RETURN、FILTER 等语义及非可信输入处理。
     ///
-    /// - `index`: RediSearch 索引名称。
-    /// - `args`: `FT.SEARCH` 在索引名之后的原样参数片段。
+    /// 返回：接纳后返回原始 Redis 响应票据；会话拒绝立即报错，缺失或非法参数及执行错误由票据报告。
     #[cfg(feature = "search")]
     pub fn ft_search_args(&mut self, index: &str, args: &[&str]) -> Result<Ticket<redis::Value>> {
         let mut c = redis::cmd("FT.SEARCH");
@@ -2426,12 +2719,13 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：FT.AGGREGATE index 后接原样 args。
+    /// 业务作用：将 RediSearch 聚合查询的完整参数序列加入当前批次，允许调用方组合分组、规约和分页。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `index`：目标 RediSearch 索引名称。
+    /// - `args`：索引名之后的查询及聚合选项，调用方负责参数顺序、数量、转义和资源边界。
     ///
-    /// - `index`: RediSearch 索引名称。
-    /// - `args`: `FT.AGGREGATE` 在索引名之后的原样参数片段。
+    /// 返回：接纳后返回原始 Redis 响应票据；会话拒绝立即报错，缺失或非法参数及执行错误由票据报告。
     #[cfg(feature = "search")]
     pub fn ft_aggregate_args(
         &mut self,
@@ -2446,12 +2740,13 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：FT.CREATE index 后接原样 args(schema/ON HASH|JSON/PREFIX… 由调用方给)。
+    /// 业务作用：将创建 RediSearch 索引的命令加入当前批次，按调用方给定的文档范围和字段定义建立索引。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `index`：新索引名称。
+    /// - `args`：索引名之后的完整选项和 SCHEMA 定义，包括 ON、PREFIX 等范围约束，调用方负责语义及非可信输入处理。
     ///
-    /// - `index`: 要创建的 RediSearch 索引名称。
-    /// - `args`: `FT.CREATE` 在索引名之后的 schema、前缀和索引选项参数。
+    /// 返回：接纳后返回创建确认票据；会话拒绝立即报错，索引冲突、参数或执行错误由票据报告，确认不表示已有文档已全部完成索引。
     #[cfg(feature = "search")]
     pub fn ft_create_args(&mut self, index: &str, args: &[&str]) -> Result<Ticket<()>> {
         let mut c = redis::cmd("FT.CREATE");
@@ -2462,28 +2757,21 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：收尾会话(消费 self):**先等齐已 auto-flush 的各段**(它们的 ticket 已在后台按段序回填),**再发出
-    /// 最后一段未满批**。逐命令独立结果回填到各 Ticket。
+    /// 业务作用：收尾显式会话，先等待已封批的串行提交链，再发送仍留在会话中的尾批。
     ///
-    /// **standalone**:最后一段组装单条 `redis::Pipeline`,一条 driver 消息、一次 flush、严格入队顺序;
-    /// 返回裸 `Vec<Value>`,server error 以 `Value::ServerError` 逐槽位内联(不经 query_async 整批
-    /// 聚合),单条 server error 只影响该 Ticket;传输失败 → 该段 ExecutionUnknown。
-    /// **cluster**:**按 key slot 分桶**(同 AutoPipeline),每桶同 slot 一条
-    /// sub-pipeline 并行发——否则多 key 单批(如 `save_all`)跨 slot 会整批路由首命令节点、其余 MOVED。
-    /// ⚠ cluster 下**仅同 slot 内保序**(跨 slot 命令落不同节点,无法单批原子保序);保序需求请同槽。
+    /// 参数说明: 无。
     ///
-    /// `execute` 返回的 `Result` 聚合**所有已 seal 段 + 最后一段**的批级传输状态:任一段传输失败(写出后
-    /// 断线 / 响应数不符)返回**第一个**错误(不再吞掉 auto-flush 段错误)。单命令确定性失败
-    /// (`Value::ServerError`)不进此返回值,仍经各自 ticket 的 `await_result()` 获取——逐 ticket 检查结果的
-    /// 契约不变,`execute().await?` 现额外保证"本 session 已提交各段无批级传输异常"。
+    /// 返回：所有批次均完成响应分发时成功；批级传输或任务异常返回首个错误，单命令服务器错误仍须从各票据读取。
+    /// 取消等待不撤销已封批任务；仍留在会话缓冲区的尾批返回确定未发送，已进入派发但未获回执的命令保留结果未知。
     pub async fn execute(mut self) -> Result<()> {
-        self.executed = true;
         // 等齐已 seal 的后台各段(链式串行,await 链尾即等齐全部);取链上第一个批级错误。
         // 链尾 task panic/cancel → JoinError 映射成 ExecutionUnknown(不假成功)。
         let chain_res = match self.flush_chain.take() {
             Some(chain) => chain.await.unwrap_or_else(join_err_to_unknown),
             None => Ok(()),
         };
+        // 等待封批链期间，尾批仍由会话独占且从未派发；只有移交尾批时才改变析构裁决，避免取消等待丢失未发送证据。
+        self.executed = true;
         let cmds = std::mem::take(&mut self.cmds);
         let last = dispatch_jobs(&self.client, cmds).await;
         chain_res.and(last) // 前序段错误优先,其次末段
@@ -2491,19 +2779,22 @@ impl PipelineSession {
 }
 
 impl Drop for PipelineSession {
-    /// 业务作用：丢弃未显式执行的 pipeline 会话。
+    /// 业务作用：释放显式会话仍持有的命令和回执，已交给后台的封批继续自行完成。
     ///
-    /// 已 auto-flush 的段保持后台提交；仅最后一段尚未发出的命令被标记为 `NotSent`,让调用方可安全重试。
+    /// 参数说明: 无。
+    ///
+    /// 返回：仍留在会话缓冲区的命令收到确定未发送结果，包括等待已封批提交链时被取消的尾批；已经移交的命令不在本会话撤销。析构不等待 Redis 或撤销后台任务。
     fn drop(&mut self) {
-        // 已 auto-flush 的各段 = **已提交**:`flush_chain` 句柄被 drop 后任务
-        // 自动 detach,在后台继续完成、回填各自 ticket——不撤销。仅**最后一段未满批**(从未发出)按 NotSent
-        // → 调用方 await_result 得 `NotExecuted`(确定未发,可安全重发),区别于"可能已发"的 ExecutionUnknown。
+        // 后台封批拥有独立责任，释放等待句柄不会撤销；未移交的尾批仍有确定未发送证据，可由调用方重新提交。
         if !self.executed && !self.cmds.is_empty() {
             let pending = self.cmds.len();
             for (_cmd, tx) in self.cmds.drain(..) {
                 let _ = tx.send(Err(TicketErr::NotSent));
             }
-            tracing::warn!(pending, "PipelineSession 未 execute 即丢弃,最后一段未发(ticket → NotExecuted;已 auto-flush 段不受影响)");
+            tracing::warn!(
+                pending,
+                "PipelineSession 释放尚未派发的尾批，命令确定未发送，已封批任务继续完成"
+            );
         }
     }
 }
@@ -2517,7 +2808,7 @@ impl Drop for PipelineSession {
 pub struct MicroBatchCfg {
     /// 合批时间窗:收到首命令后等这么久收集更多。
     pub window: Duration,
-    /// 单批最大命令数(到此立即 flush,不等满窗)。
+    /// 单批最大命令数，到达后立即发送；零按逐条处理，不停用队列。
     pub max_batch: usize,
     /// 入队队列容量；满时生产者异步等待可用容量。
     pub queue_capacity: usize,
@@ -2532,9 +2823,11 @@ pub struct MicroBatchCfg {
 }
 
 impl Default for MicroBatchCfg {
-    /// 业务作用：构造自动微批默认配置。
+    /// 业务作用：提供自动微批的默认合批窗口、条数和队列容量。
     ///
-    /// 默认 1ms 时间窗、1000 条单批和 4096 入队容量,字节上限保持关闭以兼容既有业务行为。
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 1ms 窗口、1000 条批量和 4096 个队列槽的配置，单命令与单批字节限制均为零表示不启用；不创建任务或连接。
     fn default() -> Self {
         Self {
             window: Duration::from_millis(1),
@@ -2546,10 +2839,12 @@ impl Default for MicroBatchCfg {
     }
 }
 
-/// 业务作用：估算命令参数总字节(用于字节级背压;只数 `Simple` 实参,游标极小忽略)。
+/// 业务作用：按实际参数内容估算命令占用的参数字节，供自动微批接纳和批量软边界共用。
 ///
-/// # 参数
-/// - `cmd`: 底层 Redis 命令对象。
+/// 参数说明：
+/// - `cmd`：完整 Redis 命令，普通参数计实际长度，游标等其它形态按八字节计。
+///
+/// 返回：返回参数字节估计，不包含容器容量、RESP 编码、回执或连接开销，不能解释为进程内存占用。
 fn estimate_cmd_bytes(cmd: &redis::Cmd) -> usize {
     cmd.args_iter()
         .map(|a| match a {
@@ -2559,19 +2854,25 @@ fn estimate_cmd_bytes(cmd: &redis::Cmd) -> usize {
         .sum()
 }
 
-/// 业务作用：AutoPipeline 命令准入:阻塞 / Pub-Sub / 全局管理命令
-/// **不进自动微批**——它们会拖住共享后台 flusher 或改变连接语义。返回 `Some(原因)` = 拒绝。
-/// (`PipelineSession::enqueue` 保留 raw 能力;`AutoPipeline` 是共享设施故收紧。)
+/// 业务作用：识别自动微批不应接纳的阻塞、订阅及全局管理命令，避免共享 flusher 被拖住或连接状态改变。
 ///
-/// # 参数
-/// - `cmd`: 底层 Redis 命令对象。
+/// 参数说明：
+/// - `cmd`：尚未入队的完整原始命令；此处只作共享通道准入判断，不代替 Redis 参数校验。
+///
+/// 返回：命中拒绝规则时给出固定原因，否则继续其它准入检查；显式 PipelineSession 的原始入口不使用此规则。
 fn auto_pipeline_reject(cmd: &redis::Cmd) -> Option<&'static str> {
     let mut it = cmd.args_iter();
     let name = match it.next() {
-        Some(redis::Arg::Simple(b)) => b.to_ascii_uppercase(),
+        Some(redis::Arg::Simple(b)) if !b.is_empty() => b.to_ascii_uppercase(),
         _ => return Some("命令无名字"),
     };
     match name.as_slice() {
+        // 这些状态属于物理连接；允许业务批次改写会把后续生产者置于错误数据库、身份、事务或响应模式。
+        b"MULTI" | b"EXEC" | b"DISCARD" | b"WATCH" | b"UNWATCH" | b"SELECT" | b"AUTH"
+        | b"HELLO" | b"QUIT" | b"CLIENT" | b"READONLY" | b"READWRITE" | b"ASKING" | b"SYNC"
+        | b"PSYNC" | b"REPLCONF" => {
+            Some("连接状态命令不可进 AutoPipeline，请使用独立连接或专门 API")
+        }
         // 阻塞命令:会拖住当前 batch 直到连接级 timeout 才恢复
         b"BLPOP" | b"BRPOP" | b"BLMOVE" | b"BRPOPLPUSH" | b"BLMPOP" | b"BZPOPMIN" | b"BZPOPMAX"
         | b"BZMPOP" | b"WAIT" | b"WAITAOF" => {
@@ -2584,19 +2885,43 @@ fn auto_pipeline_reject(cmd: &redis::Cmd) -> Option<&'static str> {
         }
         // 全局/管理:cluster 下只落任意单节点,语义不等价"全节点执行"
         b"SCRIPT" | b"FUNCTION" | b"FLUSHALL" | b"FLUSHDB" | b"SHUTDOWN" | b"FAILOVER"
-        | b"SWAPDB" | b"RESET" => Some(
+        | b"SWAPDB" | b"RESET" | b"ACL" | b"CONFIG" | b"MODULE" | b"CLUSTER" | b"REPLICAOF"
+        | b"SLAVEOF" | b"DEBUG" | b"SAVE" | b"BGSAVE" | b"BGREWRITEAOF" | b"MIGRATE" => Some(
             "全局/管理命令不可进 AutoPipeline(cluster 下只落任意单节点,语义不等价),请走专门 API",
         ),
-        // XREAD/XREADGROUP 仅带 BLOCK 时阻塞
+        // 只在选项位置识别 BLOCK；组名、消费者名和 STREAMS 后的键属于业务数据，不能当成阻塞选项。
         b"XREAD" | b"XREADGROUP" => {
-            for a in it {
-                if let redis::Arg::Simple(s) = a {
-                    if s.eq_ignore_ascii_case(b"BLOCK") {
-                        return Some("XREAD/XREADGROUP BLOCK 阻塞,不可进 AutoPipeline");
+            let grouped = name == b"XREADGROUP";
+            if grouped
+                && (!matches!(it.next(), Some(redis::Arg::Simple(s)) if s.eq_ignore_ascii_case(b"GROUP"))
+                    || !matches!(it.next(), Some(redis::Arg::Simple(_)))
+                    || !matches!(it.next(), Some(redis::Arg::Simple(_))))
+            {
+                return Some("XREADGROUP 缺少完整 GROUP 参数，不可进 AutoPipeline");
+            }
+            while let Some(arg) = it.next() {
+                let redis::Arg::Simple(option) = arg else {
+                    return Some("无法确认 Stream 读取为非阻塞命令，不可进 AutoPipeline");
+                };
+                if option.eq_ignore_ascii_case(b"BLOCK") {
+                    return Some("XREAD/XREADGROUP BLOCK 阻塞,不可进 AutoPipeline");
+                }
+                if option.eq_ignore_ascii_case(b"STREAMS") {
+                    return None;
+                }
+                if option.eq_ignore_ascii_case(b"COUNT")
+                    || option.eq_ignore_ascii_case(b"MAXCOUNT")
+                    || option.eq_ignore_ascii_case(b"MAXSIZE")
+                {
+                    if !matches!(it.next(), Some(redis::Arg::Simple(_))) {
+                        return Some("Stream 读取选项缺少参数，不可进 AutoPipeline");
                     }
+                } else if !(grouped && option.eq_ignore_ascii_case(b"NOACK")) {
+                    // 未知选项无法可靠定位后续 BLOCK，拒绝猜测，避免将阻塞命令放入共享提交链。
+                    return Some("无法确认 Stream 读取选项边界，不可进 AutoPipeline");
                 }
             }
-            None
+            Some("Stream 读取缺少 STREAMS 边界，不可进 AutoPipeline")
         }
         _ => None,
     }
@@ -2607,11 +2932,12 @@ type BatchJob = (
     oneshot::Sender<std::result::Result<redis::Value, TicketErr>>,
 );
 
-/// 业务作用：后台 auto-flush task 的 `JoinError`(panic/cancel)→ `ExecutionUnknown`(批级不确定,**不吞成 Ok**;
-///仅用于 `flush_chain` 段任务的 `JoinHandle::await` 失败映射。
+/// 业务作用：将已封批后台任务的异常退出保留为批级结果未知，供显式会话汇总提交链。
 ///
-/// # 参数
-/// - `e`: 错误对象或外部错误值。
+/// 参数说明：
+/// - `e`：等待封批任务得到的取消或展开错误，不能证明命令未发出。
+///
+/// 返回：始终返回 ExecutionUnknown，不将任务缺失的回执解释为成功或允许自动重放。
 fn join_err_to_unknown(e: tokio::task::JoinError) -> Result<()> {
     Err(NasaRedisError::ExecutionUnknown(format!(
         "pipeline auto-flush task 结束异常(panic/cancel): {e}"
@@ -2625,10 +2951,42 @@ pub struct AutoPipeline {
     cancel: CancellationToken,
     /// 单命令字节上限(0=不限),入队前检查(从 `MicroBatchCfg` 复制)。
     max_command_bytes: usize,
-    admission: std::sync::Mutex<bool>,
+    /// 接纳与接收端释放共用短锁，队列退出后不能再登记或移交命令。
+    admission: Arc<std::sync::Mutex<bool>>,
     abort: tokio::task::AbortHandle,
     /// 完成状态由独立 owner 留存；取消任意等待方不转移 flusher 的退出责任。
     outcome: tokio::sync::watch::Receiver<AutoPipelineState>,
+}
+
+/// 持有唯一接收端，在任务未轮询、展开或执行器关闭时同步收回队列责任。
+struct AutoPipelineQueue {
+    /// 已接纳命令的唯一缓冲区，释放前须阻止发送方继续移交。
+    rx: mpsc::Receiver<BatchJob>,
+    /// 与所有发送方共用的准入屏障。
+    admission: Arc<std::sync::Mutex<bool>>,
+    /// 唤醒尚在等待容量的发送方，令其按未接纳返回。
+    cancel: CancellationToken,
+    /// 释放队列字节时保留没有回执的未完成数量。
+    activity: Arc<crate::activity::Activity>,
+}
+
+impl Drop for AutoPipelineQueue {
+    /// 业务作用：接收责任结束时同步关闭准入并释放排队命令，覆盖尚未首次轮询及宿主运行时销毁。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：队列参数字节归零；未取得处理结束证据的责任继续保留，不将丢失回执解释为未发送或成功。
+    fn drop(&mut self) {
+        let mut open = self.admission.lock().expect("auto pipeline admission");
+        // 与发送方登记和移交串行化，避免队列清空后仍有旧许可登记新的责任。
+        self.activity.close();
+        *open = false;
+        self.cancel.cancel();
+        self.rx.close();
+        // 先释放实际排队命令，再发布字节归零；清理不依赖另一个异步任务获得轮询机会。
+        while self.rx.try_recv().is_ok() {}
+        self.activity.queue_dropped();
+    }
 }
 
 /// 自动微批后台任务的本地运行状态，不代表所有远端命令执行成功。
@@ -2643,9 +3001,12 @@ pub enum AutoPipelineState {
 }
 
 impl AutoPipeline {
-    /// 业务作用：在 flusher 责任完整时完成宿主接流裁决，与任务退出串行化。
-    /// 参数说明：`publish` 必须短小同步、不阻塞、不重入本微批入口。
-    /// 返回：未关闭且任务仍运行时返回 Some，否则不执行；不推断远端命令结果。
+    /// 业务作用：在 flusher 责任存在且入口仍开放时执行宿主的同步接流发布，与活动责任变更串行化。
+    ///
+    /// 参数说明：
+    /// - `publish`：短小、不阻塞且不重入本微批入口的同步发布动作。
+    ///
+    /// 返回：满足活动任务和关闭门禁时执行并返回 Some，否则返回 None 且不执行；不据此证明远端命令成功。
     pub fn with_running<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
         self.activity
             .with_tasks(0, 0, 1, || {
@@ -2657,9 +3018,13 @@ impl AutoPipeline {
             })
             .flatten()
     }
-    /// 业务作用：创建有界入队通道、合批任务及独立的关闭等待 owner。
-    /// 参数说明：`client` 为固定 Redis 来源；`cfg` 为窗口、条数及参数字节容量。
-    /// 返回：可共享的自动微批句柄；最后一个句柄释放时关闭准入，owner 继续等待任务退出。
+    /// 业务作用：创建有界自动微批队列，并将 flusher 的退出责任交给独立等待任务。
+    ///
+    /// 参数说明：
+    /// - `client`：固定的 Redis 来源和连接配置，后台提交期间由任务持有。
+    /// - `cfg`：合批窗口、条数及参数字节策略；队列容量限制在一至 Tokio 可表示许可上限之间。
+    ///
+    /// 返回：返回可共享句柄，最后一个句柄释放时关闭准入并触发排干；需要当前 Tokio 执行上下文，缺少时会 panic。运行时关闭可使任务失败，调用方须通过 state 或 shutdown_result 读取退出证据。
     pub fn start(client: Arc<RedisClient>, cfg: MicroBatchCfg) -> Arc<Self> {
         let queue_capacity = cfg
             .queue_capacity
@@ -2668,18 +3033,26 @@ impl AutoPipeline {
         let cancel = CancellationToken::new();
         let max_command_bytes = cfg.max_command_bytes;
         let activity = Arc::new(crate::activity::Activity::default());
+        let admission = Arc::new(std::sync::Mutex::new(true));
+        // 在移交执行器之前绑定接收端和同步收口责任，未首次轮询的销毁也必须释放队列证据。
+        let queue = AutoPipelineQueue {
+            rx,
+            admission: admission.clone(),
+            cancel: cancel.clone(),
+            activity: activity.clone(),
+        };
         let active = activity.task(crate::activity::TaskKind::Flusher);
         let progress = activity.clone();
         let worker_cancel = cancel.clone();
         let handle = tokio::spawn(async move {
+            let mut queue = queue;
             let _active = active;
-            flush_loop(client, rx, cfg, worker_cancel, progress).await;
+            flush_loop(client, &mut queue.rx, cfg, worker_cancel, progress).await;
         });
         let abort = handle.abort_handle();
         let (done, outcome) = tokio::sync::watch::channel(AutoPipelineState::Running);
         let done = activity.completion(done);
         let task_cancel = cancel.clone();
-        let owner_activity = activity.clone();
         let owner_stop = cancel.clone().drop_guard();
         // owner 从创建时起独占 JoinHandle，关闭等待方被取消也不能分离 flusher。
         tokio::spawn(async move {
@@ -2690,7 +3063,6 @@ impl AutoPipeline {
                 AutoPipelineState::Failed
             };
             task_cancel.cancel();
-            owner_activity.queue_dropped();
             done.send_replace(state);
         });
         Arc::new(Self {
@@ -2698,17 +3070,18 @@ impl AutoPipeline {
             activity,
             cancel,
             max_command_bytes,
-            admission: std::sync::Mutex::new(true),
+            admission,
             abort,
             outcome,
         })
     }
 
-    /// 业务作用：提交单条命令并异步等待对应的类型化结果，队列满时等待可用容量。
-    /// 返回：该命令的结果、确定的服务器错误或执行结果不确定错误；不自动重试写入。
+    /// 业务作用：将单条命令交给共享微批并等待其独立回执，队列满时异步等待接纳容量。
     ///
-    /// # 参数
-    /// - `cmd`: 底层 Redis 命令对象。
+    /// 参数说明：
+    /// - `cmd`：完整原始命令，入队前检查共享通道准入及参数字节上限。
+    ///
+    /// 返回：成功返回转换后的单条结果；本地拒绝表示未接纳，服务器错误与执行未知分别报告。接纳后取消等待不撤销命令，解码失败也不回滚已发生的写入。
     pub async fn execute<T: FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
         self.precheck(&cmd)?;
         let (otx, orx) = oneshot::channel();
@@ -2724,13 +3097,12 @@ impl AutoPipeline {
         }
     }
 
-    /// 业务作用：**fire-and-forget 提交**:入队后立即返回(不等结果),只 await send 做背压 + 保证后续 [`barrier`](Self::barrier)
-    /// 的顺序。适合"提交一批写、再 barrier、再 direct 读"的热路径。命令仍会被 flush 执行;
-    /// 只是放弃类型化结果(server error 不再回传给调用方,但同批其它命令不受影响)。
+    /// 业务作用：将单条命令交给共享微批后立即返回，不保留该命令的执行回执。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `cmd`：完整原始命令，须通过准入和参数字节检查；队列满时等待容量。
     ///
-    /// - `cmd`: 需要进入自动微批队列的 Redis 命令，会先做准入和字节上限校验。
+    /// 返回：成功只表示入队，服务器错误和结果未知不再返回给本调用；失败表示未接纳。后续 barrier 只提供提交顺序，不能替代已放弃的逐命令成功证据。
     pub async fn submit(&self, cmd: redis::Cmd) -> Result<()> {
         self.precheck(&cmd)?;
         let (otx, _orx) = oneshot::channel(); // 丢弃接收端 = 不等结果
@@ -2738,9 +3110,12 @@ impl AutoPipeline {
         Ok(())
     }
 
-    /// 业务作用：将容量等待与关闭裁决分开，保证关闭生效后没有新命令被接纳。
-    /// 参数说明：`job` 为尚未交给 flusher 的命令及回执。
-    /// 返回：成功表示命令已入队；关闭或通道失效时明确未发送。
+    /// 业务作用：在队列容量可用后复验关闭门禁，再同时登记未完成责任并移交命令。
+    ///
+    /// 参数说明：
+    /// - `job`：尚未接纳的 Redis 命令和独立回执发送端。
+    ///
+    /// 返回：成功表示命令已交给队列；关闭或通道失效返回 NotExecuted。容量等待被取消时不接纳命令，移交后由 flusher 负责回执。
     async fn enqueue(&self, job: BatchJob) -> Result<()> {
         let permit = tokio::select! {
             biased;
@@ -2758,7 +3133,9 @@ impl AutoPipeline {
     }
 
     /// 业务作用：等待此前已入队命令经过 flusher 处理，建立同一管道的提交顺序屏障。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：屏障 PING 的结果；不汇总此前命令的服务器错误或未知结果，写入成功仍以各自回执为准。
     pub async fn barrier(&self) -> Result<()> {
         self.execute::<redis::Value>(redis::cmd("PING"))
@@ -2766,9 +3143,12 @@ impl AutoPipeline {
             .map(|_| ())
     }
 
-    /// 业务作用：拒绝已关闭管道、会改变连接语义的命令及超过单条参数字节容量的请求。
-    /// 参数说明：`cmd` 为尚未交给后台任务的原始命令。
-    /// 返回：通过本地预检或确定的未执行错误；实际入队仍会复验关闭门禁。
+    /// 业务作用：在等待队列容量前拒绝已关闭入口、共享连接不兼容命令及超出单命令字节额度的请求。
+    ///
+    /// 参数说明：
+    /// - `cmd`：尚未入队的完整命令，准入规则不代替服务端参数验证。
+    ///
+    /// 返回：通过时不产生提交副作用；关闭返回 NotExecuted，命令类别或字节额度不符返回 Config，真正入队前仍须复验关闭状态。
     fn precheck(&self, cmd: &redis::Cmd) -> Result<()> {
         if self.cancel.is_cancelled() {
             return Err(NasaRedisError::NotExecuted("自动微批已关闭".into()));
@@ -2789,7 +3169,9 @@ impl AutoPipeline {
     }
 
     /// 业务作用：永久停止接纳新命令，通知 flusher 排干已入队责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：准入已关闭；不表示排干完成。
     pub fn begin_shutdown(&self) {
         let mut open = self.admission.lock().expect("auto pipeline admission");
@@ -2799,7 +3181,9 @@ impl AutoPipeline {
     }
 
     /// 业务作用：预算耗尽时终止 flusher；仍需等待 owner 确认退出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：关闭准入并请求终止，未获回执的命令不能自动重放。
     pub fn abort(&self) {
         self.begin_shutdown();
@@ -2807,7 +3191,9 @@ impl AutoPipeline {
     }
 
     /// 业务作用：取得后台任务终态用于监督和退出裁决。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本地任务状态；退出证据通道丢失时报告失败，不提升为远端逐命令成功。
     pub fn state(&self) -> AutoPipelineState {
         let disconnected = self.outcome.has_changed().is_err();
@@ -2820,21 +3206,27 @@ impl AutoPipeline {
     }
 
     /// 业务作用：观察当前已占用的队列容量，包括正在提交的许可。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：队列槽占用数，不含 flusher 已取出的批次。
     pub fn queued(&self) -> usize {
         self.tx.max_capacity() - self.tx.capacity()
     }
 
     /// 业务作用：读取 flusher、参数字节、未完成责任及最近批次进展。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本地工作证据，完成数量不等于远端写入成功数量。
     pub fn observation(&self) -> crate::RedisTaskObservation {
         self.activity.snapshot()
     }
 
     /// 业务作用：关闭准入并等待 flusher 的确定终态，支持并发、重复和取消后再次等待。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：正常退出时成功；异常或强制退出时报告结果未知，逐命令仍以回执为准。
     pub async fn shutdown_result(&self) -> Result<()> {
         self.begin_shutdown();
@@ -2858,7 +3250,9 @@ impl AutoPipeline {
     }
 
     /// 业务作用：兼容独立调用入口，等待关闭并记录异常终态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：等待结束；需要程序化裁决的调用方使用 shutdown_result。
     pub async fn shutdown(&self) {
         if self.shutdown_result().await.is_err() {
@@ -2869,19 +3263,28 @@ impl AutoPipeline {
 
 impl Drop for AutoPipeline {
     /// 业务作用：最后一个业务句柄释放时收回准入，独立 owner 继续承担排干责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：触发关闭；不伪报已退出。
     fn drop(&mut self) {
         self.begin_shutdown();
     }
 }
 
-/// 业务作用：按时间窗、条数和参数字节软边界合批，关闭后使用相同边界排干队列。
-/// 参数说明：`client` 持有 Redis 依赖；`rx` 是已接纳责任；`cfg` 为容量策略；`cancel` 触发关闭；`activity` 记录本地进展。
-/// 返回：队列全部产生回执后正常结束；任务中断由外层 owner 发布异常退出证据。
+/// 业务作用：按窗口、条数和参数字节软边界合批派发，关闭后排干已接纳的队列责任。
+///
+/// 参数说明：
+/// - `client`：固定 Redis 来源，直到后台提交结束仍由本任务持有。
+/// - `rx`：借用外层责任守卫持有的唯一接收端；本函数退出或被取消后仍由守卫同步关闭并释放剩余队列。
+/// - `cfg`：合批策略，窗口最多按一年计，零条数实际仍逐条处理。
+/// - `cancel`：停止继续接纳和等待合批窗口的关闭通知，不撤销已派发批次。
+/// - `activity`：记录队列取出、未完成责任及批次结束的本地证据。
+///
+/// 返回：正常返回表示已取出责任均完成回执分发，不表示每条命令成功；任务被取消或异常结束时由外层独立任务发布失败状态。
 async fn flush_loop(
     client: Arc<RedisClient>,
-    mut rx: mpsc::Receiver<BatchJob>,
+    rx: &mut mpsc::Receiver<BatchJob>,
     cfg: MicroBatchCfg,
     cancel: CancellationToken,
     activity: Arc<crate::activity::Activity>,
@@ -2890,7 +3293,10 @@ async fn flush_loop(
         // 等首命令(或停机)
         let first = tokio::select! {
             _ = cancel.cancelled() => break,
-            j = rx.recv() => match j { Some(j) => j, None => break },
+            j = rx.recv() => match j {
+                Some(j) => j,
+                None => break
+            },
         };
         let mut batch_bytes = estimate_cmd_bytes(&first.0);
         activity.dequeue(batch_bytes);
@@ -2906,7 +3312,12 @@ async fn flush_loop(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 r = tokio::time::timeout_at(deadline, rx.recv()) => match r {
-                    Ok(Some(j)) => { let bytes=estimate_cmd_bytes(&j.0); activity.dequeue(bytes); batch_bytes += bytes; batch.push(j); }
+                    Ok(Some(j)) => {
+                        let bytes = estimate_cmd_bytes(&j.0);
+                        activity.dequeue(bytes);
+                        batch_bytes += bytes;
+                        batch.push(j);
+                    }
                     _ => break, // 窗口到 / 通道关闭
                 }
             }
@@ -2922,7 +3333,9 @@ async fn flush_loop(
         while batch.len() < cfg.max_batch.max(1)
             && (cfg.max_batch_bytes == 0 || bytes < cfg.max_batch_bytes)
         {
-            let Some(job) = rx.recv().await else { break };
+            let Some(job) = rx.recv().await else {
+                break;
+            };
             let size = estimate_cmd_bytes(&job.0);
             activity.dequeue(size);
             bytes = bytes.saturating_add(size);
@@ -2932,9 +3345,14 @@ async fn flush_loop(
     }
 }
 
-/// 业务作用：派发自动微批并让各 ticket 独立接收执行结果。
-/// 参数说明：`client` 为目标 Redis 客户端；`batch` 为同一窗口收集的命令；`activity` 记录汇总结局。
-/// 返回：无；成功、命令错误或传输未知分别通过各 ticket 回执。
+/// 业务作用：派发一个自动微批，并在所有物理批次结束后记录本地完成进展。
+///
+/// 参数说明：
+/// - `client`：本批固定使用的 Redis 来源。
+/// - `batch`：已从队列取出的命令及各自回执。
+/// - `activity`：统计本批完成数及批级传输失败的本地观察对象。
+///
+/// 返回：正常结束后各命令已分发响应，完成计数包含服务器报错命令；批级失败计入本地失败进展，逐命令结果仍以回执为准。
 async fn flush_batch(
     client: &Arc<RedisClient>,
     batch: Vec<BatchJob>,
@@ -2945,14 +3363,15 @@ async fn flush_batch(
     activity.finish(count, failed);
 }
 
-/// 业务作用：**统一的 cluster 感知派发**(显式 `PipelineSession::execute` 与
-/// AutoPipeline `flush_batch` **共用同一路径**)。standalone 走单条 pipeline(保序);cluster **按 key slot 分桶**:同桶
-/// 同 slot 不 CROSSSLOT、一条 sub-pipeline 并行发,各 ticket 独立回执。返回 `Err` = 至少一个(桶的)
-/// 传输/响应数异常 → ExecutionUnknown(per-ticket 结果仍精确;cluster 下"传输失败"细化到 slot 桶级)。
+/// 业务作用：按客户端拓扑派发一批命令，并由每个物理批次独立回填票据，供显式会话和自动微批共用。
 ///
-/// # 参数
-/// - `client`: 底层客户端或连接句柄。
-/// - `jobs`: 待放入 Redis pipeline 的任务集合。
+/// 参数说明：
+/// - `client`：固定 Redis 来源及专用 Pipeline 连接入口。
+/// - `jobs`：按本地接纳顺序排列的命令与各自回执通道。
+///
+/// 返回：所有物理批次正常分发响应时成功，命令级服务器错误仍由各票据报告；任一批次传输或响应数异常时返回错误。
+/// Standalone 使用单个物理批次；Cluster 按首键 slot 分桶并发发送，无键命令单独派发，同槽保序但不保证跨槽原子性。
+/// Cluster 的无参 PING 是本地派发屏障：先等齐前面的全部槽桶，再发送 PING，之后才处理后续命令。
 async fn dispatch_jobs(client: &RedisClient, jobs: Vec<BatchJob>) -> Result<()> {
     if jobs.is_empty() {
         return Ok(());
@@ -2960,31 +3379,48 @@ async fn dispatch_jobs(client: &RedisClient, jobs: Vec<BatchJob>) -> Result<()> 
     if !client.is_cluster() {
         return send_one_pipe(client, jobs).await;
     }
-    let mut buckets: std::collections::HashMap<u16, Vec<BatchJob>> =
-        std::collections::HashMap::new();
-    //keyless 命令(PING/SCRIPT LOAD 等)**单独成桶**,不与真正 hash 到 slot 0 的
-    // key 命令混批——否则将来加 keyless 写会被错误绑到 slot-0 节点。keyless 桶整体发任意节点(cluster_async
-    // 路由),与具体 slot 无关。
-    let mut keyless: Vec<BatchJob> = Vec::new();
-    for (cmd, tx) in jobs {
-        match first_key_slot(&cmd) {
-            Some(slot) => buckets.entry(slot).or_default().push((cmd, tx)),
-            None => keyless.push((cmd, tx)),
-        }
-    }
-    let mut futs: Vec<_> = buckets
-        .into_values()
-        .map(|b| send_one_pipe(client, b))
-        .collect();
-    if !keyless.is_empty() {
-        futs.push(send_one_pipe(client, keyless));
-    }
-    let results = futures::future::join_all(futs).await;
-    // 任一桶传输/响应异常 → 整体 Err(各桶 ticket 已各自收到精确结果)
+    let mut pending = jobs.into_iter();
     let mut first_err = None;
-    for r in results {
-        if let Err(e) = r {
-            first_err.get_or_insert(e);
+    loop {
+        let mut buckets: std::collections::HashMap<u16, Vec<BatchJob>> =
+            std::collections::HashMap::new();
+        // 无键命令不能混入真实 slot 0，避免被错误绑定到该槽节点。
+        let mut keyless = Vec::new();
+        let mut barrier = None;
+        for (cmd, tx) in pending.by_ref() {
+            let is_barrier = {
+                let mut args = cmd.args_iter();
+                matches!(args.next(), Some(redis::Arg::Simple(name)) if name.eq_ignore_ascii_case(b"PING"))
+                    && args.next().is_none()
+            };
+            if is_barrier {
+                // barrier 使用无参 PING；不能把它与前序槽桶并发发送，否则成功回包时其它槽仍可能尚未执行。
+                barrier = Some((cmd, tx));
+                break;
+            }
+            match first_key_slot(&cmd) {
+                Some(slot) => buckets.entry(slot).or_default().push((cmd, tx)),
+                None => keyless.push((cmd, tx)),
+            }
+        }
+        let mut futs: Vec<_> = buckets
+            .into_values()
+            .map(|batch| send_one_pipe(client, batch))
+            .collect();
+        if !keyless.is_empty() {
+            futs.push(send_one_pipe(client, keyless));
+        }
+        for result in futures::future::join_all(futs).await {
+            if let Err(error) = result {
+                first_err.get_or_insert(error);
+            }
+        }
+        let Some(barrier) = barrier else {
+            break;
+        };
+        // 所有前序回执均已分发后才发送屏障；保留前序批级错误，但不把它冒充 PING 自身的响应。
+        if let Err(error) = send_one_pipe(client, vec![barrier]).await {
+            first_err.get_or_insert(error);
         }
     }
     match first_err {
@@ -2993,17 +3429,12 @@ async fn dispatch_jobs(client: &RedisClient, jobs: Vec<BatchJob>) -> Result<()> 
     }
 }
 
-/// 业务作用：取命令第一个 key 的 slot 用于 cluster 分桶。本库所有类型化 helper 的 key 均在 arg[1]。
-/// 无 key(keyless)→ None(归 keyless 桶)。
+/// 业务作用：为本地 Cluster 分桶估算首键槽位，显式识别脚本命令的 numkeys 布局。
 ///
-///**EVAL 系命令的 key 不在 arg[1]**(arg 布局 `NAME script/sha numkeys [key...]`,
-/// arg[1] 是脚本体/sha)——raw `enqueue(EVAL ...)` 在 cluster 下若按 arg[1] 算 slot 会**误桶**(脚本字节
-/// 当 key → 路由到错误节点 MOVED/CROSSSLOT)。这里识别 EVAL/EVALSHA/FCALL(及 `_RO` 变体),跳过
-/// `numkeys` 取**真 key**;`numkeys==0` 的无键脚本 → None(keyless 桶,任意节点)。MSET 等多 key 命令的
-/// arg[1] 本就是真 key(跨 slot 由 Redis 正确判 CROSSSLOT),无需特判。
+/// 参数说明：
+/// - `cmd`：完整命令；EVAL、EVALSHA、FCALL 及只读变体从 numkeys 后取首键，其它命令按首个参数估算。
 ///
-/// # 参数
-/// - `cmd`: 底层 Redis 命令对象。
+/// 返回：取得参数时返回哈希槽，缺少参数或无法解析脚本键数量时为 None；这只是本地分桶依据，不是任意命令的完整键发现或多键同槽校验。无键管理命令的参数也可能被当作估算键。
 fn first_key_slot(cmd: &redis::Cmd) -> Option<u16> {
     let mut it = cmd.args_iter();
     let name = match it.next()? {
@@ -3032,10 +3463,12 @@ fn first_key_slot(cmd: &redis::Cmd) -> Option<u16> {
     }
 }
 
-/// 业务作用：命令名是否为 EVAL 系(key 在 `numkeys` 之后,非 arg[1]):EVAL/EVALSHA/FCALL + `_RO` 变体。大小写无关。
+/// 业务作用：识别首键位于脚本体或函数名及 numkeys 之后的命令族，供本地分桶选择参数位置。
 ///
-/// # 参数
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+/// 参数说明：
+/// - `name`：不区分 ASCII 大小写的原始命令名。
+///
+/// 返回：EVAL、EVALSHA、FCALL 及其单个 _RO 后缀形式返回 true，其它名称返回 false；不校验服务端是否支持该命令。
 fn is_eval_family(name: &[u8]) -> bool {
     let mut up = name.to_ascii_uppercase();
     // 去掉可选的 `_RO` 只读后缀,统一比对基名
@@ -3045,12 +3478,13 @@ fn is_eval_family(name: &[u8]) -> bool {
     matches!(up.as_slice(), b"EVAL" | b"EVALSHA" | b"FCALL")
 }
 
-/// 业务作用：把一批 job 组成单条 pipeline 发出,结果逐槽位回填各 ticket。返回 `Err(ExecutionUnknown)` =
-/// 传输失败 / 响应数不符(该批 ticket 已统一收到 Unknown);`Ok` = 已逐条分发(含内联 ServerError)。
+/// 业务作用：通过专用 Pipeline lane 发送一个物理批次，并按响应位置分发各命令的回执。
 ///
-/// # 参数
-/// - `client`: 底层客户端或连接句柄。
-/// - `jobs`: 待放入 Redis pipeline 的任务集合。
+/// 参数说明：
+/// - `client`：负责获取 Pipeline 连接的 Redis 客户端。
+/// - `jobs`：按批内顺序排列的命令和回执发送端。
+///
+/// 返回：空批或完整响应分发完成时成功，单命令服务器错误仅发给对应票据；连接、传输或响应数量异常时整批返回 ExecutionUnknown 并通知票据，不自动重放。
 async fn send_one_pipe(client: &RedisClient, jobs: Vec<BatchJob>) -> Result<()> {
     let n = jobs.len();
     if n == 0 {

@@ -59,13 +59,16 @@ impl JobRun {
     /// 参数说明：
     /// - `fields`: `read_run.lua` 按声明顺序返回的 21 个字段（缺失为 nil）。
     ///
-    /// 返回：字段完整且状态合法时返回投影；数量不足或 state 非法时返回协议错误。
+    /// 返回：字段恰为二十一个、状态合法且数值可解释时返回投影；字段数量、状态或数值非法则返回协议错误。
     pub(crate) fn from_fields(fields: &[redis::Value]) -> Result<Self> {
         if fields.len() != 21 {
             return Err(protocol("read_run 返回字段数不符合合同"));
         }
         let text = |index: usize| optional_text(&fields[index]);
-        let number = |index: usize| -> Result<i64> { optional_i64(&fields[index]) };
+        let number = |index: usize| -> Result<i64> {
+            // 缺失数值兼容为零，非法文本则保留协议错误，不能用同一默认值掩盖异常字段。
+            optional_i64(&fields[index])
+        };
         let state = JobState::parse(&text(3)).ok_or_else(|| protocol("read_run state 字段非法"))?;
         Ok(Self {
             run_id: text(0),
@@ -93,12 +96,12 @@ impl JobRun {
     }
 }
 
-/// 业务作用：把一个 Run 字段值归一化为文本；nil 与非字符串取空串。
+/// 业务作用：将 Run 观测字段归一化为文本，兼容整数和缺失值，不提供执行权威证明。
 ///
 /// 参数说明：
 /// - `value`: Run 字段的原始值。
 ///
-/// 返回：字符串或整数的文本，其它为空串。
+/// 返回：字符串或整数的文本，bulk 中非法 UTF-8 使用替代字符；其它类型为空串。
 fn optional_text(value: &redis::Value) -> String {
     match value {
         redis::Value::Nil => String::new(),
@@ -136,7 +139,12 @@ fn optional_i64(value: &redis::Value) -> Result<i64> {
     }
 }
 
-/// 业务作用：构造 Job 协议错误。参数说明：`message` 摘要。返回：协议错误。
+/// 业务作用：将 Run 读取结果的字段违例归为协议错误，阻止使用非法观测值。
+///
+/// 参数说明：
+/// - `message`：不包含 Run 载荷或任意响应正文的固定错误摘要。
+///
+/// 返回：复制摘要并生成 Job 协议错误，不改变持久状态。
 fn protocol(message: &str) -> NasaRedisError {
     crate::job::JobError::Protocol(message.to_owned()).into()
 }

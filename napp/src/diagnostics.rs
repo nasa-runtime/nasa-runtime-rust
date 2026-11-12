@@ -61,7 +61,10 @@ pub struct DiagnosticSnapshot {
 
 impl Application {
     /// 业务作用：组合已有健康、配置、遥测、SQL 策略和 Redis 分区快照，不执行后端探测。
-    /// 参数说明：`limit` 限定每个领域最多返回 1..=256 条。
+    ///
+    /// 参数说明：
+    /// - `limit`：`limit` 限定每个领域最多返回 1..=256 条。
+    ///
     /// 返回：带各自采样时间的有界脱敏摘要；超限明确标记，不含原始配置、secret、SQL 或业务载荷。
     pub async fn diagnostic_snapshot(&self, limit: usize) -> ApplicationResult<DiagnosticSnapshot> {
         if !(1..=256).contains(&limit) {
@@ -102,8 +105,12 @@ impl Application {
                 },
                 state: match status.state {
                     ReloadState::Applied => "applied",
-                    ReloadState::RestartRequired { .. } => "restart_required",
-                    ReloadState::ApplyFailed { .. } => "apply_failed",
+                    ReloadState::RestartRequired {
+                        ..
+                    } => "restart_required",
+                    ReloadState::ApplyFailed {
+                        ..
+                    } => "apply_failed",
                 },
                 applied_version: status.applied_version,
             })
@@ -176,7 +183,10 @@ impl Application {
 }
 
 /// 业务作用：使诊断名称遵循宿主脱敏策略与长度限制。
-/// 参数说明：`value` 为资源或目标名称。
+///
+/// 参数说明：
+/// - `value`：`value` 为资源或目标名称。
+///
 /// 返回：不超过 256 个字符的可展示摘要。
 fn clean(value: &str) -> String {
     crate::report::redact(value).chars().take(256).collect()

@@ -6,6 +6,7 @@ mod assets;
 mod config;
 mod exporter;
 pub mod platform;
+pub mod resources;
 
 pub use assets::{dashboards, discovery_config, owner_id, pod_monitor, prometheus_rules};
 pub use config::*;

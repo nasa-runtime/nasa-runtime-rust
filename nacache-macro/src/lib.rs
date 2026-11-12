@@ -2,63 +2,51 @@
 //!
 //! `#[cached]` 生成读路径缓存编排，`#[cache_invalidate]` 生成写后失效逻辑；
 //! 真正的缓存存储和一致性控制由 `cacheable` 运行时执行。
-// ============================================================================
-// cache-macro —— Cacheable-lite 的两个属性宏
-//   #[cached(scene, key, refresh_ms, expire_ms)]      读:L1(moka)→L2(Redis三防)→原体(DB)
-//   #[cache_invalidate(scene, key, value)]            写:执行原体后,失效 L1+L2
-//
-// 设计见 rust-cache/00-Cacheable-lite设计.md。宏只负责"拼 key + 调运行期 helper",
-// 真正的两级缓存逻辑在门面 crate ::cacheable(运行期模块)。
-//
-// 三类过程宏里这俩都是【attribute 属性宏】,编译期把被注解的 fn 改写。
-// ============================================================================
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn, LitInt, LitStr};
 
-// ════════════════════════════════════════════════════════════════════════════
-// #[cached] —— 读路径:两级缓存
-// ════════════════════════════════════════════════════════════════════════════
 /// 业务作用：`#[cached]` 为异步读取函数生成 L1/L2 两级缓存编排。
 ///
-/// 贴在【async 方法/函数】上,改写成"先查 L1(moka)→ L2(Redis 三防)→ 未命中才跑原体(DB)"。
-/// 原体返回 `anyhow::Result<T>`,本注解透传同一个 `T`(签名/返回类型不变)。
+/// 运行时先读取 L1，配置共享缓存时再读取 L2，未命中才执行原函数体。
+/// 原体须返回 `anyhow::Result<T>`，缓存值与加载闭包须满足运行时的类型及生命周期约束。
 ///
-/// ## 参数
+/// 属性配置：
 /// | 参数 | 类型 | 默认 | 含义 |
 /// |---|---|---|---|
-/// | `scene` | 字符串 | ✅必填 | L1 缓存池名(按 scene 分池)。★**同一 scene 的值类型 V 必须始终一致**(混用 Vec/Option 会 panic) |
-/// | `key` | 字符串 | ✅必填 | key 模板,`{xxx}` 内联捕获**同名函数参数**(仅参数名,不支持 `{a.b}` 字段表达式) |
+/// | `scene` | 字符串 | 必填 | L1 场景名，同场景必须使用相同值类型与 TTL 配置 |
+/// | `key` | 字符串 | 必填 | `format!` 模板，以 `{name}` 捕获可见参数名，不支持 `{a.b}` 字段表达式 |
 /// | `refresh_ms` | 整数 | 1000 | L1 软刷新阈值(到点返旧值 + 后台刷) |
 /// | `expire_ms` | 整数 | 3000 | L1 硬过期(到点淘汰) |
 ///
-/// ## 用法示例
+/// 使用示例：
 /// ```ignore
-/// #[cached(scene = "kline", key = "kline:{symbol}:{period}", refresh_ms = 1000, expire_ms = 3000)]
-/// pub async fn find_range(self: Arc<Self>, symbol: String, period: u8) -> anyhow::Result<Vec<KLine>> { /* ... */ }
+/// #[cached(scene = "resource", key = "resource:{id}")]
+/// async fn load(id: u64) -> anyhow::Result<String> {
+///     fetch_resource(id).await
+/// }
 /// ```
-/// ⚠️ 用 `self` 必须取 `self: Arc<Self>`(不能 `&self`):原体会作 loader 丢进 `tokio::spawn` 后台刷新,
-///    要求 future 是 `Send + 'static`,借用 `&self` 不满足。取 `Arc<Self>` + 参数取自有值,`async move` 全按值捕获。
+/// 加载闭包可能参与后台刷新，不能借用短于任务生命周期的 `self` 或参数。
+/// 宏拒绝引用接收者；按值接收者仍须满足缓存运行时要求。
 ///
-/// # 参数
+/// 参数说明：
+/// - `attr`：属性内的场景名、键模板及 TTL 配置令牌。
+/// - `item`：被包装的异步函数或方法声明。
 ///
-/// - `attr`: `#[cached(...)]` 括号内的 scene/key/TTL 配置 token stream。
-/// - `item`: 被注解的 async 函数 token stream。
+/// 返回：保留签名并注册场景类型描述的缓存包装函数；未知属性、缺少必填项、
+/// 非异步函数或引用接收者生成编译错误，值类型约束由生成代码与运行时共同检查。
 #[proc_macro_attribute]
 pub fn cached(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // ⓪ 运行时根路径发现:nasa → ::nasa::cache;旧依赖 → ::cacheable。
+    // 按调用方的实际依赖身份选择运行时路径，兼容直接依赖、门面依赖及依赖重命名。
     let root = match nasa_macro_support::runtime_root("cache", "cacheable") {
         Ok(r) => r,
         Err(msg) => return quote! { ::core::compile_error!(#msg); }.into(),
     };
-    // ── 1. 解析注解参数(同 hystrix-macro 的 syn::meta::parser 套路) ──
-    // 1a. 准备接收变量 + 默认值
     let mut scene: Option<String> = None; // 必填:L1 池名
     let mut key: Option<String> = None; // 必填:key 模板
     let mut refresh_ms: u64 = 1000; // L1 软刷新
     let mut expire_ms: u64 = 3000; // L1 硬过期
-                                   // 1b. 定义每个 k=v 怎么取(闭包按引用捕获上面变量),此刻还没解析
     let arg_parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("scene") {
             scene = Some(meta.value()?.parse::<LitStr>()?.value());
@@ -73,7 +61,6 @@ pub fn cached(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         Ok(())
     });
-    // 1c. 真正在 attr 上跑解析,把值填进变量(出错→编译错误)
     parse_macro_input!(attr with arg_parser);
 
     // scene/key 必填:缺了直接产出一个编译错误返回
@@ -86,9 +73,8 @@ pub fn cached(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => return compile_err("#[cached]: 缺少必填参数 key"),
     };
 
-    // ── 2. 解析被注解的函数,取部件 ──
     let func = parse_macro_input!(item as ItemFn);
-    // 形态校验(对齐 #[Async] 的前置守卫,把底层报错前移成清晰提示):
+    // 在生成等待与后台加载代码前验证函数形态，避免不满足生命周期要求的接收者进入包装：
     //   ① 必须 async fn:展开体尾是 `get_or_load_2level(...).await`,贴到同步 fn 上只会报"await 不在 async 上下文"。
     //   ② 拒绝 &self / &mut self:原体被当 loader 丢进 L1 后台刷新 spawn(get_or_load_2level 要求 loader Send+'static),
     //      借用接收者满足不了(本注解与 #[cache_invalidate] 不同——后者内联 await,&self 合法)。
@@ -107,10 +93,10 @@ pub fn cached(attr: TokenStream, item: TokenStream) -> TokenStream {
             .into();
         }
     }
-    let attrs = &func.attrs; // 函数头其它属性,原样保留
-    let vis = &func.vis; // 可见性
-    let sig = &func.sig; // 签名【完全不变】(返回类型也不变,#[cached] 只在原体外包一层)
-    let block = &func.block; // 原函数体
+    let attrs = &func.attrs;
+    let vis = &func.vis;
+    let sig = &func.sig;
+    let block = &func.block;
 
     // ── 2b. CacheSceneUsage 收集元信息:从返回类型 `-> ...Result<T>` 提取缓存值类型 T,
     //        额外生成一条静态 descriptor(不改写业务函数),由 linkme 编译期收集供启动断言。
@@ -157,31 +143,33 @@ pub fn cached(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// #[cache_invalidate] —— 写路径:执行原体后失效 L1+L2
-// ════════════════════════════════════════════════════════════════════════════
 /// 业务作用：`#[cache_invalidate]` 在异步写操作完成后触发 L1/L2 缓存失效。
 ///
-/// 贴在【写操作 async 方法/函数】上:先跑原体(写 DB),再失效对应 key 的 L1 + L2。
-/// 失效是尽力而为(失败仅告警,不影响写结果);返回类型不变。
+/// 原函数体返回后立即尝试失效，包括原体返回错误的情况；不等待外层事务提交。
+/// 失效错误仅记录告警并保留原结果，任务取消或原体 panic 不保证执行失效。
+/// 需要提交后持久投递失效意图的场景应使用运行时的事务写入接口。
 ///
-/// ## 参数
+/// 属性配置：
 /// | 参数 | 类型 | 必填 | 含义 |
 /// |---|---|---|---|
 /// | `scene` | 字符串 | ✅必填 | 同 `#[cached]`,要和被失效的那个 `#[cached]` 用**同一 scene** |
 /// | `key` | 字符串 | ✅必填 | 同 `#[cached]` 的 key 模板,`{xxx}` 捕获同名函数参数 |
-/// | `value` | 字符串 | ✅必填 | 该 scene 的**值类型**(如 `"Vec<KLine>"`)。L1 按 `<K,V>` 强类型分池,失效要用相同 V 才能定位到池 |
+/// | `value` | 字符串 | 必填 | 场景值类型，传给运行时泛型入口；实际删除按场景名与键执行 |
 ///
-/// ## 用法示例
+/// 使用示例：
 /// ```ignore
-/// #[cache_invalidate(scene = "kline", key = "kline:{symbol}:{period}", value = "Vec<KLine>")]
-/// pub async fn save(&self, symbol: String, period: u8, rows: Vec<KLine>) -> anyhow::Result<()> { /* 写 DB */ }
+/// #[cache_invalidate(scene = "resource", key = "resource:{id}", value = "String")]
+/// async fn save(id: u64, value: String) -> anyhow::Result<()> {
+///     store_resource(id, value).await
+/// }
 /// ```
 ///
-/// # 参数
+/// 参数说明：
+/// - `attr`：属性内的场景名、键模板与值类型配置令牌。
+/// - `item`：被包装的异步写函数或方法声明，允许引用接收者。
 ///
-/// - `attr`: `#[cache_invalidate(...)]` 括号内的 scene/key/value 配置 token stream。
-/// - `item`: 被注解的 async 写函数 token stream。
+/// 返回：先构造缓存键、再执行原体、最后尝试失效的函数；保留原签名与返回值。
+/// 属性非法、缺少必填项、值类型无法解析或函数非异步时生成编译错误。
 #[proc_macro_attribute]
 pub fn cache_invalidate(attr: TokenStream, item: TokenStream) -> TokenStream {
     // ⓪ 运行时根路径发现(同 #[cached])。
@@ -249,11 +237,10 @@ pub fn cache_invalidate(attr: TokenStream, item: TokenStream) -> TokenStream {
         #vis #sig {
             // ① 先拼 key:此时参数还没被原体 move 走,format! 借用它们拼好 key
             let __cache_key = ::std::format!(#key);
-            // ② 跑原体(写 DB)。用 async 块隔离原体的 return:无论原体怎么早返回,
-            //    结果都落到 __r,保证下面的失效一定会执行(再把 __r 作为最终返回值)。
+            // 将原体的 return 限于内层异步块，正常返回错误值时也继续失效；取消或 panic 不在此保证内。
             let __r = (async move #block).await;
             // ③ 失效 L1+L2(尽力而为:失效失败不影响写操作的结果,仅告警)。
-            //    value 类型用于 L1 按 <String, #valty> 池失效。
+            //    泛型值类型保留入口约束，运行时按场景与键执行删除。
             if let Err(e) = #root::invalidate::<#valty>(#scene, __cache_key).await {
                 // tracing 经运行时 __private 桥引用:业务无需直接依赖 tracing。
                 #root::__private::tracing::warn!("cache_invalidate 失效失败(scene={}): {}", #scene, e);
@@ -265,18 +252,23 @@ pub fn cache_invalidate(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-// 工具:把一句话变成"编译错误" token(用于参数缺失等),返回给编译器即在注解处报错。
-/// 业务作用：工具:把一句话变成"编译错误" token(用于参数缺失等),返回给编译器即在注解处报错。
-/// # 参数
-/// - `msg`: 业务消息体或事件载荷。
+/// 业务作用：将无效缓存属性转换为编译期拒绝，阻止生成配置不完整的包装函数。
+///
+/// 参数说明：
+/// - `msg`：向编译器输出的配置错误说明，不是业务消息载荷。
+///
+/// 返回：调用 `compile_error!` 的令牌流，由编译器终止该声明的编译。
 fn compile_err(msg: &str) -> TokenStream {
     quote! { ::core::compile_error!(#msg); }.into()
 }
 
 /// 业务作用：从 `#[cached]` 的返回类型 `-> ...Result<T>` 提取缓存值类型 `T`(供 CacheSceneUsage)。
 ///
-/// 取返回类型最外层路径(如 `anyhow::Result` / `Result`)的第一个泛型实参作为 `T`;非该形态时回退用
-/// 整个返回类型(仍能编译并收集,只是类型不够精确);`-> ()` 回退为 unit。
+/// 参数说明：
+/// - `output`：原函数返回类型声明，预期为 `anyhow::Result<T>`。
+///
+/// 返回：末段路径的首个类型实参；无此实参时保留整个返回类型，未声明返回类型时为 unit。
+/// 此处仅按语法提取，不验证类型是否为 `Result`；不合运行时约束的类型仍可能无法编译。
 fn extract_cached_value_type(output: &syn::ReturnType) -> syn::Type {
     if let syn::ReturnType::Type(_, ty) = output {
         if let syn::Type::Path(type_path) = &**ty {

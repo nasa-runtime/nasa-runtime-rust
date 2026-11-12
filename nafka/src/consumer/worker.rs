@@ -27,14 +27,18 @@ pub(crate) struct WorkerTicket<T>(Arc<Completion<T>>);
 
 impl<T> WorkerTicket<T> {
     /// 业务作用：判定业务及其捕获资源是否已实际退出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：结果及业务资源析构均结束后为 true。
     pub(crate) fn is_finished(&self) -> bool {
         self.0.finished.load(Ordering::Acquire)
     }
 
     /// 业务作用：把已完成解码或业务调用的结论移交唯一 owner。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：结论或隔离的执行异常及实际完成时刻；只能在完成后调用，不能据逻辑超时提前释放名额。
     pub(crate) fn finish(self) -> (Result<T>, Instant) {
         self.0
@@ -95,7 +99,9 @@ pub(crate) struct HandlerPermit {
 
 impl Drop for HandlerPermit {
     /// 业务作用：实际闭包及其捕获资源退出后归还组执行额度和本槽关闭责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只减少本凭证的一份占用，不改变业务确认结果。
     fn drop(&mut self) {
         let mut admission = self
@@ -121,7 +127,10 @@ impl Drop for HandlerPermit {
 
 impl HandlerPool {
     /// 业务作用：冻结消费组的共享业务执行上限，不在构造时创建空闲线程。
-    /// 参数说明：capacity 为整个组允许同时执行的调用数。
+    ///
+    /// 参数说明：
+    /// - `capacity`：capacity 为整个组允许同时执行的调用数。
+    ///
     /// 返回：空池，首个实际调用触发线程创建；owner 入口复用同一上限。
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
@@ -135,7 +144,9 @@ impl HandlerPool {
     }
 
     /// 业务作用：为一个 owner 建立独立关闭责任，同时借用组内所有空闲执行额度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同一共享池的新入口；不增加组上限，也不创建线程。
     pub(crate) fn owner(&self) -> Self {
         Self {
@@ -145,7 +156,10 @@ impl HandlerPool {
     }
 
     /// 业务作用：在移动业务输入前原子预留全组执行名额，防止各槽同时超额派发。
-    /// 参数说明：domain 为业务分区及原始 key；空 key 独占分区，整个参数为 None 时仅用于无业务副作用的框架准备。
+    ///
+    /// 参数说明：
+    /// - `domain`：domain 为业务分区及原始 key。
+    ///
     /// 返回：实际责任凭证；容量或旧 owner 的顺序责任阻挡时返回 None，owner 应继续协调等待。
     pub(crate) fn reserve(&self, domain: Option<(&Tp, Option<&[u8]>)>) -> Option<HandlerPermit> {
         let mut admission = self
@@ -184,7 +198,9 @@ impl HandlerPool {
     }
 
     /// 业务作用：会话异常退出时仍等待实际调用归还，防止新会话与旧外部副作用重叠。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部业务闭包已退出；无法强制取消的调用会持续保留关闭责任。
     pub(crate) fn await_idle(&self) {
         loop {
@@ -196,7 +212,13 @@ impl HandlerPool {
     }
 
     /// 业务作用：复用空闲线程执行解码或业务调用，保持非 Send future 在同一线程构造和完成。
-    /// 参数说明：permit 为本入口预留的全组额度；job 为拥有输入的闭包，业务 future 必须在闭包内创建。
+    ///
+    /// 参数说明：
+    /// - `permit`：permit 为本入口预留的全组额度。
+    /// - `job`：job 为拥有输入的闭包。
+    ///
+    /// 共同约束：业务 future 必须在闭包内创建。
+    ///
     /// 返回：实际完成票据，panic 被隔离为执行失败；凭证不匹配或线程创建失败时不执行新工作。
     pub(crate) fn submit<T: Send + 'static>(
         &self,
@@ -246,7 +268,11 @@ impl HandlerPool {
                     }
                 })
                 .map_err(|_| NafkaError::Lifecycle("无法创建业务线程".into()))?;
-            slots.push(Slot { sender, busy, join });
+            slots.push(Slot {
+                sender,
+                busy,
+                join,
+            });
             slots.len() - 1
         };
         let completion = Arc::new(Completion {
@@ -281,14 +307,21 @@ impl HandlerPool {
 
 impl Drop for SharedPool {
     /// 业务作用：全部 owner 及实际调用退出后关闭共享线程，防止反复启动消费组积累后台资源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部池线程退出；仍有业务票据时由 owner 保留池的生命周期。
     fn drop(&mut self) {
         let slots = self
             .slots
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for Slot { sender, join, .. } in slots.drain(..) {
+        for Slot {
+            sender,
+            join,
+            ..
+        } in slots.drain(..)
+        {
             drop(sender);
             // 异常析构若发生于最后一个业务闭包，当前线程在邮箱断开后自行退出，不能同步等待自身。
             if join.thread().id() != std::thread::current().id() {

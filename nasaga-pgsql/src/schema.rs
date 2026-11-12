@@ -21,7 +21,8 @@ impl PgSagaStore {
 
     /// 业务作用：在命名 PostgreSQL datasource 创建当前完整 Saga 结构。
     ///
-    /// 参数说明：`datasource` 是已注册的 PostgreSQL qualifier。
+    /// 参数说明：
+    /// - `datasource`：是已注册的 PostgreSQL qualifier。
     ///
     /// 返回：表、索引与 updated-at trigger 全部可用时返回 `Ok`；任一步失败不宣称结构可用。
     pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), SagaStoreError> {
@@ -35,7 +36,8 @@ impl PgSagaStore {
     /// 业务作用：复用调用方已持有的 PostgreSQL 连接创建当前完整 Saga 结构，使 advisory
     /// lock 与全部结构操作位于同一会话。
     ///
-    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    /// 参数说明：
+    /// - `connection`：是调用方已取得 schema 互斥权的连接。
     ///
     /// 返回：表、索引、函数与 trigger 达到运行合同时成功；任一步失败时拒绝宣称结构可用。
     pub async fn ensure_schema_on_connection(
@@ -246,7 +248,10 @@ const AUDIT_TRIGGERS: [(&str, &str, &str, i16); 6] = [
 
 /// 业务作用：以紧凑常量表达 PostgreSQL `VARCHAR` 审计列合同，避免列清单重复填写类型属性。
 ///
-/// 参数说明：`name` 是列名，`length` 是字符上限，`nullable` 表示是否允许空值。
+/// 参数说明：
+/// - `name`：是列名
+/// - `length`：是字符上限
+/// - `nullable`：表示是否允许空值。
 ///
 /// 返回：无 identity 与默认值的 `VARCHAR` 列合同。
 const fn pg_varchar(name: &'static str, length: i64, nullable: bool) -> AuditColumnContract {
@@ -262,7 +267,10 @@ const fn pg_varchar(name: &'static str, length: i64, nullable: bool) -> AuditCol
 
 /// 业务作用：以紧凑常量表达 PostgreSQL `CHAR` 审计列合同，保持固定长度身份字段定义一致。
 ///
-/// 参数说明：`name` 是列名，`length` 是固定字符长度，`nullable` 表示是否允许空值。
+/// 参数说明：
+/// - `name`：是列名
+/// - `length`：是固定字符长度
+/// - `nullable`：表示是否允许空值。
 ///
 /// 返回：无 identity 与默认值的 `CHAR` 列合同。
 const fn pg_char(name: &'static str, length: i64, nullable: bool) -> AuditColumnContract {
@@ -278,7 +286,9 @@ const fn pg_char(name: &'static str, length: i64, nullable: bool) -> AuditColumn
 
 /// 业务作用：以紧凑常量表达 PostgreSQL `BIGINT` 审计列合同，保持序号与版本字段定义一致。
 ///
-/// 参数说明：`name` 是列名，`nullable` 表示是否允许空值。
+/// 参数说明：
+/// - `name`：是列名
+/// - `nullable`：表示是否允许空值。
 ///
 /// 返回：无 identity 与默认值的 `BIGINT` 列合同。
 const fn pg_bigint(name: &'static str, nullable: bool) -> AuditColumnContract {
@@ -294,7 +304,8 @@ const fn pg_bigint(name: &'static str, nullable: bool) -> AuditColumnContract {
 
 /// 业务作用：判断统一审计结构是否已经进入数据库，以区分明确支持的首次创建与存量契约复验。
 ///
-/// 参数说明：`connection` 是执行 schema gate 的 PostgreSQL 连接。
+/// 参数说明：
+/// - `connection`：是执行 schema gate 的 PostgreSQL 连接。
 ///
 /// 返回：当前 schema 存在事件表时为 `true`；目录读取失败时返回脱敏错误。
 async fn audit_event_table_exists(
@@ -310,7 +321,8 @@ async fn audit_event_table_exists(
 
 /// 业务作用：复验 PostgreSQL 统一审计的完整数据库合同，确保分页唯一性与同 Saga 提交顺序门禁成立。
 ///
-/// 参数说明：`connection` 是执行 schema gate 的 PostgreSQL 连接。
+/// 参数说明：
+/// - `connection`：是执行 schema gate 的 PostgreSQL 连接。
 ///
 /// 返回：两张表、关键约束、stream 索引、六组函数及 trigger 全部匹配时成功；任何漂移均拒绝 Ready。
 async fn verify_audit_schema(connection: &mut natx_pgsql::PgConn) -> Result<(), SagaStoreError> {
@@ -383,7 +395,10 @@ async fn verify_audit_schema(connection: &mut natx_pgsql::PgConn) -> Result<(), 
 
 /// 业务作用：逐列核对审计表的顺序、类型、长度、可空性、identity 与默认值。
 ///
-/// 参数说明：`connection` 是目录读取连接；`table` 是目标表；`expected` 是完整列合同。
+/// 参数说明：
+/// - `connection`：是目录读取连接
+/// - `table`：是目标表
+/// - `expected`：是完整列合同。
 ///
 /// 返回：实际列与合同完全一致时成功；缺列、增列或属性漂移时返回稳定错误。
 async fn verify_columns(
@@ -431,9 +446,14 @@ async fn verify_columns(
 
 /// 业务作用：核对命名主键或唯一约束的类别、有效状态与列顺序，避免同名对象掩盖逻辑唯一性漂移。
 ///
-/// 参数说明：连接与表定位实际目录对象，`name`、`kind`、`columns` 描述完整约束合同。
+/// 参数说明：
+/// - `connection`：读取当前 schema 目录的 PostgreSQL 连接。
+/// - `table`：需要核对的表名。
+/// - `name`：目标主键或唯一约束名。
+/// - `kind`：预期 pg_constraint 类型标识。
+/// - `columns`：要求完整一致的约束列顺序。
 ///
-/// 返回：唯一一个已验证约束完全匹配时成功；不存在、重复或定义漂移时返回稳定错误。
+/// 返回：当前 schema 下唯一匹配约束的类别、convalidated 和有序列名一致时成功，否则返回稳定合同错误或数据库错误；不校验未投影的延迟属性或表达式语义。
 async fn verify_constraint(
     connection: &mut natx_pgsql::PgConn,
     table: &str,
@@ -476,9 +496,13 @@ async fn verify_constraint(
 
 /// 业务作用：核对服务 keyset 或审计 stream 的命名 B-tree 索引，保证前导列和可用状态满足查询合同。
 ///
-/// 参数说明：连接与表定位目录对象，`name` 是索引名称，`columns` 是完整 key 列顺序。
+/// 参数说明：
+/// - `connection`：读取当前 schema 索引目录的连接。
+/// - `table`：索引所属表名。
+/// - `name`：目标索引名。
+/// - `columns`：要求完整一致的 key 列顺序。
 ///
-/// 返回：唯一一个普通、无表达式、无谓词、已就绪索引匹配时成功；其它结构返回稳定错误。
+/// 返回：唯一匹配索引为非唯一、有效、就绪、无 include/表达式/谓词的 B-tree，且完整列顺序相等时成功，否则报合同或数据库错误。不校验排序方向和 operator class 等未投影属性。
 async fn verify_named_index(
     connection: &mut natx_pgsql::PgConn,
     table: &str,
@@ -542,7 +566,8 @@ async fn verify_named_index(
 
 /// 业务作用：核对实例状态查询的跨列统计合同，使 planner 能识别 tenant、workflow 与 status 的相关分布。
 ///
-/// 参数说明：`connection` 是执行 Ready schema gate 的 PostgreSQL 连接。
+/// 参数说明：
+/// - `connection`：是执行 Ready schema gate 的 PostgreSQL 连接。
 ///
 /// 返回：两列与三列统计对象均覆盖精确列序且同时启用 MCV 与 dependencies 时成功；
 /// 缺失或同名漂移时返回稳定错误。
@@ -603,7 +628,8 @@ async fn verify_instance_query_statistics(
 /// 业务作用：在首次引入跨列统计时通过 owner 可读视图判断数据是否生成，避免等待 autovacuum
 /// 期间 planner 仍按 tenant、workflow 与 status 独立分布估算管理查询。
 ///
-/// 参数说明：`connection` 是持有 schema 自举权的 PostgreSQL 会话。
+/// 参数说明：
+/// - `connection`：是持有 schema 自举权的 PostgreSQL 会话。
 ///
 /// 返回：两个统计对象均已有公开数据行时不重复扫描；缺失时完成目标列 ANALYZE，数据库拒绝时返回错误。
 async fn populate_instance_query_statistics_if_missing(
@@ -630,7 +656,9 @@ async fn populate_instance_query_statistics_if_missing(
 
 /// 业务作用：核对审计 trigger function 的执行体与安全属性，禁止采用同名不同义的数据库代码。
 ///
-/// 参数说明：`connection` 是目录读取连接；`name` 是零参数 trigger function 名称。
+/// 参数说明：
+/// - `connection`：是目录读取连接
+/// - `name`：是零参数 trigger function 名称。
 ///
 /// 返回：当前 schema 中唯一函数与迁移合同一致时成功；缺失、重载或定义漂移时返回稳定错误。
 async fn verify_routine(
@@ -678,9 +706,14 @@ async fn verify_routine(
 
 /// 业务作用：核对 trigger 的目标表、事件时机、行级属性、启用状态与执行函数。
 ///
-/// 参数说明：连接与名称定位 trigger，`table`、`routine`、`trigger_type` 描述完整触发合同。
+/// 参数说明：
+/// - `connection`：读取当前 schema trigger 目录的连接。
+/// - `name`：目标 trigger 名称。
+/// - `table`：trigger 必须附着的表名。
+/// - `routine`：需要精确匹配的执行函数名。
+/// - `trigger_type`：预期事件、时机与行级属性组成的 pg_trigger 位集合。
 ///
-/// 返回：唯一 trigger 完全匹配时成功；禁用、带条件或同名不同义时返回稳定错误。
+/// 返回：唯一匹配项的 tgtype、普通启用态、非内部、无条件与函数名称相同则成功，否则报合同或数据库错误；不检查函数体、函数 schema 或完整签名。
 async fn verify_trigger(
     connection: &mut natx_pgsql::PgConn,
     name: &str,
@@ -726,7 +759,8 @@ async fn verify_trigger(
 
 /// 业务作用：从生产迁移合同提取指定函数体，使受控自举与正式迁移共享单一数据库代码来源。
 ///
-/// 参数说明：`name` 是审计函数的稳定名称。
+/// 参数说明：
+/// - `name`：是审计函数的稳定名称。
 ///
 /// 返回：迁移中存在完整函数体时返回其正文；合同缺失或边界不完整时返回 `None`。
 fn expected_routine_body(name: &str) -> Option<&'static str> {
@@ -738,7 +772,8 @@ fn expected_routine_body(name: &str) -> Option<&'static str> {
 
 /// 业务作用：消除数据库目录与迁移文件之间无业务含义的空白差异，同时保留标识符和字面量大小写。
 ///
-/// 参数说明：`body` 是函数正文。
+/// 参数说明：
+/// - `body`：是函数正文。
 ///
 /// 返回：以单空格连接的稳定比较文本。
 fn normalize_routine_body(body: &str) -> String {

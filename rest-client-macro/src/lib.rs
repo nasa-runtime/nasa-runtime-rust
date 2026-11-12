@@ -30,8 +30,12 @@ use syn::{
 // ── 入口宏 ──
 
 /// 业务作用：为 trait 生成支持单客户端及 qualifier 集合注入的异步 REST 实现。
-/// 参数说明：`attr` 包含服务、qualifier、路径及类型配置；`item` 为被注解的 trait。
-/// 返回：保留 trait 的客户端实现；非法配置生成编译错误，不产生网络副作用。
+///
+/// 参数说明：
+/// - `attr`：trait 级服务、qualifier、URL、路径和响应配置 token。
+/// - `item`：待生成异步 HTTP 实现的 trait token。
+///
+/// 返回：成功保留 trait 并生成可注入客户端的实现；不合法声明生成编译错误，不在展开阶段发送 HTTP 请求。
 #[proc_macro_attribute]
 pub fn rest_client(attr: TokenStream, item: TokenStream) -> TokenStream {
     match rest_client_impl(attr.into(), item.into()) {
@@ -46,9 +50,11 @@ macro_rules! mapping_stub {
     ($name:ident) => {
         /// 业务作用: 在方法映射属性脱离 `#[rest_client]` 使用时生成明确的编译期错误。
         ///
-        /// # 参数
-        /// - `attr`: 属性宏括号内的 token stream。
-        /// - `item`: 被属性宏或派生宏处理的 Rust item token stream。
+        /// 参数说明：
+        /// - `_attr`：误用时收到但不消费的属性实参。
+        /// - `item`：仍需保留给编译器处理的原始项。
+        ///
+        /// 返回：生成明确的误用编译错误并保留原项，不生成请求实现。
         #[proc_macro_attribute]
         #[allow(non_snake_case)]
         pub fn $name(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -72,12 +78,18 @@ mapping_stub!(DeleteMapping);
 
 // ── 运行时根路径解析(直接依赖 rest-discovery → ::rest_discovery;门面 nasa → ::nasa::discovery::rest) ──
 
-/// 业务作用: 解析 REST 门面的根路径；用于生成宏展开时引用的公共类型。
+/// 业务作用：解析 REST 门面的根路径；用于生成宏展开时引用的公共类型。
+///
+/// 参数说明: 无。
+///
+/// 返回：优先返回直接依赖的实际 crate 路径，其次 nasa 门面路径；均不可解析时返回裸 rest_discovery 路径，是否可用由后续编译判定。
 fn rest_root() -> TokenStream2 {
     use proc_macro_crate::{crate_name, FoundCrate};
-    /// 业务作用: 尝试查找调用方依赖图中的 `rest-discovery` crate。
+    /// 业务作用：尝试查找调用方依赖图中的 `rest-discovery` crate。 支持 Cargo 重命名；查不到时返回 `None`,外层会继续尝试 `nasa` 门面或裸路径兜底。
     ///
-    /// 支持 Cargo 重命名；查不到时返回 `None`,外层会继续尝试 `nasa` 门面或裸路径兜底。
+    /// 参数说明: 无。
+    ///
+    /// 返回：依赖解析成功返回自身或重命名后的 crate 身份，解析失败返回 None，不证明已启用所需 feature。
     fn crate_name_compat() -> Option<FoundCrate> {
         crate_name("rest-discovery").ok()
     }
@@ -119,7 +131,10 @@ struct TraitArgs {
 }
 
 /// 业务作用：解析 trait 的服务别名、默认 qualifier、路径、scheme 与生成类型配置。
-/// 参数说明：`attr` 是客户端属性的 token stream。
+///
+/// 参数说明：
+/// - `attr`：是客户端属性的 token stream。
+///
 /// 返回：合法的 trait 配置；未知属性或非法 qualifier 生成编译错误。
 fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
     let mut a = TraitArgs::default();
@@ -156,7 +171,11 @@ fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
 }
 
 /// 业务作用：校验具名注册中心选择的字面量，拒绝重复或不可解析的 qualifier。
-/// 参数说明：`meta` 是当前属性，`slot` 保存当前层级唯一的 qualifier。
+///
+/// 参数说明：
+/// - `meta`：是当前属性
+/// - `slot`：保存当前层级唯一的 qualifier。
+///
 /// 返回：合法连接名写入 slot；重复、空值、非法字符或非字符串值生成编译错误。
 fn parse_qualifier(
     meta: &syn::meta::ParseNestedMeta<'_>,
@@ -203,10 +222,12 @@ struct MappingArgs {
     headers: Vec<(String, String)>,
 }
 
-/// 业务作用: 是否为客户端方法映射之一,返回对应 HTTP method ident(GET/POST/...)。
+/// 业务作用：是否为客户端方法映射之一,返回对应 HTTP method ident(GET/POST/...)。
 ///
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
+/// 参数说明：
+/// - `attr`：待判定是否为方法映射的完整属性节点。
+///
+/// 返回：单段属性名精确匹配五种 mapping 时返回大写 HTTP 动词标识符；多段路径或其它属性返回 None。
 fn http_method_of(attr: &Attribute) -> Option<Ident> {
     let id = attr.path().get_ident()?;
     let m = match id.to_string().as_str() {
@@ -221,7 +242,10 @@ fn http_method_of(attr: &Attribute) -> Option<Ident> {
 }
 
 /// 业务作用：解析方法的路径、服务、qualifier、媒体类型、解包与固定 header 配置。
-/// 参数说明：`attr` 是方法上的 HTTP mapping 属性。
+///
+/// 参数说明：
+/// - `attr`：是方法上的 HTTP mapping 属性。
+///
 /// 返回：供跨字段校验的配置；未知属性、非法字面量或重复 qualifier 生成编译错误。
 fn parse_mapping_attr(attr: &Attribute) -> syn::Result<MappingArgs> {
     let mut a = MappingArgs::default();
@@ -279,12 +303,18 @@ fn parse_mapping_attr(attr: &Attribute) -> syn::Result<MappingArgs> {
     }
 }
 
-/// 业务作用: 把 mapping 中的固定 header 二元组解析为名称和值，并拒绝非字符串字面量。
+/// 业务作用：把 mapping 中的固定 header 二元组解析为名称和值，并拒绝非字符串字面量。
 ///
-/// # 参数
-/// - `elem`: 当前正在解析的语法元素。
+/// 参数说明：
+/// - `elem`：当前正在解析的语法元素。
+///
+/// 返回：恰有两个字符串字面量时返回名称和值；其它形态报错，不在此处校验 HTTP 字符规则。
 fn parse_header_tuple(elem: &Expr) -> syn::Result<(String, String)> {
-    if let Expr::Tuple(ExprTuple { elems, .. }) = elem {
+    if let Expr::Tuple(ExprTuple {
+        elems,
+        ..
+    }) = elem
+    {
         if elems.len() == 2 {
             let k = lit_str_of(&elems[0])?;
             let v = lit_str_of(&elems[1])?;
@@ -297,13 +327,16 @@ fn parse_header_tuple(elem: &Expr) -> syn::Result<(String, String)> {
     ))
 }
 
-/// 业务作用: 读取表达式里的字符串字面量；用于校验注解参数值。
+/// 业务作用：读取表达式里的字符串字面量；用于校验注解参数值。
 ///
-/// # 参数
-/// - `e`: 错误对象或外部错误值。
+/// 参数说明：
+/// - `e`：需要从中读取固定配置文本的表达式节点。
+///
+/// 返回：字符串字面量返回解码后的文本，其它表达式返回定位到该表达式的编译错误。
 fn lit_str_of(e: &Expr) -> syn::Result<String> {
     if let Expr::Lit(ExprLit {
-        lit: Lit::Str(s), ..
+        lit: Lit::Str(s),
+        ..
     }) = e
     {
         Ok(s.value())
@@ -353,11 +386,13 @@ enum ParamBind {
     },
 }
 
-/// 业务作用: 解析单个参数的 helper attr 并从签名删除;返回绑定信息(`None` 表示无显式注解,由调用方按 method 默认决定)。
+/// 业务作用：按参数声明解析路径、查询、请求头与请求体绑定，消除 helper 属性后供生成请求代码使用。
 ///
-/// # 参数
-/// - `pt`: 过程宏解析出的 Rust 类型节点。
-/// - `http`: 当前 trait 方法映射出的 HTTP verb。
+/// 参数说明：
+/// - `pt`：当前参数的模式、类型和属性；成功时保留非 helper 属性。
+/// - `http`：用于选择无注解参数默认绑定的 HTTP 动词。
+///
+/// 返回：成功返回显式绑定或 GET/DELETE 的默认 query 绑定，并移除已消费 helper 属性；签名、重复属性、可选路径或绑定形态不合法时报错，失败时参数属性也可能已被取走。
 fn classify_param(pt: &mut syn::PatType, http: &str) -> syn::Result<ParamBind> {
     let span = pt.span();
     let ident = match pt.pat.as_ref() {
@@ -373,7 +408,7 @@ fn classify_param(pt: &mut syn::PatType, http: &str) -> syn::Result<ParamBind> {
 
     // 找(并记下)参数上的 helper attr。
     let mut found: Option<(String, Option<String>)> = None; // (kind, explicit_name)
-    let mut body_raw = false; // #[RequestBody(raw)] → true;#[RequestBody] → false
+    let mut body_raw = false; // 仅显式 raw 标记选择原始请求体，其余采用结构化编码。
     let mut kept = Vec::new();
     for attr in pt.attrs.drain(..) {
         let kind = attr
@@ -430,7 +465,9 @@ fn classify_param(pt: &mut syn::PatType, http: &str) -> syn::Result<ParamBind> {
                 name: name.unwrap_or(default_name),
                 optional,
             }),
-            "RequestHeaders" => Ok(ParamBind::Headers { ident }),
+            "RequestHeaders" => Ok(ParamBind::Headers {
+                ident,
+            }),
             "QueryMap" => {
                 // QueryMap 整体按字段名展开,名字无意义。Option<T> 按稳定合同支持:
                 // None 不追加、Some 展开内层——Option 本身不进序列化器。
@@ -440,16 +477,25 @@ fn classify_param(pt: &mut syn::PatType, http: &str) -> syn::Result<ParamBind> {
                         "#[QueryMap] 不接受名字参数(整个结构体按字段名展开成 query)",
                     ));
                 }
-                Ok(ParamBind::QueryMap { ident, optional })
+                Ok(ParamBind::QueryMap {
+                    ident,
+                    optional,
+                })
             }
             "RequestBody" => {
                 if body_raw {
-                    Ok(ParamBind::RawBody { ident })
+                    Ok(ParamBind::RawBody {
+                        ident,
+                    })
                 } else {
-                    Ok(ParamBind::Body { ident })
+                    Ok(ParamBind::Body {
+                        ident,
+                    })
                 }
             }
-            "FormBody" => Ok(ParamBind::FormBody { ident }),
+            "FormBody" => Ok(ParamBind::FormBody {
+                ident,
+            }),
             _ => unreachable!(),
         },
         None => {
@@ -472,10 +518,12 @@ fn classify_param(pt: &mut syn::PatType, http: &str) -> syn::Result<ParamBind> {
     }
 }
 
-/// 业务作用: 取 helper attr 的显式名字串(`#[RequestParam("x")]` → Some("x");`#[RequestParam]` → None)。
+/// 业务作用：取 helper attr 的显式名字串(`#[RequestParam("x")]` → Some("x");`#[RequestParam]` → None)。
 ///
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
+/// 参数说明：
+/// - `attr`：携带可选固定绑定名的参数 helper 属性。
+///
+/// 返回：裸属性返回 None，单字符串实参返回 Some；其它实参或顶层赋值报错，不检查名称非空或业务合法性。
 fn explicit_name(attr: &Attribute) -> syn::Result<Option<String>> {
     match &attr.meta {
         Meta::Path(_) => Ok(None),
@@ -488,11 +536,12 @@ fn explicit_name(attr: &Attribute) -> syn::Result<Option<String>> {
     }
 }
 
-/// 业务作用: 解析 `#[RequestBody]` 形态:裸 `#[RequestBody]` → json body(`false`);`#[RequestBody(raw)]` → 原样字节(`true`)。
-/// 拒绝 `#[RequestBody("x")]`(body 不带名字)、`#[RequestBody(其它标识)]`、`#[RequestBody(raw, ..)]` 等任何其它形态。
+/// 业务作用：解析 `#[RequestBody]` 形态:裸 `#[RequestBody]` → json body(`false`);`#[RequestBody(raw)]` → 原样字节(`true`)。 拒绝 `#[RequestBody("x")]`(body 不带名字)、`#[RequestBody(其它标识)]`、`#[RequestBody(raw, ..)]` 等任何其它形态。
 ///
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
+/// 参数说明：
+/// - `attr`：当前 RequestBody 参数属性。
+///
+/// 返回：裸属性返回 false，唯一标识符 raw 返回 true；其它形态返回编译错误，不检查参数是否可转字节。
 fn parse_request_body_raw(attr: &Attribute) -> syn::Result<bool> {
     match &attr.meta {
         Meta::Path(_) => Ok(false),
@@ -521,10 +570,12 @@ fn parse_request_body_raw(attr: &Attribute) -> syn::Result<bool> {
     }
 }
 
-/// 业务作用: 判断参数类型是否为 `Option<T>`，供可选 query/header/body 生成分支使用。
+/// 业务作用：判断参数类型是否为 `Option<T>`，供可选 query/header/body 生成分支使用。
 ///
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
+/// 参数说明：
+/// - `ty`：Rust 类型 AST,用于宏期类型判定。
+///
+/// 返回：路径末段名为 Option 时返回 true，否则 false；不解析别名、来源或泛型参数个数。
 fn is_option(ty: &Type) -> bool {
     if let Type::Path(tp) = ty {
         if let Some(seg) = tp.path.segments.last() {
@@ -534,10 +585,12 @@ fn is_option(ty: &Type) -> bool {
     false
 }
 
-/// 业务作用: 合法 HTTP header name(RFC 7230 token:非空,字符 ∈ ALPHA/DIGIT/`!#$%&'*+-.^_`` `|~`)。
+/// 业务作用：合法 HTTP header name(RFC 7230 token:非空,字符 ∈ ALPHA/DIGIT/`!#$%&'*+-.^_`` `|~`)。
 ///
-/// # 参数
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+/// 参数说明：
+/// - `name`：声明中的 HTTP 请求头名称原文。
+///
+/// 返回：非空且所有字节均属于本层允许的 ASCII token 字符时返回 true，否则 false。
 fn is_valid_header_name(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(|b| {
@@ -562,25 +615,31 @@ fn is_valid_header_name(name: &str) -> bool {
         })
 }
 
-/// 业务作用: 合法 HTTP header value(visible ASCII + SP + HTAB;挡控制字符/CR/LF,对齐 `HeaderValue::from_str`)。
+/// 业务作用：限制固定 HTTP 请求头值为可见 ASCII、空格与 HTAB，避免控制字符和换行进入请求。
 ///
-/// # 参数
-/// - `val`: 要写入 Redis 或发送到下游的值。
+/// 参数说明：
+/// - `val`：声明中的固定 HTTP 请求头值。
+///
+/// 返回：所有字节为 HTAB 或 0x20..=0x7e 时返回 true，空串也允许；其它字节返回 false。
 fn is_valid_header_value(val: &str) -> bool {
     val.bytes()
         .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
 }
 
-/// 业务作用: query 参数是否「多值」(`Vec<T>` 或 `Option<Vec<T>>`)→ 生成重复 key `name=v1&name=v2`。
+/// 业务作用：query 参数是否「多值」(`Vec<T>` 或 `Option<Vec<T>>`)→ 生成重复 key `name=v1&name=v2`。
 ///
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
+/// 参数说明：
+/// - `ty`：Rust 类型 AST,用于宏期类型判定。
+///
+/// 返回：路径末段为 Vec 或 Option 的首个类型实参末段为 Vec 时返回 true，其它形态 false；不解析别名或校验完整泛型身份。
 fn is_multi_query(ty: &Type) -> bool {
-    /// 业务作用: 读取泛型包装类型的参数；用于识别请求体、查询和响应包装。
+    /// 业务作用：读取泛型包装类型的参数；用于识别请求体、查询和响应包装。
     ///
-    /// # 参数
-    /// - `ty`: Rust 类型 AST,用于宏期类型判定。
-    /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+    /// 参数说明：
+    /// - `ty`：需要识别可选或多值容器的类型节点。
+    /// - `name`：需要精确匹配的末段类型名。
+    ///
+    /// 返回：路径类型末段名称匹配时借用其泛型参数节点，否则返回 None；不验证容器来源。
     fn seg_args<'a>(ty: &'a Type, name: &str) -> Option<&'a syn::PathArguments> {
         if let Type::Path(tp) = ty {
             if let Some(seg) = tp.path.segments.last() {
@@ -603,10 +662,12 @@ fn is_multi_query(ty: &Type) -> bool {
     false
 }
 
-/// 业务作用: 从 `-> anyhow::Result<T>` / `Result<T>` 抽取 `T`;非该形状报错。
+/// 业务作用：从客户端方法的 Result 返回形态中提取成功类型，用于选择响应解码和无响应体路径。
 ///
-/// # 参数
-/// - `ret`: 接口方法声明的返回类型信息。
+/// 参数说明：
+/// - `ret`：接口方法声明的返回类型信息。
+///
+/// 返回：路径末段为 Result 且包含一个或两个类型实参时返回首个类型副本，否则报错；不解析别名或证明错误转换能力，后者由生成代码的类型检查保证。
 fn extract_result_inner(ret: &ReturnType) -> syn::Result<Type> {
     let ty = match ret {
         ReturnType::Type(_, ty) => ty.as_ref(),
@@ -653,18 +714,22 @@ fn extract_result_inner(ret: &ReturnType) -> syn::Result<Type> {
     ))
 }
 
-/// 业务作用: 判断成功返回类型是否为 `()`，供无响应体请求选择发送路径。
+/// 业务作用：判断成功返回类型是否为 `()`，供无响应体请求选择发送路径。
 ///
-/// # 参数
-/// - `ty`: Rust 类型 AST,用于宏期类型判定。
+/// 参数说明：
+/// - `ty`：Rust 类型 AST,用于宏期类型判定。
+///
+/// 返回：空元组类型返回 true，其它语法形态返回 false，不展开类型别名。
 fn is_unit(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(t) if t.elems.is_empty())
 }
 
-/// 业务作用: 提取模板里的 `{name}` 占位名。
+/// 业务作用：提取模板里的 `{name}` 占位名。
 ///
-/// # 参数
-/// - `template`: 路径、URL 或缓存 key 模板。
+/// 参数说明：
+/// - `template`：需要提取路径变量的模板原文。
+///
+/// 返回：按遇到的左花括号与其后首个右花括号收集内部原文，保留空名与重复项；尾部未闭合片段被忽略，不验证嵌套或占位名合法性。
 fn placeholders(template: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = template;
@@ -696,7 +761,11 @@ const FORBIDDEN_HEADERS: &[&str] = &[
 // ── 主流程 ──
 
 /// 业务作用：生成 REST 客户端及两种注入入口，使所有方法共享宿主提供的连接集合。
-/// 参数说明：`attr` 为 trait 级配置；`item` 为包含 mapping 方法的 trait。
+///
+/// 参数说明：
+/// - `attr`：为 trait 级配置
+/// - `item`：为包含 mapping 方法的 trait。
+///
 /// 返回：客户端和异步方法实现；非法 trait 或方法配置返回带源码位置的错误。
 fn rest_client_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let trait_args = parse_trait_args(attr)?;
@@ -733,14 +802,20 @@ fn rest_client_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<Token
 
         impl #client_ident {
             /// 业务作用：注入单个默认 REST 客户端，保留未声明 qualifier 的调用方式。
-            /// 参数说明：`rest` 是宿主共享和关闭的客户端，不推断具名连接身份。
+            ///
+            /// 参数说明：
+            /// - `rest`：宿主共享和关闭的默认客户端，不推断具名连接身份。
+            ///
             /// 返回：客户端实现；方法若显式要求 qualifier，调用时因缺少具名绑定而失败。
             #vis fn new(rest: ::std::sync::Arc<#rest_ty>) -> Self {
                 Self { rest: ::std::sync::Arc::new(#root::RestClientSet::from_client(rest)) }
             }
 
             /// 业务作用：注入具名 REST 客户端集合，按 trait 与方法的 qualifier 选择注册中心。
-            /// 参数说明：`rest` 是宿主已冻结的连接集合和可选默认引用。
+            ///
+            /// 参数说明：
+            /// - `rest`：宿主已冻结的具名连接集合和可选默认引用。
+            ///
             /// 返回：共享同一集合的客户端实现；未知 qualifier 或缺默认项在请求提交前失败。
             #vis fn with_clients(rest: ::std::sync::Arc<#root::RestClientSet>) -> Self {
                 Self { rest }
@@ -755,7 +830,12 @@ fn rest_client_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<Token
 }
 
 /// 业务作用：校验远程方法的选择规则、路径、参数和响应合同，再生成请求实现。
-/// 参数说明：`m` 为待展开的方法；`trait_args` 为继承的配置；`root` 为运行时 crate 路径。
+///
+/// 参数说明：
+/// - `m`：为待展开的方法
+/// - `trait_args`：为继承的配置
+/// - `root`：为运行时 crate 路径。
+///
 /// 返回：消费 mapping 属性后的方法实现；无效请求配置或 URL 与 qualifier 混用时拒绝。
 fn gen_method(
     m: &mut TraitItemFn,
@@ -1027,7 +1107,11 @@ fn gen_method(
     {
         let mut seen = std::collections::HashSet::new();
         for p in &params {
-            if let ParamBind::Path { name, ident } = p {
+            if let ParamBind::Path {
+                name,
+                ident,
+            } = p
+            {
                 if !seen.insert(name.clone()) {
                     return Err(syn::Error::new(
                         ident.span(),
@@ -1038,7 +1122,11 @@ fn gen_method(
         }
     }
     for p in &params {
-        if let ParamBind::Path { name, ident } = p {
+        if let ParamBind::Path {
+            name,
+            ident,
+        } = p
+        {
             if !ph.iter().any(|x| x == name) {
                 return Err(syn::Error::new(
                     ident.span(),
@@ -1111,7 +1199,7 @@ fn gen_method(
     // 把方法上【保留的】普通属性(cfg/doc/allow 等,映射属性已在上面消费掉)同步到生成的 impl 方法。
     // 否则 #[cfg(feature=...)] 只 gate 了 trait 里的方法【声明】(随 #item_trait 输出),而 impl 方法
     // 恒被生成 → 当该 cfg 关闭时,impl 里会多出一个 trait 并未声明的方法 → 编译报错
-    // "method ... is not a member of trait";doc/allow 同理不该在 impl 侧丢失。m.attrs 此刻即 kept_attrs。
+    // 实现与声明的条件必须一致；文档和 lint 属性也需保留，当前 attrs 已移除被本宏消费的辅助属性。
     let attrs = &m.attrs;
     Ok(quote! { #(#attrs)* #sig { #body } })
 }
@@ -1152,9 +1240,10 @@ fn gen_body(
     let pv: Vec<TokenStream2> = params
         .iter()
         .filter_map(|p| match p {
-            ParamBind::Path { ident, name } => {
-                Some(quote!((#name, ::std::string::ToString::to_string(&#ident))))
-            }
+            ParamBind::Path {
+                ident,
+                name,
+            } => Some(quote!((#name, ::std::string::ToString::to_string(&#ident)))),
             _ => None,
         })
         .collect();
@@ -1195,7 +1284,10 @@ fn gen_body(
         pre.push(quote! { __req = __req.header(#k, #v); });
     }
     for p in params {
-        if let ParamBind::Headers { ident } = p {
+        if let ParamBind::Headers {
+            ident,
+        } = p
+        {
             // 统一借用:`&#ident` 对 by-value `HeaderMap` 取引用;对 `&HeaderMap` 入参得 `&&HeaderMap`,
             // 由 deref coercion 收敛回 `&HeaderMap`。两种入参(HeaderMap / &HeaderMap)都可用。
             pre.push(quote! { __req = __req.headers_from_map(&#ident); });
@@ -1245,7 +1337,10 @@ fn gen_body(
                     });
                 }
             }
-            ParamBind::QueryMap { ident, optional } => {
+            ParamBind::QueryMap {
+                ident,
+                optional,
+            } => {
                 // 整个结构体序列化成 query 片段,按声明顺序 append(与 RequestParam 共存时不覆盖同名 key)。
                 // Option 形态:None 不追加任何片段,Some 展开内层;Option 本身从不进序列化器。
                 if *optional {
@@ -1258,18 +1353,29 @@ fn gen_body(
                     binds.push(quote! { __req = __req.query(&#ident); });
                 }
             }
-            ParamBind::Body { ident } => {
+            ParamBind::Body {
+                ident,
+            } => {
                 binds.push(quote! { __req = __req.json(&#ident); });
             }
-            ParamBind::RawBody { ident } => {
+            ParamBind::RawBody {
+                ident,
+            } => {
                 // 原样字节;不做 json/urlencoded 编码,Content-Type 已由上面的 consumes/header 处理。
                 // 这里统一传引用,运行时立刻复制到 Bytes,生成代码不需要关心入参是 String/Vec/Bytes/&str。
                 binds.push(quote! { __req = __req.raw_body(&#ident); });
             }
-            ParamBind::FormBody { ident } => {
+            ParamBind::FormBody {
+                ident,
+            } => {
                 binds.push(quote! { __req = __req.form(&#ident); });
             }
-            ParamBind::Path { .. } | ParamBind::Headers { .. } => {}
+            ParamBind::Path {
+                ..
+            }
+            | ParamBind::Headers {
+                ..
+            } => {}
         }
     }
 

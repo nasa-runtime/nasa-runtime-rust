@@ -11,14 +11,18 @@ pub struct LocalCacheRuntimeGuard(Arc<LocalWork>);
 
 impl LocalCacheRuntimeGuard {
     /// 业务作用：为独立 L1 宏调用提供有界异步刷新责任，不建立 Redis 连接。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：唯一 owner；已有本地或两级缓存 owner 时拒绝。
     pub fn install() -> anyhow::Result<Self> {
         Ok(Self(LocalWork::install()?))
     }
 
     /// 业务作用：关闭刷新准入并等待全部在途 future 释放。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：实际任务数归零后完成；取消等待不会重开准入。
     pub async fn shutdown(&self) {
         self.0.close();
@@ -28,7 +32,9 @@ impl LocalCacheRuntimeGuard {
 
 impl Drop for LocalCacheRuntimeGuard {
     /// 业务作用：收回本代刷新入口，避免旧 owner 影响后续应用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同步取消任务，不声称任务已经退出。
     fn drop(&mut self) {
         self.0.close();
@@ -36,15 +42,21 @@ impl Drop for LocalCacheRuntimeGuard {
 }
 
 pub(crate) struct LocalWork {
+    /// 关闭状态与任务登记共用的准入锁，防止关闭后再登记该 owner 的工作。
     closed: Mutex<bool>,
+    /// 全部刷新与异步失效任务共享的在途容量，任务释放时归还许可。
     capacity: Arc<Semaphore>,
+    /// 通知本 owner 的已登记任务终止等待，不代表任务已经析构。
     cancel: CancellationToken,
+    /// 记录任务实际退出，供宿主在关闭依赖资源前等待。
     tasks: TaskTracker,
 }
 
 impl LocalWork {
     /// 业务作用：为当前缓存运行态安装唯一有界刷新 owner。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：最多 128 个在途任务的 owner；已有未关闭 owner 时拒绝重复装配。
     pub(crate) fn install() -> anyhow::Result<Arc<Self>> {
         let mut current = CURRENT
@@ -65,9 +77,12 @@ impl LocalWork {
     }
 
     /// 业务作用：关闭新刷新准入并通知在途读取结束，只撤下仍属于自己的全局入口。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不会再创建该代次任务；实际退出由 wait 证明。
     pub(crate) fn close(self: &Arc<Self>) {
+        // 先收回准入再发出取消，保证 wait 不遗漏关闭之后才登记的任务。
         *self.closed.lock().expect("cache task admission") = true;
         self.tasks.close();
         self.cancel.cancel();
@@ -85,7 +100,9 @@ impl LocalWork {
     }
 
     /// 业务作用：等待全部已登记 future 实际析构，不把取消通知当作收口证明。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：任务计数清零后完成；宿主负责施加停机期限。
     pub(crate) async fn wait(&self) {
         self.tasks.wait().await;
@@ -93,7 +110,10 @@ impl LocalWork {
 }
 
 /// 业务作用：非阻塞登记当前运行态的一项读取或本地失效任务。
-/// 参数说明：`future` 为只读回源或进程内缓存操作。
+///
+/// 参数说明：
+/// - `future`：只读回源或进程内缓存操作；未获准入时直接释放，不执行其中的操作。
+///
 /// 返回：有开放 owner 和剩余容量时接纳；否则释放 future，由调用方沿同步读取或整场景失效降级。
 pub(crate) fn try_spawn(future: impl std::future::Future<Output = ()> + Send + 'static) -> bool {
     let owner = CURRENT
@@ -123,7 +143,9 @@ pub(crate) fn try_spawn(future: impl std::future::Future<Output = ()> + Send + '
 }
 
 /// 业务作用：确认纯 L1 或两级缓存仍有开放的本地工作 owner。
+///
 /// 参数说明：无。
+///
 /// 返回：当前 owner 尚未关闭时为 true，不创建任务或修改缓存。
 pub(crate) fn is_open() -> bool {
     CURRENT

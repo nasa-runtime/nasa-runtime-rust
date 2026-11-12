@@ -14,10 +14,10 @@
 // limitations under the License.
 //
 
-/// Nacos Sdk Rust Result.
+/// Nacos SDK 操作结果，统一承载协议拒绝、配置缺失与传输失败。
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Nacos Sdk Rust Error.
+/// Nacos SDK 的公开错误分类；非穷尽枚举允许新增失败类型，调用方须保留未知类型处理分支。
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -37,12 +37,12 @@ pub enum Error {
     #[error("request_id:{0:?} ret_code:{1} error_code:{2} message:{3:?}")]
     ErrResponse(Option<String>, i32, i32, Option<String>),
 
-    /// Config not found.
+    /// 服务端未找到请求的配置，不表示连接或认证成功后必然存在该配置。
     #[cfg(feature = "config")]
     #[error("config not found: {0}")]
     ConfigNotFound(String),
 
-    /// Config query conflict, it is being modified, please try later.
+    /// 配置正处于修改冲突中，当前查询无法给出确定内容；调用方可稍后重新查询。
     #[cfg(feature = "config")]
     #[error("config query conflict: {0}")]
     ConfigQueryConflict(String),

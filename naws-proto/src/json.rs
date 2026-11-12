@@ -9,16 +9,20 @@ use crate::{CodecError, Result};
 
 /// 业务作用：序列化任意 schema 对象为 JSON 字节(派生宏的 JsonBytes 分支调用)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `v`: 待编码的协议结构体或派生 schema 实例。
+///
+/// 返回：紧凑 JSON 字节；serde 编码失败时返回 Json 错误。
 pub fn to_vec<T: Serialize>(v: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(v).map_err(|e| CodecError::Json(e.to_string()))
 }
 
 /// 业务作用：从 JSON 字节反序列化(派生宏的 JsonBytes 分支调用)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `data`: 需要解码为目标 schema 的 JSON_BYTES 载荷。
+///
+/// 返回：目标 schema 实例；JSON 语法或字段转换失败时返回 Json 错误。
 pub fn from_slice<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T> {
     serde_json::from_slice(data).map_err(|e| CodecError::Json(e.to_string()))
 }
@@ -27,33 +31,41 @@ pub fn from_slice<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T> {
 
 /// 业务作用：NON_EMPTY:Option<String> 为 None 或空串时省略。
 ///
-/// # 参数
+/// 参数说明：
 /// - `v`: 待判断的可空字符串字段。
+///
+/// 返回：None 或空字符串返回 true，使该字段从 JSON 输出省略。
 pub fn opt_str_empty(v: &Option<String>) -> bool {
     v.as_ref().is_none_or(|s| s.is_empty())
 }
 
 /// 业务作用：NON_EMPTY:字符串数组为 None 或空数组时省略。
 ///
-/// # 参数
+/// 参数说明：
 /// - `v`: 待判断的可空字符串数组字段。
+///
+/// 返回：None 或零元素数组返回 true；含空元素的非空数组仍保留。
 pub fn opt_strvec_empty(v: &Option<Vec<Option<String>>>) -> bool {
     v.as_ref().is_none_or(|a| a.is_empty())
 }
 
 /// 业务作用：NON_EMPTY:字节数组为 None 或空时省略。
 ///
-/// # 参数
+/// 参数说明：
 /// - `v`: 待判断的可空 byte[] 字段。
+///
+/// 返回：None 或零字节数组返回 true，使该字段从 JSON 输出省略。
 pub fn opt_bytes_empty(v: &Option<Vec<u8>>) -> bool {
     v.as_ref().is_none_or(|a| a.is_empty())
 }
 
 /// 业务作用：byte[] 出站:每字节按 **有符号** i8 写。skip 已挡掉 None/空。
 ///
-/// # 参数
+/// 参数说明：
 /// - `v`: 待序列化的可空字节数组字段。
 /// - `s`: serde 提供的字段序列化器。
+///
+/// 返回：Some 按 i8 数组输出，None 按空值输出；传播序列化器的失败。
 pub fn ser_opt_bytes_signed<S: Serializer>(
     v: &Option<Vec<u8>>,
     s: S,
@@ -67,8 +79,10 @@ pub fn ser_opt_bytes_signed<S: Serializer>(
 /// 业务作用：byte[] 入站:仅接受协议允许的字节范围 `-128..=255`(有符号 i8 或无符号 u8 两种写法),
 /// 越界(如 256 / -129)立即报错,**不静默截断**成另一份合法数据。
 ///
-/// # 参数
+/// 参数说明：
 /// - `d`: serde 提供的字段反序列化器。
+///
+/// 返回：缺失值返回 None，合法数组转换为原始字节；类型错误或超出 -128..=255 时拒绝。
 pub fn de_opt_bytes_signed<'de, D: Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<Option<Vec<u8>>, D::Error> {

@@ -4,6 +4,10 @@
 按环境和集群聚合的 Grafana Dashboard。受管 Application 通过同一份 YAML 建立指标出口；独立
 `nafana-controller` 负责逐实例采集与平台资源，业务副本不持有 Grafana 控制面凭据。
 
+资源采集可观测当前进程 CPU、内存、线程和 FD，以及可见 cgroup、白名单文件系统和网卡。
+采样任务由 `napp` 管理，缺失和过期数据明确区分，抓取请求不执行系统扫描；配置与范围见
+[资源采集](OBSERVABILITY.md#进程容器与文件系统采集)。
+
 受管应用无需编写 metrics Router、采集配置或 Dashboard 导入脚本。配置、递归默认与安全边界见
 [统一观测出口与平台适配](OBSERVABILITY.md)。下文手动 Router 示例用于独立 Axum 接入。
 

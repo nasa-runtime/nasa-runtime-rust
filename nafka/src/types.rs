@@ -18,7 +18,7 @@ pub struct Tp {
 impl Tp {
     /// 业务作用：构造分区定位。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `topic`: Kafka topic 名,调用方保证非空(空值在使用处的 validate 拦截,此处不重复校验)。
     /// - `partition`: 分区号,>= 0。
     ///
@@ -53,7 +53,7 @@ pub struct KafkaHeaders(std::sync::Arc<Vec<KafkaHeader>>);
 impl KafkaHeaders {
     /// 业务作用：从有序 header 列表构造;保留输入顺序与重复项。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `headers`: 按 wire 出现顺序排列的 header 列表。
     ///
     /// 返回：接管原列表所有权的头集合，不合并重复名称或 null 值。
@@ -62,7 +62,9 @@ impl KafkaHeaders {
     }
 
     /// 业务作用：按 wire 顺序遍历全部 header(含重复名)。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：借用只读迭代器，不复制字节或转成无序映射。
     pub fn iter(&self) -> impl Iterator<Item = &KafkaHeader> {
         self.0.iter()
@@ -72,7 +74,7 @@ impl KafkaHeaders {
     ///
     /// 框架保留 header(X-Nasa-Event 等)按 Kafka 惯例采用 last-header 语义读取。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `name`: header 名,大小写敏感精确匹配。
     ///
     /// 返回：最后一个匹配项的借用，缺失时为 None；不执行 singleton 合同校验。
@@ -84,7 +86,7 @@ impl KafkaHeaders {
     ///
     /// 多值路由 header(如 X-Nasa-WS-Uid)必须用本方法读全量；[`Self::last`] 会丢目标。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `name`: header 名,大小写敏感精确匹配。
     ///
     /// 返回：保留线路相对顺序的全部匹配项，缺失时为空迭代器。
@@ -93,14 +95,18 @@ impl KafkaHeaders {
     }
 
     /// 业务作用：header 总条数(含重复名),用于路由数量上限校验。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：完整条目数，不按名称去重。
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
     /// 业务作用：是否没有任何 header。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只有条目集合为空时为 true，null 值条目仍属于非空集合。
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -178,7 +184,7 @@ pub struct AssignmentHandle {
 impl AssignmentHandle {
     /// 业务作用：构造固定分区任务句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `proxy`: 所属运行时。
     /// - `group`: 独占 group.id。
@@ -198,7 +204,9 @@ impl AssignmentHandle {
     }
 
     /// 业务作用：在发出控制命令前确认句柄仍对应已登记实例。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：身份相同则成功；已停止或被替换返回生命周期错误。
     fn require_current(&self) -> Result<()> {
         let current = self.proxy.group_handle(&self.group)?;
@@ -211,14 +219,18 @@ impl AssignmentHandle {
     }
 
     /// 业务作用：本 assign 任务占用的 group.id(与 subscribe group 共用命名空间,冲突在 assign 时拒绝)。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：创建时固定的组名；该值不代表句柄仍持有活动 owner。
     pub fn group(&self) -> &str {
         &self.group
     }
 
     /// 业务作用：当前固定分区集合快照。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本句柄 owner 的当前分配；实例已退出、被替换或控制失败时返回错误。
     pub async fn partitions(&self) -> Result<Vec<Tp>> {
         self.require_current()?;
@@ -235,7 +247,9 @@ impl AssignmentHandle {
     }
 
     /// 业务作用：查询本 assign group 的健康快照。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本实例的即时观测；注册身份已失效时返回错误，快照不授予提交权威。
     pub async fn health(&self) -> Result<GroupHealth> {
         self.require_current()?;
@@ -243,7 +257,9 @@ impl AssignmentHandle {
     }
 
     /// 业务作用：停止本 assign 消费并注销 group;幂等,重复调用直接返回 Ok。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仅本句柄的 owner 退出完成时成功；超时保留登记，同名新 owner 不受影响。
     pub async fn stop(&self) -> Result<()> {
         self.proxy

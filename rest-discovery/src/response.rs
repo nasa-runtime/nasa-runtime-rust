@@ -22,7 +22,13 @@ pub struct ManagedResponse {
 
 impl ManagedResponse {
     /// 业务作用：接管响应正文并登记有界消费任务，调用方不读取时仍会按期限关闭 I/O。
-    /// 参数说明：`response` 是已取得响应头的请求，`background` 保留运行时关闭权，`budget` 延续原请求期限，`permit` 已在发送前预约容量。
+    ///
+    /// 参数说明：
+    /// - `response`：是已取得响应头的请求
+    /// - `background`：保留运行时关闭权
+    /// - `budget`：延续原请求期限
+    /// - `permit`：已在发送前预约容量。
+    ///
     /// 返回：受管流式响应；运行时关闭时不接受新的正文任务。
     pub(crate) fn new(
         mut response: reqwest::Response,
@@ -78,21 +84,27 @@ impl ManagedResponse {
     }
 
     /// 业务作用：读取业务响应状态，不隐式消费正文。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：原始 HTTP 状态码。
     pub fn status(&self) -> reqwest::StatusCode {
         self.status
     }
 
     /// 业务作用：读取响应头供流式业务判断内容类型。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：原始响应头的只读引用。
     pub fn headers(&self) -> &reqwest::header::HeaderMap {
         &self.headers
     }
 
     /// 业务作用：在原请求期限内读取下一段正文。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：EOF 为空；超时、关闭和传输失败保留独立错误类别。
     pub async fn chunk(&mut self) -> Result<Option<bytes::Bytes>> {
         self.background
@@ -114,7 +126,9 @@ impl ManagedResponse {
 
 impl Drop for ManagedResponse {
     /// 业务作用：业务放弃响应时停止正文泵，避免占用连接直到远端结束。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：任务归运行时继续回收，正文不再被读取。
     fn drop(&mut self) {
         self.task.abort();

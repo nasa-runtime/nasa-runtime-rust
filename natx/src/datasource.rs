@@ -46,7 +46,7 @@ pub struct DataSourceConfig {
 
 /// 业务作用：返回连接池上限的缺省值。
 ///
-/// # 参数
+/// 参数说明: 无。
 ///
 /// 本函数无参数；缺省值面向单实例中等负载服务。
 ///
@@ -57,7 +57,7 @@ fn default_max_connections() -> u32 {
 
 /// 业务作用：返回获取连接等待上限的缺省毫秒数。
 ///
-/// # 参数
+/// 参数说明: 无。
 ///
 /// 本函数无参数；缺省值保证请求不会无限期排队等待连接。
 ///
@@ -68,7 +68,7 @@ fn default_acquire_timeout_ms() -> u64 {
 
 /// 业务作用：返回建连上限的缺省毫秒数。
 ///
-/// # 参数
+/// 参数说明: 无。
 ///
 /// 本函数无参数；缺省值覆盖常见跨机房握手耗时。
 ///
@@ -79,7 +79,7 @@ fn default_connect_timeout_ms() -> u64 {
 
 /// 业务作用：返回是否默认执行启动探测。
 ///
-/// # 参数
+/// 参数说明: 无。
 ///
 /// 本函数无参数；默认开启以便启动期就暴露真实连接错误。
 ///
@@ -91,7 +91,7 @@ fn default_probe_on_start() -> bool {
 impl std::fmt::Debug for DataSourceConfig {
     /// 业务作用：输出不含连接串凭据的调试视图。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `f`：Debug 输出使用的标准格式化器。
     ///
@@ -113,7 +113,7 @@ impl DataSourceConfig {
     ///
     /// 调用时机是建池之前；失败表示配置本身不可用，不会留下任何连接副作用。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
     /// 本方法无显式参数；校验只读取自身字段，不访问网络。
     ///
@@ -148,7 +148,7 @@ impl DataSourceConfig {
     ///
     /// 只保留 authority 中 `@` 之后的部分与路径，因此不会带出用户名或口令。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
     /// 本方法无参数；无法解析时返回固定占位符而不是原始连接串。
     ///
@@ -161,7 +161,8 @@ impl DataSourceConfig {
 impl From<&DataSourceConfig> for DataSourcePoolConfig {
     /// 业务作用：把既有 MySQL 配置投影为 driver 中立池参数，不改变公开 struct 字段。
     ///
-    /// 参数说明：`config` 是已反序列化的 MySQL datasource 配置。
+    /// 参数说明：
+    /// - `config`：是已反序列化的 MySQL datasource 配置。
     ///
     /// 返回：字段逐一对应的公共池配置；URL scheme 仍由 MySQL 包装层校验。
     fn from(config: &DataSourceConfig) -> Self {
@@ -182,7 +183,7 @@ impl From<&DataSourceConfig> for DataSourcePoolConfig {
 /// `Unknown database` 统一压成一个模糊的 acquire timeout，启动期因此看不到真正的失败原因。
 /// 单连接握手把原始 SQLx 错误原样返回给调用方，由上层决定如何脱敏输出。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `config`：待探测的数据源配置；入口会再次校验，其 `connect_timeout_ms` 同时作为探测上限。
 ///
@@ -211,7 +212,7 @@ pub async fn probe(config: &DataSourceConfig) -> anyhow::Result<()> {
 /// 返回的池尚未建立任何连接（`min_connections > 0` 时由 SQLx 后台补足）；连通性应先由
 /// [`probe`] 确认。池的所有权交给调用方，停机时必须显式 `close().await`。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `config`：待建池的数据源配置；入口会再次执行完整校验。
 ///
@@ -228,7 +229,11 @@ pub fn build_pool(config: &DataSourceConfig) -> anyhow::Result<MySqlPool> {
 }
 
 /// 业务作用：按受管语句日志策略探测真实 MySQL 连接。
-/// 参数说明：`config` 是连接配置；`logging` 控制 SQLx 语句事件。
+///
+/// 参数说明：
+/// - `config`：是连接配置
+/// - `logging`：控制 SQLx 语句事件。
+///
 /// 返回：握手和关闭成功时完成；非法配置或连接失败返回错误。
 pub async fn probe_with_logging(
     config: &DataSourceConfig,
@@ -252,7 +257,11 @@ pub async fn probe_with_logging(
 }
 
 /// 业务作用：建立由应用统一控制语句日志的 MySQL Pool。
-/// 参数说明：`config` 是池配置；`logging` 是启动期冻结的日志开关。
+///
+/// 参数说明：
+/// - `config`：是池配置
+/// - `logging`：是启动期冻结的日志开关。
+///
 /// 返回：配置合法时交出惰性池；调用方负责停机关闭。
 pub fn build_pool_with_logging(
     config: &DataSourceConfig,
@@ -268,7 +277,11 @@ pub fn build_pool_with_logging(
 }
 
 /// 业务作用：统一逐条语句事件并关闭 SQLx 自身的独立慢语句升级。
-/// 参数说明：`config` 是待解析连接配置；`logging` 指定关闭或语句事件级别。
+///
+/// 参数说明：
+/// - `config`：是待解析连接配置
+/// - `logging`：指定关闭或语句事件级别。
+///
 /// 返回：不保留 SQLx 默认慢日志策略的连接选项，URL 错误不包含凭据。
 fn logging_options(
     config: &DataSourceConfig,

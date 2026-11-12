@@ -41,7 +41,7 @@ pub trait NonTransactionalEvidence: Send + Sync {
 
     /// 业务作用: 从 PostgreSQL catalog 证明该版本的全部外部副作用已经完整可用。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `connection`: 与 advisory lock、migration 执行相同的专有物理连接。
     ///
     /// 返回: 证据完整时为 `true`；证据不足为 `false`；查询失败返回脱敏门禁错误。
@@ -50,7 +50,7 @@ pub trait NonTransactionalEvidence: Send + Sync {
 
 /// 业务作用: 使用稳定 FNV-1a 算法从 database 与 schema 身份生成 PostgreSQL advisory lock key。
 ///
-/// # 参数
+/// 参数说明：
 /// - `database`: PostgreSQL `current_database()` 返回值。
 /// - `schema`: 已通过有界 identifier 校验的受管 schema。
 ///
@@ -74,7 +74,7 @@ pub fn advisory_lock_key(database: &str, schema: &str) -> i64 {
 /// 调用方必须保证 pool 直连 PostgreSQL 或经过会话级池化代理；事务级池化不满足 session advisory lock
 /// 的持有语义。函数在 unlock 回包未确认、取消或 panic 时关闭物理连接，不让可能持锁的 session 回池。
 ///
-/// # 参数
+/// 参数说明：
 /// - `pool`: 目标 PostgreSQL datasource 连接池。
 /// - `schema`: migration 表与业务对象所属的受管 schema。
 /// - `migrator`: 业务嵌入式 SQLx migrator。
@@ -92,7 +92,7 @@ pub async fn run_gate(
 
 /// 业务作用: 使用显式非事务完成证据执行 PostgreSQL migration 门禁。
 ///
-/// # 参数
+/// 参数说明：
 /// - `pool`: 只允许直连或会话级池化的 PostgreSQL pool。
 /// - `schema`: 受管 schema。
 /// - `migrator`: 业务嵌入式 migrator。
@@ -111,8 +111,16 @@ pub async fn run_gate_with_evidence(
 }
 
 /// 业务作用：按数据源身份执行 PostgreSQL 门禁并单独记录 migration 池等待。
-/// 参数说明：`pool`、`datasource` 指定池身份；`schema`、`migrator`、`settings` 定义门禁；`evidence` 提供非事务完成证据。
-/// 返回：门禁摘要或稳定失败；连接等待不包含后续 advisory lock 竞争时间。
+///
+/// 参数说明：
+/// - `pool`：执行门禁的 PostgreSQL 连接池。
+/// - `datasource`：用于池等待观测的数据源身份，不自行证明与 pool 相符。
+/// - `schema`：迁移目标 schema，disabled 也会校验其标识符。
+/// - `migrator`：嵌入迁移及 SQLx 相关设置。
+/// - `settings`：模式、取锁预算与非事务执行策略。
+/// - `evidence`：非事务迁移完成状态的显式证据探针集合。
+///
+/// 返回：配置与 schema 合法时，disabled 直接返回摘要而不取连接；其它模式在专有 session 内校验、取锁和执行。返回摘要或稳定错误，失败前已提交迁移不会被整体撤销；仅确认解锁并恢复 search_path 后允许连接回池。
 pub async fn run_gate_with_evidence_for(
     pool: &PgPool,
     datasource: &str,
@@ -153,7 +161,7 @@ pub async fn run_gate_with_evidence_for(
 /// 该入口适合事务级业务代理旁路出的直连或会话级 migration endpoint。连接不会加入业务 PgPool，
 /// database/schema 身份应由调用方在进入本函数前与业务 pool 复验一致。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 已建立的专有 session-affine PostgreSQL 连接。
 /// - `schema`: 与业务 datasource 一致的受管 schema。
 /// - `migrator`: 业务嵌入式 migrator。
@@ -196,7 +204,7 @@ pub async fn run_gate_on_connection(
 
 /// 业务作用: 对专用 endpoint 与业务 pool 的 database/schema 身份执行取锁前复验。
 ///
-/// # 参数
+/// 参数说明：
 /// - `business_pool`: 正常承载业务请求的 PostgreSQL pool。
 /// - `migration_connection`: 直连或会话级 migration endpoint 的专有连接。
 /// - `schema`: 两侧都应使用的受管 schema。
@@ -211,8 +219,14 @@ pub async fn verify_target_identity(
 }
 
 /// 业务作用：在专有 session 取锁前复验业务池身份，并保留 migration 用途的池等待事实。
-/// 参数说明：`business_pool`、`datasource` 指定业务池身份；`migration_connection` 为专有连接，`schema` 为共同目标。
-/// 返回：身份一致时成功；差异在任何 advisory lock 之前拒绝，不把身份查询计入池等待。
+///
+/// 参数说明：
+/// - `business_pool`：业务连接池，用于取得独立连接读取目标身份。
+/// - `datasource`：该业务池等待观测使用的数据源身份。
+/// - `migration_connection`：待与业务池比较的专有迁移连接。
+/// - `schema`：双方必须存在且匹配的目标 schema。
+///
+/// 返回：两个连接查询得到的 database 与 schema 身份相等时成功；标识、连接、查询或目标差异时报错。本方法不取 advisory lock，不校验主机或集群身份，身份查询没有额外 deadline。
 pub async fn verify_target_identity_for(
     business_pool: &PgPool,
     datasource: &str,
@@ -231,8 +245,14 @@ pub async fn verify_target_identity_for(
 }
 
 /// 业务作用：在擦除 SQLx 错误前记录 migration 的真实池等待，保持锁的端到端预算。
-/// 参数说明：`pool`、`datasource` 指定池身份，`deadline`、`timeout_ms` 为可选锁预算。
-/// 返回：池连接或原有门禁错误；外部取消只产生取消事实，不输出日志或通知。
+///
+/// 参数说明：
+/// - `pool`：获取连接的 PostgreSQL 池。
+/// - `datasource`：用于观测槽选择的数据源身份。
+/// - `deadline`：获取连接与后续锁竞争共用的可选绝对截止时刻。
+/// - `timeout_ms`：绝对预算耗尽时返回的原始毫秒配置。
+///
+/// 返回：成功返回连接并结束等待观测；绝对预算耗尽返回 LockTimeout，其它连接故障映射为脱敏 Backend。取消由守卫记录，不取得 advisory lock。
 async fn acquire_connection(
     pool: &PgPool,
     datasource: &str,
@@ -271,7 +291,7 @@ struct PooledSession {
 impl PooledSession {
     /// 业务作用: 把新取得的池连接置于默认 close-on-drop 保护态。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `connection`: 尚未执行 advisory lock 的专用池连接。
     ///
     /// 返回: 未显式确认安全前不会把连接还回池的守卫。
@@ -303,7 +323,11 @@ impl PooledSession {
 }
 
 impl Drop for PooledSession {
-    /// 业务作用: 在取消、panic 或 unlock 未确认时关闭物理连接，依靠 session 终止释放 advisory lock。
+    /// 业务作用：在取消、panic 或 unlock 未确认时关闭物理连接，依靠 session 终止释放 advisory lock。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；仍持有连接时设置 close-on-drop，由池连接销毁关闭物理 session，不等待数据库确认锁释放。
     fn drop(&mut self) {
         if let Some(connection) = self.connection.as_mut() {
             connection.close_on_drop();
@@ -313,7 +337,7 @@ impl Drop for PooledSession {
 
 /// 业务作用: 在同一 session 内完成 identity、锁、catalog、裁决、执行和 unlock 的完整时序。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 全流程独占的 PostgreSQL 连接。
 /// - `schema`: 受管 schema。
 /// - `migrator`: 业务 migrator。
@@ -383,7 +407,7 @@ async fn run_on_session(
 
 /// 业务作用: 读取 catalog 并执行只读 migration 一致性裁决。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 已持有 advisory lock 的 PostgreSQL 连接。
 /// - `migrator`: 当前二进制携带的 migration 声明。
 ///
@@ -405,7 +429,7 @@ async fn validate_on_connection(
 
 /// 业务作用: 在已持锁 session 中按版本顺序执行事务 migration，并用显式证据裁决非事务阶段。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 已持有 advisory lock 的 PostgreSQL 连接。
 /// - `migrator`: 当前业务 migrator。
 /// - `evidence`: 非事务版本对应的完成探针。
@@ -463,7 +487,7 @@ async fn apply_on_connection(
 
 /// 业务作用: 执行可由 catalog 证据恢复的非事务 migration，并在证据成立后登记 checksum。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 已持有 advisory lock 的专有 session。
 /// - `migration`: 当前非事务 migration，SQL 只交给数据库执行，不进入错误输出。
 /// - `evidence`: 调用方提供的版本化完成探针集合。
@@ -510,7 +534,7 @@ async fn apply_non_transactional(
 
 /// 业务作用: 查询当前 schema 下的 SQLx migration catalog；表不存在视为尚未应用。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 已设置受管 `search_path` 的 PostgreSQL session。
 ///
 /// 返回: 按版本排序的数据库执行记录，不包含 SQL 正文。
@@ -548,7 +572,7 @@ async fn applied_state(
 
 /// 业务作用: 读取当前 database 并确认受管 schema 在该 database 中存在。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 需要检查目标身份的 PostgreSQL session。
 /// - `schema`: 已通过普通 identifier 约束的 schema。
 ///
@@ -577,7 +601,7 @@ async fn target_identity(
 
 /// 业务作用: 在统一绝对 deadline 内循环竞争 session advisory lock。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 后续 catalog 和执行也会复用的物理连接。
 /// - `lock_key`: database/schema 稳定身份生成的锁 key。
 /// - `deadline`: 获取 pool 连接前开始计算的绝对截止时间。
@@ -618,7 +642,7 @@ async fn acquire_lock(
 
 /// 业务作用: 在可选绝对 deadline 内等待单个连接或数据库动作。
 ///
-/// # 参数
+/// 参数说明：
 /// - `deadline`: `None` 表示调用方显式选择无截止时间。
 /// - `timeout_ms`: 超时时进入稳定错误的配置值。
 /// - `future`: 当前需要受统一预算约束的异步动作。
@@ -643,7 +667,7 @@ where
 
 /// 业务作用: 从锁等待配置建立连接取得与锁竞争共用的绝对 deadline。
 ///
-/// # 参数
+/// 参数说明：
 /// - `timeout_ms`: `0` 表示无显式截止时间，其它值按当前时刻计算。
 ///
 /// 返回: 有界配置对应绝对时刻，无界配置返回 `None`。
@@ -654,7 +678,7 @@ fn deadline(timeout_ms: u64) -> Option<tokio::time::Instant> {
 
 /// 业务作用: 校验 schema 可安全作为单一 PostgreSQL identifier 与 lock 身份。
 ///
-/// # 参数
+/// 参数说明：
 /// - `schema`: 外部配置提供的受管 schema 名称。
 ///
 /// 返回: ASCII 普通 identifier 且不超过 PostgreSQL 63 字节上限时成功。
@@ -674,7 +698,7 @@ fn validate_schema(schema: &str) -> Result<(), MigrationError> {
 
 /// 业务作用: 拒绝当前 PostgreSQL adapter 无法安全 catalog 查询的自定义 migration 表名。
 ///
-/// # 参数
+/// 参数说明：
 /// - `migrator`: 需要执行的 SQLx migrator。
 ///
 /// 返回: 使用默认 `_sqlx_migrations` 时成功；其它表名在网络副作用前拒绝。
@@ -690,7 +714,7 @@ fn ensure_default_table(migrator: &Migrator) -> Result<(), MigrationError> {
 
 /// 业务作用: 提取不含 SQL 正文的 up migration 描述供 core 比较。
 ///
-/// # 参数
+/// 参数说明：
 /// - `migrator`: 当前业务嵌入式 migrator。
 ///
 /// 返回: 按版本升序排列的版本、checksum、可逆性和事务属性。
@@ -711,7 +735,7 @@ fn embedded_ups(migrator: &Migrator) -> Vec<EmbeddedMigration> {
 
 /// 业务作用: 为 disabled 模式生成不接触数据库的准确摘要。
 ///
-/// # 参数
+/// 参数说明：
 /// - `migrator`: 当前业务 migrator。
 ///
 /// 返回: 嵌入数量准确且 applied 为零的 disabled 报告。
@@ -725,7 +749,7 @@ fn disabled_report(migrator: &Migrator) -> MigrationReport {
 
 /// 业务作用: 把连接与 catalog 细节收敛为不泄露 SQL、schema 或 endpoint 的稳定错误。
 ///
-/// # 参数
+/// 参数说明：
 /// - `_error`: 仅用于触发映射的底层错误，不进入公开文本。
 ///
 /// 返回: 固定数据库错误分类。
@@ -735,7 +759,7 @@ fn backend<E>(_error: E) -> MigrationError {
 
 /// 业务作用: 把 SQLx migration 错误映射为 core 稳定分类并移除 SQL 与连接细节。
 ///
-/// # 参数
+/// 参数说明：
 /// - `error`: SQLx migration 执行错误。
 ///
 /// 返回: checksum、dirty 或通用 apply 失败分类。

@@ -37,7 +37,9 @@ struct RemoteBatch {
 
 impl Drop for RemoteBatch {
     /// 业务作用：在批次唯一所有权释放时记录一次终态，包括停机预算到期的取消。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仅更新本地原子计数，不执行网络调用；未确认批次默认计入 dropped_shutdown。
     fn drop(&mut self) {
         self.state.values[self.outcome].fetch_add(1, Ordering::Relaxed);
@@ -81,20 +83,26 @@ static DESCRIPTORS: [&MetricDescriptor; 4] = [&INFO, &HEARTBEAT, &SCRAPE, &REMOT
 /// 外部事实源的低频快照刷新边界，仅在 exporter 内调用。
 pub trait MetricRefresh: Send + Sync {
     /// 业务作用：刷新已提交的外部事实，失败由源保留 last-good 并更新自身错误指标。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：受出口总超时约束的异步刷新，不影响 SQL 返回。
     fn refresh(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 }
 
 impl LegacyMetricsSource for ExporterState {
     /// 业务作用：冻结出口自观测指标目录。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：静态有界的 descriptor 集合。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         &DESCRIPTORS
     }
     /// 业务作用：从原子累计计数读取出口健康与进程库存。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：累计快照；失败不会改变业务 readiness。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         let mut result = vec![
@@ -132,7 +140,10 @@ impl LegacyMetricsSource for ExporterState {
         Some(result)
     }
     /// 业务作用：为旧调用方保留同源文本能力。
-    /// 参数说明：`output` 接收累计快照。
+    ///
+    /// 参数说明：
+    /// - `output`：`output` 接收累计快照。
+    ///
     /// 返回：追加完整样本，不清零计数。
     fn render_prometheus(&self, output: &mut String) {
         if let Some(samples) = self.snapshot() {
@@ -158,7 +169,13 @@ pub struct Exporter {
 
 impl Exporter {
     /// 业务作用：在无网络阶段登记出口 source 并冻结认证与身份。
-    /// 参数说明：`config/identity` 为校验后的策略，`hub` 为统一指标源，`secrets` 只包含本组件所需材料。
+    ///
+    /// 参数说明：
+    /// - `config`：出口启用、采样、并发、超时、认证及容量策略；禁用时不分配出口资源或解析凭据。
+    /// - `identity`：启动时冻结的部署标签，在采样边界附加到所有序列；源指标不得占用相同标签名。
+    /// - `hub`：应用共享的指标目录与累计事实源，出口自身指标也登记于此，抓取和 remote write 使用同一来源。
+    /// - `secrets`：`secrets` 只包含本组件所需材料。
+    ///
     /// 返回：可挂接 Router 或启动后台投递的资源；禁用配置返回 None 且不解析材料。
     pub fn new(
         config: ObservabilityConfig,
@@ -170,7 +187,14 @@ impl Exporter {
     }
 
     /// 业务作用：为需要外部事实刷新的 Application 建立同一受管出口。
-    /// 参数说明：`config/identity/hub/secrets` 与基础构造一致，`refresh` 只在采样边界调用。
+    ///
+    /// 参数说明：
+    /// - `config`：出口启用、采样、并发、超时、认证及容量策略，构造时校验并冻结。
+    /// - `identity`：统一附加到指标序列的进程部署身份，不从网络请求或各来源样本推断。
+    /// - `hub`：共享指标目录及累计事实源，登记出口状态后供抓取和远程投递共同读取。
+    /// - `secrets`：已解析的凭据快照，仅按启用出口的 locator 取 bearer 材料；缺失或非法材料拒绝构造。
+    /// - `refresh`：`refresh` 只在采样边界调用。
+    ///
     /// 返回：关闭能力时无资源；启用时刷新也遵守并发与超时上限。
     pub fn new_with_refresh(
         config: ObservabilityConfig,
@@ -235,7 +259,9 @@ impl Exporter {
     }
 
     /// 业务作用：核对当前显式预留、存量原生指标及接口目录的完整展开占用，禁止静默截断 family。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：检查时的已知占用能装入单批时成功；不足时返回所需与可用数量。
     /// Application 在所有 Ready 静态登记之后、终端任务启动之前调用；独立装配者也须在静态登记完成后调用。
     /// 本检查不封闭 MetricHub，也不预留未知的运行期 label；后续动态增长仍受快照与编码硬限约束。
@@ -256,7 +282,9 @@ impl Exporter {
     }
 
     /// 业务作用：提供与 health 开关无关的唯一 metrics 路由。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已携带独立认证、并发门禁与快照超时的 Router。
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new()
@@ -265,7 +293,9 @@ impl Exporter {
     }
 
     /// 业务作用：在业务 executor 之外取得有界快照，超时不积累无界阻塞任务。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：带冻结身份的累计样本；并发超限与超时只影响本次导出。
     pub async fn snapshot(self: &Arc<Self>) -> Result<Vec<MetricSample>, &'static str> {
         let permit = self.slots.clone().try_acquire_owned().map_err(|_| "busy")?;
@@ -303,7 +333,11 @@ impl Exporter {
     }
 
     /// 业务作用：监督专用抓取与远程写入，取消后停止生产并终止出口任务。
-    /// 参数说明：`listener` 是 Ready 前已绑定的专用端口，`stop` 为 Application 停机信号。
+    ///
+    /// 参数说明：
+    /// - `listener`：Ready 前绑定的独立抓取监听器；None 表示由外部 Router 承载抓取或仅运行远程投递。
+    /// - `stop`：应用拥有的停机信号，触发后停止采样并在独立排空期限内结束出口任务。
+    ///
     /// 返回：正常取消成功；运行期网络错误只记录观测失败，不改变数据库健康。
     pub async fn run(
         self: Arc<Self>,
@@ -328,9 +362,14 @@ impl Exporter {
             });
         }
         loop {
-            tokio::select! { _ = stop.cancelled() => break, result = tasks.join_next(), if !tasks.is_empty() => {
-                if result.is_some() { tracing::warn!(target:"napp::observability", event="exporter_task_stopped", "观测出口任务停止"); }
-            } }
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                result = tasks.join_next(), if !tasks.is_empty() => {
+                    if result.is_some() {
+                        tracing::warn!(target:"napp::observability", event="exporter_task_stopped", "观测出口任务停止");
+                    }
+                }
+            }
         }
         // 先撤销生产权，再在独立排空预算内等待；到期取消剩余请求，不延长业务全局停机预算。
         let drain = Duration::from_millis(
@@ -339,9 +378,12 @@ impl Exporter {
                 .remote_write
                 .shutdown_drain_timeout_ms,
         );
-        if tokio::time::timeout(drain, async { while tasks.join_next().await.is_some() {} })
-            .await
-            .is_err()
+        if tokio::time::timeout(drain, async {
+            // 取消信号不等于发送任务已退出，逐个收回任务后才能认定本地责任已排空。
+            while tasks.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
         {
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
@@ -349,7 +391,10 @@ impl Exporter {
     }
 
     /// 业务作用：以独立采样者和单一发送者实现有界、保序的累计 remote write。
-    /// 参数说明：`stop` 为停机权威。
+    ///
+    /// 参数说明：
+    /// - `stop`：采样者与发送者共享的取消信号；取消后不再生产新批次，剩余责任受上层排空预算约束。
+    ///
     /// 返回：取消后退出；满队列丢弃最旧等待批次，不对 SQL 施加背压。
     async fn remote_loop(self: Arc<Self>, stop: CancellationToken) {
         let settings = &self.config.prometheus.remote_write;
@@ -376,19 +421,36 @@ impl Exporter {
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let mut previous = 0;
                 loop {
-                    tokio::select! { _ = stop.cancelled() => break, _ = interval.tick() => {
-                        match this.snapshot().await {
-                            Ok(samples) => {
-                                let timestamp = now_millis().max(previous + 1); previous = timestamp;
-                                let mut queued = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                                if queued.len() == this.config.prometheus.remote_write.queue_capacity {
-                                    if let Some(mut discarded) = queued.pop_front() { discarded.outcome = 7; }
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = interval.tick() => {
+                            match this.snapshot().await {
+                                Ok(samples) => {
+                                    let timestamp = now_millis().max(previous + 1);
+                                    previous = timestamp;
+                                    let mut queued = queue
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    if queued.len() == this.config.prometheus.remote_write.queue_capacity {
+                                        if let Some(mut discarded) = queued.pop_front() {
+                                            discarded.outcome = 7;
+                                        }
+                                    }
+                                    queued.push_back(RemoteBatch {
+                                        timestamp,
+                                        samples,
+                                        state: this.state.clone(),
+                                        outcome: 8,
+                                    });
+                                    drop(queued);
+                                    ready.notify_one();
                                 }
-                                queued.push_back(RemoteBatch { timestamp, samples, state: this.state.clone(), outcome: 8 }); drop(queued); ready.notify_one();
-                            },
-                            Err(_) => { this.state.values[6].fetch_add(1, Ordering::Relaxed); }
+                                Err(_) => {
+                                    this.state.values[6].fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         }
-                    } }
+                    }
                 }
             }
         };
@@ -399,7 +461,10 @@ impl Exporter {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pop_front();
                 let Some(mut batch) = next else {
-                    tokio::select! { _ = stop.cancelled() => break, _ = ready.notified() => continue };
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = ready.notified() => continue,
+                    };
                 };
                 let body = match encode_remote_write(
                     &batch.samples,
@@ -465,15 +530,31 @@ impl Exporter {
         };
         tokio::pin!(producer, consumer);
         tokio::select! {
-            _ = stop.cancelled() => { let _ = tokio::time::timeout(Duration::from_millis(settings.shutdown_drain_timeout_ms), &mut consumer).await; },
-            _ = &mut producer => { let _ = tokio::time::timeout(Duration::from_millis(settings.shutdown_drain_timeout_ms), &mut consumer).await; },
-            _ = &mut consumer => {}
+            _ = stop.cancelled() => {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(settings.shutdown_drain_timeout_ms),
+                    &mut consumer,
+                )
+                .await;
+            }
+            _ = &mut producer => {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(settings.shutdown_drain_timeout_ms),
+                    &mut consumer,
+                )
+                .await;
+            }
+            _ = &mut consumer => {},
         }
     }
 }
 
 /// 业务作用：先验证凭据再申请快照槽，避免未授权请求占用采集预算。
-/// 参数说明：`state` 为冻结出口，`headers` 只读取 Authorization。
+///
+/// 参数说明：
+/// - `state`：保存抓取凭据、快照容量与导出器状态。
+/// - `headers`：`headers` 只读取 Authorization。
+///
 /// 返回：成功文本或稳定 HTTP 错误，不包含 token 或内部错误。
 async fn scrape(State(state): State<Arc<Exporter>>, headers: HeaderMap) -> Response {
     if let Some(token) = &state.scrape_token {
@@ -520,7 +601,11 @@ async fn scrape(State(state): State<Arc<Exporter>>, headers: HeaderMap) -> Respo
 }
 
 /// 业务作用：只在快照边界附加部署身份，阻止组件覆盖进程主键。
-/// 参数说明：`samples` 为 Hub 累计快照，`identity` 为启动时冻结身份。
+///
+/// 参数说明：
+/// - `samples`：从同一 MetricHub 读取的完整累计样本；调用会为每项追加标签，不能混入已带部署标签的序列。
+/// - `identity`：启动时冻结的部署身份；任一源样本已有同名标签时整体拒绝，即使标签值相同也不覆盖。
+///
 /// 返回：同源身份样本；冲突 label 拒绝本次出口。
 pub fn identity_samples(
     mut samples: Vec<MetricSample>,
@@ -565,7 +650,12 @@ struct Sample {
 }
 
 /// 业务作用：将同源累计快照编码为有序 label 的 Prometheus protobuf 与 Snappy block。
-/// 参数说明：`samples` 为快照，`timestamp` 为毫秒时间戳，`limit` 为完整批次样本上限。
+///
+/// 参数说明：
+/// - `samples`：同次采集且已完成身份绑定的完整累计样本；histogram 必须保留全部桶、sum 和 count。
+/// - `timestamp`：该批次全部系列共用的 Unix 毫秒时刻；调用方负责按投递顺序维持时间递增，本函数不调整时刻。
+/// - `limit`：histogram 展开后允许的系列数量上限；超限拒绝整批，不截断桶或部分发送。
+///
 /// 返回：协议载荷；超限时整体拒绝，不截断 histogram。
 pub fn encode_remote_write(
     samples: &[MetricSample],
@@ -584,19 +674,33 @@ pub fn encode_remote_write(
                 labels: labels
                     .into_iter()
                     .filter(|(_, value)| !value.is_empty())
-                    .map(|(name, value)| Label { name, value })
+                    .map(|(name, value)| Label {
+                        name,
+                        value,
+                    })
                     .collect(),
-                samples: vec![Sample { value, timestamp }],
+                samples: vec![Sample {
+                    value,
+                    timestamp,
+                }],
             }
         })
         .collect();
     snap::raw::Encoder::new()
-        .compress_vec(&WriteRequest { timeseries }.encode_to_vec())
+        .compress_vec(
+            &WriteRequest {
+                timeseries,
+            }
+            .encode_to_vec(),
+        )
         .map_err(|_| "remote_write_encoding")
 }
 
 /// 业务作用：统一展开累计 histogram，保证文本与 remote write 桶完全一致。
-/// 参数说明：`samples` 为结构化快照。
+///
+/// 参数说明：
+/// - `samples`：同次采集的结构化指标，histogram 的非累积桶按其边界展开为累计系列，并保留 sum 与 count。
+///
 /// 返回：名称、排序标签和数值组成的完整系列。
 fn flatten(samples: &[MetricSample]) -> Vec<(String, BTreeMap<String, String>, f64)> {
     let mut output = Vec::new();
@@ -639,7 +743,11 @@ fn flatten(samples: &[MetricSample]) -> Vec<(String, BTreeMap<String, String>, f
 }
 
 /// 业务作用：把完整快照编码为 Prometheus 文本，不在 SQL 路径执行。
-/// 参数说明：`samples` 为同源快照，`output` 为接收缓冲。
+///
+/// 参数说明：
+/// - `samples`：已完成统一身份绑定的完整采集批次，与 remote write 共用 histogram 展开语义。
+/// - `output`：接收 Prometheus TYPE 行及全部系列的文本缓冲；内容追加于末尾，不清空其它来源。
+///
 /// 返回：追加所有系列，保留 NaN 与无数据语义。
 fn render_samples(samples: &[MetricSample], output: &mut String) {
     use std::fmt::Write;
@@ -649,7 +757,9 @@ fn render_samples(samples: &[MetricSample], output: &mut String) {
             let kind = match sample.value {
                 MetricValue::Counter(_) => "counter",
                 MetricValue::Gauge(_) => "gauge",
-                MetricValue::Histogram { .. } => "histogram",
+                MetricValue::Histogram {
+                    ..
+                } => "histogram",
             };
             let _ = writeln!(output, "# TYPE {} {kind}", sample.name);
         }
@@ -672,7 +782,9 @@ fn render_samples(samples: &[MetricSample], output: &mut String) {
 }
 
 /// 业务作用：提供仅用于出口样本与心跳的 Unix 毫秒时间。
+///
 /// 参数说明：无。
+///
 /// 返回：时间异常时回落零；业务时长不使用墙上时钟。
 fn now_millis() -> i64 {
     SystemTime::now()

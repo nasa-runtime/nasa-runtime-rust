@@ -10,21 +10,33 @@ use crate::SqliteDataSource;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum SqliteErrorCategory {
+    /// 其它连接占用所需锁，尚不能据此认定当前事务可重试。
     Busy,
+    /// 读快照不能提升为写事务，保留与普通锁等待不同的原生类别。
     BusySnapshot,
+    /// 原生引擎报告锁定冲突。
     Locked,
+    /// 约束拒绝业务数据，不将其视为存储损坏。
     Constraint,
+    /// 写入被只读权限或只读状态拒绝。
     ReadOnly,
+    /// 文件 I/O 或打开失败；连续失败参与来源隔离判断。
     Io,
+    /// 存储容量耗尽导致操作失败。
     Full,
+    /// 原生执行被中断，不据此推断事务已提交或已回滚。
     Interrupted,
+    /// 数据损坏或文件不再是有效数据库，需要隔离来源。
     Corrupt,
+    /// 无法归入固定类别的错误，保留未知状态而不猜测原因。
     Other,
 }
 
 /// 业务作用：从 SQLx 原生 code 提取稳定类别，不匹配 SQL 或服务端错误文本。
+///
 /// 参数说明：
 /// - `error`：尚未擦除的 SQLx 错误。
+///
 /// 返回：固定低基数类别，扩展 BUSY_SNAPSHOT 与普通 BUSY 保持区别。
 pub fn classify_sqlite_error(error: &sqlx::Error) -> SqliteErrorCategory {
     if matches!(error, sqlx::Error::Io(_)) {
@@ -38,8 +50,10 @@ pub fn classify_sqlite_error(error: &sqlx::Error) -> SqliteErrorCategory {
 }
 
 /// 业务作用：让受控 SQL 与原生维护使用相同的稳定错误类别。
+///
 /// 参数说明：
 /// - `code`：已确认的原生扩展结果码；缺失时不猜测存储故障。
+///
 /// 返回：用于隔离判断和固定指标的错误类别。
 pub(crate) fn classify_code(code: Option<i32>) -> SqliteErrorCategory {
     use libsqlite3_sys as ffi;
@@ -60,7 +74,9 @@ pub(crate) fn classify_code(code: Option<i32>) -> SqliteErrorCategory {
 }
 
 /// 业务作用：返回当前进程实际链接的 SQLite 引擎标识。
+///
 /// 参数说明：无。
+///
 /// 返回：SQLite 的整数版本编码，用于启动诊断而不扩展每条 SQL 的指标标签。
 pub fn engine_version_number() -> i32 {
     unsafe { libsqlite3_sys::sqlite3_libversion_number() }
@@ -78,7 +94,9 @@ pub(crate) struct Diagnostics {
 
 impl Default for Diagnostics {
     /// 业务作用：为一个 datasource 创建固定规模诊断单元，不保存 SQL 和文件路径。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：计数为零，尚未取得 checkpoint 统计以负一表示。
     fn default() -> Self {
         Self {
@@ -95,16 +113,20 @@ impl Default for Diagnostics {
 
 impl Diagnostics {
     /// 业务作用：只记录已确认的原生执行错误，避免取消等待被误记为数据库拒绝。
+    ///
     /// 参数说明：
     /// - `error`：worker 已收到的原始 SQLx 错误。
+    ///
     /// 返回：固定类别计数饱和递增。
     pub(crate) fn record_error(&self, error: &sqlx::Error) {
         self.record_category(classify_sqlite_error(error));
     }
 
     /// 业务作用：按已确认类别累加源库错误，供原生维护复用同一诊断序列。
+    ///
     /// 参数说明：
     /// - `category`：实际源库故障类别。
+    ///
     /// 返回：对应固定类别的计数饱和递增。
     pub(crate) fn record_category(&self, category: SqliteErrorCategory) {
         nametrics_core::atomic::add(&self.errors[category as usize], 1);
@@ -145,8 +167,10 @@ pub struct SqliteMetricsSource {
 
 impl SqliteMetricsSource {
     /// 业务作用：冻结 Application 已安装的 SQLite 来源集合与观测基数。
+    ///
     /// 参数说明：
     /// - `sources`：每个来源只出现一次的使用句柄集合。
+    ///
     /// 返回：重复名称拒绝，成功后不再动态增加指标标签。
     pub fn new(sources: Vec<SqliteDataSource>) -> anyhow::Result<Self> {
         let mut names = std::collections::BTreeSet::new();
@@ -162,7 +186,9 @@ impl SqliteMetricsSource {
     }
 
     /// 业务作用：在指标注册之前预留该冻结来源表的最大序列数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：每个来源十种错误、十一种状态和两种备份结果的精确上限。
     pub fn series_budget(&self) -> usize {
         self.sources.len() * 23
@@ -171,14 +197,18 @@ impl SqliteMetricsSource {
 
 impl LegacyMetricsSource for SqliteMetricsSource {
     /// 业务作用：登记固定的 SQLite 维护与错误指标族。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与结构化快照一致的 descriptor 集合。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         DESCRIPTORS
     }
 
     /// 业务作用：导出原子维护事实，不在指标出口触发数据库副作用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定上限的来源快照，未取得的帧数保持负值。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         let mut samples = Vec::with_capacity(self.series_budget());
@@ -298,8 +328,10 @@ impl LegacyMetricsSource for SqliteMetricsSource {
     }
 
     /// 业务作用：把文本编码交给统一 MetricHub，保持出口口径一致。
+    ///
     /// 参数说明：
     /// - `_output`：兼容旧文本出口的缓冲区。
+    ///
     /// 返回：无直接输出，所有样本来自结构化快照。
     fn render_prometheus(&self, _output: &mut String) {}
 }

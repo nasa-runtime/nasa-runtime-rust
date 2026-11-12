@@ -55,11 +55,15 @@ pub(crate) struct ShutdownSummary {
 const REPORT_MAX_BYTES: usize = 2_048;
 /// 错误展开先独立限制内存，再由统一通道脱敏并限制最终输出长度。
 const ERROR_CHAIN_MAX_BYTES: usize = 16_384;
+/// 最多调用 Display 与 source 的不同错误节点数，防止错误链无限展开。
 const ERROR_CHAIN_MAX_DEPTH: usize = 32;
 
 struct ErrorText {
+    /// 本节点已完整接收的格式化片段，失败时整份正文由调用方丢弃。
     text: String,
+    /// 本节点可接收的最大字节数，已扣除错误链固定标记预留。
     limit: usize,
+    /// 任一片段超过剩余预算后保持拒绝，防止 Display 忽略错误后继续追加。
     exceeded: bool,
 }
 
@@ -82,9 +86,12 @@ impl std::fmt::Write for ErrorText {
 
 /// 业务作用：以 best-effort 方式直接写入 stderr，不依赖尚未启动或已经停止的日志组件。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`：已经完成脱敏和长度限制的固定诊断文本。
+///
+/// 返回：同步尝试写入全部字节，写入错误被忽略且可能只输出部分内容；不添加换行、不再脱敏或裁剪。
+/// stderr 锁和写出可能阻塞，此入口不受异步任务取消或截止时间抢占。
 pub(crate) fn write_stderr(message: &str) {
     let _ = std::io::stderr().lock().write_all(message.as_bytes());
 }
@@ -459,9 +466,12 @@ const SENSITIVE_ASSIGNMENT_SEPARATORS: &[char] = &[':', '=', '：', '＝'];
 
 /// 业务作用：隐去 URI authority 中 `@` 之前的 userinfo，保留 scheme 和 host 便于定位。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `input`：可能包含一个或多个 URI 的文本。
+///
+/// 返回：对每个字面量 :// 后、首个斜线或空白前的片段，将最后一个 @ 及之前的 userinfo 替换为 ***@；
+/// 其它内容保留。此处按文本扫描，不校验 URI 语法，不隐藏路径或查询参数中的凭据；后者由敏感字段识别处理。
 fn redact_uri_userinfo(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut rest = input;

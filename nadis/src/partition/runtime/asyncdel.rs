@@ -1,11 +1,8 @@
-// ============================================================================
-// ACK 后异步 XDEL：单 owner、有界通道、按分区批量回收 stream entry。
-//
-// XACK 决定消费终态，XDEL 只回收日志空间。两者不能绑成一个事务：删除失败不应把已经成功
-// 处理的业务消息重新投递。发送端受 inflight 预算和有界 channel 双重约束；Redis 暂时失败时
-// 保留 ID 到下一周期重试，停机在 coordinator 排空后做一次最终 flush；退出时未完成 ID
-// 转为 DeleteRetained 诊断终态，Stream 正文交由保留窗或 auto trim 回收。
-// ============================================================================
+//! ACK 后通过唯一 owner、有界通道和分区批次回收 Stream 正文。
+//!
+//! XACK 确认消费结果，XDEL 只回收存储，删除失败不会撤销成功结果或重新调用业务。
+//! 发送端同时受共享删除预算与通道容量约束，失败 ID 保留到后续周期重试。
+//! 正常停机在协调器排空后执行末次尝试；退出时未完成责任转为留存计数，正文可由保留策略继续回收。
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -28,7 +25,9 @@ struct AsyncDeleteOwner {
 
 impl Drop for AsyncDeleteOwner {
     /// 业务作用：删除 owner 的全部退出路径收口已受理责任，不撤销 ACK 或重新执行 handler。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：关闭交接后把剩余计数转为 DeleteRetained；普通退出、展开和中止均归还共享容量。
     fn drop(&mut self) {
         let mut counts = self
@@ -63,22 +62,34 @@ impl Drop for AsyncDeleteOwner {
 }
 
 /// 业务作用：运行一个分区组的异步删除 owner。
-/// 参数说明：`rt` 为当前分区组；`rx` 为 ACK 成功批次的唯一接收端。
-/// 返回：预先持有退出责任的 Future，即使首次轮询前被丢弃也会完成计数移交。
+///
+/// 参数说明：
+/// - `rt`: 持有删除预算、物理布局与停止控制的消费组运行时。
+/// - `rx`: 已确认批次的唯一接收端，发送方已在交接屏障内登记对应删除责任。
+///
+/// 返回：预先持有唯一退出守卫的 Future；首次轮询前被丢弃、展开或中止仍会关闭接收并归还尚未完成的删除预算。
 pub(super) fn async_delete_loop(
     rt: Arc<GroupRuntime>,
     rx: mpsc::Receiver<AsyncDeleteBatch>,
 ) -> impl std::future::Future<Output = ()> {
-    run_async_delete(AsyncDeleteOwner { rt, rx })
+    run_async_delete(AsyncDeleteOwner {
+        rt,
+        rx,
+    })
 }
 
 /// 业务作用：串行归并删除批次，正常停机执行末次删除尝试。
-/// 参数说明：`owner` 持有唯一接收端与退出计数责任。
-/// 返回：成功删除清除 pending；未删除正文由 owner 析构转为留存终态。
+///
+/// 参数说明：
+/// - `owner`: 持有唯一接收端、所属运行时和全部已受理删除预算的退出守卫。
+///
+/// 返回：周期为零时立即结束；正常停止或通道关闭时先完成末次删除尝试再退出。
+/// 排干通知后仍失败则关闭交接，未完成责任由守卫归还预算并计入留存；这些退出不撤销已经确认的业务结果。
 async fn run_async_delete(mut owner: AsyncDeleteOwner) {
     let rt = owner.rt.clone();
     let rx = &mut owner.rx;
     let period = rt.stream_cfg.async_del_record_period_ms;
+    // 未启用周期删除时不能留下无人消费的接收端；退出守卫负责拒绝后续交接并收口已有预算。
     if period == 0 {
         return;
     }
@@ -94,6 +105,7 @@ async fn run_async_delete(mut owner: AsyncDeleteOwner) {
         tokio::select! {
             biased;
             _ = rt.async_delete_cancel.cancelled() => {
+                // 正常停止在协调器退出后请求末次尝试；强停可中止等待，守卫始终负责收口剩余预算。
                 while let Ok(batch) = rx.try_recv() {
                     append_batch(&mut pending, &mut pending_count, batch);
                 }
@@ -112,6 +124,7 @@ async fn run_async_delete(mut owner: AsyncDeleteOwner) {
                 match batch {
                     Some(batch) => append_batch(&mut pending, &mut pending_count, batch),
                     None => {
+                        // 唯一通道关闭后不会有新交接，当前缓冲仍应获得最后一次删除机会。
                         flush_pending(&rt, &mut pending, &mut pending_count).await;
                         return;
                     }
@@ -136,8 +149,13 @@ async fn run_async_delete(mut owner: AsyncDeleteOwner) {
 
 /// 业务作用：把一个已确认批次并入 owner 本地缓冲。
 ///
-/// 达到软上限后 select 不再读取 channel；单个批次可能让计数略超过上限，但批次大小已由
-/// `stream.batch_size` 控制，不会因循环继续读取而无界增长。
+/// 参数说明：
+/// - `pending`: 按物理分区归并的待删除 ID，唯一删除 owner 持有其修改权。
+/// - `pending_count`: 本地缓冲的责任计数，包含尚未去重的重复 ID。
+/// - `batch`: 已在发送端占用分区、执行域和源级预算的已确认批次。
+///
+/// 返回：移入整批 ID 并更新本地计数，不重新申请或释放共享预算。软上限只限制常规接收，
+/// 主动 flush 可接过更多已受理批次，但总量仍由发送端的共享删除预算约束。
 fn append_batch(
     pending: &mut HashMap<u32, Vec<String>>,
     pending_count: &mut usize,
@@ -152,7 +170,13 @@ fn append_batch(
 
 /// 业务作用：尝试删除当前所有积压；失败的分区 ID 留到下一周期。
 ///
-/// 每条命令只访问一个 stream key，因此单点和 Cluster 同样成立，不需要跨 slot pipeline。
+/// 参数说明：
+/// - `rt`: 提供各物理 Stream、Redis 连接和共享删除预算的消费组。
+/// - `pending`: 唯一 owner 持有的分区待删除 ID，已取得业务 ACK 事实。
+/// - `pending_count`: 本地剩余 ID 总数，在本轮结束时按保留集合重新计算。
+///
+/// 返回：先去重并归还重复责任，再按单 Stream、有界 ID 数量发送 XDEL；删除数在零到请求 ID 数以内时归还该批全部责任。
+/// Redis 错误或越界删除数保留整批待重试；中止时尚未归还的预算由 owner 退出守卫收口，不重新投递已确认业务。
 async fn flush_pending(
     rt: &Arc<GroupRuntime>,
     pending: &mut HashMap<u32, Vec<String>>,
@@ -170,6 +194,7 @@ async fn flush_pending(
         let count_before_dedup = ids.len();
         ids.sort_unstable();
         ids.dedup();
+        // 相同物理 ID 只需一次删除，但每次交接均占用了预算；先归还重复占用，避免重试越积越多。
         decrement_gauge(rt, partition, count_before_dedup.saturating_sub(ids.len()));
         let current = std::mem::take(ids);
         let mut failed = Vec::new();
@@ -180,11 +205,24 @@ async fn flush_pending(
             for id in chunk {
                 command.arg(id);
             }
-            let result: std::result::Result<i64, redis::RedisError> =
-                command.query_async(&mut rt.client.conn()).await;
+            let result = command
+                .query_async::<i64>(&mut rt.client.conn())
+                .await
+                .and_then(|deleted| {
+                    // 不存在的 ID 可返回零，但不可能删除负数或超过请求数；异常证据不能解除重试责任。
+                    if usize::try_from(deleted).is_ok_and(|count| count <= chunk.len()) {
+                        Ok(deleted)
+                    } else {
+                        Err(redis::RedisError::from((
+                            redis::ErrorKind::Parse,
+                            "XDEL returned an invalid deleted count",
+                        )))
+                    }
+                });
             match result {
                 Ok(_) => decrement_gauge(rt, partition, chunk.len()),
                 Err(error) => {
+                    // 网络失败可能已在远端完成删除；保留精确 ID 重试，XDEL 幂等且不改变 ACK 成功事实。
                     tracing::warn!(
                         partition,
                         count = chunk.len(),
@@ -202,13 +240,20 @@ async fn flush_pending(
 }
 
 /// 业务作用：删除完成后同时归还物理分区、执行域和源级删除份额。
-/// 参数说明：`rt` 为组；`partition` 为已处理的物理分区；`count` 为删除或去重的数量。
-/// 返回：交接屏障内清除责任，其他执行域的删除份额不受影响。
+///
+/// 参数说明：
+/// - `rt`: 持有分区计数、执行域映射和全源删除预算的消费组。
+/// - `partition`: 本次完成删除或去重的有效物理分区编号。
+/// - `count`: 可解除的交接责任数，不是服务端实际删除条目数；已不存在的 ID 也可完成责任。
+///
+/// 返回：零数量不操作；其余在交接屏障内按本分区尚存计数归还各级份额，不扣减其它分区责任。
+/// 本函数不执行 Redis 命令，也不改变业务 ACK 状态。
 fn decrement_gauge(rt: &GroupRuntime, partition: u32, count: usize) {
     if count == 0 {
         return;
     }
     let mut counts = rt.async_delete_admission.lock().expect("delete admission");
+    // 退出守卫与完成回包共用交接屏障，只能归还此分区仍持有的责任，不能借重复完成扣减其它来源。
     let count = count.min(counts[partition as usize]);
     counts[partition as usize] -= count;
     let domain = rt.core.executions.domain(&rt.layout.prefix, partition);

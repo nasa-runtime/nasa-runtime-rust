@@ -269,7 +269,10 @@ impl TimerClaimBatch {
     /// 返回：只能借用 token 完成或交还其中行的 claim 批次。
     #[doc(hidden)]
     pub fn from_committed_claim(token: TimerFencingToken, timers: Vec<SagaTimerRow>) -> Self {
-        Self { token, timers }
+        Self {
+            token,
+            timers,
+        }
     }
 
     /// 业务作用：借用本批 fencing capability。

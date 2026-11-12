@@ -68,7 +68,11 @@ struct FlightGuard<'b> {
 
 impl<'b> FlightGuard<'b> {
     /// 业务作用：在等待互斥锁之前登记请求，取消等待也能归还锁项引用。
-    /// 参数说明：`locks` 为进程内锁表；`key` 为完整缓存身份。
+    ///
+    /// 参数说明：
+    /// - `locks`：同一缓存层的进程内锁表，持有者与等待者共享条目。
+    /// - `key`：包含缓存作用域的完整键，同键请求不能各自建立独立的回源锁。
+    ///
     /// 返回：与同 key 所有在途请求共享锁的守卫，不跨异步等待持有锁表分段锁。
     fn enter(locks: &'b DashMap<String, Arc<Mutex<()>>>, key: &'b str) -> Self {
         let lock = locks
@@ -84,7 +88,9 @@ impl<'b> FlightGuard<'b> {
     }
 
     /// 业务作用：取得本请求登记的互斥锁，锁守卫必须先于请求登记释放。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前 flight 的锁；引用受登记守卫生命周期约束。
     fn mutex(&self) -> &Mutex<()> {
         self.lock.as_deref().expect("flight remains registered")
@@ -93,7 +99,9 @@ impl<'b> FlightGuard<'b> {
 
 impl Drop for FlightGuard<'_> {
     /// 业务作用：归还当前请求的登记，只回收没有持有者和等待者的锁项。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：最后一个请求退出后移除对应项；其它请求继续使用同一把锁。
     fn drop(&mut self) {
         let Some(lock) = self.lock.take() else {
@@ -127,26 +135,37 @@ pub trait CacheBackend: Send + Sync {
     ///
     /// 编排层的 readiness monitor 调用本方法确认当前代后端仍可服务。实现不得把成功构造客户端
     /// 当成健康，也不得写入探针 key；Redis 实现使用 `PING`。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前探针往返与响应均有效时成功；连接或协议失败交给调用方判定可用性，
+    /// 不承诺后续缓存操作成功，也不验证写入权限。
     async fn health_check(&self) -> anyhow::Result<()>;
 
-    /// 业务作用：读一个 key;不存在返回 `Ok(None)`。底层报错原样上抛,由 `CacheLayer` 决定降级回源。
+    /// 业务作用：读取单个缓存键，将缺失与后端失败分开交给 CacheLayer 决定是否回源。
     ///
-    /// # 参数
-    /// - `key`: 完整缓存 key。
+    /// 参数说明：
+    /// - `key`：包含缓存作用域的完整键，不在后端追加场景或分组前缀。
+    ///
+    /// 返回：命中时交付尚未反序列化的字符串，键缺失为 None；后端错误不能伪装成缓存命中。
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>>;
 
-    /// 业务作用：以毫秒 TTL 写入一个 key(PSETEX 语义);TTL 抖动/空值短 TTL 由 `CacheLayer` 决定后传入。
+    /// 业务作用：将值与有限 TTL 一起写入单个缓存键，避免回填留下没有过期时间的条目。
     ///
-    /// # 参数
-    /// - `key`: 完整缓存 key。
-    /// - `value`: 已序列化的 JSON 载荷。
-    /// - `ttl_ms`: 过期毫秒数(> 0)。
+    /// 参数说明：
+    /// - `key`：完整缓存键，已有值允许被本次回填覆盖。
+    /// - `value`：上层已序列化的 JSON 或空值哨兵，后端不重新编解码。
+    /// - `ttl_ms`：上层完成抖动或空值策略后选择的正毫秒 TTL。
+    ///
+    /// 返回：后端确认写入及过期设置后成功；错误交给上层，不能推断超时意味着未写入。
     async fn set(&self, key: &str, value: &str, ttl_ms: u64) -> anyhow::Result<()>;
 
-    /// 业务作用：删除一个 key(失效用)。
+    /// 业务作用：使指定缓存键失效，不取消并发中已经开始的回源或阻止后续回填。
     ///
-    /// # 参数
-    /// - `key`: 完整缓存 key。
+    /// 参数说明：
+    /// - `key`：需要删除的完整缓存键。
+    ///
+    /// 返回：后端确认删除命令后成功，键原本不存在也成功；后端错误继续向调用方传播。
     async fn delete(&self, key: &str) -> anyhow::Result<()>;
 }
 
@@ -161,16 +180,24 @@ pub struct ClusterConnectionBackend {
 impl ClusterConnectionBackend {
     /// 业务作用：用一个已建立的集群连接构造后端。
     ///
-    /// # 参数
-    /// - `redis`: 已连接的 `ClusterConnection`(通常来自 [`crate::connect_cluster`])。
+    /// 参数说明：
+    /// - `redis`：已建立的集群连接句柄，通常来自 [`crate::connect_cluster`]。
+    ///
+    /// 返回：复用原连接的后端，不发起额外探针；构造成功不代表后续网络操作可用。
     pub fn new(redis: ClusterConnection) -> Self {
-        Self { redis }
+        Self {
+            redis,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl CacheBackend for ClusterConnectionBackend {
     /// 业务作用：使用 Redis `PING` 验证当前集群连接仍可完成一次协议往返。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：收到不区分大小写的 PONG 时成功；网络错误或其它响应拒绝，不写入业务键。
     async fn health_check(&self) -> anyhow::Result<()> {
         let mut conn = self.redis.clone();
         let pong: String = redis::cmd("PING").query_async(&mut conn).await?;
@@ -181,31 +208,37 @@ impl CacheBackend for ClusterConnectionBackend {
         Ok(())
     }
 
-    /// 业务作用：读一个 key(GET,返回 `Option<String>`)。
+    /// 业务作用：通过共享集群连接读取缓存原文，不在后端执行 JSON 解码或回源。
     ///
-    /// # 参数
-    /// - `key`: 完整缓存 key。
+    /// 参数说明：
+    /// - `key`：完整 Redis 缓存键。
+    ///
+    /// 返回：字符串值或键缺失；连接、Redis 类型及字符串转换错误向上层传播。
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
         let mut conn = self.redis.clone();
         Ok(conn.get::<_, Option<String>>(key).await?)
     }
 
-    /// 业务作用：以毫秒 TTL 写入一个 key(PSETEX)。
+    /// 业务作用：使用 PSETEX 在同一次命令中覆盖缓存值并安装过期时间。
     ///
-    /// # 参数
-    /// - `key`: 完整缓存 key。
-    /// - `value`: 已序列化的 JSON 载荷。
-    /// - `ttl_ms`: 过期毫秒数。
+    /// 参数说明：
+    /// - `key`：需要回填的完整缓存键。
+    /// - `value`：上层已经编码的缓存内容，不在后端修改。
+    /// - `ttl_ms`：本次写入的毫秒 TTL，零值等非法范围由 Redis 拒绝。
+    ///
+    /// 返回：Redis 确认后成功；协议或连接错误传播，超时不能证明命令没有生效。
     async fn set(&self, key: &str, value: &str, ttl_ms: u64) -> anyhow::Result<()> {
         let mut conn = self.redis.clone();
         conn.pset_ex::<_, _, ()>(key, value, ttl_ms).await?;
         Ok(())
     }
 
-    /// 业务作用：删除一个 key(DEL)。
+    /// 业务作用：向集群发送单键 DEL，完成当前条目的显式失效。
     ///
-    /// # 参数
-    /// - `key`: 完整缓存 key。
+    /// 参数说明：
+    /// - `key`：需要失效的完整缓存键。
+    ///
+    /// 返回：命令确认即成功，不区分实际删除与原本缺失；错误传播，不阻止并发回填。
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         let mut conn = self.redis.clone();
         conn.del::<_, ()>(key).await?;
@@ -255,12 +288,14 @@ pub struct CacheLayer {
 impl CacheLayer {
     /// 业务作用：构造 Redis 二级缓存层；由启动代码传入 Redis 集群连接与缓存 TTL 配置。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `redis`: Redis 集群连接句柄,用于读取、写入和删除 L2 缓存。
     /// - `cache_ttl_secs`: 正常缓存值的基础 TTL 秒数,写入时会叠加少量抖动防雪崩。
     /// - `null_ttl_secs`: 空结果哨兵的 TTL 秒数,用于防缓存穿透。
+    ///
+    /// 返回：共享原连接的缓存层与独立进程内锁表；不连接网络，也不预先校验 TTL 是否被后端接受。
     pub fn new(redis: ClusterConnection, cache_ttl_secs: u64, null_ttl_secs: u64) -> Self {
-        // 向后兼容入口:把自建集群连接包成默认 backend 再走 [`Self::with_backend`],既有调用方零改动。
+        // 连接适配器只承担 Redis 命令转发，缓存策略与受管后端共用同一实现。
         Self::with_backend(
             Arc::new(ClusterConnectionBackend::new(redis)),
             cache_ttl_secs,
@@ -273,10 +308,12 @@ impl CacheLayer {
     /// 让 `CacheLayer` 与具体 Redis 连接类型解耦:编排层可传入**复用受管 Redis** 的 adapter,而不必新开一条
     /// 集群连接。single-flight/TTL 抖动/空值哨兵/serde 全在本层,与 backend 具体实现无关。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `backend`: L2 命令后端(自建集群连接或受管 Redis adapter)。
     /// - `cache_ttl_secs`: 正常缓存值的基础 TTL 秒数,写入时叠加少量抖动防雪崩。
     /// - `null_ttl_secs`: 空结果哨兵的 TTL 秒数,用于防缓存穿透。
+    ///
+    /// 返回：持有后端与 TTL 策略的缓存层，不执行远程健康检查；不同实例不共享进程内回源锁表。
     pub fn with_backend(
         backend: Arc<dyn CacheBackend>,
         cache_ttl_secs: u64,
@@ -293,15 +330,20 @@ impl CacheLayer {
     /// 业务作用：对当前 L2 后端执行一次只读健康探针。
     ///
     /// 该入口只供拥有运行时生命周期的组件 monitor 使用；请求热路径不会同步探测远端。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前后端探针的原始结果；不回源、不写入缓存，也不承诺后续请求仍可成功。
     pub async fn health_check(&self) -> anyhow::Result<()> {
         self.backend.health_check().await
     }
 
-    /// 业务作用：删除一个 key（给缓存失效用，对标 Cacheable @CacheInvalidate 的远程删除）。
-    /// 由 cacheable::invalidate 调用。删 L2(Redis)这一份;失败上抛由调用方决定怎么处理。
+    /// 业务作用：把显式失效请求交给当前 L2 后端，不触及其它缓存层或正在执行的 loader。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 完整 Redis 缓存 key,通常由宏按业务模板拼好。
+    ///
+    /// 返回：后端删除的原始结果；成功不阻止并发旧 loader 稍后回填，失败由调用方决定处理。
     pub async fn delete(&self, key: &str) -> anyhow::Result<()> {
         // 经 backend 转发 DEL:失败原样上抛由调用方决定处理(具体连接类型不在本层)。
         self.backend.delete(key).await
@@ -311,9 +353,12 @@ impl CacheLayer {
     ///
     /// 三防能力:空结果短缓存防穿透、key 级互斥防击穿、非空 TTL 抖动防雪崩。调用方只需要提供完整缓存 key 和回源闭包。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 完整缓存键,调用方需要带上命名空间或业务前缀避免跨业务碰撞。
     /// - `loader`: 缓存未命中时执行的回源闭包,通常是数据库或远程服务查询。
+    ///
+    /// 返回：命中时返回解码值，否则在同键互斥内回源；读取或写入缓存失败可降级，
+    /// loader 和 JSON 序列化失败仍返回错误。锁只覆盖本实例同键请求，不提供跨节点互斥或失效屏障。
     pub async fn get_or_load<T, F, Fut>(&self, key: String, loader: F) -> anyhow::Result<T>
     where
         // ① T：缓存的值类型。
@@ -393,7 +438,7 @@ impl CacheLayer {
         // ---- 5. 回填（带随机抖动 TTL，防雪崩；空结果短 TTL，防穿透）----
         // to_string 可能失败（如类型含非法 JSON 值），同样用 ? 传播错误：序列化不出来就别往下写缓存了
         let payload = serde_json::to_string(&data)?;
-        // 通用"空"判断（详见底部 is_empty_payload）：空数组/null/空对象/空串都算空结果。
+        // 按紧凑原文字节选择空值 TTL；JSON 空字符串含引号，仍采用正常值的 TTL。
         let is_empty = is_empty_payload(&payload);
         // 用毫秒级 TTL（PSETEX）：秒级 TTL 配毫秒抖动会被整数截断，抖动等于失效
         let ttl_ms = if is_empty {
@@ -448,7 +493,9 @@ where
     C: redis::aio::ConnectionLike + Clone + Send + Sync + 'static,
 {
     /// 业务作用：在接纳分组缓存请求前证明 field TTL 可用，探针与清理在同一脚本完成。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：过期语义确认时成功；权限、版本或返回异常时拒绝，未启用 TTL 时不创建探针。
     pub async fn verify_field_ttl(&self) -> anyhow::Result<()> {
         if self.backstop_ttl_ms == 0 {
@@ -485,7 +532,11 @@ return ttl[1]
     }
 
     /// 业务作用：创建按组显式失效、每次字段写入独立过期的缓存。
-    /// 参数说明：`redis` 为 Redis 连接；`backstop_ttl_secs` 为字段保留秒数，最大一年，零表示不设置过期。
+    ///
+    /// 参数说明：
+    /// - `redis`：满足异步命令接口的共享连接，构造时不执行网络请求。
+    /// - `backstop_ttl_secs`：字段保留基础秒数，最大一年，零表示不设置过期。
+    ///
     /// 返回：配置合法时返回缓存；越界时 panic，需要可恢复错误的调用方使用 try_new。
     /// 禁用过期时业务自行限制字段保留与数量；正 TTL 也不能消除旧 loader 晚到回填的窗口。
     pub fn new(redis: C, backstop_ttl_secs: u64) -> Self {
@@ -494,7 +545,11 @@ return ttl[1]
     }
 
     /// 业务作用：在启动阶段校验 field 过期配置，避免写入后才发现过期范围无效。
-    /// 参数说明：`redis` 为单机连接；`backstop_ttl_secs` 为每次写入后的过期秒数，最大一年，零表示不设置过期。
+    ///
+    /// 参数说明：
+    /// - `redis`：满足异步命令接口的共享连接，构造不验证 Redis 命令能力。
+    /// - `backstop_ttl_secs`：每次写入后的基础过期秒数，最大一年，零表示不设置过期。
+    ///
     /// 返回：配置合法时返回分组缓存；越界时返回错误，不写入 Redis。
     pub fn try_new(redis: C, backstop_ttl_secs: u64) -> anyhow::Result<Self> {
         let backstop_ttl_ms = backstop_ttl_secs
@@ -520,9 +575,11 @@ return ttl[1]
     ///
     /// 注册关系在写入时去重，读取路径只需展开已经确认的目标集合。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `source_group`: 触发失效的源缓存组名。
     /// - `also_clear`: 源组失效时需要一并清理的其它缓存组列表。
+    ///
+    /// 返回：向已有目标集合追加并去重，不删除旧关系、不立即失效 Redis，展开时只应用直接关联。
     pub fn register_clear_ref(&self, source_group: &str, also_clear: &[&str]) {
         // 拿写锁：注册是写操作。write() 返回 RAII 守卫，本语句块结束即释放（不跨 .await，安全）
         let mut map = self.clear_map.write().unwrap();
@@ -540,18 +597,13 @@ return ttl[1]
     ///   · `field` = Hash field  = 【子业务隔离串】，组内一条缓存。例：`"BTCUSDT:1m"` / `"{userId}:{symbol}"`
     ///   建议 field 用 `cache::field(&[...])` 拼，统一分隔符、避免手拼碰撞；并控制单组 field 基数（防大 key）。
     ///
-    /// ── 函数签名拆解 ──
-    ///   get_or_load<T, F, Fut>(&self, group, field, loader) -> `anyhow::Result<T>`
-    ///   ├─ <T, F, Fut>          三个泛型，调用处自动推断
-    ///   ├─ &self                只读借用（不改 GroupedCache，故可多请求并发调）
-    ///   ├─ group / field        业务隔离 key / 子业务隔离 field（见上"键约定"）
-    ///   ├─ loader: F            回源闭包（未命中时调用，相当于真正查 DB）
-    ///   └─ -> `anyhow::Result<T>` 成功返回 T；失败返回 anyhow 错误
-    ///
-    /// # 参数
+    /// 参数说明：
     /// - `group`: Redis Hash key,表示整组缓存和整组失效的业务边界。
     /// - `field`: Redis Hash field,表示组内单条缓存的子业务键。
     /// - `loader`: 组内 field 未命中时执行的回源闭包。
+    ///
+    /// 返回：有效缓存或回源值；loader 与序列化错误传播，缓存失败降级。
+    /// 分布式锁等待到期后允许本地回源，锁到期或取消也不构成跨节点唯一执行保证，失效不阻止旧回填。
     pub async fn get_or_load<T, F, Fut>(
         &self,
         group: &str,
@@ -593,7 +645,7 @@ return ttl[1]
         // rand::random::<u64>() 取一个随机 u64；{:016x} 格式化成 16 位十六进制字符串
         let token = format!("{:016x}", rand::random::<u64>());
         // 手动拼 SET 命令（redis 高层 API 不直接暴露 NX+PX 组合，用 cmd 最直观）：
-        //   SET lock_key token NX PX lock_ttl_ms
+        // 命令形式：SET lock_key token NX PX lock_ttl_ms。
         //   NX = 仅当 key 不存在才设置（抢锁语义）；PX = 毫秒级过期（到点自动释放，崩溃也不卡死）
         // 返回：抢到 → Some("OK")；没抢到（key 已存在）→ None（Redis 返回 nil）
         let acquired: Option<String> = redis::cmd("SET")
@@ -608,7 +660,7 @@ return ttl[1]
             .unwrap_or(None);
 
         if acquired.is_some() {
-            // 抢到了：本节点（且此刻全局唯一）负责回源 + 回填
+            // 已取得有限期限的回源锁；loader 超过锁 TTL 后其它节点仍可能进入，不构成唯一写入权。
             let result = self
                 .load_and_fill::<T, F, Fut>(&mut conn, group, field, loader)
                 .await;
@@ -648,9 +700,11 @@ return ttl[1]
 
     /// 业务作用：通过 HDEL 失效指定 group 的单个 field。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `group`: Redis Hash key,表示要操作的缓存组。
     /// - `field`: Redis Hash field,表示要删除的组内条目。
+    ///
+    /// 返回：HDEL 得到确认后成功，条目缺失也成功；错误传播，不触发关联组删除或阻止旧 loader 回填。
     pub async fn invalidate_field(&self, group: &str, field: &str) -> anyhow::Result<()> {
         let mut conn = self.redis.clone();
         // turbofish ::<_, _, ()>：前两个 _ 让编译器推断 key/field 类型；()=不关心 HDEL 的返回值（删了几个）
@@ -660,8 +714,10 @@ return ttl[1]
 
     /// 业务作用：失效整个组及其登记的关联组。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `group`: 要清理的源缓存组名;函数会同时清理已登记的关联组。
+    ///
+    /// 返回：直接关联和源组去重后由一次 DEL 请求失效；错误传播，不递归展开关联，也不阻止在途回填。
     pub async fn invalidate_group(&self, group: &str) -> anyhow::Result<()> {
         // 先算出要删除的目标集合：自身 + clear_map 里登记的关联组。
         // read() 拿读锁，在这一行同步算完即释放（不跨 .await），再去做异步 DEL
@@ -676,10 +732,13 @@ return ttl[1]
 
     /// 业务作用：读 Hash field 并反序列化；脏值 / Redis 报错都降级为「未命中」（返回 None 继续回源）。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `conn`: 执行 HGET 的 Redis connection manager。
     /// - `group`: 场景对应的 Redis Hash key。
     /// - `field`: Hash field,通常由业务缓存 key 归一化得到。
+    ///
+    /// 返回：仅命中且解码成功时返回 Some；缺失、Redis 错误或 JSON 不符均返回 None，
+    /// 不删除损坏字段，后续是否回源由调用方决定。
     async fn try_read<T: DeserializeOwned>(
         &self,
         conn: &mut C,
@@ -715,7 +774,8 @@ return ttl[1]
 
     /// 业务作用：回源 + 回填（HSET），并按需给【该 field】设 per-field 兜底 TTL（HPEXPIRE，带抖动防雪崩）。
     ///
-    /// 返回：回源成功时返回业务值；缓存写入或过期失败会记录降级，回源失败直接返回错误。
+    /// 返回：回源及 JSON 序列化成功后返回业务值；缓存写入或过期失败只记录降级，
+    /// loader 或序列化失败直接返回错误。正 TTL 的脚本在过期设置失败时删除本次字段。
     ///
     /// 参数说明：
     /// - `conn`: 执行 HSET/HPEXPIRE 的 Redis connection manager。
@@ -779,17 +839,20 @@ pub const SEP: &str = ":";
 /// 用它而非各 service 手拼字符串：① 分隔符集中一处、改一次全改；② 杜绝"这里用 `:`、那里用 `_`"的不一致。
 /// 例：`field(&["BTCUSDT", "1m"])` → `"BTCUSDT:1m"`；`field(&[&uid.to_string(), symbol])` → `"123:BTCUSDT"`。
 ///
-/// # 参数
+/// 参数说明：
 /// - `parts`: 组成 Hash field 的业务片段,每个片段内部不应包含 [`SEP`]。
+///
+/// 返回：按原顺序连接的字段名；空列表得到空串，不校验或转义分隔符，调用方负责避免碰撞。
 pub fn field(parts: &[&str]) -> String {
     parts.join(SEP)
 }
 
-/// 业务作用：通用"空"判断：空数组 / null / 空对象 / 空串都算空（CacheLayer 与 GroupedCache 共用）。
-/// matches! 宏：判断 s 是否匹配右边任一字面量，等价一串 ||，但更紧凑可读。
+/// 业务作用：按缓存原文字节识别有限空值哨兵，用于 TTL 策略及空结果观察。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：通常由 serde_json 生成的紧凑正文，不在此处解析或去除空白。
+///
+/// 返回：仅原文为空或精确为 []、null、{} 时为 true；JSON 字符串的空值含引号，不属于原文空串。
 fn is_empty_payload(s: &str) -> bool {
     matches!(s, "[]" | "null" | "{}" | "")
 }
@@ -797,9 +860,11 @@ fn is_empty_payload(s: &str) -> bool {
 /// 业务作用：计算失效 `group` 时要 DEL 的目标集合：自身 + clear_map 里登记的关联组。
 /// 返回集合始终包含源组自身，保证没有关联项时仍能完成本组清理。
 ///
-/// # 参数
-/// - `map`: 当前函数读取或更新的键值映射。
-/// - `group`: 消费组、服务分组或任务分组名称。
+/// 参数说明：
+/// - `map`：源缓存组到直接关联组的只读登记快照。
+/// - `group`：本次需要失效的源缓存组。
+///
+/// 返回：包含源组和直接关联组的去重集合，顺序未定义，不递归展开关联也不执行 Redis 命令。
 fn cascade_targets(map: &HashMap<String, HashSet<String>>, group: &str) -> Vec<String> {
     // 用 HashSet 收集去重：自身和关联组可能重叠，避免 DEL 重复 key
     let mut set: HashSet<String> = HashSet::new();

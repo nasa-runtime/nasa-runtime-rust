@@ -33,7 +33,11 @@ pub struct EligibilityController {
 }
 impl EligibilityController {
     /// 业务作用：发布有期限的本地资格，不让接收者保留永久有效的最后成功值。
-    /// 参数说明：`ready` 为本地事实，`valid_for` 必须在一毫秒到三十秒之间。
+    ///
+    /// 参数说明：
+    /// - `ready`：为本地事实
+    /// - `valid_for`：必须在一毫秒到三十秒之间。
+    ///
     /// 返回：有效输入同步改变资格；非法期限拒绝且不开放接流。
     pub fn update(&self, ready: bool, valid_for: Duration) -> Result<()> {
         if valid_for < Duration::from_millis(1) || valid_for > Duration::from_secs(30) {
@@ -52,7 +56,9 @@ impl EligibilityController {
 }
 impl Drop for EligibilityController {
     /// 业务作用：发送者退出时立即撤销发布许可并唤醒注册监督。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：保留的读句柄不能延续最后一次 true。
     fn drop(&mut self) {
         self.signal.set(false);
@@ -61,7 +67,9 @@ impl Drop for EligibilityController {
 
 impl Eligibility {
     /// 业务作用：创建默认不接流的资格源，监听器准备后再显式开放。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：可由宿主保留的资格控制句柄。
     pub fn new() -> Self {
         Self {
@@ -74,7 +82,9 @@ impl Eligibility {
     }
 
     /// 业务作用：为手动宿主分离资格更新责任与传入 owner 的只读信号。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：唯一发送者和默认不接流的信号，发送者退出或证据过期均撤权。
     pub fn channel() -> (EligibilityController, Self) {
         let lifetime = Arc::new(());
@@ -90,7 +100,10 @@ impl Eligibility {
     }
 
     /// 业务作用：同步改变本地发布资格，与注册提交前复验使用同一把锁。
-    /// 参数说明：`ready` 表示该注册对应的本地 listener 和业务依赖是否可接流。
+    ///
+    /// 参数说明：
+    /// - `ready`：表示该注册对应的本地 listener 和业务依赖是否可接流。
+    ///
     /// 返回：后续发布立即受约束；手动 true 最多有效三十秒，需要宿主持续更新。
     pub fn set(&self, ready: bool) {
         let mut value = lock(&self.inner);
@@ -100,14 +113,19 @@ impl Eligibility {
     }
 
     /// 业务作用：读取本地资格供独立健康端点返回真实状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本地事实，不包含注册中心回查结果。
     pub fn is_ready(&self) -> bool {
         self.current(*lock(&self.inner))
     }
 
     /// 业务作用：绑定宿主可同步读取的本地资格，在实际发布点重新读取而不依赖轮询延迟。
-    /// 参数说明：`check` 必须无网络、有限时间返回，且不得重入 discovery 或改变资格对象。
+    ///
+    /// 参数说明：
+    /// - `check`：必须无网络、有限时间返回，且不得重入 discovery 或改变资格对象。
+    ///
     /// 返回：只依赖宿主当前事实的资格源；闭包必须自行包含停机和证据期限门禁。
     pub fn from_check(check: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {
@@ -120,7 +138,10 @@ impl Eligibility {
     }
 
     /// 业务作用：在已持有本地许可锁时复验证据期限或宿主实时状态。
-    /// 参数说明：`ready` 是保护范围内的显式许可。
+    ///
+    /// 参数说明：
+    /// - `ready`：是保护范围内的显式许可。
+    ///
     /// 返回：停止或证据到期均为 false。
     fn current(&self, ready: bool) -> bool {
         ready
@@ -137,7 +158,9 @@ impl Eligibility {
 
 impl Default for Eligibility {
     /// 业务作用：默认关闭发布许可，避免构造组件即对外注册。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：未就绪的本地资格源。
     fn default() -> Self {
         Self::new()
@@ -202,7 +225,9 @@ pub struct RegistrationStatus {
 
 impl RegistrationStatus {
     /// 业务作用：读取无需网络访问的当前发布证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已确认为 Active 且证据尚未到期才算远端就绪。
     pub fn is_ready(&self) -> bool {
         self.state == RegistrationState::Active
@@ -226,7 +251,11 @@ pub(crate) struct Record {
 
 impl Record {
     /// 业务作用：在第一项外部写入前持有完整计划和状态记录。
-    /// 参数说明：`spec` 已完成预检，`connection` 提供真实后端身份。
+    ///
+    /// 参数说明：
+    /// - `spec`：已完成预检
+    /// - `connection`：提供真实后端身份。
+    ///
     /// 返回：尚未发布的注册记录。
     pub(crate) fn new(spec: RegistrationSpec, connection: Arc<Connection>) -> Self {
         let health_revocation = connection.revocation.load(Ordering::Acquire);
@@ -253,7 +282,10 @@ impl Record {
     }
 
     /// 业务作用：统一裁决启动确认、宿主就绪与诊断读取的注册健康资格。
-    /// 参数说明：`gate` 是 owner 已持有的状态门禁，与连接撤权及健康证据发布串行。
+    ///
+    /// 参数说明：
+    /// - `gate`：是 owner 已持有的状态门禁，与连接撤权及健康证据发布串行。
+    ///
     /// 返回：旧身份代次、本地失权或停机的证据不能继续用于就绪；保留注销残留等独立生命周期事实。
     pub(crate) fn current_status(&self, gate: &Gate) -> RegistrationStatus {
         let mut status = lock(&self.status).clone();
@@ -286,7 +318,10 @@ struct Admission<'a> {
 }
 impl WriteAdmission for Admission<'_> {
     /// 业务作用：在 adapter 的实际传输提交点检查发布权并保存未知结果事实。
-    /// 参数说明：`submit` 是已经完成鉴权准备的同步提交动作。
+    ///
+    /// 参数说明：
+    /// - `submit`：是已经完成鉴权准备的同步提交动作。
+    ///
     /// 返回：许可有效时启动写入，失权时拒绝且不执行动作。
     fn submit(&self, submit: &mut dyn FnMut()) -> Result<()> {
         let (core, record) = (self.core, self.record);
@@ -309,7 +344,11 @@ impl WriteAdmission for Admission<'_> {
 }
 
 /// 业务作用：每个注册目标只运行一个写入与健康监督序列。
-/// 参数说明：`core` 管理停止信号，`record` 保存不可变外部身份。
+///
+/// 参数说明：
+/// - `core`：管理停止信号
+/// - `record`：保存不可变外部身份。
+///
 /// 返回：关闭后退出；已确认身份的幂等续约可协调重试，管理端禁用、缺失及未解决的相反写入不授予重新注册权限。
 pub(crate) async fn run(core: Arc<Core>, record: Arc<Record>) {
     let mut eligibility = record.spec.eligibility.changes.subscribe();
@@ -552,7 +591,13 @@ pub(crate) async fn run(core: Arc<Core>, record: Arc<Record>) {
 }
 
 /// 业务作用：注册或健康回查的认证撤销必须同时关闭该身份下的全部发现路由。
-/// 参数说明：`core` 提供通知，`gate` 是已持有的状态门禁，`connection` 是明确连接，`error` 是后端稳定错误类别。
+///
+/// 参数说明：
+/// - `core`：提供通知
+/// - `gate`：是已持有的状态门禁
+/// - `connection`：是明确连接
+/// - `error`：是后端稳定错误类别。
+///
 /// 返回：只有身份或权限失败会撤销连接证据，单注册冲突不影响其他服务。
 fn revoke_identity(core: &Core, gate: &Gate, connection: &Connection, error: &DiscoveryError) {
     if matches!(
@@ -564,7 +609,10 @@ fn revoke_identity(core: &Core, gate: &Gate, connection: &Connection, error: &Di
 }
 
 /// 业务作用：区分明确拒绝与请求可能已在远端执行的故障。
-/// 参数说明：`error` 由 adapter 将服务端拒绝映射为稳定类别。
+///
+/// 参数说明：
+/// - `error`：由 adapter 将服务端拒绝映射为稳定类别。
+///
 /// 返回：仅明确未执行的拒绝允许清除本次写入的不确定状态。
 fn definite_rejection(error: &DiscoveryError) -> bool {
     matches!(
@@ -578,8 +626,14 @@ fn definite_rejection(error: &DiscoveryError) -> bool {
 }
 
 /// 业务作用：发布注册状态变化，不在状态锁内执行后端调用。
-/// 参数说明：`core` 提供通知，`record` 是目标，`state`、`error` 是当前裁决。
-/// 返回：非 Active 状态同步清除就绪有效期。
+///
+/// 参数说明：
+/// - `core`：提供全局状态变化通知的运行时核心。
+/// - `record`：需要更新本地注册状态的记录。
+/// - `state`：当前裁决得到的注册状态。
+/// - `error`：与本次状态一并发布的可选受控错误。
+///
+/// 返回：无返回值；锁中更新状态和错误，非 Active 时清空 valid_until，随后解锁并通知变化。Active 时保留已有有效期，不自行续租或调用后端。
 fn set_state(
     core: &Core,
     record: &Record,
@@ -597,7 +651,12 @@ fn set_state(
 }
 
 /// 业务作用：尝试删除本 owner 曾提交的注册，结果不明时保留残留事实。
-/// 参数说明：`record` 是精确计划，`deadline` 是全局期限，`share` 防止单目标耗尽全部预算。
+///
+/// 参数说明：
+/// - `record`：是精确计划
+/// - `deadline`：是全局期限
+/// - `share`：防止单目标耗尽全部预算。
+///
 /// 返回：没有写过或明确删除且无旧未知写时标记 Removed，其余标记 Residual。
 pub(crate) async fn withdraw(record: Arc<Record>, deadline: Instant, share: Duration) {
     if !record.attempted.load(Ordering::Acquire) {
@@ -643,7 +702,10 @@ pub(crate) async fn withdraw(record: Arc<Record>, deadline: Instant, share: Dura
 }
 
 /// 业务作用：摘流终止后保留不能证明已删除的外部记录。
-/// 参数说明：`record` 的写入和摘流任务均已结束。
+///
+/// 参数说明：
+/// - `record`：的写入和摘流任务均已结束。
+///
 /// 返回：未写入的目标为 Removed，其余未完成目标为 Residual。
 pub(crate) fn finish_withdrawal(record: &Record) {
     let mut status = lock(&record.status);

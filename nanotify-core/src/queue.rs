@@ -112,7 +112,10 @@ pub enum DeliveryOutcome {
 
 impl From<NotifyErrorKind> for DeliveryOutcome {
     /// 业务作用：把渠道错误映射到统一投递指标。
-    /// 参数说明：`kind` 是稳定渠道失败分类。
+    ///
+    /// 参数说明：
+    /// - `kind`：是稳定渠道失败分类。
+    ///
     /// 返回：不会携带原始错误的固定结果。
     fn from(kind: NotifyErrorKind) -> Self {
         match kind {
@@ -144,14 +147,22 @@ pub struct QueueMetrics {
 
 impl QueueMetrics {
     /// 业务作用：为指标注册事务提供精确最坏系列数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部 provider、事件、结果和固定桶展开后的总系列数。
     pub fn series_budget(&self) -> usize {
         self.providers.len() * (3 + 9 + 30 + 10 * (LATENCY_SECONDS.len() + 3)) + 2
     }
 
     /// 业务作用：在一个 envelope 结束时写入唯一投递结果与总耗时。
-    /// 参数说明：`provider` 是冻结下标，`event` 为事件，`outcome` 为最终结果，`elapsed` 包含重试。
+    ///
+    /// 参数说明：
+    /// - `provider`：是冻结下标
+    /// - `event`：为事件
+    /// - `outcome`：为最终结果
+    /// - `elapsed`：包含重试。
+    ///
     /// 返回：无；未知下标不写入，业务结果不受影响。
     pub fn record_delivery(
         &self,
@@ -169,14 +180,18 @@ impl QueueMetrics {
 
 impl LegacyMetricsSource for QueueMetrics {
     /// 业务作用：声明此源拥有的静态通知指标合同。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定 descriptor 集合。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         DESCRIPTORS
     }
 
     /// 业务作用：从原子单元生成可供 Prometheus 和 OTLP 共用的有界快照。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部冻结维度的当前累计样本。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         let mut samples = Vec::new();
@@ -241,7 +256,10 @@ impl LegacyMetricsSource for QueueMetrics {
     }
 
     /// 业务作用：由统一 MetricHub 的结构化出口渲染，不建立第二份文本状态。
-    /// 参数说明：`output` 是宿主的输出缓冲区。
+    ///
+    /// 参数说明：
+    /// - `output`：是宿主的输出缓冲区。
+    ///
     /// 返回：无；结构化快照由 MetricHub 统一渲染。
     fn render_prometheus(&self, output: &mut String) {
         nametrics_core::atomic::render_snapshot(
@@ -281,7 +299,10 @@ pub enum EnqueueOutcome {
 
 impl AlertRoute {
     /// 业务作用：尝试移交通知所有权，满队列采用 drop-new 并记录稳定丢弃原因。
-    /// 参数说明：`notification` 是规则命中后才构造的有界消息。
+    ///
+    /// 参数说明：
+    /// - `notification`：是规则命中后才构造的有界消息。
+    ///
     /// 返回：入队、容量不足、停止或未初始化时忽略；本方法从不等待消费者或业务实现。
     pub fn try_send(&self, notification: Notification) -> EnqueueOutcome {
         // 未初始化的进程通知直接忽略，不占队列、不记录投递失败，也不在稍后初始化后补发旧事件。
@@ -332,7 +353,10 @@ pub struct NotificationProducer {
 
 impl NotificationProducer {
     /// 业务作用：在启动期把名称解析为可在热路径直接使用的队列路由。
-    /// 参数说明：`provider_ref` 必须来自经过校验的冻结配置。
+    ///
+    /// 参数说明：
+    /// - `provider_ref`：必须来自经过校验的冻结配置。
+    ///
     /// 返回：对应路由；未知 provider 返回 None。
     pub fn route(&self, provider_ref: &str) -> Option<AlertRoute> {
         self.state
@@ -349,7 +373,9 @@ impl NotificationProducer {
     }
 
     /// 业务作用：取得使用进程通知实现的非阻塞路由，未初始化时通知不进入队列。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：目录包含默认路由时返回生产能力；其它目录返回 None，不增建 provider 或指标维度。
     pub fn default_route(&self) -> Option<AlertRoute> {
         self.route(crate::DEFAULT_PROVIDER_ID).map(|mut route| {
@@ -358,13 +384,17 @@ impl NotificationProducer {
         })
     }
     /// 业务作用：先撤销所有生产路由的接受权，再由宿主排空已接受消息。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无；重复关闭没有额外副作用。
     pub fn close(&self) {
         self.state.accepting.store(false, Ordering::Release);
     }
     /// 业务作用：交出只持有原子单元的统一指标源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与生产端、worker 同源的指标句柄。
     pub fn metrics(&self) -> Arc<QueueMetrics> {
         self.state.metrics.clone()
@@ -383,7 +413,9 @@ pub struct Envelope {
 
 impl Drop for Envelope {
     /// 业务作用：即使关闭与已预留生产者并发，也为未被领取的消息回收深度并记录丢弃。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无；已被 worker 领取的消息不重复计数。
     fn drop(&mut self) {
         if self.queued {
@@ -405,7 +437,9 @@ pub struct NotificationReceiver {
 
 impl NotificationReceiver {
     /// 业务作用：取走一条已接受消息并从等待深度中扣除。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：消息或已关闭且排空的 None。
     pub async fn recv(&mut self) -> Option<Envelope> {
         let mut message = self.receiver.recv().await;
@@ -416,14 +450,18 @@ impl NotificationReceiver {
         message
     }
     /// 业务作用：关闭生产与接收入口，保留现有消息供有限排空。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无；关闭后不再接受新通知。
     pub fn close(&mut self) {
         self.state.accepting.store(false, Ordering::Release);
         self.receiver.close();
     }
     /// 业务作用：在停机预算耗尽时计数并释放尚未投递的消息。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本次放弃的消息数。
     pub fn discard_remaining(&mut self) -> usize {
         self.close();
@@ -438,7 +476,9 @@ impl NotificationReceiver {
 
 impl Drop for NotificationReceiver {
     /// 业务作用：异常退出也撤销旧路由并登记尚未消费的通知，避免悬空生产端。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无；只进行有限队列清理和原子计数。
     fn drop(&mut self) {
         self.discard_remaining();
@@ -450,7 +490,11 @@ pub struct NotificationQueue;
 
 impl NotificationQueue {
     /// 业务作用：按已引用 provider 的冻结目录预分配通知指标和有界队列。
-    /// 参数说明：`provider_ids` 为唯一合法标识，`capacity` 为 1..=65536 的队列容量。
+    ///
+    /// 参数说明：
+    /// - `provider_ids`：为唯一合法标识
+    /// - `capacity`：为 1..=65536 的队列容量。
+    ///
     /// 返回：生产端与唯一接收端；非法目录或容量不分配运行资源。
     pub fn bounded(
         provider_ids: Vec<String>,
@@ -490,13 +534,19 @@ impl NotificationQueue {
                 sender,
                 state: state.clone(),
             },
-            NotificationReceiver { receiver, state },
+            NotificationReceiver {
+                receiver,
+                state,
+            },
         ))
     }
 }
 
 /// 业务作用：限制 provider 目录和指标标签的字符集与长度。
-/// 参数说明：`id` 是普通配置中的渠道标识，不是渠道凭据。
+///
+/// 参数说明：
+/// - `id`：是普通配置中的渠道标识，不是渠道凭据。
+///
 /// 返回：仅当满足字母开头的 1..=64 字节 ASCII 标识时为真。
 pub fn valid_provider_id(id: &str) -> bool {
     (1..=64).contains(&id.len())

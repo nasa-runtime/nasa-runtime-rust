@@ -6,7 +6,10 @@ use tower::ServiceExt;
 use crate::{ApplicationPhase, ApplicationResult};
 
 /// 业务作用：限制手写业务子路由的挂载范围，使框架无需解析不透明 Axum Router 即可证明隔离。
-/// 参数说明：`prefix` 是应用相对的静态业务前缀，不含 context path。
+///
+/// 参数说明：
+/// - `prefix`：`prefix` 是应用相对的静态业务前缀。
+///
 /// 返回：非根且规范的静态路径成功；通配、转义、空段或上级路径均拒绝登记。
 pub(crate) fn validate_business_scope(prefix: &str) -> ApplicationResult<()> {
     if !prefix.starts_with('/')
@@ -29,7 +32,11 @@ pub(crate) fn validate_business_scope(prefix: &str) -> ApplicationResult<()> {
 }
 
 /// 业务作用：按路径段识别完整保留前缀，避免相似业务名称被误分派到控制面。
-/// 参数说明：`path` 是未经业务 middleware 改写的路径，`prefix` 是已规范化前缀。
+///
+/// 参数说明：
+/// - `path`：`path` 是未经业务 middleware 改写的路径。
+/// - `prefix`：`prefix` 是已规范化前缀。
+///
 /// 返回：前缀本身或它的子路径为真；仅字符串开头相同的相邻业务路径为假。
 pub(crate) fn under_prefix(path: &str, prefix: &str) -> bool {
     path == prefix
@@ -39,7 +46,11 @@ pub(crate) fn under_prefix(path: &str, prefix: &str) -> bool {
 }
 
 /// 业务作用：在绑定 listener 前拒绝与 Saga 相交的业务路由，包含参数路径和父级通配路径。
-/// 参数说明：`path` 是业务路由模式或静态作用域，`reserved` 是应用相对 Saga 前缀。
+///
+/// 参数说明：
+/// - `path`：`path` 是业务路由模式或静态作用域。
+/// - `reserved`：`reserved` 是应用相对 Saga 前缀。
+///
 /// 返回：业务路由可能占用前缀或其内部时为真；静态路径段已经分离时为假。
 pub(crate) fn intersects_reserved(path: &str, reserved: &str) -> bool {
     let mut route = path.trim_start_matches('/').split('/');
@@ -61,7 +72,12 @@ pub(crate) fn intersects_reserved(path: &str, reserved: &str) -> bool {
 }
 
 /// 业务作用：在进入任何业务路由或 layer 前将整个 Saga 前缀分派到专用认证链。
-/// 参数说明：`business` 已冻结业务 middleware，`saga` 自带认证与未知路径处理，`prefix` 含唯一 context path。
+///
+/// 参数说明：
+/// - `business`：`business` 已冻结业务 middleware。
+/// - `saga`：`saga` 自带认证与未知路径处理。
+/// - `prefix`：`prefix` 含唯一 context path。
+///
 /// 返回：共享原始请求与 listener 的独立分派器；Saga 未知路径和 method 也不会调用业务 fallback。
 pub(crate) fn isolate_saga(business: Router, saga: Router, prefix: String) -> Router {
     Router::new().fallback_service(tower::service_fn(move |request: Request| {
@@ -76,7 +92,12 @@ pub(crate) fn isolate_saga(business: Router, saga: Router, prefix: String) -> Ro
 }
 
 /// 业务作用：以原生子路由挂载限制业务作用域，同时保留框架授权所需的完整路由模板。
-/// 参数说明：`router` 是已有业务路由，`subtree` 内部路径相对于作用域，`prefix` 是已验证静态业务前缀。
+///
+/// 参数说明：
+/// - `router`：`router` 是已有业务路由。
+/// - `subtree`：`subtree` 内部路径相对于作用域。
+/// - `prefix`：`prefix` 是已验证静态业务前缀。
+///
 /// 返回：子路由只能服务声明前缀；业务 Path<T> 仅含自身参数，框架仍能取得完整 MatchedPath。
 pub(crate) fn mount_business_scope<S: Clone + Send + Sync + 'static>(
     router: Router<S>,

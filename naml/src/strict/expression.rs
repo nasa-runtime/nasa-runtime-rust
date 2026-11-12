@@ -31,7 +31,10 @@ pub struct Resolution {
 
 impl fmt::Debug for Resolution {
     /// 业务作用：避免解析结果在诊断中暴露配置正文。
-    /// 参数说明：`f` 是格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：是格式化目标。
+    ///
     /// 返回：仅报告依赖规模。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Resolution")
@@ -41,7 +44,12 @@ impl fmt::Debug for Resolution {
 }
 
 /// 业务作用：在独立候选树中解析表达式，失败时不修改调用方输入。
-/// 参数说明：`tree` 为原始完整树；`environment` 为固定环境；`policy` 为受信规则。
+///
+/// 参数说明：
+/// - `tree`：为原始完整树
+/// - `environment`：为固定环境
+/// - `policy`：为受信规则。
+///
 /// 返回：完整解析结果或安全错误。
 pub fn resolve(
     tree: &Value,
@@ -59,8 +67,14 @@ pub fn resolve(
 }
 
 /// 业务作用：只解析引导字段及其真实依赖，不提前求值等待 overlay 的业务叶子。
-/// 参数说明：`tree` 为原始合并树；`paths` 为所需字段；其余参数固定解析环境。
-/// 返回：按请求路径给出的完整引导值，未请求字段不会被传递为已解析值。
+///
+/// 参数说明：
+/// - `tree`：本轮固定的输入配置树。
+/// - `paths`：需要计算的配置路径列表，重复路径在结果映射中合并。
+/// - `environment`：本轮冻结的环境变量快照，不在求值时重新读取进程环境。
+/// - `policy`：控制路径、表达式、取消与资源预算的加载策略。
+///
+/// 返回：整树预检与全部所选路径求值成功时返回有序映射；路径不存在、策略拒绝、循环依赖、取消或预算超限返回错误，不交付部分映射。未选择且未被引用的节点不求值。
 pub fn resolve_selected(
     tree: &Value,
     paths: &[ConfigPath],
@@ -93,8 +107,13 @@ struct Evaluator<'a> {
 
 impl<'a> Evaluator<'a> {
     /// 业务作用：为单个候选创建独立依赖和展开预算。
-    /// 参数说明：`tree`、`environment`、`policy` 均在本轮固定。
-    /// 返回：尚未访问字段的求值状态。
+    ///
+    /// 参数说明：
+    /// - `tree`：本轮固定的输入配置树。
+    /// - `environment`：本轮冻结的环境变量快照，不在求值时重新读取进程环境。
+    /// - `policy`：控制路径、表达式、取消与资源预算的加载策略。
+    ///
+    /// 返回：返回借用固定输入、环境和策略的求值器，访问与展开计数从零开始且兼容模式关闭；不在构造时验证或求值。
     fn new(tree: &'a Value, environment: &'a EnvironmentSnapshot, policy: &'a LoadPolicy) -> Self {
         Self {
             tree,
@@ -114,7 +133,10 @@ impl<'a> Evaluator<'a> {
     }
 
     /// 业务作用：按节点身份解析依赖并在复制文本之前计入展开预算。
-    /// 参数说明：`path` 为当前字段。
+    ///
+    /// 参数说明：
+    /// - `path`：为当前字段。
+    ///
     /// 返回：已经完成求值的节点，不会再次把结果当成表达式源码。
     fn node(&mut self, path: &ConfigPath) -> Result<Value> {
         self.policy.check_cancelled()?;
@@ -187,7 +209,13 @@ impl<'a> Evaluator<'a> {
     }
 
     /// 业务作用：逐段拼接文本，整值引用保持被引用标量的类型。
-    /// 参数说明：`tokens` 是已校验语法；`path` 是当前节点；`depth` 为默认分支深度；`whole` 表示外层允许整值标量推断。
+    ///
+    /// 参数说明：
+    /// - `tokens`：是已校验语法
+    /// - `path`：是当前节点
+    /// - `depth`：为默认分支深度
+    /// - `whole`：表示外层允许整值标量推断。
+    ///
     /// 返回：选中分支的值，未使用分支不触发依赖访问。
     fn tokens(
         &mut self,
@@ -199,7 +227,12 @@ impl<'a> Evaluator<'a> {
         if depth > self.policy.limits.depth {
             return Err(ConfigError::new(ErrorKind::Limit).at(path));
         }
-        if let [Token::Reference { key, fallback, raw }] = tokens {
+        if let [Token::Reference {
+            key,
+            fallback,
+            raw,
+        }] = tokens
+        {
             return self.reference(key, fallback.as_deref(), raw, path, depth, whole);
         }
         let mut output = String::new();
@@ -209,7 +242,11 @@ impl<'a> Evaluator<'a> {
                     self.charge(text.len(), path)?;
                     text.clone()
                 }
-                Token::Reference { key, fallback, raw } => scalar_text(
+                Token::Reference {
+                    key,
+                    fallback,
+                    raw,
+                } => scalar_text(
                     self.reference(key, fallback.as_deref(), raw, path, depth, false)?,
                     path,
                 )?,
@@ -227,7 +264,15 @@ impl<'a> Evaluator<'a> {
     }
 
     /// 业务作用：保持配置、原样环境、规范化环境和默认值的既有优先级。
-    /// 参数说明：`key` 为引用键；`fallback` 为默认分支；`raw` 用于合法未命中保留；`path` 为当前字段；`depth` 为分支深度；`whole` 表示整值引用。
+    ///
+    /// 参数说明：
+    /// - `key`：为引用键
+    /// - `fallback`：为默认分支
+    /// - `raw`：用于合法未命中保留
+    /// - `path`：为当前字段
+    /// - `depth`：为分支深度
+    /// - `whole`：表示整值引用。
+    ///
     /// 返回：标量命中；禁止容器隐式字符串化，自引用只跳过树候选。
     fn reference(
         &mut self,
@@ -316,7 +361,11 @@ impl<'a> Evaluator<'a> {
     }
 
     /// 业务作用：在每次复制文本前限制单值和候选累计展开量。
-    /// 参数说明：`bytes` 为新增字节数；`path` 为当前字段。
+    ///
+    /// 参数说明：
+    /// - `bytes`：为新增字节数
+    /// - `path`：为当前字段。
+    ///
     /// 返回：预算内成功，超限时不继续扩展。
     fn charge(&mut self, bytes: usize, path: &ConfigPath) -> Result<()> {
         self.expanded = self
@@ -333,7 +382,11 @@ impl<'a> Evaluator<'a> {
     }
 
     /// 业务作用：仅按受信字段提示转换文本，不从字段名猜测密码或端口。
-    /// 参数说明：`value` 是完成解析的节点；`path` 用于查找策略。
+    ///
+    /// 参数说明：
+    /// - `value`：是完成解析的节点
+    /// - `path`：用于查找策略。
+    ///
     /// 返回：提示允许的值类型，显式 JSON 失败不会退回普通字符串。
     fn apply_hint(&self, value: Value, path: &ConfigPath) -> Result<Value> {
         match (self.policy.hint(path), value) {
@@ -364,7 +417,11 @@ impl<'a> Evaluator<'a> {
 }
 
 /// 业务作用：仅允许标量参与文本拼接，避免悄悄复制复杂结构。
-/// 参数说明：`value` 为引用结果；`path` 为引用位置。
+///
+/// 参数说明：
+/// - `value`：为引用结果
+/// - `path`：为引用位置。
+///
 /// 返回：不附加 JSON 字符串引号的文本。
 fn scalar_text(value: Value, path: &ConfigPath) -> Result<String> {
     match value {
@@ -376,7 +433,12 @@ fn scalar_text(value: Value, path: &ConfigPath) -> Result<String> {
 }
 
 /// 业务作用：完整校验表达式结构，包括不参与求值的默认分支。
-/// 参数说明：`text` 为原始字段；`policy` 限制语法开销；`compatible` 保留旧入口的字面键查找。
+///
+/// 参数说明：
+/// - `text`：为原始字段
+/// - `policy`：限制语法开销
+/// - `compatible`：保留旧入口的字面键查找。
+///
 /// 返回：带字面量保护的语法节点。
 fn parse_tokens(text: &str, policy: &LoadPolicy, compatible: bool) -> Result<Vec<Token>> {
     let mut position = 0;
@@ -404,7 +466,9 @@ struct SyntaxBudget {
 }
 impl SyntaxBudget {
     /// 业务作用：在语法节点分配前扣除共享数量预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仍有预算时成功，超限立即拒绝。
     fn node(&mut self) -> Result<()> {
         self.nodes = self
@@ -416,8 +480,16 @@ impl SyntaxBudget {
 }
 
 /// 业务作用：用嵌套边界解析默认值，普通文本的右括号保持字面含义。
-/// 参数说明：`text` 是原文；`position` 是游标；`nested` 表示右括号结束当前分支；`depth/limit` 限制栈深度；`budget` 约束节点与原文副本。
-/// 返回：当前序列；兼容默认分支先裁剪源码两侧空白，未闭合或动态 key 被拒绝。
+///
+/// 参数说明：
+/// - `text`：需要解析的完整表达式原文。
+/// - `position`：原位推进的 UTF-8 字节游标，调用方须保证从有效字符边界开始。
+/// - `nested`：是否在右花括号处结束当前默认值分支。
+/// - `depth`：当前引用默认值递归层数。
+/// - `limit`：允许的递归与转义嵌套深度上限。
+/// - `budget`：本次语法节点与保留原文副本共用的剩余预算。
+///
+/// 返回：返回当前位置解析出的字面量与引用序列并推进游标；嵌套模式遇右花括号保留该字符供调用方消费。引用、转义不闭合、路径非法或深度、节点、原文预算超限时失败，不恢复游标；兼容默认分支裁剪首尾源码字面空白。
 fn sequence(
     text: &str,
     position: &mut usize,
@@ -504,7 +576,11 @@ fn sequence(
             } else {
                 String::new()
             };
-            tokens.push(Token::Reference { key, fallback, raw });
+            tokens.push(Token::Reference {
+                key,
+                fallback,
+                raw,
+            });
         } else {
             let ch = rest
                 .chars()
@@ -533,8 +609,13 @@ fn sequence(
 }
 
 /// 业务作用：为旧入口保留整值环境与默认值的标量推断，同时复用嵌套语法和依赖边界。
-/// 参数说明：`tree` 为候选；`environment` 与 `policy` 固定本轮输入。
-/// 返回：完整解析结果，不更改树命中字符串的类型。
+///
+/// 参数说明：
+/// - `tree`：本轮固定的输入配置树。
+/// - `environment`：本轮冻结的环境变量快照，不在求值时重新读取进程环境。
+/// - `policy`：控制路径、表达式、取消与资源预算的加载策略。
+///
+/// 返回：兼容键预检和全树求值成功后返回树、依赖及实际访问环境；路径映射、表达式、循环、取消或预算失败返回错误，不发布配置。
 pub(crate) fn resolve_compatible(
     tree: &Value,
     environment: &EnvironmentSnapshot,
@@ -553,15 +634,24 @@ pub(crate) fn resolve_compatible(
 }
 
 /// 业务作用：在分配候选和语法节点前校验直接树输入及合并后的整体规模。
-/// 参数说明：`tree` 是来源树；`policy` 限制结构深度、节点和文本。
+///
+/// 参数说明：
+/// - `tree`：是来源树
+/// - `policy`：限制结构深度、节点和文本。
+///
 /// 返回：预算内成功，过深或过大的树不会进入求值。
 fn validate_tree(tree: &Value, policy: &LoadPolicy) -> Result<()> {
     validate_tree_keys(tree, policy, false)
 }
 
 /// 业务作用：独立校验树规模与键模型，使严格键约束不改变兼容入口的可接受字段。
-/// 参数说明：`tree/policy` 固定输入和预算；`compatible` 允许原有字面键但仍限制规模。
-/// 返回：结构与规模合法时成功，严格入口另外拒绝含糊的字段名称。
+///
+/// 参数说明：
+/// - `tree`：本轮固定的输入配置树。
+/// - `policy`：控制路径、表达式、取消与资源预算的加载策略。
+/// - `compatible`：是否按兼容规则放宽输入对象键形态。
+///
+/// 返回：遍历通过取消、节点、深度、字符串与累计输出容量检查时成功；严格模式还拒绝空键、点或方括号键及控制字符，兼容模式允许这些键形态但仍限制单键字节数。失败返回分类错误，不求值表达式。
 fn validate_tree_keys(tree: &Value, policy: &LoadPolicy, compatible: bool) -> Result<()> {
     let mut stack = vec![(tree, 0usize)];
     let mut nodes = 0usize;
@@ -621,7 +711,10 @@ fn validate_tree_keys(tree: &Value, policy: &LoadPolicy, compatible: bool) -> Re
 }
 
 /// 业务作用：复用兼容入口的点分名称身份，包括自引用与同名路径的覆盖判定。
-/// 参数说明：`path` 是树中真实节点的位置，字段名不会被重新拆分。
+///
+/// 参数说明：
+/// - `path`：是树中真实节点的位置，字段名不会被重新拆分。
+///
 /// 返回：有界的旧式名称；超限时停止构建索引。
 fn compatible_key(path: &ConfigPath) -> Result<String> {
     let mut name = String::new();
@@ -646,7 +739,11 @@ fn compatible_key(path: &ConfigPath) -> Result<String> {
 }
 
 /// 业务作用：保留旧入口的标量点分映射，名称冲突由原对象遍历中后遇到的字段覆盖。
-/// 参数说明：`tree` 为已校验规模的原树；`policy` 限制索引文本总量。
+///
+/// 参数说明：
+/// - `tree`：为已校验规模的原树
+/// - `policy`：限制索引文本总量。
+///
 /// 返回：旧式名称到真实结构路径的索引；数组仍不进入旧式映射。
 fn compatible_paths(tree: &Value, policy: &LoadPolicy) -> Result<BTreeMap<String, ConfigPath>> {
     let mut result = BTreeMap::new();
@@ -675,8 +772,14 @@ fn compatible_paths(tree: &Value, policy: &LoadPolicy) -> Result<BTreeMap<String
 }
 
 /// 业务作用：将环境覆盖视为已取得的原始文本，只允许受信类型提示进行转换。
-/// 参数说明：`tree/environment/policy` 是固定候选输入；`literal_inputs` 标识环境覆盖子树。
-/// 返回：不会再次解释环境内容的完整树。
+///
+/// 参数说明：
+/// - `tree`：本轮固定的输入配置树。
+/// - `environment`：本轮冻结的环境变量快照，不在求值时重新读取进程环境。
+/// - `policy`：控制路径、表达式、取消与资源预算的加载策略。
+/// - `literal_inputs`：由直接覆盖产生、必须按字面保留而不再次展开表达式的路径集合。
+///
+/// 返回：严格预检和全树求值成功后返回树及依赖、环境访问事实；literal_inputs 标识的直接值保持字面语义。解析、循环、取消或预算失败返回错误，不发布部分结果。
 pub(super) fn resolve_overlaid(
     tree: &Value,
     environment: &EnvironmentSnapshot,
@@ -695,8 +798,15 @@ pub(super) fn resolve_overlaid(
 }
 
 /// 业务作用：引导依赖闭包也保留环境原文，避免先后阶段采用不同解释规则。
-/// 参数说明：`paths` 是必要引导字段；其余参数为固定候选与环境覆盖位置。
-/// 返回：仅请求字段的已解析投影。
+///
+/// 参数说明：
+/// - `tree`：本轮固定的输入配置树。
+/// - `paths`：需要返回求值结果的配置路径列表。
+/// - `environment`：本轮冻结的环境变量快照，不在求值时重新读取进程环境。
+/// - `policy`：控制路径、表达式、取消与资源预算的加载策略。
+/// - `literal_inputs`：由直接覆盖产生、必须按字面保留而不再次展开表达式的路径集合。
+///
+/// 返回：严格预检与所选路径求值全部成功时返回有序映射，直接覆盖路径按字面处理；路径不存在、表达式、循环、取消或预算失败返回错误。
 pub(super) fn resolve_selected_overlaid(
     tree: &Value,
     paths: &[ConfigPath],

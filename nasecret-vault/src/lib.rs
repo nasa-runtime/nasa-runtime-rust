@@ -29,6 +29,10 @@ pub struct VaultOptions {
 
 impl Default for VaultOptions {
     /// 业务作用：使用 3 秒、256 KiB 且只信任 endpoint 自身 host 的保守缺省。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回三秒请求总超时、256 KiB 响应上限与空主机白名单；不读取 token 或连接 Vault。
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(3),
@@ -67,6 +71,11 @@ pub struct VaultKvV2Provider {
 
 impl std::fmt::Debug for VaultKvV2Provider {
     /// 业务作用：仅展示 host、mount 与响应上限，固定隐藏 bootstrap token。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收提供方配置摘要的格式化器。
+    ///
+    /// 返回：只展示 endpoint 主机、mount、响应容量并将 token 替换为固定占位符；格式化写出失败返回错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("VaultKvV2Provider")
@@ -80,6 +89,14 @@ impl std::fmt::Debug for VaultKvV2Provider {
 
 impl VaultKvV2Provider {
     /// 业务作用：创建 adapter；bootstrap token 必须来自 env/file/root-of-trust，不能由该 provider 自身解析。
+    ///
+    /// 参数说明：
+    /// - `endpoint`：可信配置中的 Vault 根 URL，可带部署路径前缀，不得含凭据、查询或片段。
+    /// - `mount`：KV 挂载的单个安全路径段。
+    /// - `token`：由独立引导流程提供的 Vault 访问 token 材料。
+    /// - `options`：请求超时、有界响应和可选主机白名单。
+    ///
+    /// 返回：endpoint 协议与主机策略、单段 mount、超时和容量合法且 HTTP 客户端构建成功时返回提供方；非法时返回配置分类错误。不验证 token 可用性或发起请求，token 的文本可编码性延迟到 read 检查。
     pub fn new(
         endpoint: &str,
         mount: impl Into<String>,
@@ -138,6 +155,11 @@ impl VaultKvV2Provider {
     }
 
     /// 业务作用：校验 `path#field`、执行有界 KV v2 请求并只提取目标字符串字段。
+    ///
+    /// 参数说明：
+    /// - `key`：采用 path/to/secret#field 形态的查询标识，路径与字段各段须通过安全字符规则。
+    ///
+    /// 返回：key 为有界安全路径加 #字段且远端成功返回符合 KV 响应结构的非空字符串时，返回其 UTF-8 材料清零容器；路径、token、状态、超限、网络、JSON 或字段异常均返回不带正文的单位错误。不刷新 token、不跟随重定向。
     async fn read_inner(&self, key: &str) -> Result<SecretBytes, SecretProviderError> {
         if key.len() > MAX_VAULT_KEY_BYTES {
             return Err(SecretProviderError);
@@ -201,12 +223,22 @@ impl VaultKvV2Provider {
 #[async_trait::async_trait]
 impl SecretProvider for VaultKvV2Provider {
     /// 业务作用：通过统一 provider 合同读取一个 Vault KV v2 字段。
+    ///
+    /// 参数说明：
+    /// - `key`：带 #字段选择器的稳定 Vault 查询标识。
+    ///
+    /// 返回：返回 read_inner 读取到的清零容器或脱敏单位错误，不另行缓存、重试或推导其它字段。
     async fn read(&self, key: &str) -> Result<SecretBytes, SecretProviderError> {
         self.read_inner(key).await
     }
 }
 
 /// 业务作用：限制 mount、path 与 field 为单个有界 ASCII 路径段。
+///
+/// 参数说明：
+/// - `value`：待用于 mount、路径段或字段选择器的原标识。
+///
+/// 返回：非空、非 . 或 ..、最多 128 字节且只含 ASCII 字母数字、连字符、下划线或点时返回 true，否则 false，不解码 URL 转义。
 fn safe_segment(value: &str) -> bool {
     !value.is_empty()
         && value != "."
@@ -234,11 +266,19 @@ struct SecretJsonString(Zeroizing<String>);
 
 impl SecretJsonString {
     /// 业务作用：判断返回字段是否为空。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：底层敏感字符串长度为零时返回 true，不输出内容。
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// 业务作用：借用 UTF-8 secret 字节，避免额外普通字符串复制。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回生命周期受当前清零字符串约束的 UTF-8 字节借用，不复制材料。
     fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
@@ -246,6 +286,11 @@ impl SecretJsonString {
 
 impl<'de> serde::Deserialize<'de> for SecretJsonString {
     /// 业务作用：使用自定义 visitor 直接把 JSON 字符串放入可清零容器。
+    ///
+    /// 参数说明：
+    /// - `deserializer`：提供 Vault 字段字符串的 serde 来源。
+    ///
+    /// 返回：反序列化为拥有的清零字符串；只接受目标反序列化器可提供的字符串表示，非法类型返回其错误，不解析数字或复合值为材料。
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -257,11 +302,21 @@ impl<'de> serde::Deserialize<'de> for SecretJsonString {
             type Value = SecretJsonString;
 
             /// 业务作用：描述反序列化器期望的 secret 字符串类型。
+            ///
+            /// 参数说明：
+            /// - `formatter`：接收反序列化类型说明的格式化器。
+            ///
+            /// 返回：写出固定的字符串类型期望或传播格式化错误，不包含实际字段材料。
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a secret string")
             }
 
             /// 业务作用：复制借用字符串到可清零所有权容器。
+            ///
+            /// 参数说明：
+            /// - `value`：由反序列化器临时借用的 secret 文本。
+            ///
+            /// 返回：复制借用字符串并包入 Zeroizing 后成功返回，不修改或清除来源缓冲，也不拒绝空字符串。
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
@@ -270,6 +325,11 @@ impl<'de> serde::Deserialize<'de> for SecretJsonString {
             }
 
             /// 业务作用：直接接管已有 String 并包装为可清零容器。
+            ///
+            /// 参数说明：
+            /// - `value`：由反序列化器移交的拥有 secret 文本。
+            ///
+            /// 返回：直接接管拥有字符串并包入 Zeroizing 后成功返回，不复制、不验证非空；非空约束由读取字段后检查。
             fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,

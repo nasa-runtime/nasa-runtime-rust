@@ -13,4 +13,4 @@ categories = ["database", "asynchronous"]
 [dependencies]
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1.54.1", features = ["sync"] }

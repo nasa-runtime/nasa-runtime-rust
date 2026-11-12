@@ -51,35 +51,38 @@ pub enum ApplicationExitReason {
 /// `code` 只由首次终止事件决定；清理失败单独保存在报告中，不会反向覆盖正常退出语义。
 #[derive(Debug)]
 pub struct ApplicationExit {
+    /// 首次终止事件，清理期间发生的次要错误不能覆盖。
     reason: ApplicationExitReason,
+    /// 供进程入口使用的退出码，不在读取时退出进程。
     code: u8,
+    /// 清理链中收集的次要失败，独立于首次终止原因。
     shutdown_failures: Vec<ApplicationError>,
 }
 
 impl ApplicationExit {
     /// 业务作用：返回决定本次正常退出的首次事件。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回值不会因后续清理失败改变。
+    /// 返回：首次终止事件对应的退出原因；后续清理失败不会覆盖该原因。
     pub fn reason(&self) -> ApplicationExitReason {
         self.reason
     }
 
     /// 业务作用：返回进程入口应使用的退出码。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回值已经包含 Batch 信号中断的非零映射。
+    /// 返回：由终止原因确定的退出码，已包含 Batch 信号中断的非零映射；读取不终止进程。
     pub fn code(&self) -> u8 {
         self.code
     }
 
     /// 业务作用：返回 active stack 清理过程中收集到的次要错误。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；借用只在当前退出报告存活期间有效。
+    /// 返回：清理失败的只读切片，借用不超过报告的生命周期；空集合表示未记录清理错误。
     pub fn shutdown_failures(&self) -> &[ApplicationError] {
         &self.shutdown_failures
     }
@@ -102,11 +105,17 @@ enum ServiceTerminal {
 /// active stack 各类步骤的停机计数；字段集合固定，不把业务名称放入指标维度。
 #[derive(Default)]
 struct ShutdownStepCounts {
+    /// 已处理的组件清理动作数量。
     component_actions: usize,
+    /// 已处理的 initializer 清理动作数量。
     initializer_actions: usize,
+    /// 已处理的任务排干门数量。
     task_gates: usize,
+    /// 已处理的业务资源清理步骤数量。
     business_resources: usize,
+    /// 已处理的组件资源清理步骤数量。
     component_resources: usize,
+    /// 已处理的 initializer 资源清理步骤数量。
     initializer_resources: usize,
 }
 
@@ -115,14 +124,21 @@ struct ShutdownStepCounts {
 /// Runner 独占组件表、active stack、任务 JoinSet 和终态写权限，从而让所有关键顺序都由一个异步控制流线性化。
 #[doc(hidden)]
 pub struct ApplicationRunner {
+    /// 生命周期状态与公共能力的共享入口。
     application: Application,
+    /// 受管任务的独占监督器，控制登记、退出裁决及依赖保留。
     supervisor: TaskSupervisor,
+    /// 按启动顺序持有的组件对象及冻结元数据。
     components: Vec<ComponentEntry>,
+    /// 已登记清理责任的栈，停机按相反顺序消费。
     active: ActiveStack,
     // 出栈不代表任务已退出；跨 await 保留任务门，外层取消时仍约束资源释放。
     task_gate_in_progress: bool,
+    /// run 建立控制面时采用的信号来源。
     signal_mode: SignalMode,
+    /// 全部异步启动阶段共享的预算，不随阶段重置。
     startup_timeout: Duration,
+    /// 一次停机清理共享的预算，不随清理步骤重置。
     shutdown_timeout: Duration,
 }
 
@@ -187,8 +203,11 @@ impl Drop for ApplicationRunner {
 
 /// 任务门之后尚未释放的生命周期所有权，不包含监督器，避免与任务存活守卫形成保留环。
 struct CancelledRunnerCleanup {
+    /// 用于封闭登记与资源借用的应用身份。
     application: Application,
+    /// 外层取消时尚未消费的清理责任。
     active: ActiveStack,
+    /// 保留到依赖任务结束后才释放的组件所有权。
     components: Vec<ComponentEntry>,
 }
 
@@ -232,7 +251,10 @@ struct ComponentEntry {
 
 impl ComponentEntry {
     /// 业务作用：接管组件对象但不调用扩展方法，登记失败或未运行时也保留析构隔离。
-    /// 参数说明：`component` 为调用方移交的生命周期实现。
+    ///
+    /// 参数说明：
+    /// - `component`：`component` 为调用方移交的生命周期实现。
+    ///
     /// 返回：尚未读取身份和依赖的组件项；元数据准备前的释放归因于 Application。
     fn new(component: Box<dyn ApplicationComponent>) -> Self {
         Self {
@@ -247,7 +269,10 @@ impl ComponentEntry {
     }
 
     /// 业务作用：为自动附加组件完成与显式声明相同的元数据门禁。
-    /// 参数说明：`component` 为框架构造但尚未执行生命周期的组件。
+    ///
+    /// 参数说明：
+    /// - `component`：`component` 为框架构造但尚未执行生命周期的组件。
+    ///
     /// 返回：元数据已经冻结的受保护对象；扩展读取展开时返回 Bootstrap 错误。
     #[cfg(any(
         feature = "config-watch",
@@ -261,7 +286,9 @@ impl ComponentEntry {
     }
 
     /// 业务作用：在所有阶段开始前一次性读取稳定元数据，阻止阶段间身份漂移与异常越过回滚边界。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：身份与依赖均可读取时冻结；任一读取展开转为固定 Bootstrap 错误，不读取异常正文。
     fn freeze_metadata(&mut self) -> ApplicationResult<()> {
         if self.metadata.is_some() {
@@ -291,12 +318,17 @@ impl ComponentEntry {
                     "component dependency metadata panicked",
                 )
             })?;
-        self.metadata = Some(ComponentMetadata { id, dependencies });
+        self.metadata = Some(ComponentMetadata {
+            id,
+            dependencies,
+        });
         Ok(())
     }
 
     /// 业务作用：向排序、配置投影和阶段上下文提供同一冻结元数据，避免再进入扩展代码。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已通过准备门禁的身份与静态依赖；准备前读取属于内部状态错误。
     fn metadata(&self) -> &ComponentMetadata {
         self.metadata
@@ -314,8 +346,14 @@ impl ComponentEntry {
 /// 返回：无返回值；单项析构异常独立告警，不截断其余步骤，不调用业务异步主体。
 fn release_cancelled_step(application: &Application, step: ActiveStep) {
     match step {
-        ActiveStep::Action { mut action, .. }
-        | ActiveStep::InitializerAction { mut action, .. } => {
+        ActiveStep::Action {
+            mut action,
+            ..
+        }
+        | ActiveStep::InitializerAction {
+            mut action,
+            ..
+        } => {
             if let Some(error) = action.release() {
                 report_shutdown(&error);
             }
@@ -340,7 +378,10 @@ fn release_cancelled_step(application: &Application, step: ActiveStep) {
 
 impl ApplicationRunner {
     /// 业务作用：把同步引导权威移交给后续组件，业务 Hook 无权替换。
-    /// 参数说明：`source` 是可选严格配置来源。
+    ///
+    /// 参数说明：
+    /// - `source`：`source` 是可选严格配置来源。
+    ///
     /// 返回：登记完成的 runner 或来源冲突错误。
     pub(crate) fn with_strict_source(
         self,
@@ -353,7 +394,10 @@ impl ApplicationRunner {
     }
 
     /// 业务作用：将未排干消费器的整段依赖所有权延迟到实际退出后释放。
-    /// 参数说明：`cleanup` 为尚未执行清理的动作、资源和组件集合。
+    ///
+    /// 参数说明：
+    /// - `cleanup`：`cleanup` 为尚未执行清理的动作、资源和组件集合。
+    ///
     /// 返回：同步关闭外部借用；所有来源和受管任务都释放守卫后才析构依赖，不声明异步清理成功。
     #[cfg(feature = "redis")]
     fn retain_partition_dependencies(&mut self, cleanup: CancelledRunnerCleanup) {
@@ -370,7 +414,8 @@ impl ApplicationRunner {
 
     /// 业务作用：外层取消时立即撤销公共入口，并把任务门之后的资源释放责任交给任务存活边界。
     ///
-    /// 参数说明：`cleanup` 持有尚未消费的 active stack、资源表和组件所有权。
+    /// 参数说明：
+    /// - `cleanup`：`cleanup` 持有尚未消费的 active stack、资源表和组件所有权。
     ///
     /// 返回：无返回值；不等待任务退出，最后一个任务 future 析构后才释放清理尾部。
     fn defer_cancelled_cleanup(&mut self, cleanup: CancelledRunnerCleanup) {
@@ -404,9 +449,11 @@ impl ApplicationRunner {
 
     /// 业务作用：设置覆盖全部启动阶段的单一绝对预算。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `timeout`：同步预检完成后允许异步启动消费的总时长。
+    ///
+    /// 返回：持有新预算的执行器；预算为零或超过 365 天时产生 panic，外部配置应使用可返回错误的入口。
     #[doc(hidden)]
     pub fn startup_timeout(self, timeout: Duration) -> Self {
         self.try_startup_timeout(timeout)
@@ -414,6 +461,11 @@ impl ApplicationRunner {
     }
 
     /// 业务作用：校验并设置启动预算；低层装配器可用本入口把外部边界错误转成 Bootstrap 失败。
+    ///
+    /// 参数说明：
+    /// - `timeout`：信号控制面建立后，全部异步启动阶段共享的总时长。
+    ///
+    /// 返回：非零且不超过 365 天时返回更新后的执行器；否则返回 Bootstrap 阶段错误，不启动任何组件。
     #[doc(hidden)]
     pub fn try_startup_timeout(mut self, timeout: Duration) -> ApplicationResult<Self> {
         validate_lifecycle_timeout(timeout, ApplicationPhase::Bootstrap, "startup")?;
@@ -423,9 +475,11 @@ impl ApplicationRunner {
 
     /// 业务作用：设置一次反向清理可以消费的全局预算。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `timeout`：所有任务、资源和 action 共享的总时长，不会按步骤重置。
+    ///
+    /// 返回：持有新停机预算的执行器；预算为零或超过 365 天时产生 panic。
     #[doc(hidden)]
     pub fn shutdown_timeout(self, timeout: Duration) -> Self {
         self.try_shutdown_timeout(timeout)
@@ -433,6 +487,11 @@ impl ApplicationRunner {
     }
 
     /// 业务作用：校验并设置停机预算；低层装配器可用本入口把外部边界错误转成配置失败。
+    ///
+    /// 参数说明：
+    /// - `timeout`：本次反向清理共享的总时长，任务和资源释放不能各自重新取得完整预算。
+    ///
+    /// 返回：非零且不超过 365 天时返回更新后的执行器；否则返回 Stopping 阶段错误，尚不执行停机。
     #[doc(hidden)]
     pub fn try_shutdown_timeout(mut self, timeout: Duration) -> ApplicationResult<Self> {
         validate_lifecycle_timeout(timeout, ApplicationPhase::Stopping, "shutdown")?;
@@ -440,11 +499,11 @@ impl ApplicationRunner {
         Ok(self)
     }
 
-    /// 业务作用：开启真实进程信号控制面。
+    /// 业务作用：让后续 run 建立真实进程信号控制面；嵌入式调用方可保持关闭并自行决定终止条件。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；同步进程入口必须调用，嵌入式调用方可保持关闭并自行管理终止条件。
+    /// 返回：已选择进程信号模式的执行器；这里只记录选择，尚未安装信号处理器。
     #[doc(hidden)]
     pub fn with_process_signals(mut self) -> Self {
         self.signal_mode = SignalMode::Process;
@@ -453,7 +512,9 @@ impl ApplicationRunner {
 
     /// 业务作用：按声明顺序追加一个生命周期组件。
     ///
-    /// 参数说明：`component` 由 Runner 独占并依次执行 Bootstrap、Start、Prepare 和 Ready。
+    /// 参数说明：
+    /// - `component`：`component` 由 Runner 独占并依次执行 Bootstrap、Start、Prepare 和 Ready。
+    ///
     /// 返回：登记不读取动态元数据；run 在阶段执行前统一冻结。对象从登记起受析构隔离保护，依赖收口后才释放。
     #[doc(hidden)]
     pub fn with_component(mut self, component: Box<dyn ApplicationComponent>) -> Self {
@@ -462,7 +523,9 @@ impl ApplicationRunner {
     }
 
     /// 业务作用：将已编入的观测能力纳入相同生命周期，不要求业务额外声明组件。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：在数据库 I/O 与业务路由之前插入已冻结元数据的组件，保留已有相对顺序；元数据读取失败阻止启动。
     fn attach_observability_components(&mut self) -> ApplicationResult<()> {
         #[cfg(feature = "config-watch")]
@@ -530,9 +593,11 @@ impl ApplicationRunner {
 
     /// 业务作用：原子替换当前配置视图并通知订阅者。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `next`：已经完成 bootstrap-only 比较和组件校验的新视图。
+    ///
+    /// 返回：完成视图发布并通知订阅者，已借出的旧 Arc 保持原内容；本入口不重复执行配置校验。
     #[doc(hidden)]
     pub fn replace_config(&self, next: Arc<ConfigView>) {
         self.application.publish_config(next);
@@ -828,11 +893,11 @@ impl ApplicationRunner {
         }
     }
 
-    /// 业务作用：对最终配置树中“有配置段却没有声明组件”的情况输出一次脱敏告警。
+    /// 业务作用：检查最终配置树中的未声明组件配置段，提醒配置不会使组件自动启动。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；告警只包含配置段名与组件名，不含段内任何值。
+    /// 返回：每次调用为命中的配置段输出脱敏告警，不含段内值；不删除配置或拒绝启动。
     fn warn_undeclared_config_sections(&self) {
         let snapshot = self.application.config();
         crate::sections::warn_undeclared_sections(&self.declared_components(), snapshot.value());
@@ -840,9 +905,9 @@ impl ApplicationRunner {
 
     /// 业务作用：对最终配置树中所有已声明组件的配置段做一次无副作用校验。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；校验失败时组件尚未创建任何连接或监听副作用。
+    /// 返回：已声明段通过校验时成功；非法配置返回 Start 阶段错误，阻止后续组件启动；本方法不创建连接或监听器。
     fn validate_declared_config_sections(&self) -> ApplicationResult<()> {
         let snapshot = self.application.config();
         crate::sections::validate_declared_sections(
@@ -852,11 +917,11 @@ impl ApplicationRunner {
         )
     }
 
-    /// 业务作用：返回当前组件表按声明顺序展开的组件身份列表。
+    /// 业务作用：读取当前组件表的冻结身份，供配置覆盖及依赖顺序校验使用。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；顺序与属性入口的源码声明顺序一致。
+    /// 返回：按当前表顺序排列的新列表，包含 Runner 自动插入的组件；不重新调用组件的动态元数据方法。
     fn declared_components(&self) -> Vec<ComponentId> {
         self.components
             .iter()
@@ -866,9 +931,9 @@ impl ApplicationRunner {
 
     /// 业务作用：校验动态组件对象的唯一性和显式依赖顺序。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；校验只读取 Runner 已持有的组件表，不重排声明顺序。
+    /// 返回：组合约束、迁移所需数据库及组件依赖全部满足时成功；重复或缺失依赖返回 Bootstrap 错误，不重排组件表。
     fn validate_component_order(&self) -> ApplicationResult<()> {
         let component_ids = self.declared_components();
         crate::spec::validate_component_order(&component_ids)?;
@@ -1104,7 +1169,9 @@ impl ApplicationRunner {
                             }
                         }
                         _ = tokio::time::sleep(remaining) => {
-                            return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Prepare)));
+                            return Err(StartupStop::Failure(startup_timeout_error(
+                                ApplicationPhase::Prepare,
+                            )));
                         }
                     }
                 }
@@ -1126,7 +1193,9 @@ impl ApplicationRunner {
                 biased;
                 _ = cancellation.cancelled() => return Err(StartupStop::Requested),
                 signal = broker.next() => return Err(signal_to_startup_stop(signal)),
-                _ = tokio::time::sleep_until(deadline) => return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Prepare))),
+                _ = tokio::time::sleep_until(deadline) => return Err(StartupStop::Failure(startup_timeout_error(
+                    ApplicationPhase::Prepare,
+                ))),
                 completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
                     if let Some(completion) = completion {
                         classify_startup_completion(completion)?;
@@ -1135,13 +1204,15 @@ impl ApplicationRunner {
                 result = &mut adapters => {
                     if let Some(task) = result.map_err(StartupStop::Failure)? {
                         // 资源清理责任已经压栈；探测任务交给同一监督器，在统一屏障后运行并在释放资源前收割。
-                        self.supervisor.spawn_component_critical(
-                            "managed-outbound-health-monitor",
-                            Box::pin(async move { task.await.map_err(anyhow::Error::from) }),
-                        ).map_err(StartupStop::Failure)?;
+                        self.supervisor
+                            .spawn_component_critical(
+                                "managed-outbound-health-monitor",
+                                Box::pin(async move { task.await.map_err(anyhow::Error::from) }),
+                            )
+                            .map_err(StartupStop::Failure)?;
                     }
                     break;
-                },
+                }
             }
         }
         Ok(())
@@ -1213,11 +1284,17 @@ impl ApplicationRunner {
                             "initializer factory completed"
                         );
                         if let Some(initializer) = initializer {
-                            enabled.push(EnabledInitializer { spec, initializer });
+                            enabled.push(EnabledInitializer {
+                                spec,
+                                initializer,
+                            });
                         }
                     }
                     FrozenInitializer::Runtime { spec, initializer } => {
-                        enabled.push(EnabledInitializer { spec, initializer });
+                        enabled.push(EnabledInitializer {
+                            spec,
+                            initializer,
+                        });
                     }
                 }
             }
@@ -1305,7 +1382,11 @@ impl ApplicationRunner {
             result = finish_startup_release(result, entry.initializer.release());
         }
         for entry in &mut pending {
-            if let FrozenInitializer::Runtime { initializer, .. } = entry {
+            if let FrozenInitializer::Runtime {
+                initializer,
+                ..
+            } = entry
+            {
                 result = finish_startup_release(result, initializer.release());
             }
         }
@@ -1424,7 +1505,7 @@ impl ApplicationRunner {
                             }
                         }
                     }
-                    _ = tokio::task::yield_now() => {}
+                    _ = tokio::task::yield_now() => {},
                 }
                 let token = self.supervisor.task_token();
                 let future = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -1492,6 +1573,7 @@ impl ApplicationRunner {
     }
 
     /// 业务作用：按声明顺序装配组件并移交终端所有权；任务主体等待全应用屏障，Batch 不开放业务 listener。
+    ///
     /// 参数说明：
     ///
     /// - `deadline`：与 Bootstrap、Start、UserHook、Prepare 和 Initialization 共享的启动截止时间。
@@ -1559,7 +1641,9 @@ impl ApplicationRunner {
                                     }
                                 }
                                 _ = tokio::time::sleep(remaining) => {
-                                    return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Ready)));
+                                    return Err(StartupStop::Failure(startup_timeout_error(
+                                        ApplicationPhase::Ready,
+                                    )));
                                 }
                             }
                         }
@@ -1613,7 +1697,11 @@ impl ApplicationRunner {
     }
 
     /// 业务作用：监听器放行后等待远端注册确认，同时继续处理停机和关键任务失败。
-    /// 参数说明：`deadline` 是原始启动截止点，`broker` 是同一进程信号源。
+    ///
+    /// 参数说明：
+    /// - `deadline`：`deadline` 是原始启动截止点。
+    /// - `broker`：`broker` 是同一进程信号源。
+    ///
     /// 返回：必需注册真实确认才完成启动，不为网络注册另开预算。
     #[cfg(feature = "discovery-runtime")]
     async fn confirm_discovery_startup(
@@ -1634,18 +1722,31 @@ impl ApplicationRunner {
                 _ = cancellation.cancelled() => return Err(StartupStop::Requested),
                 signal = broker.next() => return Err(signal_to_startup_stop(signal)),
                 completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
-                    if let Some(completion) = completion { classify_startup_completion(completion)?; }
+                    if let Some(completion) = completion {
+                        classify_startup_completion(completion)?;
+                    }
                 }
-                _ = tokio::time::sleep_until(deadline) => { startup_remaining(deadline, ApplicationPhase::Ready)?; }
+                _ = tokio::time::sleep_until(deadline) => {
+                    startup_remaining(deadline, ApplicationPhase::Ready)?;
+                }
                 result = confirmation.changed() => {
-                    if result.is_err() { return Err(StartupStop::Failure(runner_error(ApplicationPhase::Ready, "discovery startup confirmation closed"))); }
+                    if result.is_err() {
+                        return Err(StartupStop::Failure(runner_error(
+                            ApplicationPhase::Ready,
+                            "discovery startup confirmation closed",
+                        )));
+                    }
                 }
             }
         }
     }
 
     /// 业务作用：在全部任务工厂构造后复验最终静态条件、预算、取消及既有任务失败，保护唯一启动发布点。
-    /// 参数说明：`deadline` 是全局启动截止时刻，`broker` 提供待处理停止信号。
+    ///
+    /// 参数说明：
+    /// - `deadline`：`deadline` 是全局启动截止时刻。
+    /// - `broker`：`broker` 提供待处理停止信号。
+    ///
     /// 返回：仍可发布执行许可时成功；终止证据存在时保持屏障关闭并进入统一清理。
     async fn final_startup_check(
         &mut self,
@@ -1701,11 +1802,14 @@ impl ApplicationRunner {
 
     /// 业务作用：把 UserHook 放入 Runner 独占的 JoinSet，并处理其任务登记 ACK、panic 和启动中断。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `user_hook`：业务启动闭包；其 future 必须可在线程间移动并拥有全部捕获值。
+    /// - `allow_initializer_registration`：是否允许 Hook 登记 initializer；关闭时不开放该登记窗口。
     /// - `deadline`：整个异步启动共享的绝对截止时间。
     /// - `broker`：与 Hook 和 Supervisor 同时轮询的信号控制面。
+    ///
+    /// 返回：Hook 正常完成时成功；任务失败、超时、取消或信号转换为启动中断。返回前关闭 Hook 登记窗口，清理由调用方继续处理。
     async fn run_user_hook<F, Fut, E>(
         &mut self,
         user_hook: F,
@@ -1718,6 +1822,7 @@ impl ApplicationRunner {
         Fut: Future<Output = Result<(), E>> + Send + 'static,
         E: Into<anyhow::Error> + 'static,
     {
+        // 登记权限只覆盖本次 Hook 执行窗口，不能让尚未开始的业务任务提前登记初始化动作。
         self.application.open_user_hook();
         if allow_initializer_registration {
             self.application.open_initializer_registration();
@@ -1743,21 +1848,21 @@ impl ApplicationRunner {
                                 "managed task registration channel closed during startup",
                             )));
                         }
-                        SupervisorEvent::TaskCompleted(completion) => {
-                            match completion.kind {
-                                TaskKind::UserHook => break classify_user_hook_completion(completion),
-                                TaskKind::Critical => {
-                                    break Err(StartupStop::Failure(critical_task_error(completion)));
-                                }
-                                TaskKind::Background => report_background_completion(completion),
+                        SupervisorEvent::TaskCompleted(completion) => match completion.kind {
+                            TaskKind::UserHook => break classify_user_hook_completion(completion),
+                            TaskKind::Critical => {
+                                break Err(StartupStop::Failure(critical_task_error(completion)));
                             }
-                        }
+                            TaskKind::Background => report_background_completion(completion),
+                        },
                     }
                 }
                 _ = cancellation.cancelled() => break Err(StartupStop::Requested),
                 signal = broker.next() => break Err(signal_to_startup_stop(signal)),
                 _ = tokio::time::sleep(remaining) => {
-                    break Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::UserHook)));
+                    break Err(StartupStop::Failure(startup_timeout_error(
+                        ApplicationPhase::UserHook,
+                    )));
                 }
             }
         };
@@ -1768,9 +1873,11 @@ impl ApplicationRunner {
 
     /// 业务作用：等待 Service 的显式停机请求、进程信号或关键任务退出。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `broker`：在整个 Running 阶段保持活跃的信号控制面。
+    ///
+    /// 返回：首个被裁决的停机请求、信号或主失败；后台任务退出只记录并继续等待，关键任务退出即触发失败，尚不执行清理。
     async fn wait_for_service_terminal(&mut self, broker: &mut SignalBroker) -> ServiceTerminal {
         let cancellation = self.application.cancellation_token();
         loop {
@@ -1790,10 +1897,7 @@ impl ApplicationRunner {
                     };
                     match completion.kind {
                         TaskKind::Critical => {
-                            debug_assert_eq!(
-                                self.supervisor.task_group_state(),
-                                TaskGroupState::Running
-                            );
+                            debug_assert_eq!(self.supervisor.task_group_state(), TaskGroupState::Running);
                             return ServiceTerminal::Failure(critical_task_error(completion));
                         }
                         TaskKind::Background => report_background_completion(completion),
@@ -1811,7 +1915,10 @@ impl ApplicationRunner {
 
     /// 业务作用：处理启动阶段的主失败或信号中断，并保证两者共享同一反向回滚链。
     ///
-    /// 参数说明：`stop` 决定终态和退出码，`broker` 在清理期间继续监听强退信号。
+    /// 参数说明：
+    /// - `stop`：`stop` 决定终态和退出码。
+    /// - `broker`：`broker` 在清理期间继续监听强退信号。
+    ///
     /// 返回：先完成清理栈与组件释放，再返回首次主错误或带次要清理错误的信号、主动停止结果。
     async fn handle_startup_stop(
         &mut self,
@@ -1895,7 +2002,9 @@ impl ApplicationRunner {
 
     /// 业务作用：在信号控制面自身无法建立时执行最小启动失败收敛。
     ///
-    /// 参数说明：`primary` 为 handler 注册或 ready ACK 失败形成的主错误。
+    /// 参数说明：
+    /// - `primary`：`primary` 为 handler 注册或 ready ACK 失败形成的主错误。
+    ///
     /// 返回：原主错误；组件释放错误单独告警，不覆盖控制面建立失败的原因。
     async fn fail_without_broker(&mut self, mut primary: ApplicationError) -> ApplicationError {
         crate::report::report_runtime(&primary);
@@ -1919,11 +2028,11 @@ impl ApplicationRunner {
         primary
     }
 
-    /// 业务作用：发布 Stopping 状态，并保持“先提交终态、后发布状态”的顺序。
+    /// 业务作用：在调用方已提交首次终止意图后发布 Stopping，关闭后续业务进入正常生命周期的资格。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；调用方必须已经通过 `set_terminal` 提交非空首次终态。
+    /// 返回：Starting 或 Ready 成功转换后完成，已为 Stopping 时幂等成功；最终状态不能重新进入停机。首次终止意图的前置要求仅用调试断言检查。
     fn begin_stopping(&self) -> ApplicationResult<()> {
         debug_assert_ne!(
             self.application.terminal_intent(),
@@ -1983,7 +2092,9 @@ impl ApplicationRunner {
     }
 
     /// 业务作用：在资源收口后释放组件对象，尚未退出的任务保留最终释放责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已同步释放对象的稳定错误；任务仍存活时移交延迟清理，仅在实际退出后释放并告警。
     fn release_components(&mut self) -> Vec<ApplicationError> {
         // 发出取消不等于任务已经退出，不能提前释放它仍可能依赖的组件对象。
@@ -2068,7 +2179,10 @@ impl ApplicationRunner {
             let step_started = StdInstant::now();
             let failures_before = failures.len();
             match step {
-                ActiveStep::Action { component, action } => {
+                ActiveStep::Action {
+                    component,
+                    action,
+                } => {
                     counts.component_actions += 1;
                     // 任一 action 都是公开扩展点，Runner 必须在外层强制预留后续逆序清理预算；
                     // 即使实现方误用全部 remaining，也不能阻断其后的资源释放。
@@ -2556,13 +2670,21 @@ async fn shutdown_action(
 
 /// 业务作用：释放因全局预算耗尽而未执行的 action，不调用业务回调或冒充已尝试步骤。
 ///
-/// 参数说明：`step` 是已经出栈的放弃步骤，`failures` 接收独立的 action 析构异常。
+/// 参数说明：
+/// - `step`：`step` 是已经出栈的放弃步骤。
+/// - `failures`：`failures` 接收独立的 action 析构异常。
 ///
 /// 返回：无返回值；非 action 步骤不执行，资源所有权仍由注册表收口。
 fn release_abandoned_action(step: ActiveStep, failures: &mut Vec<ApplicationError>) {
     match step {
-        ActiveStep::Action { mut action, .. }
-        | ActiveStep::InitializerAction { mut action, .. } => failures.extend(action.release()),
+        ActiveStep::Action {
+            mut action,
+            ..
+        }
+        | ActiveStep::InitializerAction {
+            mut action,
+            ..
+        } => failures.extend(action.release()),
         _ => {}
     }
 }
@@ -2747,21 +2869,11 @@ where
                 result = &mut future => {
                     return match result {
                         Ok(Ok(value)) => {
-                            crate::initialization::record_duration(
-                                application,
-                                &name,
-                                stage,
-                                started.elapsed(),
-                            );
+                            crate::initialization::record_duration(application, &name, stage, started.elapsed());
                             Ok(value)
                         }
                         Ok(Err(error)) => {
-                            crate::initialization::record_duration(
-                                application,
-                                &name,
-                                stage,
-                                started.elapsed(),
-                            );
+                            crate::initialization::record_duration(application, &name, stage, started.elapsed());
                             crate::initialization::record_failure(
                                 application,
                                 &name,
@@ -2777,12 +2889,7 @@ where
                         }
                         Err(payload) => {
                             release_shutdown_panic_payload(payload);
-                            crate::initialization::record_duration(
-                                application,
-                                &name,
-                                stage,
-                                started.elapsed(),
-                            );
+                            crate::initialization::record_duration(application, &name, stage, started.elapsed());
                             crate::initialization::record_failure(
                                 application,
                                 &name,
@@ -2883,7 +2990,12 @@ fn initializer_failure_error(
 }
 
 /// 业务作用：持有真实扩展 future 到结果裁决之后，避免 await 的隐式析构覆盖已返回的业务错误。
-/// 参数说明：`future` 是扩展返回的任务；`component` 和 `phase` 提供释放失败归因。
+///
+/// 参数说明：
+/// - `future`：`future` 是扩展返回的任务。
+/// - `component`：拥有该扩展 future 的组件身份，用于归属释放异常。
+/// - `phase`：本次扩展执行的生命周期阶段，使释放异常保留发生边界。
+///
 /// 返回：业务失败保持原样；成功后的析构异常阻止启动，外层取消时守卫仍隔离释放。
 fn retain_startup_future<T, F>(
     future: F,
@@ -2914,7 +3026,12 @@ where
 }
 
 /// 业务作用：隔离组件阶段的展开，使已登记副作用继续由统一异步回滚负责。
-/// 参数说明：`future` 须包含 trait 方法调用及其返回 future 的轮询；`component` 与 `phase` 提供稳定归因。
+///
+/// 参数说明：
+/// - `future`：`future` 须包含 trait 方法调用及其返回 future 的轮询。
+/// - `component`：正在执行阶段方法的组件身份，构造与析构异常均归属于该组件。
+/// - `phase`：被隔离的启动阶段，写入异常转换后的错误上下文。
+///
 /// 返回：正常结果保持不变；单次展开转为当前组件阶段错误，不读取异常正文。
 fn isolate_component_startup<F>(
     future: F,
@@ -2948,7 +3065,11 @@ where
 }
 
 /// 业务作用：在启动等待结束后合并释放结果，保持首次错误或停止原因的优先级。
-/// 参数说明：`result` 是已裁决的阶段结果；`release` 是停止轮询后独立析构产生的错误。
+///
+/// 参数说明：
+/// - `result`：`result` 是已裁决的阶段结果。
+/// - `release`：`release` 是停止轮询后独立析构产生的错误。
+///
 /// 返回：成功阶段的释放异常阻止启动；已有中断保持原归因，次要释放异常单独报告。
 fn finish_startup_release<T>(
     result: Result<T, StartupStop>,
@@ -2966,7 +3087,14 @@ fn finish_startup_release<T>(
 }
 
 /// 业务作用：将组件展开转换为可回滚的固定错误，并隔离异常对象自身的析构。
-/// 参数说明：`component` 与 `phase` 标识失败边界；`payload` 只用于释放所有权，不参与诊断内容。
+///
+/// 参数说明：
+/// - `component`：发生展开的组件身份，用于标识错误的责任边界。
+/// - `phase`：展开发生时的启动阶段，供调用方选择回滚路径和输出诊断。
+/// - `payload`：`payload` 只用于释放所有权。
+///
+/// 共同约束：不参与诊断内容。
+///
 /// 返回：保留组件与生命周期归因的首次失败，随后清理错误由统一回滚另行记录。
 fn component_startup_panic(
     component: ComponentId,
@@ -3022,10 +3150,12 @@ where
 
 /// 业务作用：计算当前启动阶段可消费的剩余预算。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `deadline`：同步预检完成后确定的绝对启动截止时间。
 /// - `phase`：预算耗尽时用于定位的生命周期阶段。
+///
+/// 返回：截止时间尚未到达时返回剩余时长；达到或超过截止点时返回启动失败，不延长任何后续阶段的预算。
 fn startup_remaining(deadline: Instant, phase: ApplicationPhase) -> Result<Duration, StartupStop> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -3036,14 +3166,23 @@ fn startup_remaining(deadline: Instant, phase: ApplicationPhase) -> Result<Durat
 
 /// 业务作用：构造统一的全局启动超时错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：预算首次被观察为耗尽的生命周期阶段。
+///
+/// 返回：归属于 Application 及给定阶段的超时错误；只构造失败事实，不执行取消或回滚。
 fn startup_timeout_error(phase: ApplicationPhase) -> ApplicationError {
     runner_error(phase, "application startup exceeded the global deadline")
 }
 
 /// 业务作用：校验会与 `Instant` 相加的生命周期预算，阻止零值和跨平台溢出值进入 Runner。
+///
+/// 参数说明：
+/// - `timeout`：待写入执行器的启动或停机总预算。
+/// - `phase`：非法预算错误归属的生命周期阶段。
+/// - `kind`：用于错误摘要的预算类别，调用方传入固定的 startup 或 shutdown。
+///
+/// 返回：预算在零以上且不超过 365 天时成功；否则返回固定边界错误，不更改执行器配置。
 fn validate_lifecycle_timeout(
     timeout: Duration,
     phase: ApplicationPhase,
@@ -3060,9 +3199,11 @@ fn validate_lifecycle_timeout(
 
 /// 业务作用：把信号控制面事件转换为启动阶段中断。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `event`：真实信号或 Broker 意外关闭事件。
+///
+/// 返回：保留真实信号的中断分类；控制通道关闭转换为 Bootstrap 失败，不能当作正常停机。
 fn signal_to_startup_stop(event: SignalEvent) -> StartupStop {
     match event {
         SignalEvent::Received(signal) => StartupStop::Signal(signal),
@@ -3075,9 +3216,11 @@ fn signal_to_startup_stop(event: SignalEvent) -> StartupStop {
 
 /// 业务作用：把信号控制面事件转换为 Service 运行期终止分类。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `event`：真实信号或 Broker 意外关闭事件。
+///
+/// 返回：真实信号对应的终止分类，或控制通道关闭导致的 Running 失败；尚不发布应用终态。
 fn signal_to_service_terminal(event: SignalEvent) -> ServiceTerminal {
     match event {
         SignalEvent::Received(signal) => ServiceTerminal::Signal(signal),
@@ -3090,9 +3233,11 @@ fn signal_to_service_terminal(event: SignalEvent) -> ServiceTerminal {
 
 /// 业务作用：分类 Ready 阶段观察到的受管任务退出。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `completion`：Supervisor 收割到的任务身份、角色和退出结果。
+///
+/// 返回：后台任务退出在记录后允许继续启动；关键任务退出或已完成的 Hook 再次出现均返回失败，交由上层回滚。
 fn classify_startup_completion(completion: TaskCompletion) -> Result<(), StartupStop> {
     match completion.kind {
         TaskKind::Critical => Err(StartupStop::Failure(critical_task_error(completion))),
@@ -3147,9 +3292,11 @@ fn report_background_completion(completion: TaskCompletion) {
 
 /// 业务作用：把 UserHook 的 JoinSet 退出结果转换为启动结果。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `completion`：保留 UserHook 任务身份但不暴露原始 panic payload 的退出记录。
+///
+/// 返回：仅正常完成允许启动继续；业务失败保留来源，展开或取消转换为 UserHook 阶段错误。
 fn classify_user_hook_completion(completion: TaskCompletion) -> Result<(), StartupStop> {
     match completion.outcome {
         TaskOutcome::Completed => Ok(()),
@@ -3174,9 +3321,11 @@ fn classify_user_hook_completion(completion: TaskCompletion) -> Result<(), Start
 
 /// 业务作用：构造关键任务提前退出的主错误，不读取 panic payload。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `completion`：关键任务的稳定名称、TaskId 和退出结果。
+///
+/// 返回：归属于 Supervisor/Running 的主错误；正常完成和取消也视为关键任务过早退出，业务失败另保留底层来源。
 fn critical_task_error(completion: TaskCompletion) -> ApplicationError {
     let message = format!(
         "critical managed task `{}` (id={}) terminated while its group was running",
@@ -3198,10 +3347,12 @@ fn critical_task_error(completion: TaskCompletion) -> ApplicationError {
 
 /// 业务作用：创建 Runner 自身的稳定错误形状。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：错误发生或被观察到的生命周期阶段。
 /// - `message`：不包含配置值和业务秘密的稳定摘要。
+///
+/// 返回：带 Application 组件身份和指定阶段的错误；本方法不执行摘要脱敏，调用方须遵守摘要内容约束。
 fn runner_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Application, phase, message)
 }

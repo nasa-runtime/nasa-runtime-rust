@@ -41,9 +41,11 @@ pub enum Filter {
 }
 
 impl Filter {
-    /// 业务作用: 转换为 `image` crate 的过滤器表示。
+    /// 业务作用：转换为 `image` crate 的过滤器表示。 这是内部适配层，避免把第三方 crate 的类型直接暴露到业务配置结构中。
     ///
-    /// 这是内部适配层，避免把第三方 crate 的类型直接暴露到业务配置结构中。
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回与当前枚举对应的 image 重采样过滤器，不处理像素或分配图像。
     fn to_image(self) -> image_crate::imageops::FilterType {
         use image_crate::imageops::FilterType as F;
         match self {
@@ -88,10 +90,12 @@ pub enum ImageError {
 }
 
 impl core::fmt::Display for ImageError {
-    /// 业务作用: 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：Debug 或 Display 输出使用的标准格式化器。
+    ///
+    /// 返回：写入对应错误类别及原原因文本；格式器失败时传播错误，不对底层原因自动脱敏。
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ImageError::Decode(s) => write!(f, "image decode error: {s}"),
@@ -109,9 +113,10 @@ pub type Result<T> = core::result::Result<T, ImageError>;
 
 /// 业务作用：解码输入图片，按目标尺寸或比例缩放，再编码为所选格式。
 /// 同时配置宽高时优先使用宽高，否则使用 scale；两者都未配置时保持尺寸。
+///
 /// 返回：编码后的图片字节；参数、输入格式、解码或编码失败时返回错误。
 ///
-/// # 参数
+/// 参数说明：
 /// - `data`: 原始图片编码字节,函数会先识别格式再解码。
 /// - `opts`: 压缩和缩放选项,包含质量、比例、目标宽高和重采样过滤器。
 /// - `format`: 输出格式覆盖;`None` 保留输入格式,`Some` 强制使用指定格式编码。
@@ -139,12 +144,14 @@ pub fn compress(data: &[u8], opts: &CompressOpts, format: Option<ImageFormat>) -
 /// resize 输出像素上界(防 OOM):100 MP ≈ 400MB RGBA。超过则 [`compress`] 返回 `InvalidArgument`。
 const MAX_OUTPUT_PIXELS: u64 = 100_000_000;
 
-/// 业务作用: 计算 resize 后的目标尺寸上界,与 [`resize`] 的分支一致(keep-aspect 的实际输出 ≤ (w,h),取上界足够)。
+/// 业务作用：计算 resize 后的目标尺寸上界,与 [`resize`] 的分支一致(keep-aspect 的实际输出 ≤ (w,h),取上界足够)。
 ///
-/// # 参数
-/// - `src_w`: 输入图片解码后的原始宽度。
-/// - `src_h`: 输入图片解码后的原始高度。
-/// - `opts`: 压缩和缩放选项。
+/// 参数说明：
+/// - `src_w`：输入图片解码后的原始宽度。
+/// - `src_h`：输入图片解码后的原始高度。
+/// - `opts`：压缩和缩放选项。
+///
+/// 返回：返回双宽高优先、单边等比推导、其次 scale、最后原尺寸的目标上界；只计算尺寸，不验证选项或执行像素总量限制，调用方须先完成参数校验。
 fn resize_target_dims(src_w: u32, src_h: u32, opts: &CompressOpts) -> (u32, u32) {
     if let (Some(tw), Some(th)) = (opts.width, opts.height) {
         (tw, th)
@@ -172,13 +179,15 @@ fn resize_target_dims(src_w: u32, src_h: u32, opts: &CompressOpts) -> (u32, u32)
     }
 }
 
-/// 业务作用: 便捷:质量 + 等比缩放。
+/// 业务作用：便捷:质量 + 等比缩放。
 ///
-/// # 参数
-/// - `data`: 原始图片编码字节。
-/// - `quality`: 输出质量,范围 `0.0..=1.0`;主要影响 JPEG。
-/// - `scale`: 等比缩放比例,必须大于 0。
-/// - `format`: 输出格式覆盖;`None` 保留输入格式。
+/// 参数说明：
+/// - `data`：原始图片编码字节。
+/// - `quality`：输出质量,范围 `0.0..=1.0`;主要影响 JPEG。
+/// - `scale`：等比缩放比例,必须大于 0。
+/// - `format`：输出格式覆盖;`None` 保留输入格式。
+///
+/// 返回：返回指定质量与比例处理后的编码字节；无效参数、格式识别、解码、目标像素上限或编码失败返回错误，不写文件。
 pub fn compress_scale(
     data: &[u8],
     quality: f32,
@@ -193,15 +202,17 @@ pub fn compress_scale(
     compress(data, &opts, format)
 }
 
-/// 业务作用: 便捷:质量 + 定宽高 + keepAspectRatio。
+/// 业务作用：便捷:质量 + 定宽高 + keepAspectRatio。
 ///
-/// # 参数
-/// - `data`: 原始图片编码字节。
-/// - `quality`: 可选输出质量,范围 `0.0..=1.0`;`None` 使用编码器默认质量。
-/// - `width`: 目标宽度,必须大于 0。
-/// - `height`: 目标高度,必须大于 0。
-/// - `keep_aspect`: 是否保持原始宽高比;`None` 按保持比例处理。
-/// - `format`: 输出格式覆盖;`None` 保留输入格式。
+/// 参数说明：
+/// - `data`：待识别并解码的原始图片字节。
+/// - `quality`：可选 JPEG 质量，需有限且位于 0..=1；None 使用 85。
+/// - `width`：正数目标宽度。
+/// - `height`：正数目标高度。
+/// - `keep_aspect`：Some(false) 拉伸，其它值保持宽高比贴框。
+/// - `format`：可选强制输出格式；None 保留识别出的输入格式。
+///
+/// 返回：返回按目标宽高框及比例策略处理后的编码字节；参数、格式、解码、像素上限或编码失败返回错误。None 质量在 JPEG 路径使用 85，其它格式忽略质量。
 pub fn compress_size(
     data: &[u8],
     quality: Option<f32>,
@@ -224,9 +235,10 @@ pub fn compress_size(
 
 /// 业务作用：在解码和缩放之前拒绝无效的图片处理参数。
 /// quality 必须有限且位于 0..=1，scale 必须有限且大于零，显式宽高必须大于零。
+///
 /// 返回：有效参数通过；无效值返回参数错误，不静默改为默认值。
 ///
-/// # 参数
+/// 参数说明：
 /// - `opts`: 调用方传入的压缩和缩放选项。
 fn validate_opts(opts: &CompressOpts) -> Result<()> {
     if let Some(q) = opts.quality {
@@ -252,11 +264,13 @@ fn validate_opts(opts: &CompressOpts) -> Result<()> {
     Ok(())
 }
 
-/// 业务作用: 调整图片尺寸。
+/// 业务作用：调整图片尺寸。
 ///
-/// # 参数
-/// - `img`: 已解码的输入图片。
-/// - `opts`: 压缩和缩放选项；`width + height` 优先于 `scale`。
+/// 参数说明：
+/// - `img`：已解码的输入图片。
+/// - `opts`：压缩和缩放选项；`width + height` 优先于 `scale`。
+///
+/// 返回：返回缩放图像；同时宽高按比例策略贴框或拉伸，单边或 scale 推导两维后精确缩放。没有尺寸且 scale 缺省或为 1 时返回原图；本层不校验参数或限制输出像素。
 fn resize(img: DynamicImage, opts: &CompressOpts) -> DynamicImage {
     let filter = opts.filter.to_image();
     if let (Some(tw), Some(th)) = (opts.width, opts.height) {
@@ -266,7 +280,7 @@ fn resize(img: DynamicImage, opts: &CompressOpts) -> DynamicImage {
             _ => img.resize(tw, th, filter),
         }
     } else if let (Some(tw), None) = (opts.width, opts.height) {
-        // 只给 width:等比缩放到目标宽(对齐 thumbnailator `.width(w)`;此前静默 no-op 是缺陷)。
+        // 只有宽度时按原始比例推导高度，避免落入缺省尺寸分支而忽略调用方目标。
         let th = ((img.height() as u64 * tw as u64) as f64 / img.width().max(1) as f64)
             .round()
             .max(1.0) as u32;
@@ -284,19 +298,21 @@ fn resize(img: DynamicImage, opts: &CompressOpts) -> DynamicImage {
         }
         let nw = ((img.width() as f64) * scale).round().max(1.0) as u32;
         let nh = ((img.height() as f64) * scale).round().max(1.0) as u32;
-        // 等比(两维同比例)→ resize_exact 即等比,无变形。
+        // 两维分别取整后可能存在像素级比例偏差，按已计算的目标尺寸精确输出。
         img.resize_exact(nw, nh, filter)
     } else {
         img
     }
 }
 
-/// 业务作用: 将处理后的图片重新编码成目标格式。
+/// 业务作用：将处理后的图片重新编码成目标格式。
 ///
-/// # 参数
-/// - `img`: 已完成 resize 的图片。
-/// - `format`: 输出图片格式。
-/// - `quality`: 可选 JPEG 质量；非 JPEG 格式会忽略该值。
+/// 参数说明：
+/// - `img`：已完成 resize 的图片。
+/// - `format`：输出图片格式。
+/// - `quality`：可选 JPEG 质量；非 JPEG 格式会忽略该值。
+///
+/// 返回：成功返回内存中的完整编码字节；编码器失败时返回 Encode。JPEG 转 RGB 丢弃 alpha，质量缺省 85，非 JPEG 忽略质量；不写文件。
 fn encode(img: &DynamicImage, format: ImageFormat, quality: Option<f32>) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     if format == ImageFormat::Jpeg {
@@ -315,7 +331,7 @@ fn encode(img: &DynamicImage, format: ImageFormat, quality: Option<f32>) -> Resu
             )
             .map_err(|e| ImageError::Encode(format!("jpeg: {e}")))?;
     } else {
-        // 其它格式:quality 忽略(同 thumbnailator),按格式默认编码。
+        // 其它格式不使用 JPEG 质量参数，按目标格式的默认编码策略输出。
         img.write_to(&mut Cursor::new(&mut out), format)
             .map_err(|e| ImageError::Encode(format!("{format:?}: {e}")))?;
     }

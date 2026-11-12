@@ -74,7 +74,9 @@ pub enum DiscoveryTlsMode {
 
 impl DiscoveryTlsMode {
     /// 业务作用：将调用方冻结的 TLS 政策投影为与注册 metadata 一致的协议值。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定模式名称，不从端口或服务名推测 TLS。
     fn as_str(self) -> &'static str {
         match self {
@@ -86,7 +88,9 @@ impl DiscoveryTlsMode {
 }
 impl Default for DiscoveryClientOptions {
     /// 业务作用：提供有限并发和连接容量，明文必须与实例明确声明一致。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：默认五秒总调用期限、三十秒空闲回收和五分钟连接年龄。
     fn default() -> Self {
         Self {
@@ -128,7 +132,9 @@ pub struct DiscoveryGrpcService {
 }
 impl Clone for DiscoveryGrpcService {
     /// 业务作用：共享连接和总容量，保留每个 Tower Service 对象独立的就绪预约。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：新对象没有消耗或复制已有预约。
     fn clone(&self) -> Self {
         Self {
@@ -143,7 +149,9 @@ impl Clone for DiscoveryGrpcService {
 }
 impl Drop for DiscoveryGrpcService {
     /// 业务作用：业务放弃一个服务对象时立即归还尚未用于 RPC 的容量预约。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：其他 clone 的调用不受影响。
     fn drop(&mut self) {
         if let Some(ready) = self.ready.take() {
@@ -154,7 +162,12 @@ impl Drop for DiscoveryGrpcService {
 
 impl DiscoveryGrpcService {
     /// 业务作用：绑定精确发现连接与服务，避免不同环境共用连接池。
-    /// 参数说明：`discovery` 是只读受管句柄，`service` 为明确服务，`options` 固定容量及 TLS 政策。
+    ///
+    /// 参数说明：
+    /// - `discovery`：是只读受管句柄
+    /// - `service`：为明确服务
+    /// - `options`：固定容量及 TLS 政策。
+    ///
     /// 返回：可直接注入 generated client 的 Service；非法预算和 TLS 身份政策拒绝构造。
     pub fn new(
         discovery: DiscoveryHandle,
@@ -205,7 +218,10 @@ impl DiscoveryGrpcService {
     }
 
     /// 业务作用：在 poll_ready 前绑定原调用链预算，让排队也计入同一期限。
-    /// 参数说明：`budget` 为调用方原预算，子请求取消不会反向取消父预算。
+    ///
+    /// 参数说明：
+    /// - `budget`：为调用方原预算，子请求取消不会反向取消父预算。
+    ///
     /// 返回：清除当前对象未使用的预约，后续调用服从新预算。
     pub fn with_budget(mut self, budget: RequestBudget) -> Self {
         if let Some(ready) = self.ready.take() {
@@ -217,7 +233,10 @@ impl DiscoveryGrpcService {
     }
 
     /// 业务作用：将业务层已认证的单个实例绑定到本次调用，连接复用仍须取得当前发现许可。
-    /// 参数说明：`instance` 必须来自该服务的完整观察，所有身份和协议字段按原样比较。
+    ///
+    /// 参数说明：
+    /// - `instance`：必须来自该服务的完整观察，所有身份和协议字段按原样比较。
+    ///
     /// 返回：同地址的另一实例、元数据变化或宽限证据均不能替代该候选。
     pub fn for_instance(mut self, instance: nadisc::Instance) -> Self {
         if let Some(ready) = self.ready.take() {
@@ -229,7 +248,10 @@ impl DiscoveryGrpcService {
     }
 
     /// 业务作用：在实际流提交点复验业务身份资格，避免握手等待期间的凭据撤销被旧连接绕过。
-    /// 参数说明：`check` 必须是无等待、不重入发现 owner 的同步判断，不得执行网络操作。
+    ///
+    /// 参数说明：
+    /// - `check`：必须是无等待、不重入发现 owner 的同步判断，不得执行网络操作。
+    ///
     /// 返回：新请求只有在发现资格和此判断同时成立时才提交，既有请求仍服从原预算。
     pub fn with_admission(mut self, check: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.admission = Some(check);
@@ -244,7 +266,9 @@ struct Reservation {
 }
 impl Reservation {
     /// 业务作用：读取预约是否仍有效，超时后不能继续占用容量或发送。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：拥有额度且原预算未结束才有效。
     fn valid(&self) -> bool {
         !self.budget.is_exhausted()
@@ -255,7 +279,9 @@ impl Reservation {
                 .is_some()
     }
     /// 业务作用：结束调用或过期预约，取消相关双向正文并归还容量。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：幂等关闭本次调用，不影响父预算和其他 RPC。
     fn release(&self) {
         self.budget.cancel();
@@ -269,7 +295,9 @@ impl Reservation {
 struct Release(Arc<Reservation>);
 impl Drop for Release {
     /// 业务作用：在正常完成、取消、关闭或超时时统一释放预约。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：释放后不允许继续使用本次调用许可。
     fn drop(&mut self) {
         self.0.release();
@@ -282,7 +310,10 @@ impl Service<Request<Body>> for DiscoveryGrpcService {
     type Future = Pin<Box<dyn Future<Output = Result<Response<Body>, Status>> + Send>>;
 
     /// 业务作用：预约一次 RPC 的容量，等待和未使用预约均受原预算及 owner 关闭约束。
-    /// 参数说明：`cx` 提供当前任务唤醒器。
+    ///
+    /// 参数说明：
+    /// - `cx`：提供当前任务唤醒器。
+    ///
     /// 返回：Ready 表示一个有效预约；耗尽预算或 owner 关闭返回错误。
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
         if let Some(ready) = &self.ready {
@@ -337,7 +368,10 @@ impl Service<Request<Body>> for DiscoveryGrpcService {
     }
 
     /// 业务作用：用一次预约重新选址，并在 HTTP/2 提交处复验当前发现事实。
-    /// 参数说明：`request` 可以是任一 gRPC 调用类型；正文不缓存为完整消息。
+    ///
+    /// 参数说明：
+    /// - `request`：可以是任一 gRPC 调用类型；正文不缓存为完整消息。
+    ///
     /// 返回：响应正文仍受同一预算及 owner 控制；原期限到期报告 DeadlineExceeded，错误不声称远端未执行。
     fn call(&mut self, request: Request<Body>) -> Self::Future {
         let shared = self.shared.clone();
@@ -384,7 +418,11 @@ impl Service<Request<Body>> for DiscoveryGrpcService {
 }
 
 /// 业务作用：保留调用方更短的协议期限，禁止畸形 grpc-timeout 被悄悄替换为较长配置值。
-/// 参数说明：`headers` 是协议头，`maximum` 已包含就绪排队消耗。
+///
+/// 参数说明：
+/// - `headers`：是协议头
+/// - `maximum`：已包含就绪排队消耗。
+///
 /// 返回：两者较短的剩余时长；重复或非法期限拒绝发送。
 fn request_timeout(
     headers: &tonic::codegen::http::HeaderMap,
@@ -420,8 +458,13 @@ fn request_timeout(
 }
 
 /// 业务作用：为受管发现调用构造只信任显式 CA 的 mTLS 配置，不读取系统或环境中的信任材料。
-/// 参数说明：`ca` 是完整 CA PEM，`certificate` 与 `key` 是客户端身份材料。
-/// 返回：完整材料合法且密钥匹配时返回 TLS 配置；任一材料失败拒绝整个候选。
+///
+/// 参数说明：
+/// - `ca`：显式信任的 CA PEM 字节。
+/// - `certificate`：客户端身份的 PEM 证书链。
+/// - `key`：客户端身份的 PEM 私钥字节。
+///
+/// 返回：显式根证书至少一个且全部可接纳、身份材料可构建时返回共享 TLS 配置，否则返回固定 invalid_argument。不读取系统根，不进行远端握手或在此验证完整证书时间与用途。
 pub fn mutual_tls(
     ca: &[u8],
     certificate: &[u8],
@@ -453,7 +496,10 @@ pub fn mutual_tls(
 }
 
 /// 业务作用：把公共发现故障转换为不会包含 provider 地址或凭据的协议错误。
-/// 参数说明：`error` 是中性稳定类别。
+///
+/// 参数说明：
+/// - `error`：是中性稳定类别。
+///
 /// 返回：容量不足与不可用保持不同的 gRPC 状态。
 fn discovery_error(error: nadisc::managed::DiscoveryError) -> Status {
     use nadisc::managed::ErrorCode;
@@ -464,7 +510,10 @@ fn discovery_error(error: nadisc::managed::DiscoveryError) -> Status {
     }
 }
 /// 业务作用：保留调用链显式取消与期限耗尽的不同结果。
-/// 参数说明：`error` 是预算裁决。
+///
+/// 参数说明：
+/// - `error`：是预算裁决。
+///
 /// 返回：不包含请求内容的协议状态。
 fn budget_error(error: nabudget::BudgetError) -> Status {
     match error {

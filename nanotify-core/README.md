@@ -60,7 +60,8 @@ custom provider 必须使用协作式、取消安全的异步 I/O，不得同步
 #[async_trait::async_trait]
 impl nanotify_core::Notify for BusinessChannel {
     /// 业务作用：把已裁决通知移交给业务渠道，不参与触发事件的事务。
-    /// 参数说明：`notification` 是已清理且长度受限的纯文本消息。
+    /// 参数说明：
+    /// - `notification`：已经过文本清理和长度约束的通知，需按渠道合同传送。
     /// 返回：渠道回执或脱敏失败，结果未知时禁止重发。
     async fn notify(
         &self,

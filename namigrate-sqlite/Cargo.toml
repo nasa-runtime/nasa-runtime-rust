@@ -15,5 +15,5 @@ readme = "README.md"
 namigrate-core = { version = "2.0.0" }
 natx-sqlite = { version = "1.0.0", path = "../natx-sqlite" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "migrate"] }
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1.54.1", features = ["time"] }
 anyhow = "1"

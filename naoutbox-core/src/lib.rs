@@ -1,7 +1,7 @@
 //! NASA Outbox 核心。
 //!
-//! **只负责在业务 DB 事务内写 outbox 事件**(`outbox-core` 只依赖 `natx`)。轮询发往 Kafka 的
-//! dispatcher、或 CDC(Debezium)读取,都是本层之上的可选增量;应用不为 CDC 强制启用 Kafka。
+//! 定义事件、受信租户上下文、发布与保留清理合同，并提供允许重启丢失的内存队列。
+//! 持久 adapter 负责与业务数据库事务共同写入；轮询发布和 CDC 属于上层装配，CDC 不强制启用 Kafka。
 //!
 //! 事件字段对齐 Debezium Outbox Event Router 约定:aggregate type/id、event type、payload、
 //! 可选 trace context。
@@ -48,7 +48,7 @@ impl std::error::Error for OutboxStoreError {}
 /// 一条 outbox 事件(Debezium Outbox Event Router 兼容字段)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEvent {
-    /// 全局唯一事件 id；至少一次投递时消费者必须按此字段去重。
+    /// 稳定事件 ID；默认构造使用随机 UUID，重放须保持同值，至少一次消费者仍须据此去重。
     pub event_id: String,
     /// 聚合根类型(路由/topic 依据),如 `Order`。
     pub aggregate_type: String,
@@ -69,6 +69,14 @@ pub struct OutboxEvent {
 
 impl OutboxEvent {
     /// 业务作用：用必填字段创建事件(无 trace context)。
+    ///
+    /// 参数说明：
+    /// - `aggregate_type`：用于路由的聚合根类型。
+    /// - `aggregate_id`：用于聚合归属与分区的业务身份。
+    /// - `event_type`：消费者识别业务事件的类型名称。
+    /// - `payload`：已由业务按约定编码的完整事件字节。
+    ///
+    /// 返回：返回带新 UUID、system 租户及空 traceparent 的事件，接管原始正文；不检查字段非空、正文大小或业务协议，不写持久存储。
     pub fn new(
         aggregate_type: impl Into<String>,
         aggregate_id: impl Into<String>,
@@ -87,23 +95,38 @@ impl OutboxEvent {
     }
 
     /// 业务作用：附加 W3C trace context(链路穿透)。
+    ///
+    /// 参数说明：
+    /// - `traceparent`：由调用方准备的可选传播上下文原文。
+    ///
+    /// 返回：返回保存原字符串的事件；不验证 W3C 格式、身份来源或采样位。
     pub fn with_traceparent(mut self, traceparent: impl Into<String>) -> Self {
         self.traceparent = Some(traceparent.into());
         self
     }
 }
 
-/// 在业务 DB 事务内追加 outbox 事件的写入端(与业务写同事务,保证原子)。
+/// 接纳 Outbox 事件的同步写入端合同。
 ///
-/// 持久实现可在 `natx` 事务上下文里 INSERT；trait 让业务与不同 provider 解耦。
+/// 持久使用者必须另行保证业务写入与事件共同提交；此接口不返回失败或持久确认，也不自动建立事务。
 pub trait OutboxWriter {
     /// 业务作用：追加一条事件(应与当前业务事务同提交)。
+    ///
+    /// 参数说明：
+    /// - `event`：待追加并由实现接管的业务事件。
+    ///
+    /// 返回：消费事件并交给实现接纳；接口没有失败或提交确认返回，持久实现须自行保证与业务事务共同提交，不能由此接口推断原子性。
     fn append(&self, event: OutboxEvent);
 }
 
 /// 借用透传:`&W` 也是 writer,方便把同一个 outbox 借给审计等多个 sink 而无需 Arc。
 impl<W: OutboxWriter + ?Sized> OutboxWriter for &W {
     /// 业务作用：将借用 writer 的调用透明转发到底层 writer。
+    ///
+    /// 参数说明：
+    /// - `event`：需要透传给底层 writer 的事件。
+    ///
+    /// 返回：消费事件并调用原 writer 的 append，不额外缓冲、持久化或增加提交保证。
     fn append(&self, event: OutboxEvent) {
         (**self).append(event);
     }
@@ -118,11 +141,19 @@ pub struct InMemoryOutbox {
 
 impl InMemoryOutbox {
     /// 业务作用：创建空 outbox。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回空 FIFO 与独立投递互斥门禁；不持久保存，进程退出可丢失待投事件。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 业务作用：取走全部已追加事件(FIFO),清空缓冲——模拟 dispatcher 一批取出投递。
+    /// 业务作用：移交当前进程内待投队列的完整批次所有权。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：在标准锁下取走当前全部事件并清空队列；返回顺序是实际追加顺序，不取得异步投递 gate，调用方自行承担取出批次的恢复与投递责任。
     pub fn drain(&self) -> Vec<OutboxEvent> {
         let mut events = self
             .events
@@ -132,6 +163,10 @@ impl InMemoryOutbox {
     }
 
     /// 业务作用：当前缓冲的事件数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回当前内存队列长度，不包括已被 drain 取走或 dispatch_once 正在投递的批次。
     pub fn len(&self) -> usize {
         self.events
             .lock()
@@ -140,13 +175,22 @@ impl InMemoryOutbox {
     }
 
     /// 业务作用：是否为空。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前内存队列无事件时返回 true，不证明不存在取出后仍在投递的事件。
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
 impl OutboxWriter for InMemoryOutbox {
-    /// 业务作用：按调用顺序把事件追加到进程内 FIFO。
+    /// 业务作用：把事件追加到进程内 FIFO，供后续批次投递。
+    ///
+    /// 参数说明：
+    /// - `event`：待由内存队列持有的完整事件。
+    ///
+    /// 返回：取得标准锁后将事件追加到队尾；并发追加按实际持锁顺序排列，锁中毒时保留并继续使用原缓冲，不与数据库事务绑定。
     fn append(&self, event: OutboxEvent) {
         self.events
             .lock()
@@ -189,7 +233,9 @@ impl OutboxWriteContext {
         if tenant.chars().any(char::is_control) {
             return Err("outbox tenant must not contain control characters");
         }
-        Ok(Self { tenant })
+        Ok(Self {
+            tenant,
+        })
     }
 
     /// 业务作用：读取已认证租户身份。
@@ -305,6 +351,11 @@ pub struct OutboxArchiveError {
 
 impl OutboxArchiveError {
     /// 业务作用：用脱敏原因构造归档错误。
+    ///
+    /// 参数说明：
+    /// - `reason`：调用方保证不含凭据、地址或事件正文的稳定原因说明。
+    ///
+    /// 返回：返回保存原原因的归档错误，不包含自动归档或重试动作。 不自动脱敏或截断文本。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -313,7 +364,12 @@ impl OutboxArchiveError {
 }
 
 impl std::fmt::Display for OutboxArchiveError {
-    /// 业务作用：输出不含归档端身份或事件正文的稳定原因。
+    /// 业务作用：展示归档失败的调用方原因摘要。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收错误摘要的格式化器。
+    ///
+    /// 返回：原样输出归档原因或传播格式化写出错误；原因内容的脱敏责任在构造方，本方法不检查。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "outbox archive error: {}", self.reason)
     }
@@ -375,6 +431,11 @@ pub enum PublishErrorClass {
 
 impl OutboxPublishError {
     /// 业务作用：用脱敏原因构造确定性失败(默认类别,保持既有毒丸预算语义)。
+    ///
+    /// 参数说明：
+    /// - `reason`：调用方保证不含凭据、地址或事件正文的稳定原因说明。
+    ///
+    /// 返回：返回保存原原因的确定性发布错误，发布类别为 Terminal，允许调度端计入确定性失败预算。 不自动脱敏或截断文本。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -383,6 +444,11 @@ impl OutboxPublishError {
     }
 
     /// 业务作用：用脱敏原因构造瞬态/结果不确定失败——保留重投,豁免死信预算。
+    ///
+    /// 参数说明：
+    /// - `reason`：调用方保证不含凭据、地址或事件正文的稳定原因说明。
+    ///
+    /// 返回：返回保存原原因的瞬态发布错误，发布类别为 Transient，供调度端保留重投并豁免死信预算。 不自动脱敏或截断文本。
     pub fn transient(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -391,13 +457,22 @@ impl OutboxPublishError {
     }
 
     /// 业务作用：判断本失败是否豁免死信预算。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：类别为 Transient 时返回 true，Terminal 返回 false；不检查原因字符串或重新判断下游执行结果。
     pub fn is_transient(&self) -> bool {
         self.class == PublishErrorClass::Transient
     }
 }
 
 impl std::fmt::Display for OutboxPublishError {
-    /// 业务作用：输出稳定脱敏原因，不包含 broker、topic 或 payload。
+    /// 业务作用：展示发布失败的调用方原因摘要。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收错误摘要的格式化器。
+    ///
+    /// 返回：原样输出发布原因或传播格式化写出错误；不自动移除其中的 broker、topic 或正文信息，构造方必须使用脱敏原因。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "outbox publish error: {}", self.reason)
     }
@@ -412,7 +487,12 @@ impl std::error::Error for OutboxPublishError {}
 /// 故下游消费者需按 `event_id` 幂等去重；聚合类型/id/事件类型不是事件唯一键。
 #[async_trait::async_trait]
 pub trait OutboxPublisher {
-    /// 业务作用：投递一条事件;失败返回 [`OutboxPublishError`](该事件将被保留、下轮重试)。
+    /// 业务作用：约定一条 Outbox 事件的发布结果及失败类别。
+    ///
+    /// 参数说明：
+    /// - `event`：具有稳定事件 ID、聚合归属、类型与正文的待发布事件。
+    ///
+    /// 返回：实现确认接纳成功时返回 Ok，失败返回带 Terminal 或 Transient 类别的错误；传输失败或取消不证明下游未执行，事件保留与重试由调用方负责。
     async fn publish(&self, event: &OutboxEvent) -> Result<(), OutboxPublishError>;
 }
 
@@ -429,15 +509,22 @@ pub struct DispatchReport {
 
 impl DispatchReport {
     /// 业务作用：是否整批投递完成。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅比较 published 与 total 是否相等，不额外核对 first_error；正确报告由投递函数生成。
     pub fn is_complete(&self) -> bool {
         self.published == self.total
     }
 }
 
-/// 业务作用：**保序至少一次**投递一批事件:按序逐条 `publish`,遇首个失败即停(不跳过,保投递顺序),
-/// 已成功的前缀记入 `published`。调用方据 `published` 移除已投递事件、保留未投递的下轮重试。
+/// 业务作用：按输入顺序逐条等待发布，在首个失败处保留未确认后缀供调用方处理。
 ///
-/// 停在首个失败(而非继续后续)是为保证同聚合根事件的**顺序**:跳过失败项会让后发事件先落地。
+/// 参数说明：
+/// - `events`：按目标顺序排列、由调用方继续持有的事件切片。
+/// - `publisher`：按一次调用确认或拒绝事件接纳的发布实现。
+///
+/// 返回：返回发布成功的前缀长度、输入总数与首个错误；空输入完成，首次失败立即停止，不重试、不删除或恢复输入事件。顺序保证限于本次串行调用，远端结果语义取决于 publisher。
 pub async fn dispatch_in_order<P>(events: &[OutboxEvent], publisher: &P) -> DispatchReport
 where
     P: OutboxPublisher + ?Sized,
@@ -461,10 +548,12 @@ where
 }
 
 impl InMemoryOutbox {
-    /// 业务作用：一次投递轮:取走全部事件 → 保序投递 → **把未投递的按原序放回**(下轮重试)。返回本轮报告。
+    /// 业务作用：串行取得内存批次并保留恢复守卫，使失败、取消时未确认事件重新排队。
     ///
-    /// 与 `drain` 不同:失败的事件不丢,保留在 outbox 里。用于把 [`InMemoryOutbox`] 直接当 dispatcher
-    /// 的事件源做端到端演示。
+    /// 参数说明：
+    /// - `publisher`：本轮顺序投递使用的发布实现。
+    ///
+    /// 返回：返回本轮前缀成功数及首错，正常结束把未确认后缀放回当前队列之前；等待发布时被取消或展开则恢复整批，可能重复已到达下游的事件。互斥仅覆盖本方法的并发轮次，外部 drain 和进程崩溃仍需调用方管理。
     pub async fn dispatch_once<P>(&self, publisher: &P) -> DispatchReport
     where
         P: OutboxPublisher + ?Sized,
@@ -491,6 +580,12 @@ struct DrainedBatch<'a> {
 
 impl<'a> DrainedBatch<'a> {
     /// 业务作用：创建尚未确认任何发布前缀的批次恢复守卫。
+    ///
+    /// 参数说明：
+    /// - `outbox`：恢复未确认事件时写回的内存来源。
+    /// - `events`：本轮从来源取出的有序批次。
+    ///
+    /// 返回：返回持有整批事件且确认前缀为零的守卫；尚未发布时释放会恢复全部事件，不自动发送。
     fn new(outbox: &'a InMemoryOutbox, events: Vec<OutboxEvent>) -> Self {
         Self {
             outbox,
@@ -502,6 +597,10 @@ impl<'a> DrainedBatch<'a> {
 
 impl Drop for DrainedBatch<'_> {
     /// 业务作用：将未确认后缀恢复到当前队列之前，维持取消安全与原始 FIFO。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：将未确认后缀与仍排队事件连接后写回队列，已确认前缀随守卫释放；确认数超长时先限为批次长度。此操作只保护进程内所有权，不提供崩溃持久性。
     fn drop(&mut self) {
         let published = self.published.min(self.events.len());
         let mut remaining = self.events.split_off(published);
@@ -565,7 +664,8 @@ pub trait DurableOutboxDispatch: Send + Sync {
 
     /// 业务作用：按固定事件类型读取最老未获确认事件的年龄，定位投递排队。
     ///
-    /// 参数说明：`event_type` 是受信事件合同名，不从 payload 推断。
+    /// 参数说明：
+    /// - `_event_type`：是受信事件合同名，不从 payload 推断。
     ///
     /// 返回：数据库时钟计算的非负毫秒数；无积压为零，后端不支持或查询失败返回错误。
     async fn oldest_pending_age_ms(&self, _event_type: &str) -> Result<u64, OutboxStoreError> {
@@ -691,7 +791,8 @@ pub trait DurableOutboxRetention: Send + Sync {
 pub trait DurableOutboxWakeup: Send + Sync {
     /// 业务作用：订阅该 datasource 内指定 lane 的已确认提交代际。
     ///
-    /// 参数说明：`channel` 是 dispatcher 冻结的 lane；空值订阅该 datasource 的未分片兼容通道。
+    /// 参数说明：
+    /// - `channel`：是 dispatcher 冻结的 lane；空值订阅该 datasource 的未分片兼容通道。
     ///
     /// 返回：可合并连续通知的 watch 接收端；调用方仍须保留定时轮询。
     fn subscribe_committed_appends(

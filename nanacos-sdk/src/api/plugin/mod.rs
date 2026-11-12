@@ -8,6 +8,6 @@ mod encryption;
 #[cfg(feature = "config")]
 pub use encryption::*;
 
-/// Auth login plugin.
+/// 客户端登录、身份刷新及请求签名扩展。
 mod auth;
 pub use auth::*;

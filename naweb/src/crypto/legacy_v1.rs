@@ -38,6 +38,11 @@ enum LegacyAesField {
 }
 
 /// 业务作用：只在字段实际出现时区分 JSON null 与字符串；字段缺失由 `Default` 产生。
+///
+/// 参数说明：
+/// - `deserializer`：仅在 aes 字段实际出现时提供该 JSON 值的反序列化器。
+///
+/// 返回：字段为字符串时返回 Value，null 返回 Null，其它类型传播反序列化错误；字段缺失由外层 default 处理，不执行 AES 解密。
 fn deserialize_legacy_aes_field<'de, D>(deserializer: D) -> Result<LegacyAesField, D::Error>
 where
     D: Deserializer<'de>,
@@ -71,9 +76,9 @@ pub struct LegacyV1Protocol;
 impl LegacyV1Protocol {
     /// 业务作用：建立无可变状态的 legacy-v1 协议对象。
     ///
-    /// # 返回
+    /// 返回：返回只应在受控兼容路由注册的协议实现。
     ///
-    /// 返回只应在受控兼容路由注册的协议实现。
+    /// 参数说明: 无。
     pub const fn new() -> Self {
         Self
     }
@@ -82,31 +87,29 @@ impl LegacyV1Protocol {
 impl CryptoProtocol for LegacyV1Protocol {
     /// 业务作用：返回静态兼容协议 ID。
     ///
-    /// # 返回
+    /// 返回：返回 route policy 使用的 `legacy-v1`。
     ///
-    /// 返回 route policy 使用的 `legacy-v1`。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str {
         "legacy-v1"
     }
 
     /// 业务作用：返回 legacy 信封要求的 JSON 媒体类型。
     ///
-    /// # 返回
+    /// 返回：返回 `application/json`。
     ///
-    /// 返回 `application/json`。
+    /// 参数说明: 无。
     fn request_content_type(&self) -> &'static str {
         LEGACY_V1_MEDIA_TYPE
     }
 
     /// 业务作用：严格解析旧信封并按 active 加至多一个 previous key 解密。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 请求固定快照提供的有界信封、ring 与 provider。
     ///
-    /// # 返回
-    ///
-    /// 成功返回单个完整业务 JSON；失败不回退明文，也不遍历无界历史 key。
+    /// 返回：成功返回单个完整业务 JSON；失败不回退明文，也不遍历无界历史 key。
     fn decrypt<'a>(
         &'a self,
         input: ProtocolDecryptInput,
@@ -233,13 +236,11 @@ impl CryptoProtocol for LegacyV1Protocol {
 
     /// 业务作用：严格验证 `BaseResponse` 并只改写非空 data 字段。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: handler 响应和请求阶段固定的 legacy key/provider 上下文。
     ///
-    /// # 返回
-    ///
-    /// 合同正确时返回兼容 JSON；未知结构或加密失败不透传原明文。
+    /// 返回：合同正确时返回兼容 JSON；未知结构或加密失败不透传原明文。
     fn encrypt<'a>(
         &'a self,
         input: ProtocolEncryptInput,
@@ -365,13 +366,11 @@ impl CryptoProtocol for LegacyV1Protocol {
 
 /// 业务作用：计算标准 Base64 文本解码后的保守字节上界，不解析或分配输出缓冲区。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `encoded_len`: 外层严格 JSON 字符串的 UTF-8 字节数；标准 Base64 合法输入全部是 ASCII。
 ///
-/// # 返回
-///
-/// 返回按每四字符至多三个字节计算并额外覆盖非完整末组的饱和值。该上界只用于在 provider 前
+/// 返回：返回按每四字符至多三个字节计算并额外覆盖非完整末组的饱和值。该上界只用于在 provider 前
 /// 执行资源门禁，实际编码合法性仍由底层统一认证错误收敛。
 fn decoded_base64_upper_bound(encoded_len: usize) -> usize {
     encoded_len
@@ -382,14 +381,12 @@ fn decoded_base64_upper_bound(encoded_len: usize) -> usize {
 
 /// 业务作用：序列化 legacy 响应并应用最终信封上限。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `envelope`: 已完成 `BaseResponse` 字段检查与 data 改写的结构。
 /// - `limits`: 当前请求固定快照的响应大小限制。
 ///
-/// # 返回
-///
-/// 在上限内返回 JSON 响应，否则返回大小或内部序列化错误。
+/// 返回：在上限内返回 JSON 响应，否则返回大小或内部序列化错误。
 fn encode_response(
     envelope: LegacyResponseEnvelope,
     limits: &super::CryptoLimits,

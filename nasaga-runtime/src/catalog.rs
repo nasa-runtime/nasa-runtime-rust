@@ -15,7 +15,8 @@ const MAX_CAPABILITY_LEASE_MS: u64 = 120_000;
 
 /// 业务作用：在已持有 schema 串行权威的连接上建立 Catalog、capability、generation 与审计结构。
 ///
-/// 参数说明：`connection` 是 Orchestrator schema coordinator 持有的同一 MySQL session。
+/// 参数说明：
+/// - `connection`：是 Orchestrator schema coordinator 持有的同一 MySQL session。
 ///
 /// 返回：全部控制面结构可用时成功；DDL 权限或结构冲突返回错误。
 pub(crate) async fn ensure_schema(connection: &mut natx::Conn) -> anyhow::Result<()> {
@@ -120,7 +121,8 @@ pub(crate) async fn ensure_schema(connection: &mut natx::Conn) -> anyhow::Result
 
 /// 业务作用：在创建当前对象前把可识别的直接前驱 Catalog 有序迁移到 tenant、审计和文本合同。
 ///
-/// 参数说明：`connection` 是持有 database 级自举锁的同一 MySQL session。
+/// 参数说明：
+/// - `connection`：是持有 database 级自举锁的同一 MySQL session。
 ///
 /// 返回：空库或当前结构直接成功；前驱结构安全回填后成功；租户歧义、数据不一致或 DDL 失败时拒绝 Ready。
 async fn migrate_predecessor_schema(connection: &mut natx::Conn) -> anyhow::Result<()> {
@@ -207,7 +209,8 @@ async fn migrate_predecessor_schema(connection: &mut natx::Conn) -> anyhow::Resu
 
 /// 业务作用：把未记录运行时路由合同的 Catalog 副本表收敛到当前确认语义。
 ///
-/// 参数说明：`connection` 是持有 database 级自举锁的同一 MySQL session。
+/// 参数说明：
+/// - `connection`：是持有 database 级自举锁的同一 MySQL session。
 ///
 /// 返回：当前表或空库直接成功；前驱确认全部撤销并补齐非空摘要列后成功；DDL 失败时拒绝 Ready。
 async fn migrate_mysql_catalog_replica_contract(connection: &mut natx::Conn) -> anyhow::Result<()> {
@@ -255,7 +258,8 @@ async fn migrate_mysql_catalog_replica_contract(connection: &mut natx::Conn) -> 
 
 /// 业务作用：把无 tenant 的直接前驱 capability 安全绑定到唯一 definition 租户并重算持久摘要。
 ///
-/// 参数说明：`connection` 是 schema 锁内连接。
+/// 参数说明：
+/// - `connection`：是 schema 锁内连接。
 ///
 /// 返回：租户可唯一推导时完成列、JSON、摘要、主键和查询索引迁移；歧义时拒绝 Ready。
 async fn migrate_mysql_capability_tenant(connection: &mut natx::Conn) -> anyhow::Result<()> {
@@ -393,7 +397,9 @@ async fn migrate_mysql_capability_tenant(connection: &mut natx::Conn) -> anyhow:
 
 /// 业务作用：判断当前 database 是否存在指定 Catalog 普通表。
 ///
-/// 参数说明：连接与表名定位当前 database 对象。
+/// 参数说明：
+/// - `connection`：绑定目标 Catalog 数据库的连接；对象查询以当前 database 或 schema 为范围。
+/// - `table`：待查询或校验的 Catalog 表名。
 ///
 /// 返回：存在时为真；查询失败返回错误。
 async fn mysql_table_exists(connection: &mut natx::Conn, table: &str) -> anyhow::Result<bool> {
@@ -409,7 +415,10 @@ async fn mysql_table_exists(connection: &mut natx::Conn, table: &str) -> anyhow:
 
 /// 业务作用：判断目标表是否已有指定列，支持 MySQL 隐式提交后的迁移续跑。
 ///
-/// 参数说明：连接、表和列定位结构事实。
+/// 参数说明：
+/// - `connection`：绑定目标 Catalog 数据库的连接；对象查询以当前 database 或 schema 为范围。
+/// - `table`：待查询或校验的 Catalog 表名。
+/// - `column`：待查询是否存在的列名。
 ///
 /// 返回：列存在时为真；查询失败返回错误。
 async fn mysql_column_exists(
@@ -430,7 +439,10 @@ async fn mysql_column_exists(
 
 /// 业务作用：判断目标表是否已有命名索引，避免重复 DDL。
 ///
-/// 参数说明：连接、表与索引名定位结构事实。
+/// 参数说明：
+/// - `connection`：绑定目标 Catalog 数据库的连接；对象查询以当前 database 或 schema 为范围。
+/// - `table`：待查询或校验的 Catalog 表名。
+/// - `index`：待查询或复验的命名索引。
 ///
 /// 返回：索引存在时为真；查询失败返回错误。
 async fn mysql_index_exists(
@@ -445,9 +457,12 @@ async fn mysql_index_exists(
 
 /// 业务作用：读取 MySQL 命名索引的完整列序，供迁移和最终合同使用同一事实来源。
 ///
-/// 参数说明：连接、表与索引名定位当前 database 索引。
+/// 参数说明：
+/// - `connection`：绑定目标 Catalog 数据库的连接；对象查询以当前 database 或 schema 为范围。
+/// - `table`：待查询或校验的 Catalog 表名。
+/// - `index`：待查询或复验的命名索引。
 ///
-/// 返回：逗号分隔列序；索引不存在返回空文本。
+/// 返回：逗号分隔列序；索引不存在返回空文本。 数据库查询或结果解码失败时返回错误。
 async fn mysql_index_columns(
     connection: &mut natx::Conn,
     table: &str,
@@ -467,7 +482,8 @@ async fn mysql_index_columns(
 
 /// 业务作用：复验 Catalog 全部表、列、collation、索引、唯一性与 CHECK 合同，结构漂移时拒绝 Ready。
 ///
-/// 参数说明：`connection` 是仍持有 schema 串行权威且绑定目标 database 的同一会话。
+/// 参数说明：
+/// - `connection`：是仍持有 schema 串行权威且绑定目标 database 的同一会话。
 ///
 /// 返回：服务端最终结构与运行期 SQL 假设完全一致时成功；任一缺失或类型漂移返回错误。
 async fn verify_schema(connection: &mut natx::Conn) -> anyhow::Result<()> {
@@ -915,7 +931,8 @@ async fn verify_schema(connection: &mut natx::Conn) -> anyhow::Result<()> {
 
 /// 业务作用：复验已离开 candidate 的 definition 都具有可公开的首次激活时间证据。
 ///
-/// 参数说明：`connection` 是 database 锁内连接。
+/// 参数说明：
+/// - `connection`：是 database 锁内连接。
 ///
 /// 返回：历史事实完整时成功；任一非 candidate 行缺少 `activated_at` 时拒绝 Ready。
 async fn verify_mysql_activation_facts(connection: &mut natx::Conn) -> anyhow::Result<()> {
@@ -934,7 +951,8 @@ async fn verify_mysql_activation_facts(connection: &mut natx::Conn) -> anyhow::R
 
 /// 业务作用：逐项核对 MySQL 命名 CHECK 的真实表达式，阻止同名弱约束通过 Ready。
 ///
-/// 参数说明：`connection` 是 database 锁内连接。
+/// 参数说明：
+/// - `connection`：是 database 锁内连接。
 ///
 /// 返回：八项表达式与当前合同一致时成功；缺失或表达式漂移返回错误。
 async fn verify_mysql_check_contracts(connection: &mut natx::Conn) -> anyhow::Result<()> {
@@ -1015,7 +1033,8 @@ async fn verify_mysql_check_contracts(connection: &mut natx::Conn) -> anyhow::Re
 
 /// 业务作用：复验 MySQL 时间默认值、ON UPDATE 与 audit 自增行为。
 ///
-/// 参数说明：`connection` 是 database 锁内连接。
+/// 参数说明：
+/// - `connection`：是 database 锁内连接。
 ///
 /// 返回：默认值和额外行为精确命中当前合同时成功；漂移时返回错误。
 async fn verify_mysql_column_behaviors(connection: &mut natx::Conn) -> anyhow::Result<()> {
@@ -1096,7 +1115,8 @@ async fn verify_mysql_column_behaviors(connection: &mut natx::Conn) -> anyhow::R
 
 /// 业务作用：把 MySQL 结构表达式压缩为可精确比较的稳定文本。
 ///
-/// 参数说明：`value` 是 information_schema 输出或源码静态期望。
+/// 参数说明：
+/// - `value`：是 information_schema 输出或源码静态期望。
 ///
 /// 返回：小写且移除 ASCII 空白、标识符反引号、展示转义和等价字符集 introducer 的文本。
 fn normalize_mysql_sql_contract(value: &str) -> String {
@@ -1116,7 +1136,12 @@ fn normalize_mysql_sql_contract(value: &str) -> String {
 
 /// 业务作用：复验一个命名索引的唯一性和完整前导列顺序，防止同名残缺索引绕过 Ready 门禁。
 ///
-/// 参数说明：连接、表、索引名、唯一性与逗号分隔列序共同描述执行合同。
+/// 参数说明：
+/// - `connection`：绑定目标 Catalog 数据库的连接；对象查询以当前 database 或 schema 为范围。
+/// - `table`：待查询或校验的 Catalog 表名。
+/// - `index`：待查询或复验的命名索引。
+/// - `unique`：期望的索引唯一性，true 要求唯一索引。
+/// - `expected_columns`：期望的逗号分隔完整列序。
 ///
 /// 返回：服务端索引精确命中时成功；缺失、列序或唯一性漂移返回错误。
 async fn verify_index(
@@ -1148,7 +1173,8 @@ async fn verify_index(
 
 /// 业务作用：读取同一 MySQL generation 的候选与运行 definition，以及当前有效能力 route。
 ///
-/// 参数说明：`datasource` 是 Orchestrator 明确绑定的 Catalog datasource。
+/// 参数说明：
+/// - `datasource`：是 Orchestrator 明确绑定的 Catalog datasource。
 ///
 /// 返回：所有持久行与 seal 复验通过时返回不可变快照；漂移或数据库失败返回错误。
 pub async fn load_dynamic_catalog_for(datasource: &str) -> anyhow::Result<DynamicCatalogSnapshot> {
@@ -1259,7 +1285,11 @@ pub async fn load_dynamic_catalog_for(datasource: &str) -> anyhow::Result<Dynami
 
 /// 业务作用：按完整 definition key 读取 Catalog 记录，供协议层在租户授权后返回当前生命周期。
 ///
-/// 参数说明：`datasource` 固定 Catalog，tenant/workflow/version 共同定位不可变定义。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `tenant`：定义所属租户，与流程名和定义版本共同定位记录。
+/// - `workflow`：该租户内的流程定义名称。
+/// - `version`：不可变业务流程定义的版本编号。
 ///
 /// 返回：记录存在且持久字段与 seal 一致时返回；不存在返回空，漂移或数据库失败返回错误。
 pub async fn load_definition_for(
@@ -1318,10 +1348,16 @@ pub async fn load_definition_for(
 
 /// 业务作用：登记 Orchestrator 副本已完整装载并复验某个 Catalog 快照，同时续租 Ready 资格。
 ///
-/// 参数说明：数据源和两个身份定位副本，`generation`/`digest` 是已装载快照，
-/// `activation_contract_digest` 绑定本副本实际发布边界，`lease_ms` 是有界租期。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `service_identity`：限定副本确认范围的逻辑 Orchestrator 身份。
+/// - `replica_identity`：该逻辑服务下独立运行副本的稳定标识。
+/// - `generation`：副本已装载或待比较的 Catalog 快照代次。
+/// - `digest`：该 Catalog 快照的完整内容摘要。
+/// - `activation_contract_digest`：副本实际采用的数据面发布与激活合同摘要。
+/// - `lease_ms`：数据库时钟下的 Ready 租期毫秒数，允许 5000 至 60000。
 ///
-/// 返回：代际一致且确认提交时返回数据库时钟下的租约截止毫秒；代际变化、参数非法或持久化失败时不授予租约。
+/// 返回：参数合法、锁定代次与已装载值一致且事务提交确认时，返回数据库时钟计算的租约截止毫秒；不重算传入摘要。参数、代次或数据库操作失败返回错误，提交失败时不能据此断言远端未授予租约。
 pub async fn acknowledge_catalog_generation_for(
     datasource: &str,
     service_identity: &ServiceIdentity,
@@ -1397,10 +1433,14 @@ pub async fn acknowledge_catalog_generation_for(
 
 /// 业务作用：判断同一逻辑 Orchestrator 的全部有效 Ready 副本是否确认了当前完整快照。
 ///
-/// 参数说明：身份限定共享控制面，`generation`/`digest` 是待激活候选依赖的当前快照，
-/// `activation_contract_digest` 是本进程实际运行时路由合同。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `service_identity`：限定副本确认范围的逻辑 Orchestrator 身份。
+/// - `generation`：副本已装载或待比较的 Catalog 快照代次。
+/// - `digest`：该 Catalog 快照的完整内容摘要。
+/// - `activation_contract_digest`：副本实际采用的数据面发布与激活合同摘要。
 ///
-/// 返回：至少存在一个有效副本且全部确认相同代际和摘要时返回真；读取失败返回错误。
+/// 返回：以数据库当前时刻筛选 Ready 且未过期副本，至少一项且每项均匹配传入代次及两个摘要时返回 true；读取失败返回错误。本查询不单独复验传入代次仍是 Catalog 当前值。
 pub async fn catalog_generation_fully_acknowledged_for(
     datasource: &str,
     service_identity: &ServiceIdentity,
@@ -1430,7 +1470,10 @@ pub async fn catalog_generation_fully_acknowledged_for(
 
 /// 业务作用：在副本排空时撤销其 Catalog Ready 资格，使后续激活不等待已失权进程。
 ///
-/// 参数说明：数据源和两个身份精确定位本副本租约。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `service_identity`：限定副本确认范围的逻辑 Orchestrator 身份。
+/// - `replica_identity`：该逻辑服务下独立运行副本的稳定标识。
 ///
 /// 返回：对应记录不存在也视为幂等成功；数据库失败返回错误。
 pub async fn retire_catalog_replica_for(
@@ -1452,7 +1495,10 @@ pub async fn retire_catalog_replica_for(
 
 /// 业务作用：以 workflow owner 身份幂等发布不可变 candidate，并在同事务推进 Catalog generation 与审计。
 ///
-/// 参数说明：`datasource` 是共享 Catalog，`actor` 是认证主体，`artifact` 是完整 definition seal。
+/// 参数说明：
+/// - `datasource`：是共享 Catalog
+/// - `actor`：是认证主体
+/// - `artifact`：是完整 definition seal。
 ///
 /// 返回：首次发布或同摘要重放的类型化结论与持久记录；同键异摘要、越权或数据库失败返回错误。
 pub async fn publish_definition_for(
@@ -1557,10 +1603,15 @@ pub async fn publish_definition_for(
 
 /// 业务作用：在行锁下验证全部步骤存在有效 capability 后原子激活 candidate。
 ///
-/// 参数说明：`datasource` 是共享 Catalog，`actor` 是获权主体，`gate` 锁定
-/// 已被全部 Ready 副本确认的同代摘要与数据面协议，其余字段定位不可变定义。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `actor`：用于持久 owner 或激活门禁比对的逻辑操作主体，调用方须已认证该身份。
+/// - `gate`：绑定 Orchestrator、Catalog 代次与摘要、传输及结果合同的激活门禁。
+/// - `tenant`：定义所属租户，与流程名和定义版本共同定位记录。
+/// - `workflow`：该租户内的流程定义名称。
+/// - `version`：不可变业务流程定义的版本编号。
 ///
-/// 返回：激活成功或 active 幂等重放时返回记录；缺能力、状态非法或数据库失败返回错误。
+/// 返回：激活成功或 active 幂等重放时返回记录；缺能力、状态非法或数据库失败返回错误。 提交阶段失败不能推断远端未提交；调用方应按持久身份复查。
 pub async fn activate_definition_for(
     datasource: &str,
     actor: &ServiceIdentity,
@@ -1586,9 +1637,16 @@ pub async fn activate_definition_for(
 
 /// 业务作用：以持久幂等身份和事务内 seal 前置条件激活 candidate definition。
 ///
-/// 参数说明：数据源、主体、门禁和定义键定位目标，`operation` 携带 CAS、操作身份与审计原因。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `actor`：用于持久 owner 或激活门禁比对的逻辑操作主体，调用方须已认证该身份。
+/// - `gate`：绑定 Orchestrator、Catalog 代次与摘要、传输及结果合同的激活门禁。
+/// - `tenant`：定义所属租户，与流程名和定义版本共同定位记录。
+/// - `workflow`：该租户内的流程定义名称。
+/// - `version`：不可变业务流程定义的版本编号。
+/// - `operation`：携带幂等操作 ID、期望定义摘要及操作原因的生命周期变更前置条件。
 ///
-/// 返回：首次提交或同参数重放返回 active 记录；摘要或操作身份冲突时不改变 Catalog。
+/// 返回：首次变更或匹配同主体、动作、操作 ID、对象、摘要和原因的持久重放时返回目标状态记录；前置条件、权限、生命周期或数据库失败返回错误。提交失败不证明远端未发生变更。
 pub async fn activate_definition_with_operation_for(
     datasource: &str,
     actor: &ServiceIdentity,
@@ -1615,9 +1673,14 @@ pub async fn activate_definition_with_operation_for(
 
 /// 业务作用：原子把 active definition 标记为 deprecated，只关闭新实例入口。
 ///
-/// 参数说明：`datasource` 是共享 Catalog，`actor` 是获权主体，其余字段定位不可变定义。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `actor`：用于持久 owner 或激活门禁比对的逻辑操作主体，调用方须已认证该身份。
+/// - `tenant`：定义所属租户，与流程名和定义版本共同定位记录。
+/// - `workflow`：该租户内的流程定义名称。
+/// - `version`：不可变业务流程定义的版本编号。
 ///
-/// 返回：变更成功或 deprecated 幂等重放时返回记录；状态非法或数据库失败返回错误。
+/// 返回：变更成功或 deprecated 幂等重放时返回记录；状态非法或数据库失败返回错误。 提交阶段失败不能推断远端未提交；调用方应按持久身份复查。
 pub async fn deprecate_definition_for(
     datasource: &str,
     actor: &ServiceIdentity,
@@ -1642,9 +1705,15 @@ pub async fn deprecate_definition_for(
 
 /// 业务作用：以持久幂等身份和事务内 seal 前置条件弃用 active definition。
 ///
-/// 参数说明：数据源、主体和定义键定位目标，`operation` 携带 CAS、操作身份与审计原因。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `actor`：用于持久 owner 或激活门禁比对的逻辑操作主体，调用方须已认证该身份。
+/// - `tenant`：定义所属租户，与流程名和定义版本共同定位记录。
+/// - `workflow`：该租户内的流程定义名称。
+/// - `version`：不可变业务流程定义的版本编号。
+/// - `operation`：携带幂等操作 ID、期望定义摘要及操作原因的生命周期变更前置条件。
 ///
-/// 返回：首次提交或同参数重放返回 deprecated 记录；摘要或操作身份冲突时不改变 Catalog。
+/// 返回：首次变更或匹配同主体、动作、操作 ID、对象、摘要和原因的持久重放时返回目标状态记录；前置条件、权限、生命周期或数据库失败返回错误。提交失败不证明远端未发生变更。
 pub async fn deprecate_definition_with_operation_for(
     datasource: &str,
     actor: &ServiceIdentity,
@@ -1670,9 +1739,15 @@ pub async fn deprecate_definition_with_operation_for(
 
 /// 业务作用：以持久幂等身份和事务内 seal 前置条件退休无持久引用的 deprecated definition。
 ///
-/// 参数说明：数据源、主体和定义键定位目标，`operation` 携带 CAS、操作身份与审计原因。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `actor`：用于持久 owner 或激活门禁比对的逻辑操作主体，调用方须已认证该身份。
+/// - `tenant`：定义所属租户，与流程名和定义版本共同定位记录。
+/// - `workflow`：该租户内的流程定义名称。
+/// - `version`：不可变业务流程定义的版本编号。
+/// - `operation`：携带幂等操作 ID、期望定义摘要及操作原因的生命周期变更前置条件。
 ///
-/// 返回：首次提交或同参数重放返回 retired 记录；摘要或操作身份冲突时不改变 Catalog。
+/// 返回：首次变更或匹配同主体、动作、操作 ID、对象、摘要和原因的持久重放时返回目标状态记录；前置条件、权限、生命周期或数据库失败返回错误。提交失败不证明远端未发生变更。
 pub async fn retire_definition_with_operation_for(
     datasource: &str,
     actor: &ServiceIdentity,
@@ -1698,7 +1773,10 @@ pub async fn retire_definition_with_operation_for(
 
 /// 业务作用：以 owner 认证身份登记或续租一个逐实例 capability，并在数据库行锁内分配单调 route generation。
 ///
-/// 参数说明：`datasource` 是共享目录，`actor` 来自认证边界，`descriptor` 是当前实例能力。
+/// 参数说明：
+/// - `datasource`：是共享目录
+/// - `actor`：来自认证边界
+/// - `descriptor`：是当前实例能力。
 ///
 /// 返回：服务端数据库时钟确定的有界租约、有效路由代际、内容摘要和 Catalog generation；越权或持久事实漂移返回错误。
 pub async fn register_capability_for(
@@ -1842,9 +1920,12 @@ struct DefinitionLifecycleChange<'a> {
 
 /// 业务作用：执行 definition 到目标生命周期的封闭迁移，并将 generation 与审计共同提交。
 ///
-/// 参数说明：`datasource` 与 `actor` 定位数据库权威，`change` 绑定定义键、目标状态、激活门禁与人工操作。
+/// 参数说明：
+/// - `datasource`：指向共享 Saga Catalog 的具名数据库入口。
+/// - `actor`：用于持久 owner 或激活门禁比对的逻辑操作主体，调用方须已认证该身份。
+/// - `change`：绑定完整定义键、目标生命周期、可选激活门禁和幂等操作的变更请求。
 ///
-/// 返回：迁移后的完整记录；能力不足、越权、状态不合法或数据库失败返回错误。
+/// 返回：迁移后的完整记录；能力不足、越权、状态不合法或数据库失败返回错误。 提交阶段失败不能推断远端未提交；调用方应按持久身份复查。
 async fn change_definition_lifecycle(
     datasource: &str,
     actor: &ServiceIdentity,
@@ -2029,7 +2110,9 @@ async fn change_definition_lifecycle(
 
 /// 业务作用：在 Catalog 权威锁内证明定义不再被实例、审计或待投递资料引用。
 ///
-/// 参数说明：`transaction` 固定当前 generation，`artifact` 定位租户与不可变定义。
+/// 参数说明：
+/// - `transaction`：固定当前 generation
+/// - `artifact`：定位租户与不可变定义。
 ///
 /// 返回：全部引用释放时成功；保留的终态实例同样阻止退休，资料清理必须由独立保留流程完成。
 async fn ensure_definition_unreferenced(
@@ -2103,14 +2186,14 @@ async fn ensure_definition_unreferenced(
     Ok(())
 }
 
-/// 业务作用：证明候选 definition 的每个步骤至少存在一个租约内、语义相符且能被实际
-/// publisher 接受的能力 route。
+/// 业务作用：证明候选 definition 的每个步骤至少存在一个租约内、语义相符且能被实际 publisher 接受的能力 route。
 ///
-/// 参数说明：`transaction` 持有 generation 行锁，`artifact` 是待激活完整流程，
-/// `gate` 绑定当前 Orchestrator 实际选用的数据面协议与 Redis 专属 route 上下文。
+/// 参数说明：
+/// - `transaction`：承载本次 Catalog 变更并由调用方负责提交或回滚的事务。
+/// - `artifact`：待激活的封存定义，包含租户、流程、步骤与不可变定义身份。
+/// - `gate`：绑定 Orchestrator、Catalog 代次与摘要、传输及结果合同的激活门禁。
 ///
-/// 返回：HTTP/gRPC 每步至少一个合法实例、消息队列每步只有一个 route key 时成功；
-/// 缺失、非法、歧义或仅有漂移能力时拒绝激活。
+/// 返回：HTTP/gRPC 每步至少一个合法实例、消息队列每步只有一个 route key 时成功； 缺失、非法、歧义或仅有漂移能力时拒绝激活。
 async fn validate_live_capabilities(
     transaction: &mut sqlx::Transaction<'_, sqlx::MySql>,
     artifact: &DefinitionArtifact,
@@ -2196,7 +2279,10 @@ async fn validate_live_capabilities(
 
 /// 业务作用：在 definition 行仍被锁定时证明同一逻辑 Orchestrator 的全部有效 Ready 副本确认了精确快照。
 ///
-/// 参数说明：`transaction` 持有 generation 权威，`generation` 是当前代际，`gate` 固定服务身份与摘要。
+/// 参数说明：
+/// - `transaction`：持有 generation 权威
+/// - `generation`：是当前代际
+/// - `gate`：固定服务身份与摘要。
 ///
 /// 返回：至少一个副本且全部命中同代同摘要时成功；缺失、落后或分歧时拒绝激活。
 async fn ensure_catalog_generation_acknowledged(
@@ -2230,7 +2316,9 @@ async fn ensure_catalog_generation_acknowledged(
 
 /// 业务作用：复验 definition 发布主体和 artifact owner 一致，避免请求字段自行授予权限。
 ///
-/// 参数说明：`actor` 来自认证层，`artifact` 携带声明 owner 与租户。
+/// 参数说明：
+/// - `actor`：来自认证层
+/// - `artifact`：携带声明 owner 与租户。
 ///
 /// 返回：身份与租户合法且相等时成功；否则在数据库写入前拒绝。
 fn validate_definition_actor(
@@ -2248,7 +2336,9 @@ fn validate_definition_actor(
 
 /// 业务作用：复验 capability 的 owner、步骤键、transport、完整 route 与租约建议均来自合法封闭值。
 ///
-/// 参数说明：`actor` 来自认证层，`descriptor` 是参与方请求体。
+/// 参数说明：
+/// - `actor`：来自认证层
+/// - `descriptor`：是参与方请求体。
 ///
 /// 返回：认证 owner 与描述完全一致且字段有界时成功；否则不接触数据库。
 fn validate_capability_actor(
@@ -2284,7 +2374,8 @@ fn validate_capability_actor(
 
 /// 业务作用：读取 MySQL 服务端当前毫秒，所有租约与激活判断使用同一时钟权威。
 ///
-/// 参数说明：`connection` 是当前连接或事务。
+/// 参数说明：
+/// - `connection`：是当前连接或事务。
 ///
 /// 返回：非负 Unix 毫秒；数据库失败或时钟异常返回错误。
 async fn database_now_ms<'e, E>(connection: E) -> anyhow::Result<i64>
@@ -2301,7 +2392,8 @@ where
 
 /// 业务作用：把数据库生命周期文本恢复为封闭枚举，拒绝未知持久状态。
 ///
-/// 参数说明：`value` 是 Catalog 行中的 lifecycle。
+/// 参数说明：
+/// - `value`：是 Catalog 行中的 lifecycle。
 ///
 /// 返回：已知状态返回枚举；未知文本返回结构漂移错误。
 fn parse_lifecycle(value: &str) -> anyhow::Result<DefinitionLifecycle> {
@@ -2316,7 +2408,8 @@ fn parse_lifecycle(value: &str) -> anyhow::Result<DefinitionLifecycle> {
 
 /// 业务作用：构造 definition 审计对象键，不包含 payload 或凭据。
 ///
-/// 参数说明：`artifact` 提供租户、workflow 与版本。
+/// 参数说明：
+/// - `artifact`：提供租户、workflow 与版本。
 ///
 /// 返回：可稳定检索的对象键。
 fn definition_key(artifact: &DefinitionArtifact) -> String {
@@ -2328,7 +2421,8 @@ fn definition_key(artifact: &DefinitionArtifact) -> String {
 
 /// 业务作用：构造 capability 审计对象键，区分 owner 副本和步骤版本。
 ///
-/// 参数说明：`descriptor` 提供能力主键字段。
+/// 参数说明：
+/// - `descriptor`：提供能力主键字段。
 ///
 /// 返回：不含 endpoint 的稳定对象键。
 fn capability_key(descriptor: &CapabilityDescriptor) -> String {
@@ -2345,9 +2439,16 @@ fn capability_key(descriptor: &CapabilityDescriptor) -> String {
 
 /// 业务作用：把控制面变更审计与其 generation 状态变化写入同一事务。
 ///
-/// 参数说明：事务、generation、主体、动作、对象键与摘要共同形成不可分审计事实。
+/// 参数说明：
+/// - `transaction`：承载本次 Catalog 变更并由调用方负责提交或回滚的事务。
+/// - `generation`：与本次状态变更绑定的 Catalog 代次。
+/// - `actor`：已确定的控制面操作主体标识。
+/// - `action`：本次持久化控制面变更的动作名称。
+/// - `object_key`：用于定位被变更定义或能力的持久对象键。
+/// - `digest`：本次审计对象的定义或能力摘要。
+/// - `operation`：可选的幂等操作 ID 和操作原因，缺省时两字段写 NULL。
 ///
-/// 返回：审计行写入成功时完成；失败使外层控制面事务整体回滚。
+/// 返回：成功时在传入事务中写入审计行，不自行提交；写入失败返回错误，调用方必须停止并回滚本次控制面变更。
 async fn insert_audit(
     transaction: &mut sqlx::Transaction<'_, sqlx::MySql>,
     generation: u64,

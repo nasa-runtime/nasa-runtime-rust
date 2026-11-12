@@ -43,7 +43,7 @@ owner，再调整业务接线。直接复制外部客户端句柄不能获得与
 
 ## 核对配置与入口
 
-- `zcf/application.yml` 必须存在，按进程工作目录解析。
+- 主配置优先使用非空环境变量 `APP_CONFIG_FILE`，未设置或为空时使用 `zcf/application.yml`；相对路径按进程工作目录解析，所选文件必须存在。
 - `application.mode` 决定 Service 或 Batch；无入站的常驻后台服务应显式使用 `service`。
 - 单源数据库使用 `database`，多源使用 `datasources`，两种根互斥；PostgreSQL 显式声明 `driver: postgresql`，SQLite 显式声明 `driver: sqlite` 并使用 `sqlite.path`。
 - datasource、Redis qualifier 和 Kafka client name 都是资源身份；显式引用不存在时拒绝启动。

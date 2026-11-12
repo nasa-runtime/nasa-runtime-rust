@@ -11,5 +11,5 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-tokio = { version = "1", features = ["time", "macros"] }
+tokio = { version = "1.54.1", features = ["time", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }

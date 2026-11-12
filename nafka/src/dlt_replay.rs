@@ -56,7 +56,11 @@ pub enum DltReplayError {
 
 impl std::fmt::Display for DltReplayError {
     /// 业务作用：提供可用于任务保护和诊断的脱敏分类。
-    /// 参数说明：formatter 为输出目标。返回：固定类别，不包含原始输入或底层异常。
+    ///
+    /// 参数说明：
+    /// - `formatter`：formatter 为输出目标。
+    ///
+    /// 返回：固定类别，不包含原始输入或底层异常。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "Kafka DLT replay: {self:?}")
     }

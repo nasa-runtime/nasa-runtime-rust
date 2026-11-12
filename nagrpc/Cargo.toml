@@ -31,7 +31,7 @@ prost-types = "0.14"
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
-tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["io-util", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }

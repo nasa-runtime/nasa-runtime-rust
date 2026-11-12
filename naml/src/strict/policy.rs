@@ -44,7 +44,9 @@ pub struct LoadLimits {
 
 impl Default for LoadLimits {
     /// 业务作用：为独立配置装配提供有限的默认资源范围。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：主文件、profile 和导入共享的预算。
     fn default() -> Self {
         Self {
@@ -122,7 +124,9 @@ pub struct LoadPolicy {
 
 impl Default for LoadPolicy {
     /// 业务作用：默认启用明确环境来源与严格表达式，拒绝含糊 profile。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不读取外部策略的初始加载约束。
     fn default() -> Self {
         Self {
@@ -143,7 +147,9 @@ impl Default for LoadPolicy {
 
 impl LoadPolicy {
     /// 业务作用：在有界工作阶段之间响应宿主撤销权威。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：未取消时成功；取消后拒绝产生新候选。
     pub fn check_cancelled(&self) -> Result<()> {
         if self.cancelled.load(Ordering::Acquire) {
@@ -154,7 +160,10 @@ impl LoadPolicy {
     }
 
     /// 业务作用：选择最具体的字段策略，父级声明可保护整棵子树。
-    /// 参数说明：`path` 是当前字段位置。
+    ///
+    /// 参数说明：
+    /// - `path`：是当前字段位置。
+    ///
     /// 返回：最长匹配路径上的类型或求值策略。
     pub(crate) fn hint(&self, path: &ConfigPath) -> Option<ValueHint> {
         self.hints

@@ -24,7 +24,12 @@ nasa = { version = "2.0.3", features = ["kafka"] }
 ```rust
 use nasa::kafka::kafka_consumer;
 
-/// 业务作用：按已登记路由处理订单事件。参数说明：message 为解码后的订单。返回：成功允许 Auto 确认，失败交由消费策略处理。
+/// 业务作用：按已登记路由处理订单事件。
+///
+/// 参数说明：
+/// - `message`：已按路由解码的订单事件。
+///
+/// 返回：成功允许 Auto 确认，失败交由消费策略处理。
 #[kafka_consumer(
     topics = ["orders"],
     event = "ORDER_CREATED",
@@ -40,7 +45,12 @@ async fn on_order(message: OrderCreated) -> anyhow::Result<()> {
 必须使用带 `KafkaRecord` 的形态：
 
 ```rust
-/// 业务作用：业务完成后确认付款输入。参数说明：record 为含当前确认权威的付款记录。返回：业务与确认均成功才完成本次调用。
+/// 业务作用：业务完成后确认付款输入。
+///
+/// 参数说明：
+/// - `record`：携带当前投递确认能力的付款记录。
+///
+/// 返回：业务执行与本次 ack 调用均成功才完成；ack 被接纳不单独证明 broker 位点已持久化。
 #[kafka_consumer(
     topics = ["payments"],
     event = "PAYMENT_CAPTURED",

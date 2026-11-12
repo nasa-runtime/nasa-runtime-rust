@@ -32,12 +32,15 @@ pub(crate) type ManagedTaskFuture =
 /// 任务 future 的共同存活边界；仅监督器与尚未释放的 future 持有强引用。
 #[derive(Default)]
 struct TaskLifetime {
+    /// 最后一个任务存活引用释放后才允许析构的同步清理尾部。
     deferred_cleanup: Mutex<Option<Box<dyn Send>>>,
 }
 
 /// 字段顺序保证先释放业务 future，再解除它对后续资源清理的约束。
 struct LifetimeBoundTask {
+    /// 需要先于依赖存活守卫析构的任务主体。
     future: ManagedTaskFuture,
+    /// 保留后续资源清理责任，直到主体及其捕获值释放。
     _lifetime: Arc<TaskLifetime>,
 }
 
@@ -46,7 +49,8 @@ impl Future for LifetimeBoundTask {
 
     /// 业务作用：在任务存活守卫内推进业务 future，不把一次 poll 完成等同于所有权已释放。
     ///
-    /// 参数说明：`context` 为执行器本次轮询的唤醒上下文。
+    /// 参数说明：
+    /// - `context`：`context` 为执行器本次轮询的唤醒上下文。
     ///
     /// 返回：透传业务结果或 Pending；future 析构后才归还存活守卫。
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
@@ -75,9 +79,9 @@ pub struct TaskId(u64);
 impl TaskId {
     /// 业务作用：返回任务标识的数值形式，供日志和诊断信息建立关联。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// - `self`：需要读取的任务标识。
+    /// 返回：监督器分配的本地数值，仅用于所属任务组的关联，不证明任务仍在运行。
     pub fn get(self) -> u64 {
         self.0
     }
@@ -86,15 +90,20 @@ impl TaskId {
 /// 受管任务的业务角色，决定退出事件应如何影响应用生命周期。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskKind {
+    /// 决定用户启动阶段结果的保留钩子。
     UserHook,
+    /// 非预期退出会触发应用失败的任务。
     Critical,
+    /// 退出仅记录结果的普通后台任务。
     Background,
 }
 
 /// 用户任务组的生命周期状态；Runner 单线程写入并据此分类任务退出。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskGroupState {
+    /// 按正常运行语义分类任务完成。
     Running,
+    /// 取消广播已发出，后续退出按停机语义分类。
     Stopping,
 }
 
@@ -102,9 +111,13 @@ pub(crate) enum TaskGroupState {
 ///
 /// 请求只有被 Runner 接收并加入任务集合后才会确认，调用方因此不会把“进入通道”误认为“已经受管”。
 pub(crate) struct TaskRegistration {
+    /// 当前任务组内用于去重的稳定名称。
     pub(crate) name: Arc<str>,
+    /// 控制任务退出如何影响应用的角色。
     pub(crate) kind: TaskKind,
+    /// 等待接管的主体，入队不等于已启动。
     pub(crate) future: ManagedTaskFuture,
+    /// 向提交方确认实际接管或拒绝的单次通道。
     pub(crate) acknowledged: oneshot::Sender<ApplicationResult<TaskId>>,
 }
 
@@ -113,8 +126,11 @@ pub(crate) struct TaskRegistration {
 /// 该句柄不持有任务集合，只能通过有界通道请求 Runner 完成注册。
 #[derive(Clone)]
 pub(crate) struct SupervisorClient {
+    /// 有界注册通道，队列满时对提交方施加背压。
     sender: mpsc::Sender<TaskRegistration>,
+    /// 接管方关闭后供发送方提前拒绝的共享标记。
     registration_open: Arc<AtomicBool>,
+    /// 由监督器广播、业务任务通过子令牌观察的取消源。
     task_group_token: CancellationToken,
     // Application 可能被延迟清理本身持有；客户端只能持弱引用，避免形成保留环。
     task_lifetime: Weak<TaskLifetime>,
@@ -162,9 +178,9 @@ impl SupervisorClient {
 
     /// 业务作用：为一个新受管任务创建组级取消令牌。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；返回的子令牌只接收 Runner 的组级停机广播，任务自行取消不会反向取消整组。
+    /// 返回：接收组级停机广播的子令牌，单独取消不影响整组；组已取消时子令牌也处于取消态。
     pub(crate) fn task_token(&self) -> CancellationToken {
         self.task_group_token.child_token()
     }
@@ -172,7 +188,9 @@ impl SupervisorClient {
 
 /// 任务主体结束后写回 `JoinSet` 的原始结果。
 struct TaskExit {
+    /// 任务启动时分配的本地身份。
     id: TaskId,
+    /// 主体正常结束时的业务结果，不含 panic 或运行时取消。
     result: anyhow::Result<()>,
 }
 
@@ -181,44 +199,67 @@ struct TaskExit {
 /// 元数据与执行结果分离保存，使 panic 或取消时仍能恢复业务名称和任务角色。
 #[derive(Clone)]
 struct TaskMeta {
+    /// 可与成功结果或异常退出关联的本地身份。
     id: TaskId,
+    /// 退出后需要解除占用的任务名。
     name: Arc<str>,
+    /// 任务结束时使用的生命周期分类。
     kind: TaskKind,
+    /// 强制退场时向对应运行时任务发出取消请求的句柄。
     abort_handle: tokio::task::AbortHandle,
 }
 
 /// 监督器归一化后的任务退出结果。
 pub(crate) enum TaskOutcome {
+    /// 主体正常返回成功。
     Completed,
+    /// 主体正常返回业务错误。
     Failed(anyhow::Error),
+    /// 运行时报告非取消的异常退出。
     Panicked,
+    /// 运行时确认任务被取消。
     Cancelled,
 }
 
 /// 一次已完成任务及其业务上下文。
 pub(crate) struct TaskCompletion {
+    /// 已结束任务的本地身份。
     pub(crate) id: TaskId,
+    /// 已解除占用的任务名称。
     pub(crate) name: Arc<str>,
+    /// 决定 Runner 后续处理的业务角色。
     pub(crate) kind: TaskKind,
+    /// 归一后的完成、失败或取消结果。
     pub(crate) outcome: TaskOutcome,
 }
 
 /// Runner 等待监督器时可能收到的事件。
 pub(crate) enum SupervisorEvent {
+    /// 已处理一次注册请求，是否成功以其 ACK 为准。
     RegistrationAccepted,
+    /// 注册通道关闭或收取结果缺少可关联的元数据。
     RegistrationChannelClosed,
+    /// 已收取且具有完整业务上下文的完成结果。
     TaskCompleted(TaskCompletion),
 }
 
 /// `JoinSet` 只有 Runner 持有；业务侧只持有 bounded sender，并等待接收确认。
 pub(crate) struct TaskSupervisor {
+    /// Runner 独占的注册请求接收端。
     receiver: mpsc::Receiver<TaskRegistration>,
+    /// 与所有客户端共享的永久登记关闭标记。
     registration_open: Arc<AtomicBool>,
+    /// 已启动且等待收取结果的运行时任务集合。
     tasks: JoinSet<TaskExit>,
+    /// 在任务 panic 或取消后仍可恢复的业务上下文。
     task_meta: HashMap<TokioTaskId, TaskMeta>,
+    /// 尚未收取的任务名称占用集合。
     task_names: HashSet<Arc<str>>,
+    /// 本地任务标识分配游标，达到整数上界后饱和。
     next_id: u64,
+    /// Runner 用于解释任务退出原因的组状态。
     task_group_state: TaskGroupState,
+    /// 统一停机取消源，不等同于任务释放证明。
     task_group_token: CancellationToken,
     // 放在任务集合与接收队列之后；监督器离开时，最后一个业务 future 接续持有清理尾部。
     task_lifetime: Arc<TaskLifetime>,
@@ -261,9 +302,9 @@ impl TaskSupervisor {
 
     /// 业务作用：等待下一次注册或任务退出事件。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// - `self`：由 Runner 独占推进的任务监督器。
+    /// 返回：处理注册请求后返回 RegistrationAccepted，是否接管由请求 ACK 决定；任务结束时归一为完成事件，通道关闭或缺少完成元数据时返回 RegistrationChannelClosed。
     pub(crate) async fn next_event(&mut self) -> SupervisorEvent {
         if self.tasks.is_empty() {
             return match self.receiver.recv().await {
@@ -277,7 +318,9 @@ impl TaskSupervisor {
 
         /// 同一次公平等待中先到达的内部事件。
         enum Next {
+            /// 接收端取得请求或观察到通道关闭。
             Registration(Option<TaskRegistration>),
+            /// 任务集合产生完成结果或已经清空。
             Joined(Option<Result<(TokioTaskId, TaskExit), JoinError>>),
         }
         let next = {
@@ -392,7 +435,10 @@ impl TaskSupervisor {
     }
 
     /// 业务作用：把终端主体隔离在组件与 initializer 共用的启动屏障后，避免逐项登记造成部分执行。
-    /// 参数说明：`future` 为已经构造但尚未 poll 的终端主体。
+    ///
+    /// 参数说明：
+    /// - `future`：`future` 为已经构造但尚未 poll 的终端主体。
+    ///
     /// 返回：等待统一放行的受管任务；组级取消或 owner 消失时释放主体而不执行它。
     fn guard_activation(&self, mut future: StartupCleanup<ManagedTaskFuture>) -> ManagedTaskFuture {
         let activation = self.activation.clone();
@@ -403,7 +449,7 @@ impl TaskSupervisor {
                 tokio::select! {
                     biased;
                     _ = stop.cancelled() => return Ok(()),
-                    _ = activation.cancelled() => {}
+                    _ = activation.cancelled() => {},
                 }
                 future.value_mut().await
             }
@@ -421,14 +467,18 @@ impl TaskSupervisor {
     }
 
     /// 业务作用：Batch 完成启动门禁后一次发布受管任务许可，不按任务逐个开放副作用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：唤醒全部等待任务；Service 的同一许可由 Ready 状态转换发布。
     pub(crate) fn release_startup_tasks(&self) {
         self.activation.cancel();
     }
 
     /// 业务作用：使领域准入与受管任务共用同一次启动许可。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：由宿主独占发布权的一次性信号，领域 owner 只能等待。
     pub(crate) fn activation_token(&self) -> CancellationToken {
         self.activation.clone()
@@ -436,17 +486,20 @@ impl TaskSupervisor {
 
     /// 业务作用：接受并确认一个注册请求，或把拒绝原因回传给调用方。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
-    /// - `self`：由 Runner 独占推进的任务监督器。
     /// - `registration`：包含名称、角色、任务主体和确认通道的注册请求。
+    ///
+    /// 返回：入口开放、确认接收方存在且名称唯一时先启动并登记任务再确认；拒绝时释放请求主体，确认发送失败不撤销已接管任务。
     fn accept(&mut self, registration: TaskRegistration) {
+        // 发送方入队前的检查可能已过时；接管前复验关闭状态，避免停机期间新增任务。
         if !self.registration_open.load(Ordering::Acquire) {
             let _ = registration
                 .acknowledged
                 .send(Err(supervisor_error("managed task registration is closed")));
             return;
         }
+        // 等待方已离开时不再启动尚未接管的主体；通过此检查后仍可能发生接收侧取消。
         if registration.acknowledged.is_closed() {
             return;
         }
@@ -465,12 +518,13 @@ impl TaskSupervisor {
 
     /// 业务作用：把任务加入运行时集合，并建立运行时标识到业务元数据的映射。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
-    /// - `self`：由 Runner 独占推进的任务监督器。
     /// - `name`：应用内唯一的任务名称。
     /// - `kind`：任务的业务角色。
     /// - `future`：需要被启动和收割的任务主体。
+    ///
+    /// 返回：启动任务、登记运行时标识与元数据后返回本地标识；名称占用与启动许可须由调用方预先处理，不等待主体完成。
     fn spawn_task(&mut self, name: Arc<str>, kind: TaskKind, future: ManagedTaskFuture) -> TaskId {
         let id = TaskId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -492,9 +546,9 @@ impl TaskSupervisor {
 
     /// 业务作用：等待并归一化下一项任务完成结果。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// - `self`：由 Runner 独占推进的任务监督器。
+    /// 返回：收取任务结果并释放其元数据及名称占用后返回完成事件；集合为空或缺少对应元数据时返回 None，不处理待注册请求。
     pub(crate) async fn join_next(&mut self) -> Option<TaskCompletion> {
         let joined = self.tasks.join_next_with_id().await?;
         self.complete_joined(joined)
@@ -502,10 +556,11 @@ impl TaskSupervisor {
 
     /// 业务作用：将运行时完成结果还原为带业务上下文的任务完成事件。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
-    /// - `self`：持有运行时标识与业务元数据映射的监督器。
     /// - `joined`：`JoinSet` 返回的成功、失败、取消或 panic 结果。
+    ///
+    /// 返回：找到元数据时移除映射和名称占用，返回保留业务身份的完成事件；缺少映射时返回 None，不虚构任务身份。
     fn complete_joined(
         &mut self,
         joined: Result<(TokioTaskId, TaskExit), JoinError>,
@@ -544,9 +599,9 @@ impl TaskSupervisor {
 
     /// 业务作用：判断监督器中是否仍有尚未收割的任务。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// - `self`：需要检查的任务监督器。
+    /// 返回：JoinSet 非空时为 true，包含已完成但尚未收取的任务；不计注册队列中的主体，不能替代存活守卫检查。
     pub(crate) fn has_tasks(&self) -> bool {
         !self.tasks.is_empty()
     }
@@ -574,7 +629,8 @@ impl TaskSupervisor {
 
     /// 业务作用：把任务门之后的同步清理所有权保留到最后一个已接管 future 释放。
     ///
-    /// 参数说明：`cleanup` 为不执行异步业务主体的清理尾部，其析构负责逆序归还所有权。
+    /// 参数说明：
+    /// - `cleanup`：`cleanup` 为不执行异步业务主体的清理尾部。
     ///
     /// 返回：无返回值；不创建清理任务、不等待 join，监督器及任务的最后一个强引用释放时执行析构。
     pub(crate) fn retain_until_tasks_release(&mut self, cleanup: impl Send + 'static) {
@@ -592,11 +648,12 @@ impl TaskSupervisor {
     ///
     /// 状态写入先于令牌取消，这是任务退出分类的线性化点：Runner 在该点之后收割到的退出均属于预期停机。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// - `self`：需要切换到停机态的任务监督器。
+    /// 返回：首次调用先发布 Stopping 再广播取消，并请求中止 UserHook；重复调用不再动作，不关闭登记也不等待任务退出。
     pub(crate) fn begin_stopping(&mut self) {
         if self.task_group_state == TaskGroupState::Running {
+            // 必须先切换退出分类再唤醒任务，后续收取的取消结果才能归入预期停机。
             self.task_group_state = TaskGroupState::Stopping;
             self.task_group_token.cancel();
             // UserHook 没有业务任务令牌；启动中断时必须显式 abort，避免它占满整个清理预算。
@@ -610,9 +667,9 @@ impl TaskSupervisor {
 
     /// 业务作用：返回用户任务组当前的退出分类状态。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// - `self`：需要读取状态的任务监督器。
+    /// 返回：当前 Running 或 Stopping 标记；Stopping 表示已广播停机，不表示任务已经排干。
     pub(crate) fn task_group_state(&self) -> TaskGroupState {
         self.task_group_state
     }
@@ -630,10 +687,11 @@ impl TaskSupervisor {
     ///
     /// 先发布关闭状态再关闭接收端，使并发发送方可以在入队前快速失败；随后逐项确认拒绝，避免调用方悬挂。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// - `self`：需要关闭注册入口的任务监督器。
+    /// 返回：关闭入口和接收端并为队列内请求发送拒绝后完成；不停止已接管任务，等待队列耗尽时未在此另设截止点。
     pub(crate) async fn close_registration(&mut self) {
+        // 先阻止新准入，再关闭队列并回复积压请求，避免等待 ACK 的注册方滞留。
         self.registration_open.store(false, Ordering::Release);
         self.receiver.close();
         while let Some(registration) = self.receiver.recv().await {
@@ -648,28 +706,34 @@ impl TaskSupervisor {
     /// 返回 `true` 表示 `JoinSet` 已清空；返回 `false` 表示仍有不合作任务，调用方应记录未优雅
     /// 收割并继续退场。不能在全局 deadline 之后无界等待，因为任务取消只能在 future 再次让出时生效。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
-    /// - `self`：需要终止剩余任务的监督器。
     /// - `budget`：当前全局停机截止时间尚余的时长。
+    ///
+    /// 返回：取消请求发出后集合已空，或预算内完成收取且集合为空时为 true；否则为 false，不覆盖注册队列及外部句柄的存活判断。
     pub(crate) async fn abort_and_drain(&mut self, budget: Duration) -> bool {
+        // abort 只请求任务取消；必须在剩余预算内继续收取，不能把请求发出当成任务释放。
         self.tasks.abort_all();
         if self.tasks.is_empty() {
             return true;
         }
-        let drained =
-            tokio::time::timeout(budget, async { while self.join_next().await.is_some() {} })
-                .await
-                .is_ok();
+        let drained = tokio::time::timeout(budget, async {
+            // abort 只请求取消；收回 JoinHandle 才能确认任务持有的资源已释放。
+            while self.join_next().await.is_some() {}
+        })
+        .await
+        .is_ok();
         drained && self.tasks.is_empty()
     }
 }
 
 /// 业务作用：构造任务监督阶段的统一应用错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`：不含敏感数据的稳定诊断信息。
+///
+/// 返回：归属 Supervisor、阶段为 UserHook 的应用错误；不附加任务主体或底层配置。
 fn supervisor_error(message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Supervisor, ApplicationPhase::UserHook, message)
 }

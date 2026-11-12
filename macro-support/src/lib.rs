@@ -2,34 +2,10 @@
 //!
 //! 供各属性宏在“业务直接依赖实现 crate”和“业务只依赖门面 crate”两种接入形态下，
 //! 生成可解析的运行时代码路径。
-// ============================================================================
-// macro-support —— 过程宏的运行时路径发现。
-//
-// 背景:宏展开代码原先硬编码 `::hystrix`、`::cacheable` 等绝对路径;业务改为只依赖
-// `nasa` 门面后,这些传递依赖**不在业务 crate 的 extern prelude 里**,路径无法解析。
-// 也不能改死成 `::nasa::hystrix`——用户可能 Cargo 重命名:
-//   company-nasa = { package = "nasa", ... }   → 实际 crate 名是 company_nasa。
-//
-// ★ 解析顺序 = **旧直接依赖优先,门面回退**(proc-macro-crate 只能发现
-// crate 是否存在,看不见 feature——若门面优先,"项目只为 WebSocket 引入
-// nasa = { features = [\"ws\"] },HTTP 部分仍直接使用 hystrix/naweb-macro"的**渐进迁移**
-// 会被无关的 nasa 依赖破坏:旧宏全部展开成 ::nasa::hystrix 而该 feature 未启用):
-//   1) 调用方直接依赖旧运行时 crate(如 `hystrix`/`cacheable`,含重命名)→ `::<实际名>`;
-//   2) 否则回退门面 `nasa`(含重命名)→ `::<实际名>::<module>`
-//      (纯门面消费者没有旧直接依赖,恒走这支);
-//   3) 都没有 → Err(统一文案),宏侧转成 compile_error。
-// ★ 同模块并存的边界:legacy-first 只为支撑【不同业务模块的渐进
-// 迁移】(如 nasa 只开 ws + 旧 hystrix)。**同一模块**新旧入口并存(nasa features 含
-// hystrix + 直接依赖 hystrix)仅当两条边解析到**同一 source**(同一 path/同一 registry
-// 版本)时被 Cargo 合并为单实例;跨 source(registry 版 nasa + path 版旧依赖)会:
-// ① 同版本 → lockfile package collision 拒绝构建;② 不同版本 → 双实例,REGISTRY/缓存
-// 注册表/连接池/任务表等 crate 级全局状态分裂。**禁止同模块混用**,流水线应做
-// "feature × 直接依赖"配对检查,并结合 `cargo tree -d` 拦截重复实例。
-//
-// 第三方 crate(axum/tokio/linkme/tracing)不在此解析:宏生成
-// `<运行时根>::__private::<第三方>`,由各运行时 crate 的 #[doc(hidden)] __private 桥接
-// (业务无需为宏展开细节添加 linkme 等依赖)。
-// ============================================================================
+// 运行时优先从直接依赖解析，再回退 nasa 门面，并保留 Cargo 重命名后的实际名称。
+// 依赖发现不检查门面 feature；直接运行时优先可以避免其他用途的 nasa 依赖遮蔽可用组件。
+// 同一组件的门面与直接依赖必须解析到同一源码身份，否则可能发生包冲突或运行时全局状态分裂。
+// 第三方依赖通过运行时 __private 桥访问，业务无需为宏展开细节额外声明这些依赖。
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -53,24 +29,23 @@ pub struct HandlerWrapper {
     pub call_inner: TokenStream,
 }
 
-/// 业务作用：构造 [`HandlerWrapper`];签名不适合内层包装时返回 `None`,由调用方退回旧展开形态。
+/// 业务作用：保留原处理函数的参数模式与返回类型，生成可在外层统一转换响应的异步内层包装。
 ///
-/// 返回 `None` 的情形:带 `self` 接收者、带泛型或 where 子句、可变参数、参数上有属性
-/// (这些形态无法把参数列表机械拆成"外层透传 + 内层原模式")。
+/// 参数说明：
+/// - `sig`：调用方改写返回类型之前的原始签名，用于保留输入类型、解构模式和结果类型。
+/// - `block`：原业务函数体，不在宏展开阶段执行。
+/// - `inner_ident`：内层异步函数标识，应使用宏专属前缀避免与业务声明冲突。
+/// - `arg_prefix`：外层透传参数的合法标识前缀，后接参数序号生成局部变量名。
 ///
-/// # 参数
-/// - `sig`: 被注解函数的原签名(调用方改写返回类型**之前**的那一份)。
-/// - `block`: 被注解函数的原函数体。
-/// - `inner_ident`: 内层 `async fn` 的名字,应带宏前缀避免与业务标识符相撞。
-/// - `arg_prefix`: 外层参数名前缀,同样应带宏前缀。
-///
-/// 返回：签名可安全拆分时返回内外层包装产物；不支持的签名形态返回 `None`。
+/// 返回：可拆分签名的外层输入、内层定义及等待表达式；接收者、泛型、where 子句、可变参数或参数属性使其返回 None。
+/// 调用方负责选择其余签名的展开方式；无效标识前缀可能在构造标识时 panic，不会隐式改写业务函数体。
 pub fn wrap_handler(
     sig: &syn::Signature,
     block: &syn::Block,
     inner_ident: &syn::Ident,
     arg_prefix: &str,
 ) -> Option<HandlerWrapper> {
+    // 泛型、接收者和参数属性不能安全地机械搬入独立内层函数，保留由上层宏选择展开策略的机会。
     if !sig.generics.params.is_empty()
         || sig.generics.where_clause.is_some()
         || sig.variadic.is_some()
@@ -97,7 +72,8 @@ pub fn wrap_handler(
         outer_inputs,
         inner_fn: quote! {
             /// 业务作用：在监控包装内保留原处理函数的参数模式与返回类型，使业务错误推断保持一致。
-            /// 参数说明：参数沿用被包装处理函数的业务输入声明。
+            /// 参数说明：
+            /// 业务输入及逐参数语义沿用外层处理函数声明，包装层不新增业务参数。
             /// 返回：原处理函数的执行结果，不改变其错误类型。
             async fn #inner_ident(#inner_inputs) #inner_output #block
         },
@@ -107,28 +83,21 @@ pub fn wrap_handler(
 
 /// 业务作用：兼容性包装：查询调用方是否依赖指定运行时包。
 ///
-/// # 参数
+/// 参数说明：
 /// - `package`: Cargo 包名，例如 `hystrix`、`cacheable`、`natx` 或 `naweb`。
 ///
-/// 返回：能够解析时返回 Cargo 识别的 crate 身份，否则返回 `None`。
+/// 返回：Cargo 识别的自身包或重命名依赖身份；包缺失或依赖解析失败均为 None，由上层决定回退或报错。
 fn crate_name_compat(package: &str) -> Option<proc_macro_crate::FoundCrate> {
     proc_macro_crate::crate_name(package).ok()
 }
 
-/// 业务作用：解析某个宏的**运行时根路径**(旧直接依赖优先,门面回退;见文件头)。
+/// 业务作用：为单层门面模块解析宏展开所用的运行时根，优先匹配直接运行时依赖并支持 Cargo 重命名。
 ///
-/// - `module`:门面下的模块名(`hystrix`/`cache`/`tx`/`scheduling`);
-/// - `legacy`:直接依赖的包名(`hystrix`/`cacheable`/`natx`/`nasched`);
-/// - 返回 `Ok(路径 tokens)`,如 `::hystrix`、`::nasa::hystrix`、`::company_nasa::hystrix`、
-///   `crate`(在运行时 crate 自身内展开时);
-/// - `Err(提示文案)`:两类依赖都找不到,调用方应整体替换为 `compile_error!`。
-///
-/// # 参数
-///
+/// 参数说明：
 /// - `module`: 门面 crate 下的模块名，例如 `hystrix`、`cache`、`tx` 或 `scheduling`。
 /// - `legacy`: 直接依赖的包名，用于兼容未走门面导出的调用方。
 ///
-/// 返回：直接运行时或门面模块的可解析路径；两类依赖均不存在时返回编译提示。
+/// 返回：直接运行时根或 nasa 门面模块路径；均无法解析时返回提示，由宏转换为编译错误，不检查门面 feature 是否启用。
 pub fn runtime_root(module: &str, legacy: &str) -> Result<TokenStream, String> {
     runtime_root_nested(&[module], module, legacy)
 }
@@ -170,7 +139,8 @@ pub fn runtime_root_nested(
 
 /// 业务作用：把直接运行时包解析为宏展开可用的 crate 根，并正确处理同包非 lib target。
 ///
-/// 参数说明：`legacy` 是直接运行时的 Cargo 包名。
+/// 参数说明：
+/// - `legacy`：直接运行时的 Cargo 包名，用于解析重命名依赖及自身包内不同 target 的访问路径。
 ///
 /// 返回：依赖存在时返回实际重命名路径；不存在时返回 `None` 交由门面解析。
 fn direct_runtime_root(legacy: &str) -> Option<TokenStream> {
@@ -196,8 +166,8 @@ fn direct_runtime_root(legacy: &str) -> Option<TokenStream> {
     }
 }
 
-/// Web mapping 宏的三态解析：优先使用直接 naweb 依赖，其次使用 nasa::web 门面；
-/// 仅直接依赖 naweb-macro 时走裸 axum/linkme/tracing 路径。
+/// Web mapping 宏的解析结果：直接依赖 naweb-macro 时使用第三方路径；
+/// 其余场景优先使用直接 naweb，再使用 nasa::web 门面，均未发现时回退第三方路径。
 pub enum WebRoot {
     /// 经门面/运行时桥:第三方走 `<root>::__private::<crate>`。
     Runtime(TokenStream),

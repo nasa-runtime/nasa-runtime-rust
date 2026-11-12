@@ -26,7 +26,13 @@ pub(crate) enum WsClusterPlan {
 
 impl WsClusterPlan {
     /// 业务作用：冻结 Redis 广播流与节点身份，不建立连接。
-    /// 参数说明：`source` 为 qualifier，`node` 为稳定节点，`stream` 为广播流，`incarnation` 为持久单调节点代次。
+    ///
+    /// 参数说明：
+    /// - `source`：`source` 为 qualifier。
+    /// - `node`：`node` 为稳定节点。
+    /// - `stream`：`stream` 为广播流。
+    /// - `incarnation`：`incarnation` 为持久单调节点代次。
+    ///
     /// 返回：字段有界且非空时返回计划，否则拒绝。
     #[cfg(feature = "ws-redis")]
     pub(crate) fn redis(
@@ -49,7 +55,13 @@ impl WsClusterPlan {
     }
 
     /// 业务作用：冻结 Kafka client 归属和 WS 协议策略，避免业务持有关闭责任。
-    /// 参数说明：`source` 为 qualifier，`config` 和 `contract` 是领域配置与 topic 合同，`incarnation` 为持久单调节点代次。
+    ///
+    /// 参数说明：
+    /// - `source`：`source` 为 qualifier。
+    /// - `config`：节点、通信通道、消费者组与容量等 Kafka 运行参数。
+    /// - `contract`：控制、数据与死信 topic 的预期属性和管理权限。
+    /// - `incarnation`：`incarnation` 为持久单调节点代次。
+    ///
     /// 返回：名称有效时返回计划；完整协议校验由领域构造器完成。
     #[cfg(feature = "ws-kafka")]
     pub(crate) fn kafka(
@@ -80,7 +92,9 @@ pub(crate) enum ClusterRuntime {
 
 impl ClusterRuntime {
     /// 业务作用：在监听器发布前关闭协议准入，覆盖启动失败和停机放弃路径。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已发出停止信号，完成证明由异步等待提供。
     fn close(&self) {
         match self {
@@ -92,7 +106,10 @@ impl ClusterRuntime {
     }
 
     /// 业务作用：把本地发送器与来源围栏交给 Kafka 数据面，保持业务 listener 未开放。
-    /// 参数说明：`server` 为已构建但未绑定的 WS server。
+    ///
+    /// 参数说明：
+    /// - `server`：`server` 为已构建但未绑定的 WS server。
+    ///
     /// 返回：数据面绑定成功或 Redis 无需绑定时成功；重复或缺少围栏时拒绝。
     pub(crate) fn bind(&self, server: &naws::Server) -> ApplicationResult<()> {
         match self {
@@ -112,7 +129,9 @@ impl ClusterRuntime {
     }
 
     /// 业务作用：提供实际协议运行态的健康结论，不把构造成功记作远端可用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：Redis 两侧连接正常；Kafka 还须同时拥有有效 assignment 和近期 poll 证据。
     pub(crate) async fn healthy(&self) -> bool {
         match self {
@@ -147,7 +166,11 @@ impl ClusterRuntime {
 }
 
 /// 业务作用：装配唯一 WS 集群策略，并在可能启动任务之前移交完整关闭责任。
-/// 参数说明：`context` 提供受管依赖和清理栈，`builder` 已应用业务鉴权与 endpoint 策略。
+///
+/// 参数说明：
+/// - `context`：`context` 提供受管依赖和清理栈。
+/// - `builder`：`builder` 已应用业务鉴权与 endpoint 策略。
+///
 /// 返回：更新后的 builder 与内部观测句柄；无计划时不访问任何后端。
 pub(crate) async fn prepare(
     context: &mut ReadyContext<'_>,
@@ -215,7 +238,9 @@ struct ClusterShutdown(ClusterRuntime);
 
 impl Drop for ClusterShutdown {
     /// 业务作用：清理动作尚未执行就被放弃时关闭子能力准入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同步请求停止，不把未等待任务记为已排空。
     fn drop(&mut self) {
         self.0.close();
@@ -224,14 +249,19 @@ impl Drop for ClusterShutdown {
 
 impl ShutdownAction for ClusterShutdown {
     /// 业务作用：提供固定停机归因，不携带业务节点或来源字段。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：WS 集群清理动作名称。
     fn label(&self) -> &'static str {
         "ws-cluster"
     }
 
     /// 业务作用：在共享截止点前等待协议任务真实退出，再允许来源组件释放。
-    /// 参数说明：`context` 携带宿主剩余停机预算。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 携带宿主剩余停机预算。
+    ///
     /// 返回：全部任务结束时成功，超时或领域关闭失败时返回未完成错误。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -279,7 +309,10 @@ impl ShutdownAction for ClusterShutdown {
 }
 
 /// 业务作用：生成不含后端地址或凭据的 WS 集群阶段错误。
-/// 参数说明：`message` 为固定失败原因。
+///
+/// 参数说明：
+/// - `message`：`message` 为固定失败原因。
+///
 /// 返回：WS 组件的领域装配错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Ws, ApplicationPhase::Ready, message)

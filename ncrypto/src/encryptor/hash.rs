@@ -11,11 +11,12 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 
 // ==================== BCrypt ====================
 
-/// 业务作用: BCrypt 加密(密码哈希,OsRng 随机盐)。cost=10，并固定使用可与存量 jBCrypt 数据互验的
-/// `$2a$` 版本前缀；≤72 字节口令下 `$2a`/`$2b` 算法等价，仅前缀字面不同。
+/// 业务作用：使用随机盐和固定 cost 生成 BCrypt 口令哈希。
 ///
-/// # 参数
-/// - `content`: 待哈希的口令文本。
+/// 参数说明：
+/// - `content`：需要哈希的口令文本，长度等处理由 BCrypt 库执行。
+///
+/// 返回：返回 cost 为 10 且前缀为 $2a$ 的哈希文本；哈希计算返回的错误映射为加密错误，不输出明文。
 pub fn bcrypt(content: &str) -> Result<String> {
     let mut salt = [0u8; 16];
     OsRng.fill_bytes(&mut salt);
@@ -24,41 +25,46 @@ pub fn bcrypt(content: &str) -> Result<String> {
         .map_err(|e| CryptoError::encrypt(format!("bcrypt: {e}")))
 }
 
-/// 业务作用: 验证密码是否匹配 BCrypt 哈希(hash 自带 cost/盐,跨语言可互验)。出错即 false。
+/// 业务作用：依据已存哈希中的参数校验口令。
 ///
-/// # 参数
-/// - `content`: 待验证的口令文本。
-/// - `hash`: 已存储的 BCrypt 哈希串,其中包含版本、cost 和盐。
+/// 参数说明：
+/// - `content`：待验证的口令文本。
+/// - `hash`：包含版本、cost 和盐的 BCrypt 哈希。
+///
+/// 返回：匹配返回 true；不匹配或哈希解析、验证失败统一返回 false。
 pub fn bcrypt_check(content: &str, hash: &str) -> bool {
     bcrypt::verify(content, hash).unwrap_or(false)
 }
 
 // ==================== MD5 / SHA ====================
 
-/// 业务作用: MD5 摘要(**小写** hex,32 字符)。仅用于遗留数据兼容。
+/// 业务作用：为既有数据格式计算 UTF-8 内容的 MD5 摘要。
 ///
-/// # 参数
-/// - `content`: 要计算摘要的 UTF-8 文本。
+/// 参数说明：
+/// - `content`：需要计算兼容摘要的原始 UTF-8 文本。
 ///
-/// # 返回
-/// 返回 32 字符的小写十六进制 MD5 摘要；该入口不执行随机化或盐处理。
+/// 返回：返回 32 字符小写十六进制摘要，不添加盐或密钥；本入口只提供既有摘要格式兼容。
 pub fn md5(content: &str) -> String {
     hex_lower(&Md5::digest(content.as_bytes()))
 }
 
-/// 业务作用: 计算 SHA-256 并输出大写十六进制摘要。
+/// 业务作用：计算 UTF-8 内容的 SHA-256 摘要。
 ///
-/// # 参数
-/// - `content`: 要计算摘要的 UTF-8 文本。
+/// 参数说明：
+/// - `content`：未做字符归一化的原始 UTF-8 文本。
+///
+/// 返回：返回 64 字符的大写十六进制摘要，不添加盐或密钥。
 pub fn sha256(content: &str) -> String {
     hex_upper(&Sha256::digest(content.as_bytes()))
 }
 
-/// 业务作用: SHA-256,`upper=true` 大写 / `false` 小写 hex。
+/// 业务作用：计算 SHA-256 并选择十六进制字母大小写。
 ///
-/// # 参数
-/// - `content`: 要计算摘要的 UTF-8 文本。
-/// - `upper`: `true` 返回大写 HEX,`false` 返回小写 HEX。
+/// 参数说明：
+/// - `content`：要计算摘要的 UTF-8 原始文本。
+/// - `upper`：true 输出大写，false 输出小写。
+///
+/// 返回：返回 64 字符十六进制摘要，不添加盐或密钥。
 pub fn sha256_cased(content: &str, upper: bool) -> String {
     let h = Sha256::digest(content.as_bytes());
     if upper {
@@ -68,26 +74,32 @@ pub fn sha256_cased(content: &str, upper: bool) -> String {
     }
 }
 
-/// 业务作用: SHA-1(小写 hex,40 字符)。已有碰撞,仅遗留兼容。
+/// 业务作用：为既有数据格式计算 UTF-8 内容的 SHA-1 摘要。
 ///
-/// # 参数
-/// - `content`: 要计算摘要的 UTF-8 文本。
+/// 参数说明：
+/// - `content`：需要计算兼容摘要的原始 UTF-8 文本。
+///
+/// 返回：返回 40 字符小写十六进制摘要，不添加盐或密钥；本入口只提供既有摘要格式兼容。
 pub fn sha1(content: &str) -> String {
     hex_lower(&Sha1::digest(content.as_bytes()))
 }
 
-/// 业务作用: SHA-384(小写 hex,96 字符)。
+/// 业务作用：计算 UTF-8 内容的 SHA-384 摘要。
 ///
-/// # 参数
-/// - `content`: 要计算摘要的 UTF-8 文本。
+/// 参数说明：
+/// - `content`：未做字符归一化的原始 UTF-8 文本。
+///
+/// 返回：返回 96 字符的小写十六进制摘要，不添加盐或密钥。
 pub fn sha384(content: &str) -> String {
     hex_lower(&Sha384::digest(content.as_bytes()))
 }
 
-/// 业务作用: SHA-512(小写 hex,128 字符)。
+/// 业务作用：计算 UTF-8 内容的 SHA-512 摘要。
 ///
-/// # 参数
-/// - `content`: 要计算摘要的 UTF-8 文本。
+/// 参数说明：
+/// - `content`：未做字符归一化的原始 UTF-8 文本。
+///
+/// 返回：返回 128 字符的小写十六进制摘要，不添加盐或密钥。
 pub fn sha512(content: &str) -> String {
     hex_lower(&Sha512::digest(content.as_bytes()))
 }

@@ -1,33 +1,15 @@
-// ============================================================================
-// src/partition/retryop.rs —— ExactTargetRetry 的 retry-op marker 协议。
-// 业务约束由持久化意图和 CAS 五规则共同保证。
-//
-// 解决的问题
-//   · `XCLAIM RETRYCOUNT n` 是【直接置值】可把 delivery count 调低——"盲目重放"会回退
-//     已被合法重投的计数、把消息从新 owner 抢回;
-//   · same-consumer XCLAIM 的 Unknown 无法靠 owner 变化判断"执行过没有"(owner 前后相同)
-//     → 必须先把意图(desired count)写进 Redis 端 marker,重放才有事实依据。
-//
-// 协议(**按 operation_id 键控**,消除 per-partition 单 marker 串扰)
-//   marker = {prefix}:retryop:{p}:{op_id}(HASH + TTL 600s)
-//   op_id  = fnv1a64(sorted(ids) | group | consumer 身份与来源任期 | ticket revision)
-//            —— 同一票据网络重放稳定；新的业务失败创建新的操作身份
-//   字段:state=Pending;ids=JSON [{"id":"1-0","desired":2},...]
-//
-//   首次:逐 ID XPENDING 查 count → desired = count+1 → 整体写 Pending + TTL
-//        → 本地票据冻结意图 → 逐 ID 执行 CAS Lua；终态可删除 marker，残留由 TTL 清理;
-//   重放(上次 Unknown 中断,同 op_id 的 marker 仍 Pending):读回 ids+desired → 逐 ID 同一
-//        CAS Lua ——desired 来自 marker,不重算,结果幂等(防 crash/响应丢失二次递增);
-//   不同 operation 按 op_id 使用独立 marker，同一分区的并行操作不覆盖彼此的意图。
-//
-// 单 ID CAS 判定表：
-//   owner ≠ expected            → 'OWNER'     (OwnershipChanged,绝不 XCLAIM)
-//   count == desired - 1        → XCLAIM RETRYCOUNT desired,返回 payload('CLAIMED')
-//   count == desired            → 仅 XRANGE 取 payload,**不再 XCLAIM**('HAVE')
-//   count >  desired            → 'SUPERSEDED'(绝不把 count 调低)
-//   count <  desired - 1        → 'CORRUPT'   (协议损坏,告警停止自动修改)
-//   不在 PEL                    → 'RESOLVED'  (AlreadyResolved/EntryDeleted)
-// ============================================================================
+//! ExactTargetRetry 使用按操作身份分离的限时 HASH 保存重投目标次数。
+//!
+//! XCLAIM RETRYCOUNT 会直接覆盖投递次数，同 consumer 的回包丢失也不能仅凭 owner 判断是否执行。
+//! 因此先通过 XPENDING 读取次数并登记 Pending 意图，再由本地票据冻结同一意图执行或重放。
+//! 标记键包含物理组、分区及操作摘要，state 保存 Pending，ids 保存记录坐标与 desired 的 JSON；
+//! 新标记同时保存完整 request_ids，已有标记不被并发登记覆盖，未包含该字段的旧标记须完整匹配请求。
+//! 新建标记的 TTL 为 600 秒，操作结束后可删除，调用方持有的冻结意图不依赖标记继续存活。
+//!
+//! 每条重投脚本先检查锁 holder、可选 fencing 身份和 PEL consumer，再比较实际次数与目标次数。
+//! 目标次数限定为正整数且不超过 2^53−1，避免 Lua 的整数转浮点过程混淆相邻次数。
+//! 已达到目标时只读取正文，已被后继重投超越时停止修改，尚未达到前驱次数时报告 Corrupt。
+//! RESOLVED 表示未取得待处理正文，调用方仍需精确区分墓碑与缺少 data 的记录；本模块不执行 XACK。
 
 use std::sync::Arc;
 
@@ -37,22 +19,27 @@ use super::KeyLayout;
 use crate::client::RedisClient;
 use crate::error::{NasaRedisError, Result};
 
-/// 业务作用：retry-op marker key(**按 operation_id 键控**):`{prefix}:retryop:{p}:{op_id}`。
-/// op_id = 确定性摘要(同 operation 重试稳定、不同 operation 不同)→ 从根上消除"per-partition
-/// 单 marker 被不同 operation 覆盖/串扰"。
+/// 业务作用：按物理组、分区与操作身份定位重投意图，避免同分区所有操作共用一个标记。
 ///
-/// # 参数
-/// - `layout`: 分区组 key 布局。
-/// - `p`: 分区编号。
-/// - `op_id`: retry operation 的稳定 ID。
+/// 参数说明：
+/// - `layout`: 已冻结的分区组键布局。
+/// - `p`: 目标记录所在的物理分区。
+/// - `op_id`: 调用方在同一次操作重放期间保持不变的身份。
+///
+/// 返回：该操作的 HASH 键名；不读取 Redis，也不证明标记已存在或意图与请求一致。
 pub fn marker_key(layout: &KeyLayout, p: u32, op_id: &str) -> String {
     format!("{}:retryop:{}:{}", layout.prefix, p, op_id)
 }
 
-/// 业务作用：计算 operation_id:对(排序后的 target ids + group + consumer + claim_term)做 FNV-1a64。
-/// 参数说明：`layout` 提供组身份；`consumer` 包含节点身份、来源任期和操作身份；
-/// `claim_term` 为同一票据稳定的 revision；`ids` 为本次精确重投坐标。
-/// 返回：同一票据的网络重放得到相同摘要，不同业务失败使用不同操作身份。
+/// 业务作用：由排序后的记录坐标与来源身份生成稳定摘要，使同一重投票据的网络重放复用标记。
+///
+/// 参数说明：
+/// - `layout`: 提供本次重投所属消费组的身份。
+/// - `consumer`: 包含节点及来源任期的消费身份，由调用方在票据生命周期内保持一致。
+/// - `claim_term`: 本次票据的稳定修订序号，新的业务失败应使用新的修订。
+/// - `ids`: 本次精确重投的记录坐标，输入顺序不影响摘要。
+///
+/// 返回：组合输入的 FNV-1a64 十六进制摘要；摘要不构成无碰撞保证，持久意图仍需核对请求身份。
 pub fn operation_id(layout: &KeyLayout, consumer: &str, claim_term: u64, ids: &[String]) -> String {
     let mut sorted: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
     sorted.sort_unstable();
@@ -66,14 +53,37 @@ pub fn operation_id(layout: &KeyLayout, consumer: &str, claim_term: u64, ids: &[
     crate::keytag::fnv1a64_hex(payload.as_bytes())
 }
 
+/// 业务作用：将完整 Stream 坐标解析为数值身份，避免精确重投查询接受缩写范围或符号。
+///
+/// 参数说明：
+/// - `id`: 需要定位单条记录的毫秒与序号文本。
+///
+/// 返回：两个非空 ASCII 十进制分量均可表示为 u64 时返回坐标；前导零保留数值等价，非法输入返回 None。
+fn parse_record_id(id: &str) -> Option<(u64, u64)> {
+    let (millis, sequence) = id.split_once('-')?;
+    // XPENDING 允许范围缩写，但重投意图必须指向完整的一条记录，不能把其它坐标当作查询结果。
+    if millis.is_empty()
+        || sequence.is_empty()
+        || !millis.bytes().all(|byte| byte.is_ascii_digit())
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((millis.parse().ok()?, sequence.parse().ok()?))
+}
+
 /// retry-op marker 的 TTL(防 finish 删除失败 / crash 留下孤儿 marker 永久残留)。
 const RETRYOP_MARKER_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Lua 将 XPENDING 整数转为双精度数；目标次数不超过该值时，后继更大次数仍可安全判为已被替代。
+const MAX_RETRY_COUNT: u64 = 9_007_199_254_740_991;
 
 /// marker 中一条目标的意图记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryIntent {
+    /// 本次意图对应的完整 Stream 记录坐标。
     pub id: String,
-    /// 目标 delivery count(= 写 Pending 时的 current + 1;重放恒用此值)。
+    /// 登记时实际投递次数加一，取值为一到 2^53−1；重放沿用此值而不重新计算。
     pub desired: u64,
 }
 
@@ -86,11 +96,11 @@ pub enum RetryOutcome {
     Have(Vec<u8>),
     /// 已不在 PEL，或脚本未取得 data 正文；调用方须精确读取以区分 tombstone 与缺字段记录。
     Resolved,
-    /// owner 已变(被 reaper/新 owner 接管):放弃该 ID。
+    /// 锁持有者、组身份、任期或 PEL consumer 不符，当前来源不能再修改该记录。
     OwnershipChanged,
     /// count > desired:已被更新的重投取代,本宗作废。
     Superseded,
-    /// count < desired-1:协议损坏(理论不可达),停止自动修改。
+    /// 次数低于预期前驱，或状态回包无法完整解释；停止本条记录的自动修改。
     Corrupt,
 }
 
@@ -98,24 +108,59 @@ pub enum RetryOutcome {
 /// PEL consumer 名不能单独证明当前来源仍有权修改 delivery count。
 /// `fence_key` 为空表示 LegacyV1 的 holder-only 校验。
 pub struct FenceArgs<'a> {
+    /// 当前来源在分区锁 HASH 中的持有者 token。
     pub holder: &'a str,
+    /// 与目标物理分区对应的完整锁键。
     pub lock_key: &'a str,
+    /// RustV2 的组 fence HASH 键；为空时仅核对 LegacyV1 holder。
     pub fence_key: &'a str,
+    /// 当前组缓存的初始化轮次。
     pub round: u64,
+    /// 当前组缓存的激活身份。
     pub nonce: &'a str,
+    /// 当前任期凭据所属的组初始化 epoch。
+    pub epoch: u64,
+    /// 当前持锁者取得的分区任期计数。
     pub counter: u64,
 }
 
 // CAS 本身不执行 XACK；RESOLVED 仍由调用方精确检查正文，确认 tombstone 后才交给提交监督清理 PEL。
 const RETRY_CAS_LUA: &str = r#"
 -- owner/fence 前缀：KEYS[2]=lock KEYS[3]=fence；ARGV[5]=holder ARGV[6]=has_fence
---   ARGV[7]=round ARGV[8]=nonce ARGV[9]=p ARGV[10]=counter。任一不符 → 'OWNER'(交新 owner)。
-if redis.call('hexists', KEYS[2], ARGV[5]) == 0 then return {'OWNER'} end
+-- ARGV[7]=round、ARGV[8]=nonce、ARGV[9]=p、ARGV[10]=counter、ARGV[11]=epoch。
+-- 修改投递次数同样需要完整权威，不能只依赖仍相同的 PEL consumer。
+if redis.call('hexists', KEYS[2], ARGV[5]) == 0 then
+    return {'OWNER'}
+end
 if ARGV[6] == '1' then
-    if redis.call('HGET', KEYS[3], 'state') ~= 'Ready' then return {'OWNER'} end
-    if redis.call('HGET', KEYS[3], 'round') ~= ARGV[7] then return {'OWNER'} end
-    if redis.call('HGET', KEYS[3], 'nonce') ~= ARGV[8] then return {'OWNER'} end
-    if redis.call('HGET', KEYS[3], 'c:' .. ARGV[9]) ~= ARGV[10] then return {'OWNER'} end
+    if redis.call('HGET', KEYS[3], 'state') ~= 'Ready' then
+        return {'OWNER'}
+    end
+    if redis.call('HGET', KEYS[3], 'round') ~= ARGV[7] then
+        return {'OWNER'}
+    end
+    if redis.call('HGET', KEYS[3], 'nonce') ~= ARGV[8] then
+        return {'OWNER'}
+    end
+    if redis.call('HGET', KEYS[3], 'c:' .. ARGV[9]) ~= ARGV[10] then
+        return {'OWNER'}
+    end
+    local epoch = redis.call('HGET', KEYS[3], 'epoch')
+    if epoch == false or string.match(epoch, '^%d+$') == nil then
+        return {'OWNER'}
+    end
+    local normalized_epoch = string.gsub(epoch, '^0+', '')
+    if normalized_epoch == '' then
+        normalized_epoch = '0'
+    end
+    if normalized_epoch ~= ARGV[11] then
+        return {'OWNER'}
+    end
+end
+-- XPENDING 的整数进入 Lua 后已经转为双精度数，超出精确范围的目标不能参与相等和前驱判定。
+if string.match(ARGV[4], '^%d+$') == nil or string.sub(ARGV[4], 1, 1) == '0' or
+    string.len(ARGV[4]) > 16 or (string.len(ARGV[4]) == 16 and ARGV[4] > '9007199254740991') then
+    return {'CORRUPT'}
 end
 local pend = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
 if #pend == 0 then
@@ -123,22 +168,28 @@ if #pend == 0 then
 end
 -- XPENDING 详式返回 {id, consumer, idle, delivery-count}
 local owner = pend[1][2]
-local count = tonumber(pend[1][4])
+local count = pend[1][4]
 local desired = tonumber(ARGV[4])
 if owner ~= ARGV[2] then
     return {'OWNER'}
 end
+if type(count) ~= 'number' or count < 0 or count % 1 ~= 0 then
+    return {'CORRUPT'}
+end
+-- 目标严格低于双精度舍入边界，即使更大实际次数已被舍入，仍能可靠判为被后继替代。
 if count > desired then
     return {'SUPERSEDED'}
 end
 if count < desired - 1 then
     return {'CORRUPT'}
 end
--- 取 payload 的辅助:XRANGE 精确单条,提取 data field
+-- 业务作用：读取同一原子步骤内的精确记录正文，避免用其它坐标代替重投目标。
+-- 参数说明：无。
+-- 返回：存在 data 字段时返回原始字节，否则返回 nil，由调用方继续区分墓碑与缺字段记录。
 local function payload_of()
     local rows = redis.call('XRANGE', KEYS[1], ARGV[3], ARGV[3])
     if #rows == 0 then
-        return nil  -- entry 已删(tombstone):PEL 在、payload 无
+        return nil
     end
     local fields = rows[1][2]
     for i = 1, #fields, 2 do
@@ -150,31 +201,35 @@ local function payload_of()
 end
 if count == desired then
     local pl = payload_of()
-    if pl == nil then return {'RESOLVED'} end
+    if pl == nil then
+        return {'RESOLVED'}
+    end
     return {'HAVE', pl}
 end
--- count == desired - 1:执行 claim(置 count = desired,幂等重放的唯一递增点)
-local claimed = redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'RETRYCOUNT', desired)
+-- 仅前驱次数才能递增；发送原十进制参数，避免 Lua 数字转文本再次改变目标值。
+local claimed = redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'RETRYCOUNT', ARGV[4])
 if #claimed == 0 then
     return {'RESOLVED'}
 end
 local pl = payload_of()
-if pl == nil then return {'RESOLVED'} end
+if pl == nil then
+    return {'RESOLVED'}
+end
 return {'CLAIMED', pl}
 "#;
 
-/// 业务作用：确保 Pending 意图已持久化(**按 op_id 键控**):marker 不存在 → 按当前 PEL 算
-/// desired 写新 Pending + TTL;已 Pending(同 op_id = 同 operation,op_id 由 ids 派生)→
-/// 读回沿用已落盘 desired(重放幂等,不重算)。
-/// 不同 operation 的 marker 独立；同一 op_id 的 marker ids 与请求不一致时拒绝执行，
-/// 防止操作身份碰撞让调用方继承其它记录的重投意图。
+/// 业务作用：读取已有 Pending 重投意图，或从当前 PEL 计算目标投递次数并登记限时标记。
 ///
-/// # 参数
-/// - `client`: 读写 retry marker 与 PEL 状态的 Redis 客户端。
-/// - `layout`: 分区组 key 布局。
-/// - `p`: 分区编号。
-/// - `op_id`: retry operation 的稳定 ID。
-/// - `ids`: 本次要纳入 retry operation 的 stream entry ID 列表。
+/// 参数说明：
+/// - `client`: 读取 PEL 并保存操作意图的 Redis 客户端。
+/// - `layout`: 本次记录所属物理组的键布局。
+/// - `p`: 精确重投记录所在的物理分区。
+/// - `op_id`: 同一操作重放期间不变的标记身份。
+/// - `ids`: 本次操作的唯一记录坐标集合，已不在 PEL 的记录在新建意图时略过。
+///
+/// 返回：完整且有期限的 Pending 沿用原意图；不存在时从 PEL 计算后原子登记，竞争时返回胜出者的意图。
+/// 全部记录已出 PEL 且没有并发登记时返回空列表；非法身份、不可精确比较的次数或网络错误返回失败。
+/// 新目标次数上限为 2^53−1，此步骤本身不执行 XCLAIM，也不续延已有标记的 TTL。
 pub async fn ensure_pending(
     client: &Arc<RedisClient>,
     layout: &KeyLayout,
@@ -182,75 +237,172 @@ pub async fn ensure_pending(
     op_id: &str,
     ids: &[String],
 ) -> Result<Vec<RetryIntent>> {
-    // 重复 ID 破坏一次 operation 对应一组唯一坐标的合同，必须在登记意图前拒绝。
-    let uniq: std::collections::BTreeSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-    if uniq.len() != ids.len() {
-        return Err(NasaRedisError::ProtocolMarker(format!(
-            "retry-op 请求含重复 ID(分区 {p}):{ids:?},fail-closed"
-        )));
-    }
-    let mkey = marker_key(layout, p, op_id);
-    let state: Option<String> = client.h_get(&mkey, "state").await?;
-
-    if state.as_deref() == Some("Pending") {
-        let json: Option<String> = client.h_get(&mkey, "ids").await?;
-        let old: Vec<RetryIntent> = serde_json::from_str(&json.unwrap_or_default())
-            .map_err(|e| NasaRedisError::Codec(format!("retryop ids 解析失败: {e}")))?;
-        // 同 op_id = 同 operation(op_id 由 sorted(ids)+group+consumer+term 派生)→ 合法重放。
-        // 防 op_id 碰撞:marker ids 集合必须与本次请求一致,否则 fail-closed(绝不据他宗 desired)。
-        let marker_set: std::collections::BTreeSet<&str> =
-            old.iter().map(|i| i.id.as_str()).collect();
-        let req_set: std::collections::BTreeSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        if marker_set == req_set {
-            return Ok(old); // 重放:沿用已落盘 desired(幂等,防 crash/响应丢失二次递增)
-        }
-        return Err(NasaRedisError::ProtocolMarker(format!(
-            "retry-op op_id 碰撞(marker ids 与请求不一致),fail-closed: op_id={op_id}"
-        )));
-    }
-
-    // 首次:逐 ID 查 count → desired = count + 1。复用 `actual_count`
-    //(空=不在 PEL 跳过;XPENDING 形态异常 = fail-closed 上抛,绝不静默丢 intent)。
-    let mut intents = Vec::with_capacity(ids.len());
+    let mut requested = std::collections::BTreeSet::new();
+    // 同一坐标的不同文本表示也不能占两个意图，全部输入应在读取或登记前确认。
     for id in ids {
-        if let Some(count) = actual_count(client, layout, p, id).await? {
-            intents.push(RetryIntent {
-                id: id.clone(),
-                desired: count + 1,
-            });
+        let coordinate = parse_record_id(id).ok_or_else(|| {
+            NasaRedisError::ProtocolMarker("retry-op 请求 ID 不完整或越界".into())
+        })?;
+        if !requested.insert(coordinate) {
+            return Err(NasaRedisError::ProtocolMarker(
+                "retry-op 请求包含重复坐标".into(),
+            ));
         }
     }
-    if intents.is_empty() {
-        return Ok(intents); // 全部已出 PEL:无宗可立
-    }
-    // 意图、状态与 TTL 在同一 Lua 写入，避免崩溃留下缺少状态或无法到期的 marker。
-    let json = serde_json::to_string(&intents).map_err(|e| NasaRedisError::Codec(e.to_string()))?;
-    let _: redis::Value = redis::Script::new(ENSURE_PENDING_LUA)
+    let identities: Vec<_> = requested
+        .iter()
+        .map(|(millis, sequence)| format!("{millis}-{sequence}"))
+        .collect();
+    let request_json = serde_json::to_string(&identities)
+        .map_err(|_| NasaRedisError::Codec("retry-op 请求编码失败".into()))?;
+    let mkey = marker_key(layout, p, op_id);
+    let script = redis::Script::new(ENSURE_PENDING_LUA);
+    // 状态、意图、完整请求及期限一次读取，避免拼接两个时刻的标记或覆盖持久损坏。
+    let reply = script
         .key(&mkey)
-        .arg(json.as_str())
+        .arg("load")
+        .arg("")
+        .arg(&request_json)
         .arg(RETRYOP_MARKER_TTL.as_millis() as u64)
         .invoke_async(&mut client.conn())
         .await?;
-    Ok(intents)
+    if let Some(intents) = parse_pending_reply(reply, &requested)? {
+        return Ok(intents);
+    }
+    // 目标必须落在 Lua 可精确比较的范围，不能先写入一个后续无法判定是否已执行的意图。
+    let mut intents = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(count) = actual_count(client, layout, p, id).await? {
+            let desired = count
+                .checked_add(1)
+                .filter(|desired| *desired <= MAX_RETRY_COUNT)
+                .ok_or_else(|| {
+                    NasaRedisError::ProtocolMarker("retry-op 目标次数超过精确比较范围".into())
+                })?;
+            intents.push(RetryIntent {
+                id: id.clone(),
+                desired,
+            });
+        }
+    }
+    let json = serde_json::to_string(&intents)
+        .map_err(|_| NasaRedisError::Codec("retry-op 意图编码失败".into()))?;
+    // 只有仍不存在的标记才可创建；并发胜出的旧意图必须原样沿用，不能用较晚或较早快照覆盖。
+    let reply = script
+        .key(&mkey)
+        .arg("create")
+        .arg(&json)
+        .arg(&request_json)
+        .arg(RETRYOP_MARKER_TTL.as_millis() as u64)
+        .invoke_async(&mut client.conn())
+        .await?;
+    parse_pending_reply(reply, &requested)?
+        .ok_or_else(|| NasaRedisError::ProtocolMarker("retry-op 登记未返回持久意图".into()))
 }
 
-/// 原子写 retry-op Pending marker + TTL(防半 marker / 永久 marker)。
+/// 原子读取或仅在键不存在时登记意图；已有 Pending 保留原值和 TTL，竞争者必须沿用胜出的意图。
 const ENSURE_PENDING_LUA: &str = r#"
-redis.call('HSET', KEYS[1], 'ids', ARGV[1], 'state', 'Pending')
-redis.call('PEXPIRE', KEYS[1], ARGV[2])
-return 1
+-- 残缺或无期限的已有标记不能覆盖，否则迟到登记可能改变已经执行过的目标次数。
+if redis.call('EXISTS', KEYS[1]) ~= 0 then
+    local state = redis.call('HGET', KEYS[1], 'state')
+    local intents = redis.call('HGET', KEYS[1], 'ids')
+    if state ~= 'Pending' or intents == false or redis.call('PTTL', KEYS[1]) <= 0 then
+        return {'CORRUPT'}
+    end
+    return {'FOUND', intents, redis.call('HGET', KEYS[1], 'request_ids')}
+end
+if ARGV[1] == 'load' then
+    return {'MISSING'}
+end
+if ARGV[1] ~= 'create' then
+    return {'CORRUPT'}
+end
+-- 全部已出 PEL 时没有需要持久化的意图，但仍须先检查是否存在并发登记的原操作。
+if ARGV[2] == '[]' then
+    return {'CREATED', ARGV[2], ARGV[3]}
+end
+redis.call('HSET', KEYS[1], 'ids', ARGV[2], 'request_ids', ARGV[3], 'state', 'Pending')
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+return {'CREATED', ARGV[2], ARGV[3]}
 "#;
 
-/// 业务作用：逐 ID 执行 CAS 归约(可重放:Pending 期间任意次调用结果一致)。**owner-fenced**
-/// ——CAS 改 PEL 前在同一 Lua 校验持锁 + fence 任期,失锁/旧任期 → `OwnershipChanged`(交新 owner)。
+/// 业务作用：核对原子读取或登记返回的完整意图，避免继承其它请求、重复坐标或不可精确比较的次数。
 ///
-/// # 参数
-/// - `client`: 执行 retry CAS Lua 的 Redis 客户端。
-/// - `layout`: 分区组 key 布局。
-/// - `p`: 分区编号。
-/// - `consumer`: 当前 owner consumer 名。
-/// - `intents`: 已持久化的目标 entry 与 desired delivery count。
-/// - `fence`: 当前 owner 的持锁与任期校验参数。
+/// 参数说明：
+/// - `reply`: 标记脚本返回的状态、意图 JSON 与可选完整请求 JSON。
+/// - `requested`: 调用方已校验且去除表示差异的完整请求坐标集合。
+///
+/// 返回：明确缺失时返回 None；请求身份及意图全部一致时返回持久意图，旧标记只允许完整集合相等。
+/// 损坏或未知响应返回固定协议错误，不回显 JSON 正文；已存空意图不作为可重放标记接受。
+fn parse_pending_reply(
+    reply: redis::Value,
+    requested: &std::collections::BTreeSet<(u64, u64)>,
+) -> Result<Option<Vec<RetryIntent>>> {
+    let invalid = || NasaRedisError::ProtocolMarker("retry-op 标记响应或持久意图非法".into());
+    let redis::Value::Array(fields) = reply else {
+        return Err(invalid());
+    };
+    if let [redis::Value::BulkString(tag)] = fields.as_slice() {
+        return if tag == b"MISSING" {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    }
+    let [redis::Value::BulkString(tag), redis::Value::BulkString(json), request_json] =
+        fields.as_slice()
+    else {
+        return Err(invalid());
+    };
+    if tag != b"FOUND" && tag != b"CREATED" {
+        return Err(invalid());
+    }
+    let intents: Vec<RetryIntent> = serde_json::from_slice(json).map_err(|_| invalid())?;
+    if tag == b"FOUND" && intents.is_empty() {
+        return Err(invalid());
+    }
+    let mut stored = std::collections::BTreeSet::new();
+    // 每个意图只能占据一个真实坐标，非法目标次数不能在后续 Lua 中变成错误的相等判断。
+    for intent in &intents {
+        let id = parse_record_id(&intent.id).ok_or_else(invalid)?;
+        if !stored.insert(id) || intent.desired == 0 || intent.desired > MAX_RETRY_COUNT {
+            return Err(invalid());
+        }
+    }
+    match request_json {
+        redis::Value::BulkString(json) => {
+            let identities: Vec<String> = serde_json::from_slice(json).map_err(|_| invalid())?;
+            let mut declared = std::collections::BTreeSet::new();
+            for id in identities {
+                if !declared.insert(parse_record_id(&id).ok_or_else(invalid)?) {
+                    return Err(invalid());
+                }
+            }
+            // 记录可能在登记前已出 PEL，因此意图可以是子集，但完整请求身份必须精确一致。
+            if &declared != requested || !stored.is_subset(&declared) {
+                return Err(invalid());
+            }
+        }
+        // 没有完整请求字段的旧标记仅能证明其全部意图，不能猜测它还曾包含哪些已消失的记录。
+        redis::Value::Nil if tag == b"FOUND" && &stored == requested => {}
+        _ => return Err(invalid()),
+    }
+    Ok(Some(intents))
+}
+
+/// 业务作用：逐条按持久重投意图执行 CAS，在改变 PEL 前原子复验 holder 和可选任期身份。
+///
+/// 参数说明：
+/// - `client`: 执行每条记录原子重投判定的 Redis 客户端。
+/// - `layout`: 当前物理组的 Stream 与消费组布局。
+/// - `p`: 本批意图所属的物理分区。
+/// - `consumer`: 预期仍持有各记录 PEL 项的消费身份。
+/// - `intents`: 已登记的记录坐标与目标投递次数，重放时不得重新计算目标值。
+/// - `fence`: 当前来源的锁 holder 与可选 fencing 身份。
+///
+/// 返回：所有脚本调用完成时按输入顺序返回逐条结果；网络或脚本错误立即返回失败，
+/// 此前已执行的记录不会回滚。Corrupt 只记录错误并保留该条结果，不在本函数中确认或删除正文。
+/// 整批坐标与目标次数在首次请求前校验，目标上限为 2^53−1；空批次不读取或改变持久状态。
 pub async fn execute(
     client: &Arc<RedisClient>,
     layout: &KeyLayout,
@@ -259,6 +411,34 @@ pub async fn execute(
     intents: &[RetryIntent],
     fence: &FenceArgs<'_>,
 ) -> Result<Vec<(String, RetryOutcome)>> {
+    let mut identities = std::collections::BTreeSet::new();
+    // 任一后段参数非法时也不得先修改前段 PEL，重复数值坐标不能被不同文本包装成两条意图。
+    for intent in intents {
+        let id = parse_record_id(&intent.id).ok_or_else(|| {
+            NasaRedisError::ProtocolMarker("retry-op 意图 ID 不完整或越界".into())
+        })?;
+        if !identities.insert(id) || intent.desired == 0 || intent.desired > MAX_RETRY_COUNT {
+            return Err(NasaRedisError::ProtocolMarker(
+                "retry-op 意图重复或目标次数不可精确比较".into(),
+            ));
+        }
+    }
+    if intents.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 凭据本身必须可表示为有效任期，服务端只负责复验这份完整身份是否仍然成立。
+    if fence.holder.is_empty()
+        || fence.lock_key.is_empty()
+        || (!fence.fence_key.is_empty()
+            && (fence.round == 0
+                || fence.nonce.is_empty()
+                || fence.counter == 0
+                || fence.counter > i64::MAX as u64))
+    {
+        return Err(NasaRedisError::ProtocolMarker(
+            "retry-op 来源持有权凭据不完整".into(),
+        ));
+    }
     let stream = layout.stream(p);
     let lua = redis::Script::new(RETRY_CAS_LUA);
     let has_fence = if fence.fence_key.is_empty() {
@@ -287,32 +467,38 @@ pub async fn execute(
             .arg(fence.nonce)
             .arg(p.to_string())
             .arg(fence.counter.to_string())
+            .arg(fence.epoch)
             .invoke_async(&mut client.conn())
             .await?;
         let outcome = parse_outcome(v);
         if matches!(outcome, RetryOutcome::Corrupt) {
-            tracing::error!(p, id = %it.id, "retry-op 协议损坏(count < desired-1),停止自动修改");
+            tracing::error!(p, id = %it.id, "retry-op 响应或计数状态异常，停止本条自动修改");
         }
         out.push((it.id.clone(), outcome));
     }
     Ok(out)
 }
 
-/// 业务作用：读单 ID 当前在本组 PEL 的真实 delivery count(poison 判断必须以**实际
-/// delivery count** 为准,不能直接信 marker desired——损坏 desired 会绕过 CAS 直接 Drop)。
-/// 返回 None = 已不在 PEL(Resolved)。
+/// 业务作用：查询单条记录在当前消费组 PEL 中的实际投递次数，为重投和毒消息判定提供依据。
 ///
-/// # 参数
-/// - `client`: 执行 XPENDING 查询的 Redis 客户端。
-/// - `layout`: 分区组 key 布局。
-/// - `p`: 分区编号。
-/// - `id`: 要读取 delivery count 的 stream entry ID。
+/// 参数说明：
+/// - `client`: 执行精确 XPENDING 查询的 Redis 客户端。
+/// - `layout`: 提供目标 Stream 与消费组的物理布局。
+/// - `p`: 记录所属的物理分区。
+/// - `id`: 要读取实际投递次数的完整记录坐标。
+///
+/// 返回：合法查询的空数组表示记录已不在 PEL；唯一完整行的坐标匹配且时间与次数非负时返回次数。
+/// 输入缩写、越界、字段损坏或响应坐标不符时失败，不把原始回包内容写入协议错误。
+/// 此读取不改变 PEL，也不能替代实际重投时对 owner 与任期的原子检查。
 pub async fn actual_count(
     client: &Arc<RedisClient>,
     layout: &KeyLayout,
     p: u32,
     id: &str,
 ) -> Result<Option<u64>> {
+    // 发送前限定完整坐标，防止 Redis 将缩写当范围起点而返回其它记录的次数。
+    let expected = parse_record_id(id)
+        .ok_or_else(|| NasaRedisError::ProtocolMarker("retry-op 记录 ID 不完整或越界".into()))?;
     let v: redis::Value = redis::cmd("XPENDING")
         .arg(layout.stream(p))
         .arg(layout.group())
@@ -321,44 +507,41 @@ pub async fn actual_count(
         .arg(1)
         .query_async(&mut client.conn())
         .await?;
-    // 详式:[[id, consumer, idle, count]];**空数组**=确证不在 PEL(Resolved)。
-    //:其余形态异常(有行但缺 count / 非 Array)= 协议损坏,**fail-closed**——绝不当成
-    // "不在 PEL"(那会让仍在 PEL 的消息被当 Resolved 跳过)。
+    let invalid = || NasaRedisError::ProtocolMarker("retry-op XPENDING 响应形态或字段非法".into());
+    // 只有完整空数组能证明不在 PEL；有行时必须同时确认唯一坐标及全部字段，不能只抽取次数。
     let redis::Value::Array(rows) = v else {
-        return Err(NasaRedisError::ProtocolMarker(format!(
-            "XPENDING 详式响应非数组(分区 {p} id={id}): {v:?}"
-        )));
+        return Err(invalid());
     };
-    let Some(first) = rows.into_iter().next() else {
-        return Ok(None); // 空 = 确证不在 PEL
-    };
-    let redis::Value::Array(row) = first else {
-        return Err(NasaRedisError::ProtocolMarker(format!(
-            "XPENDING 行非数组(分区 {p} id={id})"
-        )));
-    };
-    match row.get(3) {
-        //`try_from` 而非 `as u64`(fail-closed 路径唯一裸强转)——delivery count
-        // 理论非负,但负值强转会 wrapping 成巨大 u64 污染毒判;负值即协议异常,上抛 ProtocolMarker。
-        Some(redis::Value::Int(count)) => u64::try_from(*count).map(Some).map_err(|_| {
-            NasaRedisError::ProtocolMarker(format!(
-                "XPENDING delivery count 为负(分区 {p} id={id}): {count}"
-            ))
-        }),
-        other => Err(NasaRedisError::ProtocolMarker(format!(
-            "XPENDING 行缺 count 字段(分区 {p} id={id}): {other:?}"
-        ))),
+    if rows.is_empty() {
+        return Ok(None);
     }
+    let [redis::Value::Array(row)] = rows.as_slice() else {
+        return Err(invalid());
+    };
+    let [redis::Value::BulkString(returned), redis::Value::BulkString(consumer), redis::Value::Int(idle), redis::Value::Int(count)] =
+        row.as_slice()
+    else {
+        return Err(invalid());
+    };
+    if std::str::from_utf8(returned).ok().and_then(parse_record_id) != Some(expected)
+        || std::str::from_utf8(consumer).is_err()
+        || *idle < 0
+    {
+        return Err(invalid());
+    }
+    u64::try_from(*count).map(Some).map_err(|_| invalid())
 }
 
-/// 业务作用：收宗:本 operation 全部 ID 已归约 → **删除该 op_id 的 marker**(:op_id 键控后每
-/// operation 独立 marker,直接删除即可,无需 Done 态;删除失败由 TTL 兜底清孤儿)。
+/// 业务作用：在调用方确认本操作全部记录已收口后删除其重投意图标记。
 ///
-/// # 参数
-/// - `client`: 删除 retry marker 的 Redis 客户端。
-/// - `layout`: 分区组 key 布局。
-/// - `p`: 分区编号。
-/// - `op_id`: 已完成的 retry operation ID。
+/// 参数说明：
+/// - `client`: 执行标记删除的 Redis 客户端。
+/// - `layout`: 该操作所属的物理组布局。
+/// - `p`: 操作记录所在的物理分区。
+/// - `op_id`: 已完成且不再重放的操作身份。
+///
+/// 返回：Redis 删除调用成功时完成，标记已不存在也接受；网络错误返回失败，残留依靠既有 TTL 回收。
+/// 本函数不核对记录终态，也不执行 XACK 或删除 Stream 正文，调用方须保证删除时机。
 pub async fn finish(
     client: &Arc<RedisClient>,
     layout: &KeyLayout,
@@ -369,36 +552,40 @@ pub async fn finish(
     Ok(())
 }
 
-/// 业务作用：解析 Lua 返回:["TAG"(, payload)]。
+/// 业务作用：将逐条重投 Lua 的状态标签与可选正文转换为调用方可处理的归约结果。
 ///
-/// # 参数
-/// - `v`: 待转换的值。
+/// 参数说明：
+/// - `v`: 本条记录的原始 Redis 脚本响应。
+///
+/// 返回：完整且字段数精确的响应转换为已认领、已有正文、已消失、失权或被后继替代的状态；
+/// 标签编码、字段数或正文类型异常时返回 Corrupt，正文允许为空或含二进制字节。
+/// 本函数只解释响应，不确认消息，也不把未知响应当作已完成。
 fn parse_outcome(v: redis::Value) -> RetryOutcome {
     let redis::Value::Array(mut arr) = v else {
         return RetryOutcome::Corrupt;
     };
     let tag = match arr.first() {
-        Some(redis::Value::BulkString(b)) => String::from_utf8_lossy(b).into_owned(),
-        Some(redis::Value::SimpleString(s)) => s.clone(),
-        _ => return RetryOutcome::Corrupt,
+        Some(redis::Value::BulkString(bytes)) => std::str::from_utf8(bytes).ok(),
+        Some(redis::Value::SimpleString(value)) => Some(value.as_str()),
+        _ => None,
     };
-    match tag.as_str() {
-        "CLAIMED" | "HAVE" => {
-            //脚本对 tombstone **明确**返回 RESOLVED;CLAIMED/HAVE 却缺
-            // payload = 协议损坏,**当 Corrupt**(冻结告警),绝不当 tombstone 跳过(那会丢消息)。
+    match tag {
+        Some("CLAIMED" | "HAVE") if arr.len() == 2 => {
+            let claimed = tag == Some("CLAIMED");
+            // 正文只能来自第二个字段，缺项不能取标签充当正文，多余字段也不能改变消息内容。
             let payload = match arr.pop() {
-                Some(redis::Value::BulkString(b)) => b,
+                Some(redis::Value::BulkString(bytes)) => bytes,
                 _ => return RetryOutcome::Corrupt,
             };
-            if tag == "CLAIMED" {
+            if claimed {
                 RetryOutcome::Claimed(payload)
             } else {
                 RetryOutcome::Have(payload)
             }
         }
-        "RESOLVED" => RetryOutcome::Resolved,
-        "OWNER" => RetryOutcome::OwnershipChanged,
-        "SUPERSEDED" => RetryOutcome::Superseded,
+        Some("RESOLVED") if arr.len() == 1 => RetryOutcome::Resolved,
+        Some("OWNER") if arr.len() == 1 => RetryOutcome::OwnershipChanged,
+        Some("SUPERSEDED") if arr.len() == 1 => RetryOutcome::Superseded,
         _ => RetryOutcome::Corrupt,
     }
 }

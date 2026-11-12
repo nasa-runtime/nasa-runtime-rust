@@ -40,7 +40,10 @@ struct TlsPlan {
 }
 
 /// 业务作用：从同一已解析视图装配命名 Registry client，不隐式注册 schema。
-/// 参数说明：`context` 持有资源、secret 与停机责任。
+///
+/// 参数说明：
+/// - `context`：`context` 持有资源、secret 与停机责任。
+///
 /// 返回：显式计划全部通过；禁用计划不解析认证或连接远端。
 pub(crate) fn prepare(context: &mut PrepareContext<'_>) -> ApplicationResult<()> {
     let app = context.application().clone();
@@ -141,14 +144,19 @@ struct RegistryShutdown {
 
 impl ShutdownAction for RegistryShutdown {
     /// 业务作用：为独立 Registry 清理提供稳定名称。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定名称，不包含 endpoint、subject 或认证材料。
     fn label(&self) -> &'static str {
         "schema-registry"
     }
 
     /// 业务作用：收回 Registry 准入并在宿主截止点内归还全部 HTTP 与业务等待责任。
-    /// 参数说明：context 为所有清理步骤共享的停止预算。
+    ///
+    /// 参数说明：
+    /// - `context`：context 为所有清理步骤共享的停止预算。
+    ///
     /// 返回：实际请求和旧调用均退出时成功；超时保留关闭状态，不推定远端注册已撤销。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         // 先关闭外部门面与原生请求准入，旧等待退出期间不能补发新的请求。
@@ -169,7 +177,9 @@ impl ShutdownAction for RegistryShutdown {
 
 impl Drop for RegistryShutdown {
     /// 业务作用：在启动回滚或清理责任提前退出时关闭 Registry 的内部请求门禁。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已接纳请求收到关闭通知；远端副作用结果仍可能未知。
     fn drop(&mut self) {
         self.client.close();
@@ -177,7 +187,11 @@ impl Drop for RegistryShutdown {
 }
 
 /// 业务作用：只从本代 SecretSnapshot 读取 Registry 凭据，不接受明文认证配置。
-/// 参数说明：`secrets` 为初始已解析材料；`reference` 为 secret:// 身份。
+///
+/// 参数说明：
+/// - `secrets`：`secrets` 为初始已解析材料。
+/// - `reference`：`reference` 为 secret:// 身份。
+///
 /// 返回：拥有清零责任的材料副本；不存在或格式错误时拒绝。
 fn material(
     secrets: &nasecret::SecretSnapshot,
@@ -195,7 +209,10 @@ fn material(
 #[async_trait::async_trait]
 impl SchemaRegistryClient for ManagedAdapter<ConfluentSchemaRegistry> {
     /// 业务作用：在关闭门禁内获取已批准 schema，保留底层有界缓存与查询失败语义。
-    /// 参数说明：`id` 为正 schema ID。
+    ///
+    /// 参数说明：
+    /// - `id`：`id` 为正 schema ID。
+    ///
     /// 返回：查询结果；关闭后拒绝，不建立新的 HTTP 调用。
     async fn schema_by_id(
         &self,
@@ -212,7 +229,13 @@ impl SchemaRegistryClient for ManagedAdapter<ConfluentSchemaRegistry> {
             .await
     }
     /// 业务作用：在完整调用责任内检查 schema 兼容性。
-    /// 参数说明：`subject`、`version` 为管理目标；`schema_type`、`schema` 为业务明确提交的候选。
+    ///
+    /// 参数说明：
+    /// - `subject`：注册中心中待比较的 schema 主题。
+    /// - `version`：主题下用于兼容性比较的版本标识。
+    /// - `schema_type`：候选定义采用的 schema 格式。
+    /// - `schema`：业务明确提交的候选定义正文。
+    ///
     /// 返回：领域兼容裁决；关闭或远端拒绝按原合同传播。
     async fn is_compatible(
         &self,
@@ -232,7 +255,12 @@ impl SchemaRegistryClient for ManagedAdapter<ConfluentSchemaRegistry> {
             .await
     }
     /// 业务作用：仅在显式开启 auto_register 时执行受管 schema 注册。
-    /// 参数说明：`subject` 为命名主题；`schema_type`、`schema` 为待注册定义。
+    ///
+    /// 参数说明：
+    /// - `subject`：将接收该定义的注册中心主题。
+    /// - `schema_type`：待注册定义的 schema 格式。
+    /// - `schema`：待注册定义正文，不由客户端推断或生成。
+    ///
     /// 返回：远端确认的 ID；取消或传输失败不擅自重试未知结果。
     async fn register(
         &self,
@@ -254,7 +282,10 @@ impl SchemaRegistryClient for ManagedAdapter<ConfluentSchemaRegistry> {
 
 impl Application {
     /// 业务作用：取得不要求启动 Kafka 消费者的命名 Registry client。
-    /// 参数说明：`name` 为 schema_registries 名称。
+    ///
+    /// 参数说明：
+    /// - `name`：`name` 为 schema_registries 名称。
+    ///
     /// 返回：受管客户端；不存在时拒绝，不临时建连。
     pub async fn schema_registry(
         &self,
@@ -268,7 +299,10 @@ impl Application {
 }
 
 /// 业务作用：输出不含 endpoint、认证材料或 schema 的固定装配错误。
-/// 参数说明：`message` 为稳定摘要。
+///
+/// 参数说明：
+/// - `message`：`message` 为稳定摘要。
+///
 /// 返回：宿主 Prepare 错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Application, ApplicationPhase::Prepare, message)

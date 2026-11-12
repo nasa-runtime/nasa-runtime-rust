@@ -20,6 +20,7 @@ use crate::wire::{DecodePayload, PayloadCodec};
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct RawRecord {
+    /// 同一原文及输入额度的共享所有权，最后引用退出才允许归还实际占用。
     inner: Arc<RawRecordData>,
 }
 
@@ -29,7 +30,7 @@ pub struct RawRecordData {
     /// 实际原文引用持有的责任；账本撤销本身不能归还仍被执行方使用的额度。
     input_permit: Arc<crate::consumer::capacity::RecordPermit>,
     /// 原始可空 payload；`None` 表示 tombstone。
-    pub payload: Option<Vec<u8>>,
+    pub payload: Option<Arc<Vec<u8>>>,
     /// 已解析的拥有型上下文。
     pub ctx: ConsumeCtx,
     /// owner 在物化记录时观察到的 assignment epoch。
@@ -38,10 +39,16 @@ pub struct RawRecordData {
 
 impl RawRecord {
     /// 业务作用：接管已经准入的原文字节，使裁决方与执行方共享同一份内容。
-    /// 参数说明：payload 为可空正文；ctx 为来源上下文；assignment_epoch 为物化时的分配权威；input_permit 为物化前取得的输入责任。
+    ///
+    /// 参数说明：
+    /// - `payload`：可空正文，空字节与 tombstone 保持区分。
+    /// - `ctx`：来源上下文。
+    /// - `assignment_epoch`：物化时的分配权威。
+    /// - `input_permit`：物化前取得的输入责任。
+    ///
     /// 返回：独占初始引用；派发后克隆不再增加原文字节副本。
     pub(crate) fn new(
-        payload: Option<Vec<u8>>,
+        payload: Option<Arc<Vec<u8>>>,
         ctx: ConsumeCtx,
         assignment_epoch: u64,
         input_permit: Arc<crate::consumer::capacity::RecordPermit>,
@@ -57,14 +64,18 @@ impl RawRecord {
     }
 
     /// 业务作用：将输入额度随实际调用延续到业务结束，避免主循环作废旧分配时提前释放。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同一原始输入凭证的引用，不重复计费，也不增加确认权限。
     pub(crate) fn input_permit(&self) -> Arc<crate::consumer::capacity::RecordPermit> {
         Arc::clone(&self.inner.input_permit)
     }
 
     /// 业务作用：仅在独占原始记录时发布可信投递次数，防止更改已交给业务线程的输入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：独占内容；仍有执行方引用时拒绝隐式复制或更改共同上下文。
     pub(crate) fn exclusive(&mut self) -> &mut RawRecordData {
         Arc::get_mut(&mut self.inner).expect("可信投递次数只能在派发前更新")
@@ -73,9 +84,10 @@ impl RawRecord {
     /// 业务作用：返回本记录保留的主要字节数，供容量 permit 计量。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：payload、原始 key 和有序 header 的字节总量，不把非 UTF-8 key 当作空键。
     pub fn retained_bytes(&self) -> usize {
-        self.payload.as_ref().map_or(0, Vec::len)
+        self.payload.as_ref().map_or(0, |bytes| bytes.len())
             + self.ctx.raw_key.as_ref().map_or(0, Vec::len)
             + self
                 .ctx
@@ -90,7 +102,9 @@ impl std::ops::Deref for RawRecord {
     type Target = RawRecordData;
 
     /// 业务作用：读取共享且在派发期间冻结的原文与来源上下文。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：绑定当前引用生命周期的只读内容，不创建字节副本。
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -178,27 +192,39 @@ pub struct ConsumerMeta {
 #[doc(hidden)]
 pub trait ErasedConsumer: Send + Sync {
     /// 业务作用：返回注册时冻结的元数据。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与当前消费者生命周期绑定的只读声明，调用时不重新读取可变业务配置。
     fn meta(&self) -> &ConsumerMeta;
 
     /// 业务作用：返回消息类型固定 codec。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：注册时确定的正文编码标识，供路由与记录匹配，不协商或尝试其它编码。
     fn codec(&self) -> PayloadCodec;
 
     /// 业务作用：逐条解码原始记录，以便精确归属失败 offset。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `raw`: 已受容量约束的拥有型原始记录。
     ///
     /// # 错误
     ///
-    /// tombstone、codec 不匹配或 payload 解码失败时返回错误。
+    /// 消息类型不接受 tombstone、解码失败或解码发生 panic 时返回错误；线路 codec 匹配由派发入口先行检查。
+    ///
+    /// 返回：携带具体业务值、来源上下文和分配代次的擦除记录；此步骤不调用业务处理器或授予确认权限。
     fn decode(&self, raw: &RawRecord) -> Result<ErasedRecord>;
 
     /// 业务作用：恢复具体业务类型并调用 handler。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `records`: 已逐条解码的连续 run。
+    ///
+    /// 返回：由执行线程驱动的非 Send future；成功、业务失败与框架输入不变量失败分别上报，实际提交仍由 owner 裁决。
     fn invoke<'a>(&'a self, records: Vec<ErasedRecord>) -> HandlerFuture<'a>;
 }
 
@@ -237,13 +263,15 @@ struct BatchAdapter<C> {
 
 /// 业务作用：将公开单条消费者实例擦除为内部 trait object。
 ///
-/// # 参数说明
+/// 参数说明：
 ///
 /// - `consumer`: 已完成业务依赖注入的消费者实例。
 ///
 /// # 错误
 ///
 /// id、event、topic 列表非法或存在重复 topic 时返回注册错误。
+///
+/// 返回：冻结单条消费者声明及调用序号的共享适配器；非法组身份返回 Config，其它非法声明返回 Registry，不开放消费。
 #[doc(hidden)]
 pub fn erase_single<C: SingleConsumer>(consumer: C) -> Result<Arc<dyn ErasedConsumer>> {
     let meta = single_meta(&consumer)?;
@@ -256,13 +284,15 @@ pub fn erase_single<C: SingleConsumer>(consumer: C) -> Result<Arc<dyn ErasedCons
 
 /// 业务作用：将公开批消费者实例擦除为内部 trait object。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `consumer`: 已完成业务依赖注入的消费者实例。
 ///
 /// # 错误
 ///
 /// id、event、topic 列表非法或存在重复 topic 时返回注册错误。
+///
+/// 返回：冻结批消费者声明的共享适配器；按键执行模式或其它非法声明被拒绝，不分配 Kafka 连接或执行处理器。
 #[doc(hidden)]
 pub fn erase_batch<C: BatchConsumer>(consumer: C) -> Result<Arc<dyn ErasedConsumer>> {
     let meta = batch_meta(&consumer)?;
@@ -274,7 +304,10 @@ pub fn erase_batch<C: BatchConsumer>(consumer: C) -> Result<Arc<dyn ErasedConsum
 }
 
 /// 业务作用：在登记时读取一次单条消费者声明，防止运行中改变路由身份。
-/// 参数说明：consumer 为待冻结元数据的消费者实例。
+///
+/// 参数说明：
+/// - `consumer`：为待冻结元数据的消费者实例。
+///
 /// 返回：完整冻结声明；组身份非法时为 Config，其它非法元数据为 Registry。
 fn single_meta<C: SingleConsumer>(consumer: &C) -> Result<ConsumerMeta> {
     build_meta(
@@ -291,7 +324,10 @@ fn single_meta<C: SingleConsumer>(consumer: &C) -> Result<ConsumerMeta> {
 }
 
 /// 业务作用：在登记时读取一次批消费者声明，并拒绝无法表达批次责任的按键模式。
-/// 参数说明：consumer 为待冻结元数据的消费者实例。
+///
+/// 参数说明：
+/// - `consumer`：为待冻结元数据的消费者实例。
+///
 /// 返回：完整冻结声明；组身份非法时为 Config，其它非法元数据或按键批模式为 Registry。
 fn batch_meta<C: BatchConsumer>(consumer: &C) -> Result<ConsumerMeta> {
     build_meta(
@@ -312,7 +348,11 @@ fn batch_meta<C: BatchConsumer>(consumer: &C) -> Result<ConsumerMeta> {
 /// consumer id、broadcast scope 与 topic 参与身份比较或资源选择，
 /// 不得通过静默裁剪改写调用方声明。event 与普通 group 另行校验各自的精确文本边界，有效身份保留原文。
 ///
-/// 参数说明：id 为所属 consumer，value 为待校验的身份值，field 为诊断中的字段名。
+/// 参数说明：
+/// - `id`：为所属 consumer
+/// - `value`：为待校验的身份值
+/// - `field`：为诊断中的字段名。
+///
 /// 返回：无首尾空白时通过，否则返回注册错误，不发布消费路由。
 fn deny_padded(id: &str, value: &str, field: &str) -> Result<()> {
     if value != value.trim() {
@@ -326,7 +366,7 @@ fn deny_padded(id: &str, value: &str, field: &str) -> Result<()> {
 
 /// 业务作用：校验并构造通用消费者元数据。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `id`: 稳定 handler id。
 /// - `topics`: topic 列表。
@@ -375,7 +415,10 @@ fn build_meta(
         GroupSpec::Default => {}
         GroupSpec::Named(value) => crate::wire::validate_group(value)?,
         GroupSpec::Broadcast(value) => deny_padded(id, value, "broadcast scope")?,
-        GroupSpec::StableBroadcast { scope, instance_id } => {
+        GroupSpec::StableBroadcast {
+            scope,
+            instance_id,
+        } => {
             // 共同编码独立验证精确原文，不沿用旧广播净化或裁剪规则。
             crate::broadcast_group(scope, instance_id.as_deref().unwrap_or("pending"))?;
         }
@@ -415,30 +458,42 @@ fn build_meta(
 
 impl<C: SingleConsumer> ErasedConsumer for SingleAdapter<C> {
     /// 业务作用：返回单条消费者冻结元数据。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：注册时校验并排序后的只读声明，不再次调用业务消费者的声明方法。
     fn meta(&self) -> &ConsumerMeta {
         &self.meta
     }
 
     /// 业务作用：返回单条消息类型固定 codec。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：冻结元数据中的 codec 副本；与单条消费者的消息类型声明一致，不解析输入字节。
     fn codec(&self) -> PayloadCodec {
         self.meta.codec
     }
 
     /// 业务作用：解码一条拥有型原始记录。
     ///
-    /// - `raw`: 已受字节 permit 约束的记录。
+    /// 参数说明：
+    /// - `raw`：已受字节额度约束、且派发入口已匹配 codec 的原始记录。
+    ///
+    /// 返回：携带业务值和上下文副本的擦除记录；不接受 tombstone、解码失败或 panic 时返回错误，不调用业务处理器。
     fn decode(&self, raw: &RawRecord) -> Result<ErasedRecord> {
         decode_record::<C::Message>(raw)
     }
 
     /// 业务作用：调用一次且只含一条记录的单条 handler run。
     ///
-    /// - `records`: dispatcher 提供的单记录向量。
+    /// 参数说明：
+    /// - `records`：恰好一条已解码记录，携带来源身份和 owner 的实时确认许可。
     ///
-    /// 参数说明：records 携带已解码值、来源身份和 owner 的实时确认许可。
-    /// 返回：回调期受管的业务 future；成功仍须服从 Manual Ack 和有效权威门禁。
+    /// 返回：待驱动的业务 future；形态或类型不符为 Fatal，业务错误及捕获的 panic 为 Failed，成功确认仍须 owner 复验权威。
     fn invoke<'a>(&'a self, records: Vec<ErasedRecord>) -> HandlerFuture<'a> {
         Box::pin(async move {
+            // 形态错误属于框架派发合同，不能进入业务重试并消耗这条输入的重试次数。
             if records.len() != 1 {
                 return InvocationOutcome::Fatal(NafkaError::Lifecycle(format!(
                     "single adapter 收到非单条 run: {}",
@@ -480,28 +535,39 @@ impl<C: SingleConsumer> ErasedConsumer for SingleAdapter<C> {
 
 impl<C: BatchConsumer> ErasedConsumer for BatchAdapter<C> {
     /// 业务作用：返回批消费者冻结元数据。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：登记时冻结的只读批消费声明；重复读取不会改变路由、顺序域或确认模式。
     fn meta(&self) -> &ConsumerMeta {
         &self.meta
     }
 
     /// 业务作用：返回批消息类型固定 codec。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：整条批消费路由共用的固定 codec，不按单条正文内容切换编码。
     fn codec(&self) -> PayloadCodec {
         self.meta.codec
     }
 
     /// 业务作用：逐条解码拥有型原始记录。
     ///
-    /// - `raw`: 已受字节 permit 约束的记录。
+    /// 参数说明：
+    /// - `raw`：已准入并匹配路由 codec 的单条原始记录；不是整个批次。
+    ///
+    /// 返回：保留该条来源代次的擦除记录；解码错误仍归属该条 offset，不执行整批业务回调。
     fn decode(&self, raw: &RawRecord) -> Result<ErasedRecord> {
         decode_record::<C::Message>(raw)
     }
 
     /// 业务作用：恢复连续 run 的业务类型并调用一次批 handler。
     ///
-    /// - `records`: 同 route、同分区且 offset 连续的记录。
+    /// 参数说明：
+    /// - `records`：派发方保证同 route、同分区并按交付顺序连续的记录及确认许可；适配器不重新验证分区顺序。
     ///
-    /// 参数说明：records 为按交付顺序排列的连续 run 及其确认许可。
-    /// 返回：整个调用成功时仅确认有效连续前缀，错误或取消封存本次全部 token。
+    /// 返回：待驱动的批处理 future；类型恢复失败为 Fatal，业务错误为 Failed，成功只报告有效确认前缀，取消时封存本次 token。
     fn invoke<'a>(&'a self, records: Vec<ErasedRecord>) -> HandlerFuture<'a> {
         Box::pin(async move {
             let total = records.len();
@@ -519,6 +585,7 @@ impl<C: BatchConsumer> ErasedConsumer for BatchAdapter<C> {
                 }),
             );
             let mut typed = Vec::with_capacity(total);
+            // 全部类型恢复成功才调用业务，防止框架类型错误造成半批业务副作用。
             for (index, erased) in records.into_iter().enumerate() {
                 let value = match erased.value.downcast::<C::Message>() {
                     Ok(value) => *value,
@@ -544,14 +611,17 @@ impl<C: BatchConsumer> ErasedConsumer for BatchAdapter<C> {
 }
 
 /// 业务作用：按业务类型解码拥有型记录，并保留 Kafka null 与普通正文的区别。
-/// 参数说明：raw 为保留原始 null 身份的记录。
+///
+/// 参数说明：
+/// - `raw`：为保留原始 null 身份的记录。
+///
 /// 返回：业务消息值；类型不接受 tombstone 或 codec 解码失败时返回错误。
 fn decode_record<T: DecodePayload>(raw: &RawRecord) -> Result<ErasedRecord> {
     // codec 在有界业务线程中处理外部字节；panic 归为本条解码失败，由 owner 按输入顺序
     // 应用 invalid_record_policy 与连续失败保护，不能越过尚未接管的前缀改变分区状态。
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match raw.payload.as_deref() {
-            Some(payload) => T::decode(payload),
+            Some(_) => T::decode_owned(crate::RawPayload::from_record(raw)),
             None => T::decode_tombstone(),
         }
     }))
@@ -577,7 +647,12 @@ fn decode_record<T: DecodePayload>(raw: &RawRecord) -> Result<ErasedRecord> {
 }
 
 /// 业务作用：按确认模式为本次调用建立受 owner 权威约束的临时确认槽。
-/// 参数说明：mode 为确认模式；invocation_id 为本次调用身份；contexts 按输入顺序携带坐标、分配代次、实时权威与源停止门。
+///
+/// 参数说明：
+/// - `mode`：为确认模式
+/// - `invocation_id`：为本次调用身份
+/// - `contexts`：按输入顺序携带坐标、分配代次、实时权威与源停止门。
+///
 /// 返回：Manual 模式的确认集合；Auto 模式不创建确认槽，旧调用不能确认后来分配的输入。
 fn manual_ack_set<'a>(
     mode: AckMode,
@@ -611,11 +686,13 @@ fn manual_ack_set<'a>(
 
 /// 业务作用：为指定记录生成确认能力。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `mode`: route 确认模式。
 /// - `set`: 手动模式的确认槽集合。
-/// - `index`: 输入下标。
+/// - `index`：输入下标，手动模式下由调用方保证有效且仅领取一次。
+///
+/// 返回：自动模式的标记或共享对应手动槽的 token；手动集合缺失或下标越界会 panic，不执行 broker 提交。
 fn record_ack(mode: AckMode, set: Option<&ManualAckSet>, index: usize) -> RecordAck {
     match mode {
         AckMode::Auto => RecordAck::Auto,
@@ -625,9 +702,11 @@ fn record_ack(mode: AckMode, set: Option<&ManualAckSet>, index: usize) -> Record
 
 /// 业务作用：失败路径封存全部 token。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `set`: 可选手动确认集合。
+///
+/// 返回：存在集合时永久封存全部槽且丢弃临时确认，不存在时无副作用；遗留 token 不能再推进本次调用结果。
 fn seal_failed(set: Option<&ManualAckSet>) {
     if let Some(set) = set {
         let _ = set.finish(false);
@@ -636,12 +715,14 @@ fn seal_failed(set: Option<&ManualAckSet>) {
 
 /// 业务作用：把 handler future 结果转换为严格确认矩阵。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `result`: 捕获 panic 后的 handler 结果。
 /// - `set`: 手动确认集合。
 /// - `total`: 本次 run 总记录数。
 /// - `mode`: route 确认模式。
+///
+/// 返回：成功时报告自动全量确认或手动连续前缀及空洞后确认数；错误和 panic 作废全部临时确认，结果仍待 owner 校验分配权威。
 fn finish_invocation(
     result: std::result::Result<Result<()>, Box<dyn Any + Send>>,
     set: Option<&ManualAckSet>,
@@ -650,6 +731,7 @@ fn finish_invocation(
 ) -> InvocationOutcome {
     match result {
         Ok(Ok(())) => {
+            // 处理器成功只决定临时确认是否可计入结果，后续源水位仍受分配代次约束。
             let (acked_prefix, acked_after_gap) = match mode {
                 AckMode::Auto => (total, 0),
                 AckMode::Manual => {
@@ -664,6 +746,7 @@ fn finish_invocation(
             }
         }
         Ok(Err(error)) => {
+            // 失败返回不能沿用此前的局部 ack，否则重试会越过尚未完成的业务记录。
             seal_failed(set);
             InvocationOutcome::Failed(error)
         }
@@ -674,17 +757,14 @@ fn finish_invocation(
     }
 }
 
-/// 业务作用：将 panic payload 转为不暴露业务数据的简短文本。
+/// 业务作用：将消费调用或 owner 的 panic 转为固定诊断，避免原文进入健康信息与死信原因。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `payload`: `catch_unwind` 捕获的 payload。
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_owned()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "非字符串 panic payload".into()
-    }
+/// - `payload`：catch_unwind 捕获的原始值；只释放所有权，不读取或格式化内容。
+///
+/// 返回：与 payload 类型和内容无关的固定文本；不改变 panic hook，也不处理业务主动返回的错误说明。
+pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    drop(payload);
+    "panic 内容已抑制".into()
 }

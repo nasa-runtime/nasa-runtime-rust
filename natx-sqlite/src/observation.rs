@@ -7,7 +7,9 @@ use crate::{DatabaseDriver, SqliteDataSource};
 
 impl PoolSnapshot for SqliteDataSource {
     /// 业务作用：抓取真实物理连接责任和当前可借用数量，不把 async 取消误记为连接退出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：允许并发变化的有界池状态快照。
     fn snapshot(&self) -> PoolState {
         PoolState {
@@ -30,8 +32,10 @@ impl PoolSnapshot for SqliteDataSource {
 }
 
 /// 业务作用：为冻结的 SQLite 来源表提供统一连接池指标，不创建采样任务。
+///
 /// 参数说明：
 /// - `sources`：名称与来源使用句柄。
+///
 /// 返回：身份合法且不重复时返回固定目录的指标源。
 pub fn pool_metrics_source(
     sources: impl IntoIterator<Item = (String, SqliteDataSource)>,

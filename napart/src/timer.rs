@@ -194,7 +194,7 @@ impl RunnerTimer {
                     let sleep = tokio::time::sleep_until(deadline);
                     tokio::pin!(sleep);
                     tokio::select! {
-                        _ = &mut sleep => {}
+                        _ = &mut sleep => {},
                         _ = notified => continue,
                     }
                 }

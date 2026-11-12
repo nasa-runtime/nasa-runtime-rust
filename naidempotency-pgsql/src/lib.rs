@@ -117,7 +117,9 @@ impl PgIdempotencyStore {
     }
 
     /// 业务作用：在宿主迁移门禁之后只读核对本 store 所需表和字段，不隐式执行 DDL。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：连接和必要字段可读取时成功；表缺失、权限不足或结构不符时返回脱敏错误。
     pub async fn validate_schema(&self) -> Result<(), IdempotencyError> {
         let mut connection = natx_pgsql::conn_for(&self.datasource)
@@ -422,11 +424,21 @@ fn database_epoch_ms_sql() -> &'static str {
 fn map_transaction_error<E>(error: TxRunError<E>) -> PgIdempotencyTransactionError<E> {
     match error {
         TxRunError::Rollback(error) => PgIdempotencyTransactionError::Business(error),
-        TxRunError::RollbackOnly { .. } => PgIdempotencyTransactionError::RollbackOnly,
-        TxRunError::CommitRejected { .. } => PgIdempotencyTransactionError::CommitRejected,
-        TxRunError::CommitUncertain { .. } => PgIdempotencyTransactionError::OutcomeUnknown,
-        TxRunError::RollbackFailed { .. } => PgIdempotencyTransactionError::RollbackFailed,
-        TxRunError::Infrastructure { .. } => PgIdempotencyTransactionError::Infrastructure,
+        TxRunError::RollbackOnly {
+            ..
+        } => PgIdempotencyTransactionError::RollbackOnly,
+        TxRunError::CommitRejected {
+            ..
+        } => PgIdempotencyTransactionError::CommitRejected,
+        TxRunError::CommitUncertain {
+            ..
+        } => PgIdempotencyTransactionError::OutcomeUnknown,
+        TxRunError::RollbackFailed {
+            ..
+        } => PgIdempotencyTransactionError::RollbackFailed,
+        TxRunError::Infrastructure {
+            ..
+        } => PgIdempotencyTransactionError::Infrastructure,
     }
 }
 

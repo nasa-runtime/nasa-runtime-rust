@@ -33,6 +33,11 @@ pub enum Audience {
 
 impl Audience {
     /// 业务作用：判断单值或数组 audience 是否包含策略要求的精确值。
+    ///
+    /// 参数说明：
+    /// - `expected`：业务策略要求包含的 audience 字符串。
+    ///
+    /// 返回：单值精确相等或多值列表任一项精确相等时返回 true；不去空白或转换大小写。
     fn contains(&self, expected: &str) -> bool {
         match self {
             Audience::One(value) => value == expected,
@@ -109,6 +114,11 @@ pub enum TokenError {
 
 impl std::fmt::Display for TokenError {
     /// 业务作用：输出稳定校验原因，不包含 token、claims 正文或签名字节。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收错误摘要的格式化器。
+    ///
+    /// 返回：输出分类与 AlgorithmNotAllowed 保存的原算法名称，写出失败返回格式化错误；不添加完整 token，原算法值不自动脱敏或去除控制字符。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenError::Malformed => write!(formatter, "token is not a well-formed JWT"),
@@ -139,6 +149,11 @@ impl std::fmt::Display for TokenError {
 impl std::error::Error for TokenError {}
 
 /// 业务作用：拆分 JWT 并 base64url 解码 header/claims(**不验签**);结构或解码错返回 [`TokenError`]。
+///
+/// 参数说明：
+/// - `token`：待拆分和解析但尚未验证的原始 JWT 文本。
+///
+/// 返回：恰好三段且前两段可作无填充 URL-safe Base64 与目标 JSON 解码时返回头和声明；形态或解码失败返回错误。不解码、验证签名或时间策略，也不限制总输入大小，不可据此授权。
 pub fn parse_unverified(token: &str) -> Result<(JwtHeader, AccessTokenClaims), TokenError> {
     let mut parts = token.split('.');
     let header_b64 = parts.next().ok_or(TokenError::Malformed)?;
@@ -159,12 +174,13 @@ pub fn parse_unverified(token: &str) -> Result<(JwtHeader, AccessTokenClaims), T
 
 /// 业务作用：校验 access token 的 header + claims(不含签名验签)。
 ///
-/// 参数说明:
-/// - `header`/`claims`:已解析的 JWT header 与 claims。
-/// - `policy`:期望 issuer/audience、算法白名单、leeway。
-/// - `now`:当前墙上时间(可用 `nabase::date::UtcClock` 注入时钟来源)。
+/// 参数说明：
+/// - `header`：已经解析的 JWT 头，仍需与同一 token 的签名验证绑定。
+/// - `claims`：需要检查发行方、受众与时间窗的访问声明。
+/// - `policy`：固定的发行方、受众、算法白名单及时间容差。
+/// - `now`：调用方可信当前时间，用于秒级时间窗判断。
 ///
-/// 返回: header 和 claims 满足策略时返回成功，否则返回稳定分类的 [`TokenError`]。
+/// 返回：算法为 RS256 且在策略白名单、typ 忽略大小写为 at+jwt、issuer 与 audience 匹配、必需 exp 未过期及可选 nbf/iat 满足容差时成功；否则返回分类错误。不验签，不检查 scope 或主体权限，epoch 前时刻按零秒处理。
 pub fn validate_access_token(
     header: &JwtHeader,
     claims: &AccessTokenClaims,
@@ -218,6 +234,12 @@ pub fn validate_access_token(
 }
 
 /// 业务作用：从 JWK 取某个 base64url 参数并解码为字节(如 RSA 的 `n`/`e`)。
+///
+/// 参数说明：
+/// - `jwk`：选定的 JWK，提供 n/e 等公开参数。
+/// - `name`：需要解码的 JWK 参数名。
+///
+/// 返回：参数存在且为字符串并可无填充 URL-safe Base64 解码时返回字节；缺失或类型错误返回 UnsupportedKey，解码失败返回 Decode。不单独检查解码结果非空或 RSA 有效性。
 fn jwk_component(jwk: &crate::jwks::Jwk, name: &str) -> Result<Vec<u8>, TokenError> {
     let value = jwk
         .params
@@ -229,15 +251,13 @@ fn jwk_component(jwk: &crate::jwks::Jwk, name: &str) -> Result<Vec<u8>, TokenErr
         .map_err(|_| TokenError::Decode)
 }
 
-/// 业务作用：用 JWK 校验 JWT 的 **RS256 签名**(经 `ncrypto` 的 RSASSA-PKCS1-v1_5 + SHA-256)。
+/// 业务作用：用 JWK 校验 JWT 的 **RS256 签名**(经 `ncrypto` 的 RSASSA-PKCS1-v1_5 + SHA-256)。 仅支持 `kty=RSA` 且(若 JWK 声明 `alg`)`alg=RS256`,否则 [`TokenError::UnsupportedKey`]。签名输入为 `header_b64 "." payload_b64`(原样字节);签名与 `n`/`e` 均按 base64url 解码。验签不通过返回 [`TokenError::SignatureInvalid`]。
 ///
-/// 仅支持 `kty=RSA` 且(若 JWK 声明 `alg`)`alg=RS256`,否则 [`TokenError::UnsupportedKey`]。签名输入为
-/// `header_b64 "." payload_b64`(原样字节);签名与 `n`/`e` 均按 base64url 解码。验签不通过返回
-/// [`TokenError::SignatureInvalid`]。
+/// 参数说明：
+/// - `token`：按原始前两段字节验签的完整 JWT。
+/// - `jwk`：调用方从可信集合选定的 RSA 公钥。
 ///
-/// # 参数
-/// - `token`:紧凑序列化 JWT(`header.payload.signature`)。
-/// - `jwk`:选定的 JSON Web Key(其 `params` 含 RSA 的 `n`/`e`)。
+/// 返回：三段形态、密钥类型及可选算法允许且 n/e 解码后通过 RS256 验签时成功，其它返回分类错误。不验证 header 声明、kid、use、issuer、受众或时间，不证明密钥来源可信。
 pub fn verify_rs256_signature(token: &str, jwk: &crate::jwks::Jwk) -> Result<(), TokenError> {
     let mut parts = token.split('.');
     let header_b64 = parts.next().ok_or(TokenError::Malformed)?;
@@ -267,16 +287,15 @@ pub fn verify_rs256_signature(token: &str, jwk: &crate::jwks::Jwk) -> Result<(),
     }
 }
 
-/// 业务作用：**完整校验** access token:解析 → 按 header `kid` 选 JWK → RS256 验签 → header/claims 校验。
+/// 业务作用：**完整校验** access token:解析 → 按 header `kid` 选 JWK → RS256 验签 → header/claims 校验。 返回已验证 claims。这是 OAuth Resource Server / authentication 中间件应调用的入口:先证明**签名 真实**,再判断 claims 是否满足策略;二者缺一不可(仅 [`validate_access_token`] 不验签,不足以信任 claims)。
 ///
-/// 返回已验证 claims。这是 OAuth Resource Server / authentication 中间件应调用的入口:先证明**签名
-/// 真实**,再判断 claims 是否满足策略;二者缺一不可(仅 [`validate_access_token`] 不验签,不足以信任 claims)。
+/// 参数说明：
+/// - `token`：需要验证后才可使用声明的完整访问 JWT。
+/// - `jwks`：调用方提供并应预先校验的可信公钥集合。
+/// - `policy`：固定的发行方、受众、算法和时间容差策略。
+/// - `now`：本次访问令牌判断所用的可信当前时间。
 ///
-/// # 参数
-/// - `token`:紧凑序列化 JWT。
-/// - `jwks`:当前有效 JWKS(由 `JwksRegistry` 快照提供)。
-/// - `policy`:期望 issuer/audience、算法白名单、leeway。
-/// - `now`:当前墙上时间。
+/// 返回：解析后用 kid 查找首个密钥，先验签再检查访问策略，全部成功才返回 claims；未知 key、验签或策略失败均返回错误。不主动校验整个 JWKS，来源与集合合同应由调用方先保证。
 pub fn verify_access_token(
     token: &str,
     jwks: &crate::jwks::JwkSet,

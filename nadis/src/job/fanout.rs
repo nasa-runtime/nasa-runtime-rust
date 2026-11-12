@@ -518,7 +518,7 @@ pub struct FanoutShard {
     pub shard_total: i64,
     /// 稳定分片序号。
     pub seq: i64,
-    /// 多实现共享的业务幂等键（`namespace:fanoutId:seq`）。
+    /// 多实现共享的业务幂等键（`qualifier:namespace:fanoutId:seq`）。
     pub execution_key: String,
     /// 目标稳定节点身份。
     pub target_node_identity: String,
@@ -559,8 +559,11 @@ pub struct FanoutShard {
 /// Fanout 数据模型仓库；持有连接、键模型与配置。
 #[derive(Clone)]
 pub struct FanoutRepository {
+    /// 当前数据源连接，承载同桶脚本及持久投影读取。
     client: Arc<RedisClient>,
+    /// 冻结的数据源、命名空间和桶布局，保证一次脚本的键落在同一 slot。
     keyspace: JobKeyspace,
+    /// 同一运行实例的批量、租约、重试和保留期限配置。
     config: Arc<JobConfig>,
 }
 
@@ -585,7 +588,8 @@ impl FanoutRepository {
     ///
     /// 参数说明：
     /// - `fanout_id`: Fanout 标识（与根 attempt 一一对应）。
-    /// - `root_run_id`/`root_attempt`: 根 Run 标识与 attempt。
+    /// - `root_run_id`：发起本批次的普通根 Run 标识。
+    /// - `root_attempt`：与批次标识对应的根执行尝试次数，由协调器验证整数编码范围。
     /// - `snapshot`: 冻结的能力快照，提供 `snapshot_id` 与逐字节兼容的 `snapshotPayload`。
     /// - `root_definition`: 根任务定义，提供回执参数与根调度定位。
     /// - `contract`: 本次冻结的目标 Worker、合同、schema、编码与失败策略。
@@ -639,6 +643,7 @@ impl FanoutRepository {
             root_shard.to_string().into_bytes(),
             self.keyspace.qualifier().as_bytes().to_vec(),
         ];
+        // 先冻结快照和创建截止，后续分批写入中断时才能由持久 intent 接续或收敛。
         let raw = eval(&self.client, &FANOUT_BEGIN, &keys, &argv).await?;
         let code = raw.first().map(value_to_string).unwrap_or_default();
         Ok(match code.as_str() {
@@ -651,7 +656,7 @@ impl FanoutRepository {
         })
     }
 
-    /// 业务作用：把全部 shard 按配置批量幂等写入，目标由快照成员按序 1:1 分配；分批共享一次 Redis 时间。
+    /// 业务作用：把全部 shard 按配置批量幂等写入，目标由冻结快照成员按序一一分配。
     ///
     /// 参数说明：
     /// - `fanout_id`: Fanout 标识。
@@ -661,7 +666,7 @@ impl FanoutRepository {
     /// - `origin_executor_id`: 发起本次创建的执行器身份。
     /// - `shard_payloads`: 每个 shard 的业务参数字节，长度必须等于快照成员数。
     ///
-    /// 返回：全部批次成功返回累计新增数与已建立总数；任一批次拒绝立即返回对应结局。
+    /// 返回：全部批次成功返回累计新增数与已建立总数；任一批次拒绝立即返回对应结局，之前已写入的批次保留。
     #[allow(clippy::too_many_arguments)]
     pub async fn add_shards(
         &self,
@@ -672,6 +677,7 @@ impl FanoutRepository {
         origin_executor_id: &str,
         shard_payloads: &[Vec<u8>],
     ) -> Result<FanoutAddShardsOutcome> {
+        // 载荷与快照成员必须按位置一一对应；数量不符时拒绝，避免参数落到错误目标。
         if shard_payloads.len() != snapshot.members.len() {
             return Err(protocol("add_shards 载荷数必须与快照成员数一致"));
         }
@@ -745,6 +751,7 @@ impl FanoutRepository {
             self.keyspace.fanout_roots(fanout_id).into_bytes(),
             self.keyspace.fanout_completion(fanout_id).into_bytes(),
         ];
+        // 在同桶内复验 shard 已齐全后才发布提交状态，禁止投递半创建批次。
         let raw = eval(
             &self.client,
             &FANOUT_COMMIT,
@@ -858,8 +865,8 @@ impl FanoutRepository {
     ///
     /// 参数说明：
     /// - `fanout_id`: Fanout 标识。
-    /// - `snapshot`: 能力快照，成员按序对应各 shard 的目标节点（决定 inbox 与通知频道）。
-    /// - `definition`: 根任务定义，提供接收回执超时。
+    /// - `snapshot`：冻结快照，成员数量确定首次投递要读取的连续 shard 序号范围。
+    /// - `_definition`：保留的根定义参数；投递期限取持久根记录，当前调用不读取该参数。
     ///
     /// 返回：全部批次成功返回累计投递数与投递游标；根未提交返回 `NotCommitted`。只投递当前 assignment 且尚无 inbox 消息的 shard。
     pub async fn deliver_batch(
@@ -915,6 +922,7 @@ impl FanoutRepository {
         shards: &[FanoutShard],
         advance_cursor: bool,
     ) -> Result<FanoutDeliverOutcome> {
+        // 未提交根不能开放投递；此处只做预检，写脚本仍须复验持久状态及 assignment。
         let root = match self.read_root(fanout_id).await? {
             Some(root) if root.state == "COMMITTED" || root.state == "WAITING_CHILDREN" => root,
             _ => return Ok(FanoutDeliverOutcome::NotCommitted),
@@ -945,6 +953,7 @@ impl FanoutRepository {
                 },
             ];
             for shard in batch {
+                // 不允许把另一批次的目标与 epoch 拼入当前批次，避免跨批次投递。
                 if shard.fanout_id != fanout_id {
                     return Err(protocol("投递 shard 与 fanout_id 不一致"));
                 }
@@ -970,6 +979,7 @@ impl FanoutRepository {
                     root.receipt_timeout_ms.to_string().into_bytes(),
                 ]);
             }
+            // 由同桶脚本先建立 inbox 与回执期限，再发通知；通知丢失仍有持久恢复入口。
             let raw = eval(&self.client, &FANOUT_DELIVER_BATCH, &keys, &argv).await?;
             let code = raw.first().map(value_to_string).unwrap_or_default();
             match code.as_str() {
@@ -990,7 +1000,9 @@ impl FanoutRepository {
     /// 业务作用：目标节点持久确认已接收一个 Fanout shard，建立 start 截止索引后向根执行器发回执信号。
     ///
     /// 参数说明：
-    /// - `fanout_id`/`seq`: Fanout 标识与分片序号。
+    /// - `definition`：本地 Worker 定义，提供接收前必须匹配的合同、Schema 和编码集合。
+    /// - `fanout_id`：目标批次标识，用于定位持久根与同桶索引。
+    /// - `seq`：批次内稳定分片序号。
     /// - `target_node_identity`: 本节点稳定身份，必须与 shard 记录一致。
     /// - `executor_id`: 本进程执行器身份，成为接收方。
     /// - `assignment_epoch`: 当前 assignment epoch，必须与 shard 记录一致。
@@ -1035,6 +1047,7 @@ impl FanoutRepository {
             definition.schema_id().as_bytes().to_vec(),
             definition.wire_codecs().as_bytes().to_vec(),
         ];
+        // 接收前必须在脚本中复验来源、合同和 assignment；旧代次通知不能取得新代次接收权。
         let raw = eval(&self.client, &FANOUT_ACCEPT_SHARD, &keys, &argv).await?;
         let code = raw.first().map(value_to_string).unwrap_or_default();
         Ok(match code.as_str() {
@@ -1166,7 +1179,8 @@ impl FanoutRepository {
 
     /// 业务作用：目标节点已经确认接收、但本地执行槽暂满时短暂保留当前 assignment；连续等待超过容量窗口后，非严格策略重新开放根失败策略，严格快照保持固定目标与既有退避。
     ///
-    /// 参数说明：`shard` 提供当前 Fanout、分片序号、目标稳定身份与 assignment epoch。
+    /// 参数说明：
+    /// - `shard`：已接收的分片投影，提供批次、序号、目标稳定身份和 assignment epoch。
     ///
     /// 返回：当前 RECEIVED assignment 成功延后时返回新可见时刻，超过容量窗口时返回累计证据，状态或 assignment 已变化时返回封闭陈旧结局；Redis 或协议失败返回错误。
     pub async fn defer_ready_for_capacity(
@@ -1178,7 +1192,9 @@ impl FanoutRepository {
 
     /// 业务作用：在容量压力复查时开启下一段等待窗口，避免同一 assignment 因历史窗口耗尽永久停滞。
     ///
-    /// 参数说明：`reopen` 为真时重置容量窗口起点；仅监视器在确认没有可切换兼容目标时使用。
+    /// 参数说明：
+    /// - `shard`：待延后分片的当前 assignment，用于复验状态和目标归属。
+    /// - `reopen`：是否重新开启容量窗口；为真只用于监视器确认没有可切换兼容目标后的再次等待。
     ///
     /// 返回：与 `defer_ready_for_capacity` 相同；assignment 或状态变化时返回陈旧结局。
     pub(crate) async fn defer_ready_for_capacity_mode(
@@ -1207,6 +1223,7 @@ impl FanoutRepository {
                 b"CONTINUE".to_vec()
             },
         ];
+        // 容量等待不能绕过 assignment CAS，也不能把执行槽不足归因为执行器失联。
         let raw = eval(&self.client, &FANOUT_DEFER_READY, &keys, &argv).await?;
         let code = raw.first().map(value_to_string).unwrap_or_default();
         Ok(match code.as_str() {
@@ -1226,8 +1243,9 @@ impl FanoutRepository {
     /// 业务作用：以 FANOUT 模式原子领取一个 shard 的 attempt 执行权，复验根提交状态、目标 assignment 与 fencing，并确认 inbox 消息。
     ///
     /// 参数说明：
-    /// - `fanout_id`/`seq`: Fanout 标识与分片序号。
-    /// - `worker_name`: Worker 能力名。
+    /// - `definition`：目标 Worker 的冻结定义，提供能力名、合同、Schema 和编码集合。
+    /// - `fanout_id`：待领取的批次标识。
+    /// - `seq`：批次内稳定分片序号。
     /// - `node_identity`: 本节点稳定身份，必须与 shard 目标一致。
     /// - `executor_id`: 本进程执行器身份，成为 owner。
     /// - `assignment_epoch`: 当前 assignment epoch，必须与 shard 记录一致。
@@ -1284,13 +1302,18 @@ impl FanoutRepository {
             definition.schema_id().as_bytes().to_vec(),
             definition.wire_codecs().as_bytes().to_vec(),
         ];
+        // 执行权、租约与 inbox 确认由同一脚本提交；调用方只能在权威结局允许时进入 Handler。
         let raw = eval(&self.client, &START_RUN, &keys, &argv).await?;
         interpret_start(&raw)
     }
 
-    /// 业务作用：只为当前 owner/token 续期一个 Fanout shard，并把持久取消请求同步到本地权威门禁。
+    /// 业务作用：只为当前 owner/token 续期一个 Fanout shard，并向调用方返回持久取消信号。
     ///
-    /// 参数说明：`fanout_id`/`seq` 定位 shard，`executor_id`/`attempt_token` 证明当前执行权。
+    /// 参数说明：
+    /// - `fanout_id`：正在执行的批次标识。
+    /// - `seq`：批次内正在执行的稳定分片序号。
+    /// - `executor_id`：当前执行器身份，必须与持久 owner 一致。
+    /// - `attempt_token`：领取时取得的 fencing token，防止旧执行续期新租约。
     ///
     /// 返回：续期成功返回 Redis 时刻、新截止与取消标志；状态或执行权不符返回封闭结局。
     pub async fn renew_shard(
@@ -1318,14 +1341,15 @@ impl FanoutRepository {
     /// 业务作用：以 FANOUT 模式提交一个 shard 的 attempt 结果，释放执行权，并在最后一个 shard 结束时原子决定 Fanout 根终态。
     ///
     /// 参数说明：
-    /// - `fanout_id`/`seq`: Fanout 标识与分片序号。
+    /// - `fanout_id`：结果归属的批次标识。
+    /// - `seq`：批次内稳定分片序号。
     /// - `worker_name`: Worker 能力名。
     /// - `executor_id`: 当前 owner，必须与记录一致。
     /// - `attempt_token`: 当前 fencing token，必须与记录一致。
     /// - `assignment_epoch`: 当前 assignment epoch，必须与记录一致。
-    /// - `definition`: 根任务定义，提供重试上限与重试延迟基数（FANOUT 用未抖动基数）。
+    /// - `definition`：本次执行的 Worker 定义，提供重试上限与未抖动的重试延迟基数。
     /// - `result_code`: Handler 结果码。
-    /// - `summary`: 结果摘要（按既有实现原样写入，业务侧保证有界）。
+    /// - `summary`：原样写入的结果摘要，调用方须保证有界且不包含敏感载荷。
     ///
     /// 返回：提交成功返回 shard 下一状态与权威时刻；owner/token/assignment 不符返回对应结局，迟到提交不覆盖新 attempt。
     #[allow(clippy::too_many_arguments)]
@@ -1367,6 +1391,7 @@ impl FanoutRepository {
             assignment_epoch.to_string().into_bytes(),
             self.keyspace.execution_key(fanout_id, seq).into_bytes(),
         ];
+        // 完成提交必须复验 owner、token 和 assignment；迟到结果不能覆盖新尝试或重复累计根计数。
         let raw = eval(&self.client, &FINISH_RUN, &keys, &argv).await?;
         interpret_finish(&raw)
     }
@@ -1504,7 +1529,8 @@ impl FanoutRepository {
     /// 业务作用：对账期把一个确认不可达的 shard 以给定终态收敛进根，并在最后一个 shard 时原子决定根终态。
     ///
     /// 参数说明：
-    /// - `fanout_id`/`seq`: Fanout 标识与分片序号。
+    /// - `fanout_id`：需要收敛的批次标识。
+    /// - `seq`：已经由调用方确认可按失败策略收敛的分片序号。
     /// - `shard_terminal_state`: 该 shard 的收敛终态（如 SKIPPED）。
     /// - `result_code`: 收敛结果码。
     /// - `result_summary`: 收敛原因摘要。
@@ -1567,7 +1593,11 @@ impl FanoutRepository {
 
     /// 业务作用：按故障或容量路由模式原子切换 Fanout assignment，并使用对应的独立预算。
     ///
-    /// 参数说明：`mode` 取 `FAILURE`、`CAPACITY` 或 `CAPACITY_TARGET_LOST`。
+    /// 参数说明：
+    /// - `root`：批次根投影，确定持久桶与批次身份。
+    /// - `shard`：观察到的旧目标和 assignment epoch，作为切换前的 CAS 证据。
+    /// - `new_target`：已筛选的兼容目标；为空表示没有候选节点。
+    /// - `mode`：`FAILURE` 使用故障预算；`CAPACITY` 和 `CAPACITY_TARGET_LOST` 使用容量路由预算。
     ///
     /// 返回：切换成功、竞争陈旧、故障配额耗尽或容量路由配额耗尽的明确结局。
     pub(crate) async fn reassign_shard_mode(
@@ -1609,6 +1639,7 @@ impl FanoutRepository {
             mode.as_bytes().to_vec(),
             self.config.fanout_capacity_wait_ms.to_string().into_bytes(),
         ];
+        // 在持久脚本中复验旧目标、epoch 与模式证据，成功后才使新目标取得下一 assignment。
         let raw = eval(&self.client, &FANOUT_REASSIGN_SHARD, &keys, &argv).await?;
         let code = raw.first().map(value_to_string).unwrap_or_default();
         Ok(match code.as_str() {
@@ -1629,9 +1660,14 @@ impl FanoutRepository {
     /// 参数说明：
     /// - `root`: 终态且已对账的 Fanout 根投影，提供清理游标与分片总数。
     ///
-    /// 返回：本批删除数与下一游标；全部删除返回 `Completed`；未对账/未到期/状态不符返回对应结局。
+    /// 返回：本批删除数与下一游标；旧游标返回删除数零及当前游标，不改动持久数据。
+    /// 全部删除返回 `Completed`；未对账、未到期或状态不符返回对应结局，非法投影返回协议错误。
     pub async fn cleanup(&self, root: &FanoutRoot) -> Result<FanoutCleanupOutcome> {
-        let remaining = (root.shard_total - root.cleanup_cursor).max(0);
+        // 清理键由投影游标构造；先拒绝无效范围，避免溢出或定位到不存在的负序号。
+        if root.cleanup_cursor < 0 || root.shard_total < root.cleanup_cursor {
+            return Err(protocol("Fanout 清理游标超出分片范围"));
+        }
+        let remaining = root.shard_total - root.cleanup_cursor;
         let count = remaining.min(self.config.fanout_cleanup_batch_size as i64);
         let mut keys: Vec<Vec<u8>> = vec![
             self.keyspace.fanout_root(&root.fanout_id).into_bytes(),
@@ -1663,7 +1699,9 @@ impl FanoutRepository {
             root.fanout_id.as_bytes().to_vec(),
             count.to_string().into_bytes(),
             INBOX_GROUP.as_bytes().to_vec(),
+            root.cleanup_cursor.to_string().into_bytes(),
         ];
+        // 键列表与观察游标一并提交；并发清理已推进时必须零写入返回，不能用旧键推进新游标。
         let raw = eval(&self.client, &FANOUT_CLEANUP, &keys, &argv).await?;
         let code = raw.first().map(value_to_string).unwrap_or_default();
         Ok(match code.as_str() {
@@ -1684,20 +1722,25 @@ impl FanoutRepository {
         })
     }
 
-    /// 业务作用：对处于 CANCELLING 的 Fanout 有界推进一批取消；运行中 shard 只写协作式取消信号，等完成或租约恢复。
+    /// 业务作用：发起或继续 Fanout 的有界取消；先封闭根的新执行入口，运行中 shard 只记录协作式取消并等待完成或租约恢复。
     ///
     /// 参数说明：
-    /// - `root`: CANCELLING 的 Fanout 根投影，提供取消游标与分片总数。
+    /// - `root`：待取消或已处于 CANCELLING 的根投影，提供取消游标与分片总数。
     /// - `reason`: 取消原因。
     ///
-    /// 返回：仍在取消返回 `Cancelling` 与下一游标；全部收敛返回 `Cancelled` 与保留截止；已终态或游标过期返回对应结局。
+    /// 返回：仍在取消返回 `Cancelling`，全部收敛返回 `Cancelled`；终态或陈旧游标返回对应结局，非法投影在 Redis I/O 前拒绝。
     pub async fn cancel_batch(
         &self,
         root: &FanoutRoot,
         reason: &str,
     ) -> Result<FanoutCancelBatchOutcome> {
-        let remaining = (root.shard_total - root.cancel_cursor).max(0);
-        let count = remaining.min(self.config.fanout_cleanup_batch_size as i64);
+        // 根投影不可信时不能据此拼装分片键，避免越界取消、整数溢出或向错误游标提交保护态。
+        if root.cancel_cursor < 0 || root.cancel_cursor > root.shard_total {
+            return Err(protocol("Fanout 取消游标超出分片范围"));
+        }
+        let batch_size = i64::from(self.config.fanout_cleanup_batch_size);
+        let remaining = root.shard_total - root.cancel_cursor;
+        let count = remaining.min(batch_size);
         let mut keys: Vec<Vec<u8>> = vec![
             self.keyspace.fanout_root(&root.fanout_id).into_bytes(),
             self.keyspace.fanout_roots(&root.fanout_id).into_bytes(),
@@ -1739,7 +1782,9 @@ impl FanoutRepository {
         let code = raw.first().map(value_to_string).unwrap_or_default();
         let tag = raw.get(1).map(value_to_string).unwrap_or_default();
         Ok(match code.as_str() {
-            "ALREADY_COMPLETED" => FanoutCancelBatchOutcome::AlreadyCompleted { state: tag },
+            "ALREADY_COMPLETED" => FanoutCancelBatchOutcome::AlreadyCompleted {
+                state: tag,
+            },
             "STALE" => FanoutCancelBatchOutcome::Stale {
                 cursor: parse_num(raw.get(1), "cancel_batch cursor")?,
             },
@@ -1758,7 +1803,7 @@ impl FanoutRepository {
     /// 参数说明：
     /// - `root`: Fanout 根投影，提供 fanoutId 与失败策略。
     /// - `shard`: shard 投影，提供 seq 与 Worker 名。
-    /// - `definition`: 根任务定义，提供重试上限与重试延迟基数。
+    /// - `definition`：目标 Worker 定义，提供重试上限与重试延迟基数。
     ///
     /// 返回：恢复成功返回下一状态与可选唤醒延迟；租约未到期返回 `NotDue`；状态或索引不一致返回 `Stale`。
     /// 与普通 Run 共用同一 `recover_expired` 内核，不分叉。
@@ -1780,7 +1825,9 @@ impl FanoutRepository {
 
     /// 业务作用：在本地 Worker 契约已撤销时，只为 CANCELLING 根收敛到期 shard，不建立新执行入口。
     ///
-    /// 参数说明：`root` 与 `shard` 提供持久失败策略、桶定位及当前租约证据。
+    /// 参数说明：
+    /// - `root`：已进入取消流程的根投影，提供批次定位与持久失败策略。
+    /// - `shard`：待回收分片投影，提供稳定序号和 Worker 名。
     ///
     /// 返回：根确为 CANCELLING 且租约到期时把 shard 收敛为取消；根状态变化返回 `RootNotCancelling`。
     pub(crate) async fn recover_cancelling_shard(
@@ -1794,7 +1841,12 @@ impl FanoutRepository {
 
     /// 业务作用：以显式恢复模式调用共享租约撤权脚本，统一普通 Fanout 恢复与删除取消恢复的键序。
     ///
-    /// 参数说明：`max_attempts`、`retry_delay_ms` 仅在 FANOUT 模式生效；`mode` 决定是否允许新 attempt。
+    /// 参数说明：
+    /// - `root`：批次根投影，提供桶定位和持久失败策略。
+    /// - `shard`：需要检查租约的分片，提供稳定序号及 Worker 名。
+    /// - `max_attempts`：正常恢复允许的最大执行次数；仅取消模式忽略此值。
+    /// - `retry_delay_ms`：正常恢复的重试延迟基数，单位毫秒；仅取消模式忽略此值。
+    /// - `mode`：`FANOUT` 允许正常恢复；`FANOUT_CANCEL_ONLY` 只收敛取消根，不开放新尝试。
     ///
     /// 返回：服务端复验后的封闭恢复结局；未知模式或返回码按协议错误处理。
     async fn recover_shard_with_mode(
@@ -1833,6 +1885,7 @@ impl FanoutRepository {
             root.failure_policy.as_bytes().to_vec(),
             Vec::new(),
         ];
+        // 旧投影不能直接撤权；服务端按当前租约和根状态复验，再撤销旧 owner 并推进恢复结局。
         let raw = eval(&self.client, &RECOVER_EXPIRED, &keys, &argv).await?;
         interpret_recover(&raw)
     }
@@ -1842,7 +1895,8 @@ impl FanoutRepository {
     /// 参数说明：
     /// - `bucket`: 目标 Fanout 桶下标。
     ///
-    /// 返回：权威时刻、桶内看门狗根数量与四类到期扫描；脚本只读，真正推进仍由各自写脚本按证据复验。
+    /// 返回：权威时刻、桶内看门狗根数量与四类到期扫描；负时间或根数量、超批量及多余字段返回协议错误。
+    /// 脚本只读，真正推进仍由各自写脚本按证据复验。
     pub async fn scan_due(&self, bucket: u32) -> Result<FanoutDueScans> {
         let keys: Vec<Vec<u8>> = vec![
             self.keyspace.fanout_roots_at(bucket).into_bytes(),
@@ -1858,11 +1912,23 @@ impl FanoutRepository {
         }
         let redis_now = parse_num(raw.first(), "fanout_scan_due redisNow")?;
         let root_count = parse_num(raw.get(1), "fanout_scan_due rootCount")?;
+        // 时间和数量不能为负，拒绝无法作为持久恢复依据的扫描头。
+        if redis_now < 0 || root_count < 0 {
+            return Err(protocol("fanout_scan_due 时间或根数量非法"));
+        }
         let mut cursor = 2_usize;
         let receipts = parse_due_index(&raw, &mut cursor)?;
         let ready = parse_due_index(&raw, &mut cursor)?;
         let leases = parse_due_index(&raw, &mut cursor)?;
         let gc = parse_due_index(&raw, &mut cursor)?;
+        // 返回合同恰含四组，每组受请求批量限制；未消费字段不能被静默当成另一种布局。
+        if cursor != raw.len()
+            || [&receipts, &ready, &leases, &gc]
+                .iter()
+                .any(|index| index.members.len() > self.config.scan_batch_size as usize)
+        {
+            return Err(protocol("fanout_scan_due 索引数量或批量不符合合同"));
+        }
         Ok(FanoutDueScans {
             redis_now,
             root_count,
@@ -1880,7 +1946,8 @@ impl FanoutRepository {
 /// - `raw`: 脚本返回数组。
 /// - `cursor`: 当前解析游标，解析后前移到下一组起点。
 ///
-/// 返回：该组的下一 score 与到期成员对；结构不完整或非数值 fail-closed。
+/// 返回：该组的下一 score 与到期成员对；负计数、结构不完整或非数值返回协议错误。
+/// 分配成员缓冲前检查实际响应能否容纳声明数量，不按未经验证的服务端计数预分配。
 fn parse_due_index(raw: &[redis::Value], cursor: &mut usize) -> Result<DueIndexScan> {
     let next_text = raw
         .get(*cursor)
@@ -1898,8 +1965,14 @@ fn parse_due_index(raw: &[redis::Value], cursor: &mut usize) -> Result<DueIndexS
     };
     let count = parse_num(raw.get(*cursor), "fanout_scan_due dueCount")?;
     *cursor += 1;
-    let mut members = Vec::with_capacity(count.max(0) as usize);
-    for _ in 0..count.max(0) {
+    let count =
+        usize::try_from(count).map_err(|_| protocol("fanout_scan_due dueCount 超出合法范围"))?;
+    // 每个成员至少占两个返回元素；在分配前拒绝无对应字节的计数，避免畸形响应触发过量分配。
+    if count > raw.len().saturating_sub(*cursor) / 2 {
+        return Err(protocol("fanout_scan_due dueCount 超出响应成员数"));
+    }
+    let mut members = Vec::with_capacity(count);
+    for _ in 0..count {
         let member = raw
             .get(*cursor)
             .map(value_to_string)
@@ -1915,7 +1988,13 @@ fn parse_due_index(raw: &[redis::Value], cursor: &mut usize) -> Result<DueIndexS
     })
 }
 
-/// 业务作用：把投影字段归一化为文本；nil 与非字符串取空串。
+/// 业务作用：按 Fanout 投影规则读取文本字段，兼容整数和两种 Redis 字符串表示。
+///
+/// 参数说明：
+/// - `fields`：已按投影合同排列的 Redis 字段数组。
+/// - `index`：所需字段在该投影中的固定位置。
+///
+/// 返回：整数转十进制文本，字节串按 UTF-8 容错解码；缺失、nil 或其它类型返回空串。
 fn text(fields: &[redis::Value], index: usize) -> String {
     match fields.get(index) {
         Some(redis::Value::Nil) | None => String::new(),
@@ -1927,6 +2006,12 @@ fn text(fields: &[redis::Value], index: usize) -> String {
 }
 
 /// 业务作用：把投影数值字段解释为 i64；nil 或空取 0，非法文本 fail-closed。
+///
+/// 参数说明：
+/// - `fields`：已按持久投影合同排列的 Redis 字段数组。
+/// - `index`：需要读取的数值字段位置。
+///
+/// 返回：缺失、nil 或空文本返回零；整数直接采用，非法数值文本或其它类型返回协议错误。
 fn num(fields: &[redis::Value], index: usize) -> Result<i64> {
     match fields.get(index) {
         Some(redis::Value::Nil) | None => Ok(0),
@@ -1949,6 +2034,12 @@ fn num(fields: &[redis::Value], index: usize) -> Result<i64> {
 }
 
 /// 业务作用：把脚本返回的一个可选数值元素解释为 i64；缺失或非数值 fail-closed。
+///
+/// 参数说明：
+/// - `value`：脚本响应中应存在的数值元素。
+/// - `field`：固定字段名称，用于区分协议错误来源。
+///
+/// 返回：成功返回有符号整数；字段缺失、类型不支持或文本不能解析时返回协议错误。
 fn parse_num(value: Option<&redis::Value>, field: &str) -> Result<i64> {
     value
         .map(value_to_string)
@@ -1957,7 +2048,12 @@ fn parse_num(value: Option<&redis::Value>, field: &str) -> Result<i64> {
         .map_err(|_| protocol(&format!("{field} 非法")))
 }
 
-/// 业务作用：构造 Job 协议错误。参数说明：`message` 摘要。返回：协议错误。
+/// 业务作用：把 Fanout 持久数据与脚本响应的合同违例归入 Job 协议错误。
+///
+/// 参数说明：
+/// - `message`：说明违例字段或状态的固定摘要，不应包含业务参数或凭据。
+///
+/// 返回：保留摘要的协议错误，由调用方停止当前操作，不自动重放写入。
 fn protocol(message: &str) -> NasaRedisError {
     crate::job::JobError::Protocol(message.to_owned()).into()
 }

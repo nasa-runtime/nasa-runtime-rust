@@ -143,12 +143,13 @@ pub enum NasaRedisError {
 }
 
 impl NasaRedisError {
-    /// 业务作用：是否为**基础设施级可重试**错误(连接断开/超时/服务端瞬时类)。
-    /// 用于管理命令决策:这类错误**不得**把命令推进到 Rejected
-    /// 终态、不得 ACK+XDEL command——保留 PEL 交下一轮或新 owner 重试;反之**确定性失败**
-    /// (WRONGTYPE / 语法 ERR / NOPERM / EXECABORT / 解析等)立即 Rejected,绝不空转重试。
+    /// 业务作用：为管理命令识别应保留处理责任的基础设施瞬态错误及所有权变化。
     ///
-    /// 按 `redis::RedisError` 的 IO/超时/断连判定与服务端 code 分类；WRONGTYPE 等确定性错误不进入重试。
+    /// 参数说明：无。
+    ///
+    /// 返回：底层瞬态错误、执行结果未知或所有权变化时为真，管理消费不得据此确认并删除命令。
+    /// 其它错误为假，仍须按各自合同处理；尤其操作冲突有独立窗口裁决，不等同于业务确定失败。
+    /// 本方法不执行重试，也不证明任意业务写操作都可安全重放。
     pub fn is_infra_retryable(&self) -> bool {
         match self {
             NasaRedisError::Redis(e) => redis_is_transient(e),
@@ -172,8 +173,10 @@ impl NasaRedisError {
 /// CLUSTERDOWN/MASTERDOWN(集群/主从切换的暂时态);WRONGTYPE/ERR/NOPERM/CROSSSLOT/
 /// EXECABORT/NOSCRIPT 等确定性服务端错误一律不重试。
 ///
-/// # 参数
-/// - `e`: 错误对象或外部错误值。
+/// 参数说明：
+/// - `e`：底层 Redis 错误，按连接分类与稳定服务器错误码判断。
+///
+/// 返回：I/O、超时、连接断开或列明的瞬态错误码为真，其余为假；不解析错误文本，也不执行重试。
 pub(crate) fn redis_is_transient(e: &redis::RedisError) -> bool {
     if e.is_io_error() || e.is_timeout() || e.is_connection_dropped() {
         return true;

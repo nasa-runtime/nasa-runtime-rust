@@ -26,7 +26,62 @@ region、zone、service_version 可省略。与 telemetry 的服务名或实例�
 platform 模式默认绑定 `0.0.0.0:9464/metrics`，其它模式默认 `127.0.0.1:9464/metrics`。
 非回环端口必须由受信网络、NetworkPolicy、安全组、bearer 或 mTLS sidecar 限制。
 
-## 抓取出口
+## 进程、容器与文件系统采集
+
+`collectors` 在同一 MetricHub 登记有界资源来源，可独立于外部出口启用。napp 在 Ready 后启动
+唯一采样任务，停止时按应用统一期限回收；`/metrics` 只读缓存，不扫描目录或等待磁盘。
+
+```yaml
+grafana:
+  observability:
+    collectors:
+      enabled: true
+      interval_ms: 5000
+      filesystem_interval_ms: 30000
+      timeout_ms: 1000
+      stale_after_ms: 15000
+      process: true
+      cgroup: true
+      filesystems:
+        data: /var/lib/application
+      network_interfaces:
+        ingress: eth0
+      io_devices: {}
+      max_file_bytes: 65536
+      max_entries: 65536
+```
+
+默认关闭采集；显式开启后 CPU、RSS、虚拟内存、线程、FD、缺页与上下文切换按平台能力输出。
+Linux 额外提供进程 I/O、当前进程所属可见 cgroup v2 的 CPU、内存、OOM、pids、压力及白名单
+设备 I/O；macOS 提供 CPU、内存、线程、FD 和文件系统，其余来源标为 unsupported。
+cgroup v1 不读取为 v2，也不使用宿主机总量填补不可见数据。内核字段语义见
+[cgroup v2 文档](https://docs.kernel.org/admin-guide/cgroup-v2.html) 和
+[/proc 文档](https://docs.kernel.org/filesystems/proc.html)。
+
+资源指标使用 `napp_process_*`、`napp_cgroup_*`、`napp_filesystem_*`、`napp_network_*`。
+CPU、节流和压力累计时间以 `microseconds_total` 报告，查询使用 `rate(...[5m]) / 1000000`
+得到秒率。内存分项不能相加到 current；CPU total 与 user/system 也不能重复求和。本级有限
+cgroup 配额不代表所有祖先约束后的有效上限，无限或不可读限制不产生数值，不能据此强算百分比。
+进程 I/O 区分 `syscall` 和 `storage`；网络量属于当前网络命名空间，不能当成该进程业务字节。
+
+路径、网卡与设备分别最多 16 个固定别名，标签不包含实际路径。设备配置值使用 `major:minor`；
+未配置的设备不输出。文件系统按实际设备去重，重复挂载别名显示 duplicate；它的 available
+可能与其它容器共享，不代表单进程独占空间。每个统计文件完整读取受 `max_file_bytes` 限制；
+描述符枚举超过 `max_entries` 时报告 unavailable，不把截断数量当真值。采集不需要特权、
+Docker socket 或宿主机挂载，不执行外部命令。
+
+`napp_resource_collection_state{collector,state}` 固定区分 uninitialized、unsupported、
+unavailable、stale、ready、duplicate；`available` 仅在当前来源具有新鲜成功样本时为一。
+不可用或过期时停止输出该来源数值，保留 `last_success_timestamp_seconds`，并提供采样耗时
+Histogram 和错误计数。文件系统新鲜度取 `stale_after_ms` 与三倍文件系统周期的较大值。
+可选内核字段未提供时没有对应序列，来源 ready 不承诺所有可选字段存在。
+
+采集超时不创建替代阻塞任务；原任务一直占据唯一名额，迟到结果不发布。无法在停机期限内退出
+的系统调用会明确报告未完成，不能承诺强制取消内核阻塞调用。配置和来源目录在启动时固定，
+全部标签组合与 Histogram 展开序列在登记时预留，容量不足拒绝启动。独立宿主可使用
+`ResourceCollector::new`、`worst_case_series`、`run`、`finish` 遵循同一生命周期。
+
+## 抓取认证
 
 ```yaml
 grafana:

@@ -21,11 +21,13 @@ const GCM_IV_LEN: usize = 12;
 
 // ---------- ECB ----------
 
-/// 业务作用: 执行 AES ECB 加密；用于兼容只传密钥的分组加密场景。
+/// 业务作用：用 AES-ECB 和 PKCS7 填充加密原始字节。
 ///
-/// # 参数
-/// - `key`: AES 密钥字节,长度必须为 16、24 或 32。
-/// - `data`: 待加密的明文字节。
+/// 参数说明：
+/// - `key`：16、24 或 32 字节的 AES 密钥。
+/// - `data`：需要加密的原始明文。
+///
+/// 返回：返回包含填充后的密文字节；密钥长度非法返回配置或加密错误，此模式不生成 IV 或认证标签。
 fn ecb_encrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     macro_rules! run {
         ($a:ty) => {
@@ -46,11 +48,13 @@ fn ecb_encrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// 业务作用: 执行 AES ECB 解密；用于还原只传密钥的密文数据。
+/// 业务作用：用 AES-ECB 解密并移除 PKCS7 填充。
 ///
-/// # 参数
-/// - `key`: AES 密钥字节,长度必须为 16、24 或 32。
-/// - `ct`: 密文字节或密文文本。
+/// 参数说明：
+/// - `key`：与加密相同的 16、24 或 32 字节密钥。
+/// - `ct`：完整的分组密文字节。
+///
+/// 返回：返回去填充明文；密钥长度、分组长度或填充无效返回错误，不构成认证验证。
 fn ecb_decrypt(key: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
     macro_rules! run {
         ($a:ty) => {
@@ -74,12 +78,14 @@ fn ecb_decrypt(key: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
 
 // ---------- CBC ----------
 
-/// 业务作用: 执行 AES CBC 加密；用于带初始化向量的分组加密场景。
+/// 业务作用：使用独立 IV 执行 AES-CBC 和 PKCS7 填充。
 ///
-/// # 参数
-/// - `key`: AES 密钥字节,长度必须为 16、24 或 32。
-/// - `iv`: AES-CBC 使用的初始化向量。
-/// - `data`: 待加密的明文字节。
+/// 参数说明：
+/// - `key`：16、24 或 32 字节 AES 密钥。
+/// - `iv`：必须为 16 字节的初始化向量。
+/// - `data`：待加密的原始字节。
+///
+/// 返回：成功返回密文字节；密钥或 IV 长度非法返回错误，不附加 IV 或认证标签。
 fn cbc_encrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     macro_rules! run {
         ($a:ty) => {
@@ -100,12 +106,14 @@ fn cbc_encrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// 业务作用: 执行 AES CBC 解密；用于还原带初始化向量的密文数据。
+/// 业务作用：用给定 IV 解密 AES-CBC 并验证 PKCS7 填充。
 ///
-/// # 参数
-/// - `key`: AES 密钥字节,长度必须为 16、24 或 32。
-/// - `iv`: AES-CBC 使用的初始化向量。
-/// - `ct`: 密文字节或密文文本。
+/// 参数说明：
+/// - `key`：与加密一致的 AES 密钥。
+/// - `iv`：与加密一致的 16 字节初始化向量。
+/// - `ct`：完整的 CBC 密文字节。
+///
+/// 返回：成功返回去填充明文；密钥、IV、密文长度或填充非法时返回错误，不提供真实性认证。
 fn cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
     macro_rules! run {
         ($a:ty) => {
@@ -127,11 +135,13 @@ fn cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// 业务作用: 按调用方选择把 AES 密文字节编码成 Base64 或大写 hex 文本。
+/// 业务作用：把密文字节转换为调用方选择的输出文本。
 ///
-/// # 参数
-/// - `bytes`: 原始字节切片。
-/// - `enc`: 待解密的密文字节。
+/// 参数说明：
+/// - `bytes`：已加密的原始密文字节。
+/// - `enc`：选择标准 Base64 或大写 HEX 的输出编码。
+///
+/// 返回：返回指定编码文本，不改变原密文字节的含义。
 fn encode_out(bytes: &[u8], enc: EncOutput) -> String {
     match enc {
         EncOutput::Base64 => b64_encode(bytes),
@@ -139,11 +149,13 @@ fn encode_out(bytes: &[u8], enc: EncOutput) -> String {
     }
 }
 
-/// 业务作用: 按调用方选择把 Base64 或 hex 密文文本还原为 AES 密文字节。
+/// 业务作用：按选定格式还原密文文本的原始字节。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
-/// - `enc`: 待解密的密文字节。
+/// 参数说明：
+/// - `s`：需要解码的密文文本。
+/// - `enc`：必须与编码时一致的 Base64 或 HEX 格式。
+///
+/// 返回：成功返回原始字节，非法编码返回解码错误，不执行 AES 解密。
 fn decode_in(s: &str, enc: EncOutput) -> Result<Vec<u8>> {
     match enc {
         EncOutput::Base64 => b64_decode(s),
@@ -153,11 +165,13 @@ fn decode_in(s: &str, enc: EncOutput) -> Result<Vec<u8>> {
 
 // ==================== AES-ECB(默认 encryptAES) ====================
 
-/// 业务作用: AES-ECB 加密(PKCS5,Base64 输出)。
+/// 业务作用：以 AES-ECB 和 PKCS7 填充加密，使用 Base64 文本输出。
 ///
-/// # 参数
-/// - `content`: 要加密的 UTF-8 明文。
-/// - `key`: AES 密钥字符串,按 UTF-8 字节直接使用;长度必须是 16/24/32 字节。
+/// 参数说明：
+/// - `content`：待加密的 UTF-8 明文。
+/// - `key`：按 UTF-8 使用的 16、24 或 32 字节密钥。
+///
+/// 返回：返回标准 Base64密文；密钥或 IV 长度不符返回错误，不自动生成或附加认证材料。
 pub fn encrypt_aes(content: &str, key: &str) -> Result<String> {
     Ok(encode_out(
         &ecb_encrypt(key.as_bytes(), content.as_bytes())?,
@@ -165,21 +179,25 @@ pub fn encrypt_aes(content: &str, key: &str) -> Result<String> {
     ))
 }
 
-/// 业务作用: AES-ECB 解密(PKCS5,Base64 输入)。
+/// 业务作用：以 AES-ECB 和 PKCS7 填充解密，使用 Base64 文本输入。
 ///
-/// # 参数
-/// - `cipher`: Base64 编码的 AES-ECB 密文。
-/// - `key`: AES 密钥字符串,必须与加密时完全一致。
+/// 参数说明：
+/// - `cipher`：Base64 编码的完整密文。
+/// - `key`：按 UTF-8 使用的 16、24 或 32 字节密钥。
+///
+/// 返回：返回通过 UTF-8 检查的去填充明文；编码、密钥、IV、填充或 UTF-8 不符返回错误，不提供认证保证。
 pub fn decrypt_aes(cipher: &str, key: &str) -> Result<String> {
     let pt = ecb_decrypt(key.as_bytes(), &b64_decode(cipher)?)?;
     String::from_utf8(pt).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
 }
 
-/// 业务作用: AES-ECB 加密(PKCS5,**大写 HEX** 输出)。
+/// 业务作用：以 AES-ECB 和 PKCS7 填充加密，使用 HEX 文本输出。
 ///
-/// # 参数
-/// - `content`: 要加密的 UTF-8 明文。
-/// - `key`: AES 密钥字符串,按 UTF-8 字节直接使用;长度必须是 16/24/32 字节。
+/// 参数说明：
+/// - `content`：待加密的 UTF-8 明文。
+/// - `key`：按 UTF-8 使用的 16、24 或 32 字节密钥。
+///
+/// 返回：返回大写 HEX密文；密钥或 IV 长度不符返回错误，不自动生成或附加认证材料。
 pub fn encrypt_aes_hex(content: &str, key: &str) -> Result<String> {
     Ok(encode_out(
         &ecb_encrypt(key.as_bytes(), content.as_bytes())?,
@@ -187,11 +205,13 @@ pub fn encrypt_aes_hex(content: &str, key: &str) -> Result<String> {
     ))
 }
 
-/// 业务作用: AES-ECB 解密(PKCS5,HEX 输入,大小写均可)。
+/// 业务作用：以 AES-ECB 和 PKCS7 填充解密，使用 HEX 文本输入。
 ///
-/// # 参数
-/// - `cipher`: HEX 编码的 AES-ECB 密文,大小写均可。
-/// - `key`: AES 密钥字符串,必须与加密时完全一致。
+/// 参数说明：
+/// - `cipher`：HEX 编码的完整密文。
+/// - `key`：按 UTF-8 使用的 16、24 或 32 字节密钥。
+///
+/// 返回：返回通过 UTF-8 检查的去填充明文；编码、密钥、IV、填充或 UTF-8 不符返回错误，不提供认证保证。
 pub fn decrypt_aes_hex(cipher: &str, key: &str) -> Result<String> {
     let pt = ecb_decrypt(key.as_bytes(), &hex_decode(cipher)?)?;
     String::from_utf8(pt).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
@@ -199,11 +219,13 @@ pub fn decrypt_aes_hex(cipher: &str, key: &str) -> Result<String> {
 
 // ==================== AES-CBC ====================
 
-/// 业务作用: AES-CBC 加密(PKCS5,**IV = key 字节**,Base64 输出)。
+/// 业务作用：以 AES-CBC 和 PKCS7 填充加密，使用 Base64 文本输出。
 ///
-/// # 参数
-/// - `content`: 要加密的 UTF-8 明文。
-/// - `key`: AES 密钥字符串,同时作为 CBC IV 的字节来源;长度必须是 16/24/32 字节。
+/// 参数说明：
+/// - `content`：待加密的 UTF-8 明文。
+/// - `key`：同时用作密钥和 IV 的 UTF-8 字节，必须恰好 16 字节。
+///
+/// 返回：返回标准 Base64密文；密钥或 IV 长度不符返回错误，不自动生成或附加认证材料。
 pub fn encrypt_aes_cbc(content: &str, key: &str) -> Result<String> {
     Ok(b64_encode(&cbc_encrypt(
         key.as_bytes(),
@@ -212,12 +234,14 @@ pub fn encrypt_aes_cbc(content: &str, key: &str) -> Result<String> {
     )?))
 }
 
-/// 业务作用: AES-CBC 加密(PKCS5,独立 IV = iv 串 UTF-8 字节,Base64 输出)。
+/// 业务作用：以 AES-CBC 和 PKCS7 填充加密，使用 Base64 文本输出。
 ///
-/// # 参数
-/// - `content`: 要加密的 UTF-8 明文。
-/// - `key`: AES 密钥字符串,按 UTF-8 字节直接使用;长度必须是 16/24/32 字节。
-/// - `iv`: CBC 初始化向量字符串,按 UTF-8 字节直接使用;长度必须匹配 AES 块大小 16 字节。
+/// 参数说明：
+/// - `content`：待加密的 UTF-8 明文。
+/// - `key`：按 UTF-8 使用的 16、24 或 32 字节密钥。
+/// - `iv`：按 UTF-8 使用、与加密一致的 16 字节初始化向量。
+///
+/// 返回：返回标准 Base64密文；密钥或 IV 长度不符返回错误，不自动生成或附加认证材料。
 pub fn encrypt_aes_cbc_iv(content: &str, key: &str, iv: &str) -> Result<String> {
     Ok(b64_encode(&cbc_encrypt(
         key.as_bytes(),
@@ -226,22 +250,26 @@ pub fn encrypt_aes_cbc_iv(content: &str, key: &str, iv: &str) -> Result<String> 
     )?))
 }
 
-/// 业务作用: AES-CBC 解密(PKCS5,IV = key 字节,Base64 输入)。
+/// 业务作用：以 AES-CBC 和 PKCS7 填充解密，使用 Base64 文本输入。
 ///
-/// # 参数
-/// - `cipher`: Base64 编码的 AES-CBC 密文。
-/// - `key`: AES 密钥字符串,同时作为 CBC IV 的字节来源;必须与加密时完全一致。
+/// 参数说明：
+/// - `cipher`：Base64 编码的完整密文。
+/// - `key`：同时用作密钥和 IV 的 UTF-8 字节，必须恰好 16 字节。
+///
+/// 返回：返回通过 UTF-8 检查的去填充明文；编码、密钥、IV、填充或 UTF-8 不符返回错误，不提供认证保证。
 pub fn decrypt_aes_cbc(cipher: &str, key: &str) -> Result<String> {
     let pt = cbc_decrypt(key.as_bytes(), key.as_bytes(), &b64_decode(cipher)?)?;
     String::from_utf8(pt).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
 }
 
-/// 业务作用: AES-CBC 解密(PKCS5,独立 IV,Base64 输入)。
+/// 业务作用：以 AES-CBC 和 PKCS7 填充解密，使用 Base64 文本输入。
 ///
-/// # 参数
-/// - `cipher`: Base64 编码的 AES-CBC 密文。
-/// - `key`: AES 密钥字符串,必须与加密时完全一致。
-/// - `iv`: CBC 初始化向量字符串,必须与加密时完全一致。
+/// 参数说明：
+/// - `cipher`：Base64 编码的完整密文。
+/// - `key`：按 UTF-8 使用的 16、24 或 32 字节密钥。
+/// - `iv`：按 UTF-8 使用、与加密一致的 16 字节初始化向量。
+///
+/// 返回：返回通过 UTF-8 检查的去填充明文；编码、密钥、IV、填充或 UTF-8 不符返回错误，不提供认证保证。
 pub fn decrypt_aes_cbc_iv(cipher: &str, key: &str, iv: &str) -> Result<String> {
     let pt = cbc_decrypt(key.as_bytes(), iv.as_bytes(), &b64_decode(cipher)?)?;
     String::from_utf8(pt).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
@@ -249,11 +277,13 @@ pub fn decrypt_aes_cbc_iv(cipher: &str, key: &str, iv: &str) -> Result<String> {
 
 // ==================== AES-GCM(认证加密,推荐新用途) ====================
 
-/// 业务作用: AES-GCM 加密。输出 `Base64(IV[12] ‖ ciphertext ‖ tag[16])`,IV 随机(OsRng)。
+/// 业务作用：以随机 nonce 对 UTF-8 明文执行 AES-GCM 认证加密。
 ///
-/// # 参数
-/// - `content`: 要认证加密的 UTF-8 明文。
-/// - `key`: AES-GCM 密钥字符串,按 UTF-8 字节直接使用;长度必须是 16/24/32 字节。
+/// 参数说明：
+/// - `content`：待认证加密的 UTF-8 明文。
+/// - `key`：按 UTF-8 原字节使用的 16、24 或 32 字节密钥。
+///
+/// 返回：返回标准 Base64 编码的 12 字节 nonce、密文和认证标签；密钥长度或加密失败返回错误，nonce 随每次操作生成。
 pub fn encrypt_aes_gcm(content: &str, key: &str) -> Result<String> {
     let key = key.as_bytes();
     let nonce_bytes = {
@@ -286,11 +316,13 @@ pub fn encrypt_aes_gcm(content: &str, key: &str) -> Result<String> {
     Ok(b64_encode(&nonce_bytes))
 }
 
-/// 业务作用: AES-GCM 解密(从密文头部取 IV)。
+/// 业务作用：从密文头部取得 nonce，验证 AES-GCM 标签并解码明文。
 ///
-/// # 参数
-/// - `cipher`: Base64 编码的 `IV + 密文 + tag` 数据。
-/// - `key`: AES-GCM 密钥字符串,必须与加密时完全一致。
+/// 参数说明：
+/// - `cipher`：Base64 编码的 nonce、密文和标签组合。
+/// - `key`：与加密一致的 UTF-8 密钥字节。
+///
+/// 返回：认证和 UTF-8 检查通过才返回明文；编码、头部长度、密钥、标签或 UTF-8 失败返回错误。
 pub fn decrypt_aes_gcm(cipher: &str, key: &str) -> Result<String> {
     let key = key.as_bytes();
     let decoded = b64_decode(cipher)?;
@@ -325,14 +357,15 @@ pub fn decrypt_aes_gcm(cipher: &str, key: &str) -> Result<String> {
 
 // ==================== 通用(自定义 mode + 编码) ====================
 
-/// 业务作用: AES 加密(自定义 ECB/CBC + Base64/HEX 输出)。
-/// CBC 模式 IV = key 字节(默认变体)。
+/// 业务作用：按指定分组模式和文本格式加密 UTF-8 内容。
 ///
-/// # 参数
-/// - `content`: 要加密的 UTF-8 明文。
-/// - `key`: AES 密钥字符串,按 UTF-8 字节直接使用;CBC 模式也用它作为 IV。
-/// - `mode`: AES 分组模式,决定走 ECB 还是 CBC。
-/// - `enc`: 输出编码格式,决定返回 Base64 还是 HEX。
+/// 参数说明：
+/// - `content`：待加密的 UTF-8 明文。
+/// - `key`：AES 密钥原字节，CBC 分支还将其用作 IV。
+/// - `mode`：选择 ECB 或 CBC 的公开模式枚举，实际使用 PKCS7 填充。
+/// - `enc`：选择 Base64 或大写 HEX 输出。
+///
+/// 返回：返回选定编码的密文；密钥或 IV 长度非法返回错误。CBC 因复用密钥作 16 字节 IV，仅 16 字节密钥可用，不生成认证标签。
 pub fn encrypt_aes_with(content: &str, key: &str, mode: AesMode, enc: EncOutput) -> Result<String> {
     let ct = match mode {
         AesMode::EcbPkcs5 => ecb_encrypt(key.as_bytes(), content.as_bytes())?,
@@ -341,13 +374,15 @@ pub fn encrypt_aes_with(content: &str, key: &str, mode: AesMode, enc: EncOutput)
     Ok(encode_out(&ct, enc))
 }
 
-/// 业务作用: AES 解密(自定义 ECB/CBC + Base64/HEX 输入)。
+/// 业务作用：按指定模式与文本编码解密并检查 UTF-8 明文。
 ///
-/// # 参数
-/// - `cipher`: 按 `enc` 编码的 AES 密文。
-/// - `key`: AES 密钥字符串,必须与加密时完全一致;CBC 模式也用它作为 IV。
-/// - `mode`: AES 分组模式,必须与加密时一致。
-/// - `enc`: 输入编码格式,决定按 Base64 还是 HEX 解码。
+/// 参数说明：
+/// - `cipher`：按 enc 编码的密文。
+/// - `key`：与加密相同的密钥，CBC 同时将其用作 IV。
+/// - `mode`：与加密相同的 ECB 或 CBC 模式。
+/// - `enc`：密文采用的 Base64 或 HEX 编码。
+///
+/// 返回：成功返回 UTF-8 明文；编码、密钥、IV、填充或 UTF-8 失败返回错误。复用密钥作 IV 的 CBC 仅接受 16 字节密钥。
 pub fn decrypt_aes_with(cipher: &str, key: &str, mode: AesMode, enc: EncOutput) -> Result<String> {
     let raw = decode_in(cipher, enc)?;
     let pt = match mode {

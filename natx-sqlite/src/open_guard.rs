@@ -18,8 +18,10 @@ pub(crate) struct OpenGuard {
 
 impl OpenGuard {
     /// 业务作用：为唯一 SQLx worker 登记原生打开时需要保留的文件权威。
+    ///
     /// 参数说明：
     /// - `lifetime`：打开开始前取得的物理容量和文件锁责任。
+    ///
     /// 返回：原生回调可识别的线程名称和登记责任；安装失败时不开始打开。
     pub(crate) fn new(lifetime: Arc<PhysicalLifetime>) -> anyhow::Result<Self> {
         let result =
@@ -43,7 +45,9 @@ impl OpenGuard {
     }
 
     /// 业务作用：把本次建连身份传给 SQLx 的专用线程。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只属于本次打开的 worker 名称。
     pub(crate) fn name(&self) -> String {
         self.name.clone()
@@ -52,7 +56,9 @@ impl OpenGuard {
 
 impl Drop for OpenGuard {
     /// 业务作用：建连已返回后撤销未被原生句柄接管的登记。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已安装的原生析构责任不受此清理影响。
     fn drop(&mut self) {
         if let Ok(mut opening) = OPENING.lock() {
@@ -62,10 +68,12 @@ impl Drop for OpenGuard {
 }
 
 /// 业务作用：在 SQLite 打开回调中锚定文件锁，覆盖随后失败的 SQLx 初始化。
+///
 /// 参数说明：
 /// - `database`：SQLite 正在打开的原生连接。
 /// - `_message`：SQLite 预留的错误消息输出。
 /// - `_api`：SQLite 预留的扩展入口。
+///
 /// 返回：本框架以外的连接保持原状；登记连接只有安装成功才允许继续打开。
 unsafe extern "C" fn anchor_open(
     database: *mut ffi::sqlite3,
@@ -100,10 +108,12 @@ unsafe extern "C" fn anchor_open(
 }
 
 /// 业务作用：为原生析构回调提供不可用于业务操作的函数载体。
+///
 /// 参数说明：
 /// - `context`：SQLite 函数调用上下文。
 /// - `_count`：原生参数数量。
 /// - `_values`：原生参数数组。
+///
 /// 返回：固定空值，不暴露文件或 owner 信息。
 unsafe extern "C" fn physical_owner(
     context: *mut ffi::sqlite3_context,
@@ -116,8 +126,10 @@ unsafe extern "C" fn physical_owner(
 }
 
 /// 业务作用：原生连接析构时归还打开阶段持有的物理责任。
+///
 /// 参数说明：
 /// - `pointer`：注册函数时转交的唯一 Arc 原始引用。
+///
 /// 返回：最后一个责任退出后才能解除文件独占。
 unsafe extern "C" fn release_owner(pointer: *mut c_void) {
     unsafe {

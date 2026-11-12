@@ -15,10 +15,12 @@ pub use sqlx::migrate::Migrator;
 pub use namigrate_core::{MigrationError, MigrationMode, MigrationReport, MigrationSettings};
 
 /// 业务作用：在默认有限执行预算内校验或应用文件来源的迁移计划。
+///
 /// 参数说明：
 /// - `source`：与业务 Mapper 相同的受管来源。
 /// - `migrator`：业务嵌入的 SQLx 计划。
 /// - `settings`：门禁模式和锁预算。
+///
 /// 返回：确认完成的迁移摘要或不包含 SQL、路径的稳定错误。
 pub async fn run_gate(
     source: &SqliteDataSource,
@@ -29,11 +31,13 @@ pub async fn run_gate(
 }
 
 /// 业务作用：以独立总执行预算保证整批迁移原子提交，并严格验证计划与历史的前缀关系。
+///
 /// 参数说明：
 /// - `source`：业务来源句柄。
 /// - `migrator`：只执行 up 项的嵌入计划。
 /// - `settings`：validate、apply 或 disabled 及有限锁预算。
 /// - `execution_timeout_ms`：取得迁移事务后整个批次的有限预算。
+///
 /// 返回：计划不一致时在数据库操作前拒绝；disabled 返回跳过摘要，其余模式确认历史与计划一致并物理收口后成功，失败不自动重试。
 pub async fn run_gate_with_timeout(
     source: &SqliteDataSource,
@@ -207,8 +211,10 @@ pub async fn run_gate_with_timeout(
 }
 
 /// 业务作用：生成稳定迁移失败摘要，不暴露数据库文件路径或 SQL 正文。
+///
 /// 参数说明：
 /// - `reason`：固定阶段或边界说明。
+///
 /// 返回：后端中立错误中的 SQLite 失败原因。
 fn backend(reason: &str) -> MigrationError {
     MigrationError::Backend(reason.to_owned())

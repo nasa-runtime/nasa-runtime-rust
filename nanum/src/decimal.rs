@@ -19,10 +19,12 @@ use std::str::FromStr;
 /// 零值与不需要展开的结构操作不消耗此额度。
 pub const MAX_DECIMAL_EXPANSION: u64 = 1_000_000;
 
-/// 业务作用: 校验 `10^exp` 展开位数不超 [`MAX_DECIMAL_EXPANSION`](防 OOM),返 `usize` 供 `int_pow`。超界 → `Err(Scale)`。
+/// 业务作用：在十进制幂展开前检查允许的指数跨度。
 ///
-/// # 参数
-/// - `exp`: 十进制缩放指数。
+/// 参数说明：
+/// - `exp`：需要展开的非负十进制位数。
+///
+/// 返回：不超过 MAX_DECIMAL_EXPANSION 时返回可用于分配的指数，否则返回 Scale；不限制已有系数自身大小。
 fn checked_decimal_exp(exp: u64) -> Result<usize> {
     if exp > MAX_DECIMAL_EXPANSION {
         return Err(NumericError::Scale(format!(
@@ -32,24 +34,27 @@ fn checked_decimal_exp(exp: u64) -> Result<usize> {
     Ok(exp as usize)
 }
 
-/// 业务作用: `10^exp`(BigInt)。`exp` 须已过 [`checked_decimal_exp`]。
+/// 业务作用：构造已通过调用方范围检查的十进制幂。
 ///
-/// # 参数
-/// - `exp`: 十进制缩放指数。
+/// 参数说明：
+/// - `exp`：调用方已限制的非负整数指数。
+///
+/// 返回：返回精确的 10 的 exp 次幂；本函数不再次验证展开预算。
 fn pow10_bigint(exp: usize) -> bigdecimal::num_bigint::BigInt {
     use bigdecimal::num_bigint::BigInt;
     use bigdecimal::num_traits::pow::pow as int_pow;
     int_pow(BigInt::from(10), exp)
 }
 
-/// 业务作用: 按 `mode` 把 `num_abs / den_abs`(均 ≥ 0,`den_abs > 0`)舍入为带符号 `BigInt` 商。`Unnecessary` 遇余数非 0 → `Err`。
-/// 全 8 `RoundingMode`,被 [`divide_scaled_exact`] 与 [`set_scale_round_checked`] 复用。
+/// 业务作用：按结果符号和舍入策略对非负整数比值取整。
 ///
-/// # 参数
-/// - `num_abs`: 有理数分子的绝对值。
-/// - `den_abs`: 有理数分母的绝对值。
-/// - `result_negative`: 运算结果是否应为负数。
-/// - `mode`: 当前操作使用的编码、舍入、订阅或执行模式。
+/// 参数说明：
+/// - `num_abs`：被除数的非负幅值。
+/// - `den_abs`：除数的正幅值，调用方须保证非零。
+/// - `result_negative`：最终商是否应为负数。
+/// - `mode`：存在余数时决定进位或拒绝的舍入策略。
+///
+/// 返回：返回带正确符号的整数商；Unnecessary 遇非零余数返回 RoundingNecessary。不检查零除数这一调用前置条件。
 fn round_bigint_div(
     num_abs: bigdecimal::num_bigint::BigInt,
     den_abs: bigdecimal::num_bigint::BigInt,
@@ -88,14 +93,14 @@ fn round_bigint_div(
     Ok(q)
 }
 
-/// 业务作用：用 checked scale 算术和 BigInt 将数值舍入到目标 scale。
-/// 放大时精确乘以十的幂，缩小时按 mode 舍入；先验证派生 scale 与展开上限，再分配整数。
-/// 返回：目标 scale 的值；派生量溢出、展开超界或无法满足舍入要求时返回错误。
+/// 业务作用：在受限幂展开内把十进制数转换到目标 scale。
 ///
-/// # 参数
-/// - `val`: 要写入 Redis 或发送到下游的值。
-/// - `scale`: 小数精度或缩放位数。
-/// - `mode`: 当前操作使用的编码、舍入、订阅或执行模式。
+/// 参数说明：
+/// - `val`：需要改变精度的十进制数。
+/// - `scale`：目标 scale，可为负数。
+/// - `mode`：降低精度时使用的舍入策略。
+///
+/// 返回：零值直接返回目标 scale 的零；其它值精确扩展或按模式舍入。指数差溢出或展开超界返回 Scale，需要但禁止舍入时返回 RoundingNecessary。
 fn set_scale_round_checked(val: &BigDecimal, scale: i64, mode: RoundingMode) -> Result<BigDecimal> {
     use bigdecimal::num_traits::{Signed, Zero};
     let (unscaled, cur) = val.as_bigint_and_exponent(); // 值 = unscaled × 10^-cur
@@ -124,14 +129,14 @@ fn set_scale_round_checked(val: &BigDecimal, scale: i64, mode: RoundingMode) -> 
     }
 }
 
-/// 业务作用: checked BigDecimal 加/减,**不调 bigdecimal 的 `+`/`-`**(其内部 `(lhs.scale - rhs.scale) as u64` 在极端 operand
-/// scale 下整数溢出 panic + `ten_to_the` 天量分配)。对齐到 `max(a_scale,b_scale)` 后 BigInt 加减,
-/// scale 对齐展开过 [`checked_decimal_exp`]。
+/// 业务作用：先精确对齐到共同 scale，再计算加法或减法。
 ///
-/// # 参数
-/// - `a`: 参与当前计算或编码的第一个输入值。
-/// - `b`: 参与当前计算或编码的第二个输入值。
-/// - `subtract`: 本次小数运算是否执行减法。
+/// 参数说明：
+/// - `a`：左侧加数或被减数。
+/// - `b`：右侧加数或减数。
+/// - `subtract`：true 计算 a 减 b，false 计算相加。
+///
+/// 返回：成功返回精确结果和两操作数的较大 scale；非零系数对齐的指数差溢出或展开超界时返回 Scale。
 fn checked_add_bd(a: &BigDecimal, b: &BigDecimal, subtract: bool) -> Result<BigDecimal> {
     use bigdecimal::num_bigint::BigInt;
     use bigdecimal::num_traits::Zero;
@@ -164,12 +169,13 @@ fn checked_add_bd(a: &BigDecimal, b: &BigDecimal, subtract: bool) -> Result<BigD
     Ok(BigDecimal::new(combined, common))
 }
 
-/// 业务作用: checked BigDecimal 乘,**不调 bigdecimal 的 `*`**(其内部 `self.scale + rhs.scale` 未 checked,极端 operand scale
-/// 溢出 panic)。unscaled 直接 BigInt 相乘,结果 scale = `a_scale + b_scale`(checked)。
+/// 业务作用：相乘十进制系数并检查非零乘积的 scale 相加。
 ///
-/// # 参数
-/// - `a`: 参与当前计算或编码的第一个输入值。
-/// - `b`: 参与当前计算或编码的第二个输入值。
+/// 参数说明：
+/// - `a`：左侧乘数。
+/// - `b`：右侧乘数。
+///
+/// 返回：返回精确乘积；非零乘积 scale 相加溢出时返回 Scale。任一系数为零时返回零，scale 使用饱和相加。
 fn checked_mul_bd(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
     use bigdecimal::num_traits::Zero;
     let (au, ae) = a.as_bigint_and_exponent();
@@ -188,73 +194,72 @@ fn checked_mul_bd(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
 
 // ==================== BigDecimal 段====================
 
-/// 业务作用: BigDecimal 加法(精确)。
+/// 业务作用：精确相加两个十进制数。
 ///
-/// **返 `Result`**:operand 自带极端 scale(如 `BigDecimal::new(_, i64::MAX/MIN)`)对齐时会溢出,
-/// 走 checked 算术返 `Err(Scale)` 而非 panic(crate "溢出→Result、不 panic" 契约)。正常输入永不出错。
+/// 参数说明：
+/// - `a`：左侧加数。
+/// - `b`：右侧加数。
 ///
-/// # 参数
-///
-/// - `a`: 左侧加数，按其 BigDecimal 数值和 scale 参与对齐。
-/// - `b`: 右侧加数，按其 BigDecimal 数值和 scale 参与对齐。
+/// 返回：返回共同 scale 下的精确和；对齐指数不可表示或跨度超过限制时返回 Scale。
 pub fn add(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
     checked_add_bd(a, b, false)
 }
 
-/// 业务作用: BigDecimal 减法(精确)。返 `Result`(同 [`add`])。
+/// 业务作用：精确计算两个十进制数的差。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：被减数。
+/// - `b`：减数。
 ///
-/// - `a`: 被减数，按其 BigDecimal 数值和 scale 参与对齐。
-/// - `b`: 减数，按其 BigDecimal 数值和 scale 参与对齐。
+/// 返回：返回共同 scale 下的精确差；对齐指数不可表示或跨度超过限制时返回 Scale。
 pub fn subtract(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
     checked_add_bd(a, b, true)
 }
 
-/// 业务作用: BigDecimal 乘法(精确)。返 `Result`(同 [`add`])。
+/// 业务作用：精确相乘两个十进制数。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：左侧乘数。
+/// - `b`：右侧乘数。
 ///
-/// - `a`: 左侧乘数。
-/// - `b`: 右侧乘数。
+/// 返回：返回系数乘积及相加的 scale；非零乘积的 scale 溢出返回 Scale，零乘积的 scale 饱和相加。
 pub fn multiply(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
     checked_mul_bd(a, b)
 }
 
-/// 业务作用: BigDecimal 乘法,结果对齐到 `scale`(HALF_UP)。
+/// 业务作用：计算十进制乘积并以 HalfUp 对齐到指定 scale。
 ///
-/// 返 `Result`:乘法本身(`checked_mul_bd`)与对齐(`set_scale_round_checked`)均 checked,极端 scale 返 `Err(Scale)`。
+/// 参数说明：
+/// - `a`：左侧乘数。
+/// - `b`：右侧乘数。
+/// - `scale`：乘积的目标 scale。
 ///
-/// # 参数
-///
-/// - `a`: 左侧乘数。
-/// - `b`: 右侧乘数。
-/// - `scale`: 结果需要保留的小数位数，可超过 fixed 8 位上限。
+/// 返回：返回目标精度的舍入乘积；乘法指数溢出、对齐溢出或幂展开超限返回 Scale。
 pub fn multiply_scale(a: &BigDecimal, b: &BigDecimal, scale: i64) -> Result<BigDecimal> {
     set_scale_round_checked(&checked_mul_bd(a, b)?, scale, RoundingMode::HalfUp)
 }
 
-/// 业务作用: BigDecimal 除法,指定 `scale`(HALF_UP;避免无限循环小数)。
+/// 业务作用：在指定 scale 上以 HalfUp 计算十进制商。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：被除数。
+/// - `b`：非零除数。
+/// - `scale`：商的目标 scale。
 ///
-/// - `a`: 被除数。
-/// - `b`: 除数；为 `0` 时返回 [`NumericError::DivByZero`]。
-/// - `scale`: 结果需要保留的小数位数。
+/// 返回：返回目标精度的商；除数为零返回 DivByZero，指数不可表示或幂展开超界返回 Scale。
 pub fn divide(a: &BigDecimal, b: &BigDecimal, scale: i64) -> Result<BigDecimal> {
     divide_mode(a, b, scale, RoundingMode::HalfUp)
 }
 
-/// 业务作用：按指定 scale 和舍入模式执行 BigDecimal 除法。
-/// 返回：目标 scale 的商；除数为零返回 `DivByZero`，Unnecessary 需要舍入时返回
-/// `RoundingNecessary`，展开超界返回 `Scale`。
+/// 业务作用：按指定目标 scale 和舍入策略计算十进制商。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：被除数。
+/// - `b`：非零除数。
+/// - `scale`：商的目标 scale。
+/// - `mode`：截取整数商时使用的舍入策略。
 ///
-/// - `a`: 被除数。
-/// - `b`: 除数；为 `0` 时返回 [`NumericError::DivByZero`]。
-/// - `scale`: 结果需要保留的小数位数。
-/// - `mode`: 除不尽或缩减精度时使用的舍入策略。
+/// 返回：返回目标精度的商；零除数、指数溢出或展开超限返回对应错误，Unnecessary 遇非零余数返回 RoundingNecessary。
 pub fn divide_mode(
     a: &BigDecimal,
     b: &BigDecimal,
@@ -264,18 +269,15 @@ pub fn divide_mode(
     divide_scaled_exact(a, b, scale, mode)
 }
 
-/// 业务作用: 按目标 `scale` **直接用 BigInt 整数除法 + 舍入**,真任意精度。
+/// 业务作用：把目标精度的十进制除法转成整数系数除法，避免中间商精度限制。
 ///
-/// **旧实现先 `let q = a / b` 再 `q.with_scale_round(scale)`,但 `bigdecimal` 的 `/` 默认中间
-/// 精度仅 ~100 位有效数字,`scale` 超过后 `with_scale_round` 只会**补零**(如 `divide(1,3,120)` 约 100 位后全 0),
-/// 数学错误。此处改为:把 `a/b` 化成目标 scale 下的 unscaled 商 `Q = round(a_int × 10^(scale−a_exp+b_exp) / b_int)`,
-/// 用 BigInt `div_rem` + 按 `RoundingMode` 判进位,**无中间精度上限**。
+/// 参数说明：
+/// - `a`：被除数，其系数和 scale 共同参与指数计算。
+/// - `b`：非零除数，其系数和 scale 共同参与指数计算。
+/// - `scale`：最终商的目标 scale。
+/// - `mode`：整数除法有余数时的舍入策略。
 ///
-/// # 参数
-/// - `a`: 参与当前计算或编码的第一个输入值。
-/// - `b`: 参与当前计算或编码的第二个输入值。
-/// - `scale`: 小数精度或缩放位数。
-/// - `mode`: 当前操作使用的编码、舍入、订阅或执行模式。
+/// 返回：返回目标 scale 的商，零被除数直接返回零；零除数返回 DivByZero，指数溢出或展开超限返回 Scale，禁止必要舍入时返回 RoundingNecessary。
 fn divide_scaled_exact(
     a: &BigDecimal,
     b: &BigDecimal,
@@ -293,9 +295,8 @@ fn divide_scaled_exact(
     if a_int.is_zero() {
         return Ok(BigDecimal::new(0.into(), scale));
     }
-    // Q = a/b × 10^scale = a_int × 10^(scale − a_exp + b_exp) / b_int。
-    //checked 算术——极端 i64 scale/operand-exponent 下 `scale-a_exp+b_exp` 会整数溢出,
-    // `(-k) as usize` 在 `k==i64::MIN` 取负溢出,违反 crate "不 panic" 契约。
+    // 目标整数商按 Q = a/b × 10^scale 计算，以整数系数和指数调整保持目标精度。
+    // 指数差必须先校验可表示性；取绝对幅值使用无符号运算，避免最小有符号指数取负溢出。
     let k = scale
         .checked_sub(a_exp)
         .and_then(|v| v.checked_add(b_exp))
@@ -316,43 +317,45 @@ fn divide_scaled_exact(
     Ok(BigDecimal::new(q, scale))
 }
 
-/// 业务作用: BigDecimal 截到 `scale` 位(HALF_UP)。
+/// 业务作用：以 HalfUp 将十进制数对齐到目标 scale。
 ///
-/// 返 `Result`:极端 scale 经 `set_scale_round_checked` 返 `Err(Scale)` 而非 panic/OOM。
+/// 参数说明：
+/// - `val`：待对齐的十进制数。
+/// - `scale`：目标 scale，可为负数。
 ///
-/// # 参数
-///
-/// - `val`: 需要按目标精度重新对齐的 BigDecimal 值。
-/// - `scale`: 目标小数位数。
+/// 返回：返回扩展或舍入后的值；指数差溢出或幂展开超过限制返回 Scale。
 pub fn align(val: &BigDecimal, scale: i64) -> Result<BigDecimal> {
     set_scale_round_checked(val, scale, RoundingMode::HalfUp)
 }
 
-/// 业务作用: BigDecimal 向上(+∞,CEILING)取到 `scale`。返 `Result`(同 [`align`])。
+/// 业务作用：朝正无穷方向将十进制数对齐到目标 scale。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待对齐的有符号十进制数。
+/// - `scale`：目标 scale。
 ///
-/// - `val`: 需要向正无穷方向对齐的 BigDecimal 值。
-/// - `scale`: 目标小数位数。
+/// 返回：返回 Ceiling 对齐结果，负数也按正无穷方向取整；指数差溢出或展开超界返回 Scale。
 pub fn align_up(val: &BigDecimal, scale: i64) -> Result<BigDecimal> {
     set_scale_round_checked(val, scale, RoundingMode::Ceiling)
 }
 
-/// 业务作用: BigDecimal 向下(−∞,FLOOR)取到 `scale`。返 `Result`(同 [`align`])。
+/// 业务作用：朝负无穷方向将十进制数对齐到目标 scale。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待对齐的有符号十进制数。
+/// - `scale`：目标 scale。
 ///
-/// - `val`: 需要向负无穷方向对齐的 BigDecimal 值。
-/// - `scale`: 目标小数位数。
+/// 返回：返回 Floor 对齐结果；指数差溢出或幂展开超界返回 Scale。
 pub fn align_down(val: &BigDecimal, scale: i64) -> Result<BigDecimal> {
     set_scale_round_checked(val, scale, RoundingMode::Floor)
 }
 
-/// 业务作用：对 BigDecimal 引用求和，空输入返回零。
-/// 输入不包含空引用；可选值由调用方过滤。使用 checked scale 对齐，超界返回 `Err(Scale)`。
+/// 业务作用：逐项精确对齐并累加十进制引用序列。
 ///
-/// # 参数
-/// - `vals`: 待计算或格式化的数值列表。
+/// 参数说明：
+/// - `vals`：待求和的有限十进制数迭代序列。
+///
+/// 返回：成功返回精确和，空输入返回零；任一对齐失败返回 Scale，不跳过失败项。
 pub fn sum<'a, I: IntoIterator<Item = &'a BigDecimal>>(vals: I) -> Result<BigDecimal> {
     use bigdecimal::Zero;
     let mut r = BigDecimal::zero();
@@ -362,14 +365,13 @@ pub fn sum<'a, I: IntoIterator<Item = &'a BigDecimal>>(vals: I) -> Result<BigDec
     Ok(r)
 }
 
-/// 业务作用: BigDecimal 平均值,对齐到 `scale`(HALF_UP);空 → `0`。
+/// 业务作用：精确求和后，以 HalfUp 计算目标 scale 的算术平均值。
 ///
-/// 返 `Result`:求和阶段走 `checked_add_bd`、除法走 `divide_scaled_exact`,极端 scale
-/// 全程返 `Err(Scale)` 而非 panic(指出旧实现 `s += v` 求和阶段仍会 panic)。正常 scale 永不出错。
+/// 参数说明：
+/// - `vals`：待求平均值的有限十进制数迭代序列。
+/// - `scale`：非空输入平均值的目标 scale。
 ///
-/// # 参数
-/// - `vals`: 待计算或格式化的数值列表。
-/// - `scale`: 小数精度或缩放位数。
+/// 返回：非空输入返回舍入平均值，空输入返回默认 scale 的零；求和或除法的指数、展开错误传播。
 pub fn avg<'a, I: IntoIterator<Item = &'a BigDecimal>>(vals: I, scale: i64) -> Result<BigDecimal> {
     use bigdecimal::Zero;
     let mut s = BigDecimal::zero();
@@ -386,26 +388,24 @@ pub fn avg<'a, I: IntoIterator<Item = &'a BigDecimal>>(vals: I, scale: i64) -> R
 
 // ==================== 最小单位 / 随机步长(BigDecimal,构造不展开、不受 8 位限)====================
 
-/// 业务作用：构造指定精度的最小正值 `1 × 10^-scale`，允许负 scale。
-/// 构造只设置系数与 scale，不展开十的幂；后续算术仍受 `MAX_DECIMAL_EXPANSION` 约束。
-/// 返回：系数为 1 的 BigDecimal，例如 `scale_min(-1)` 为 10。
+/// 业务作用：构造目标 scale 的最小正精度单位。
 ///
-/// # 参数
+/// 参数说明：
+/// - `scale`：用于 1 乘以 10 的负 scale 次幂的十进制指数。
 ///
-/// - `scale`: 小数位数；返回值为 `1 × 10^-scale`。
+/// 返回：返回系数为一的 BigDecimal，支持任意 i64 scale，不在构造时展开十进制幂。
 pub fn scale_min(scale: i64) -> BigDecimal {
     // BigDecimal(unscaledValue=1, scale):1 × 10^-scale。
     BigDecimal::new(1.into(), scale)
 }
 
-/// 业务作用: 在最小精度位上取步长随机值,范围 `[min, (step-1)×min]`(`min=10^-scale`)。
+/// 业务作用：生成以指定最小精度为单位的正随机步长。
 ///
-/// `step<=0` → `scale_min(scale)`;`rand=0` 时也返回 `min`（不返回零）。构造不展开,任意 `i64 scale` 安全。
+/// 参数说明：
+/// - `step`：系数采样的排他上界，非正值使用最小单位。
+/// - `scale`：最小精度单位的 scale。
 ///
-/// # 参数
-///
-/// - `step`: 随机步长上界；`<= 0` 时直接返回 [`scale_min`]。
-/// - `scale`: 最小单位的小数位数。
+/// 返回：step 不大于一时返回最小单位；其余返回系数介于一和 step 减一的数。随机零映射为一，构造不展开幂。
 pub fn random_step(step: i64, scale: i64) -> BigDecimal {
     if step <= 0 {
         return scale_min(scale);
@@ -419,24 +419,23 @@ pub fn random_step(step: i64, scale: i64) -> BigDecimal {
     BigDecimal::new(unscaled.into(), scale)
 }
 
-/// 业务作用：将 BigDecimal 步长上界朝零截断为 i64 后，生成最小精度单位上的随机值。
-/// 超出 i64 的步长按符号饱和，避免回绕改变上界。
-/// 返回：遵循 `random_step` 合同的正值；非正步长返回最小单位。
+/// 业务作用：先将十进制步长上界朝零截断并饱和为 i64，再采样最小精度单位。
 ///
-/// # 参数
+/// 参数说明：
+/// - `step`：会先朝零截断、越界时按符号饱和的上界。
+/// - `scale`：返回值的最小精度 scale。
 ///
-/// - `step`: BigDecimal 形式的随机步长上界，会先截断为 `i64`。
-/// - `scale`: 最小单位的小数位数。
+/// 返回：返回遵循 random_step 规则的正值，截断后的非正上界返回最小单位。
 pub fn random_step_bd(step: &BigDecimal, scale: i64) -> BigDecimal {
     random_step(bigdecimal_to_i64_saturating(step), scale)
 }
 
-/// 业务作用：朝零截断 BigDecimal 的整数部分，超出 i64 时按符号饱和。
-/// 通过系数位数和 scale 定位有效数字，不展开十的幂，避免极端指数引发巨大分配。
-/// 返回：截断后的整数，或对应符号的 i64 边界。
+/// 业务作用：在不展开任意指数的情况下提取整数部分并饱和转换。
 ///
-/// # 参数
-/// - `v`: 待转换的值。
+/// 参数说明：
+/// - `v`：待朝零截断的十进制数。
+///
+/// 返回：可表示时返回 i64 整数部分，越界按符号返回边界，绝对值小于一返回零；不按四舍五入取整。
 fn bigdecimal_to_i64_saturating(v: &BigDecimal) -> i64 {
     use bigdecimal::num_traits::{Signed, Zero};
     let (unscaled, exponent) = v.as_bigint_and_exponent(); // 值 = unscaled × 10^-exponent
@@ -483,22 +482,22 @@ fn bigdecimal_to_i64_saturating(v: &BigDecimal) -> i64 {
 
 // 字符串入口直接解析十进制数；浮点入口先生成十进制文本，再进入 BigDecimal 运算。
 
-/// 业务作用: 精确解析十进制或科学计数法字符串，非法文本返回错误。
+/// 业务作用：直接解析十进制或科学计数法文本。
 ///
-/// # 参数
+/// 参数说明：
+/// - `s`：交由 BigDecimal 解析的原始文本。
 ///
-/// - `s`: 十进制或科学计数法文本，按 BigDecimal 精确解析。
+/// 返回：合法文本返回对应十进制值，否则返回 Parse；不执行算术展开预算校验。
 pub fn parse(s: &str) -> Result<BigDecimal> {
     BigDecimal::from_str(s).map_err(|e| NumericError::Parse(format!("BigDecimal 解析失败: {e}")))
 }
 
-/// 业务作用：把有限 f64 的十进制显示文本解析为 BigDecimal。
-/// 例如 `1.0` 的显示文本为 `1`，所得 scale 为 0；本入口不保留输入文本的尾零或显示精度。
-/// 依赖固定 scale、数据库列精度或序列化文本的调用方必须显式对齐与格式化。
-/// 返回：转换后的值；非有限输入或文本解析失败时返回错误。
+/// 业务作用：将有限浮点的十进制显示文本解析成十进制数。
 ///
-/// # 参数
-/// - `v`: 待转换的值。
+/// 参数说明：
+/// - `v`：需要转换的有限 f64。
+///
+/// 返回：成功返回显示文本对应的 BigDecimal；非有限值或文本解析失败返回 Parse，不保留输入显示尾零或二进制浮点的精确展开。
 fn from_f64(v: f64) -> Result<BigDecimal> {
     if !v.is_finite() {
         return Err(NumericError::Parse(format!("非有限 f64: {v}")));
@@ -506,118 +505,129 @@ fn from_f64(v: f64) -> Result<BigDecimal> {
     parse(&format!("{v}"))
 }
 
-/// 业务作用: `addDecimal(String,String)`。
+/// 业务作用：转换两个十进制文本后相加。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：十进制文本形式的左侧加数。
+/// - `b`：十进制文本形式的右侧加数。
 ///
-/// - `a`: 左侧十进制文本加数。
-/// - `b`: 右侧十进制文本加数。
+/// 返回：成功返回精确和；文本解析失败返回 Parse，算术指数或展开超界返回 Scale。
 pub fn add_decimal_str(a: &str, b: &str) -> Result<BigDecimal> {
     add(&parse(a)?, &parse(b)?)
 }
 
-/// 业务作用: `addDecimal(double,double)`。
+/// 业务作用：转换两个有限 f64后相加。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：有限 f64形式的左侧加数。
+/// - `b`：有限 f64形式的右侧加数。
 ///
-/// - `a`: 左侧 f64 加数，会先转换为 BigDecimal。
-/// - `b`: 右侧 f64 加数，会先转换为 BigDecimal。
+/// 返回：成功返回精确和；输入非有限或十进制文本转换失败返回 Parse，算术指数或展开超界返回 Scale。
 pub fn add_decimal_f64(a: f64, b: f64) -> Result<BigDecimal> {
     add(&from_f64(a)?, &from_f64(b)?)
 }
 
-/// 业务作用: `subtractDecimal(String,String)`。
+/// 业务作用：转换两个十进制文本后相减。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：十进制文本形式的被减数。
+/// - `b`：十进制文本形式的减数。
 ///
-/// - `a`: 十进制文本被减数。
-/// - `b`: 十进制文本减数。
+/// 返回：成功返回精确差；文本解析失败返回 Parse，算术指数或展开超界返回 Scale。
 pub fn subtract_decimal_str(a: &str, b: &str) -> Result<BigDecimal> {
     subtract(&parse(a)?, &parse(b)?)
 }
 
-/// 业务作用: `subtractDecimal(double,double)`。
+/// 业务作用：转换两个有限 f64后相减。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：有限 f64形式的被减数。
+/// - `b`：有限 f64形式的减数。
 ///
-/// - `a`: f64 被减数，会先转换为 BigDecimal。
-/// - `b`: f64 减数，会先转换为 BigDecimal。
+/// 返回：成功返回精确差；输入非有限或十进制文本转换失败返回 Parse，算术指数或展开超界返回 Scale。
 pub fn subtract_decimal_f64(a: f64, b: f64) -> Result<BigDecimal> {
     subtract(&from_f64(a)?, &from_f64(b)?)
 }
 
-/// 业务作用: `multiplyDecimal(String,String)`。
+/// 业务作用：转换两个十进制文本后相乘。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：十进制文本形式的左侧乘数。
+/// - `b`：十进制文本形式的右侧乘数。
 ///
-/// - `a`: 左侧十进制文本乘数。
-/// - `b`: 右侧十进制文本乘数。
+/// 返回：成功返回精确乘积；文本解析失败返回 Parse，算术指数或展开超界返回 Scale。
 pub fn multiply_decimal_str(a: &str, b: &str) -> Result<BigDecimal> {
     multiply(&parse(a)?, &parse(b)?)
 }
 
-/// 业务作用: `multiplyDecimal(double,double)`。
+/// 业务作用：转换两个有限 f64后相乘。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：有限 f64形式的左侧乘数。
+/// - `b`：有限 f64形式的右侧乘数。
 ///
-/// - `a`: 左侧 f64 乘数，会先转换为 BigDecimal。
-/// - `b`: 右侧 f64 乘数，会先转换为 BigDecimal。
+/// 返回：成功返回精确乘积；输入非有限或十进制文本转换失败返回 Parse，算术指数或展开超界返回 Scale。
 pub fn multiply_decimal_f64(a: f64, b: f64) -> Result<BigDecimal> {
     multiply(&from_f64(a)?, &from_f64(b)?)
 }
 
-/// 业务作用: `multiplyDecimal(String,String,scale)`。
+/// 业务作用：转换十进制文本后计算乘积并以 HalfUp 对齐精度。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：十进制文本形式的左侧乘数。
+/// - `b`：十进制文本形式的右侧乘数。
+/// - `scale`：乘积目标 scale。
 ///
-/// - `a`: 左侧十进制文本乘数。
-/// - `b`: 右侧十进制文本乘数。
-/// - `scale`: 乘积需要保留的小数位数。
+/// 返回：返回目标精度的乘积；文本解析失败、乘法或对齐失败时返回相应错误。
 pub fn multiply_decimal_str_scale(a: &str, b: &str, scale: i64) -> Result<BigDecimal> {
     multiply_scale(&parse(a)?, &parse(b)?, scale)
 }
 
-/// 业务作用: `multiplyDecimal(double,double,scale)`。
+/// 业务作用：转换有限 f64后计算乘积并以 HalfUp 对齐精度。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：有限 f64形式的左侧乘数。
+/// - `b`：有限 f64形式的右侧乘数。
+/// - `scale`：乘积目标 scale。
 ///
-/// - `a`: 左侧 f64 乘数，会先转换为 BigDecimal。
-/// - `b`: 右侧 f64 乘数，会先转换为 BigDecimal。
-/// - `scale`: 乘积需要保留的小数位数。
+/// 返回：返回目标精度的乘积；输入非有限或十进制文本转换失败、乘法或对齐失败时返回相应错误。
 pub fn multiply_decimal_f64_scale(a: f64, b: f64, scale: i64) -> Result<BigDecimal> {
     multiply_scale(&from_f64(a)?, &from_f64(b)?, scale)
 }
 
-/// 业务作用: `divideDecimal(String,String,scale)`。
+/// 业务作用：转换十进制文本后以HalfUp计算目标精度的商。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：十进制文本形式的被除数。
+/// - `b`：十进制文本形式的非零除数。
+/// - `scale`：商的目标 scale。
 ///
-/// - `a`: 十进制文本被除数。
-/// - `b`: 十进制文本除数；为 `0` 时返回 [`NumericError::DivByZero`]。
-/// - `scale`: 商需要保留的小数位数。
+/// 返回：返回目标 scale 的商；文本解析失败、零除数、指数溢出、展开超界时返回对应错误。
 pub fn divide_decimal_str(a: &str, b: &str, scale: i64) -> Result<BigDecimal> {
     divide(&parse(a)?, &parse(b)?, scale)
 }
 
-/// 业务作用: `divideDecimal(double,double,scale)`。
+/// 业务作用：转换有限 f64后以HalfUp计算目标精度的商。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：有限 f64形式的被除数。
+/// - `b`：有限 f64形式的非零除数。
+/// - `scale`：商的目标 scale。
 ///
-/// - `a`: f64 被除数，会先转换为 BigDecimal。
-/// - `b`: f64 除数，会先转换为 BigDecimal；为 `0` 时返回 [`NumericError::DivByZero`]。
-/// - `scale`: 商需要保留的小数位数。
+/// 返回：返回目标 scale 的商；输入非有限或十进制文本转换失败、零除数、指数溢出、展开超界时返回对应错误。
 pub fn divide_decimal_f64(a: f64, b: f64, scale: i64) -> Result<BigDecimal> {
     divide(&from_f64(a)?, &from_f64(b)?, scale)
 }
 
-/// 业务作用: `divideDecimal(String,String,scale,mode)`。
+/// 业务作用：转换十进制文本后以指定模式计算目标精度的商。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：十进制文本形式的被除数。
+/// - `b`：十进制文本形式的非零除数。
+/// - `scale`：商的目标 scale。
+/// - `mode`：有非零余数时的舍入或拒绝策略。
 ///
-/// - `a`: 十进制文本被除数。
-/// - `b`: 十进制文本除数；为 `0` 时返回 [`NumericError::DivByZero`]。
-/// - `scale`: 商需要保留的小数位数。
-/// - `mode`: 除不尽或缩减精度时使用的舍入策略。
+/// 返回：返回目标 scale 的商；文本解析失败、零除数、指数溢出、展开超界或禁止必要舍入时返回对应错误。
 pub fn divide_decimal_str_mode(
     a: &str,
     b: &str,
@@ -627,14 +637,15 @@ pub fn divide_decimal_str_mode(
     divide_mode(&parse(a)?, &parse(b)?, scale, mode)
 }
 
-/// 业务作用: `divideDecimal(double,double,scale,mode)`。
+/// 业务作用：转换有限 f64后以指定模式计算目标精度的商。
 ///
-/// # 参数
+/// 参数说明：
+/// - `a`：有限 f64形式的被除数。
+/// - `b`：有限 f64形式的非零除数。
+/// - `scale`：商的目标 scale。
+/// - `mode`：有非零余数时的舍入或拒绝策略。
 ///
-/// - `a`: f64 被除数，会先转换为 BigDecimal。
-/// - `b`: f64 除数，会先转换为 BigDecimal；为 `0` 时返回 [`NumericError::DivByZero`]。
-/// - `scale`: 商需要保留的小数位数。
-/// - `mode`: 除不尽或缩减精度时使用的舍入策略。
+/// 返回：返回目标 scale 的商；输入非有限或十进制文本转换失败、零除数、指数溢出、展开超界或禁止必要舍入时返回对应错误。
 pub fn divide_decimal_f64_mode(
     a: f64,
     b: f64,
@@ -644,103 +655,113 @@ pub fn divide_decimal_f64_mode(
     divide_mode(&from_f64(a)?, &from_f64(b)?, scale, mode)
 }
 
-/// 业务作用: `alignDecimal(String,scale)`。
+/// 业务作用：将十进制文本转换为十进制数后按 HalfUp 对齐。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待转换及对齐的十进制文本。
+/// - `scale`：目标 scale，可为负数。
 ///
-/// - `val`: 需要按目标精度对齐的十进制文本。
-/// - `scale`: 目标小数位数。
+/// 返回：返回目标精度的值；文本解析失败或对齐指数、展开超界时返回对应错误。
 pub fn align_decimal_str(val: &str, scale: i64) -> Result<BigDecimal> {
     align(&parse(val)?, scale)
 }
 
-/// 业务作用: `alignDecimal(double,scale)`。
+/// 业务作用：将有限 f64转换为十进制数后按 HalfUp 对齐。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待转换及对齐的有限 f64。
+/// - `scale`：目标 scale，可为负数。
 ///
-/// - `val`: 需要按目标精度对齐的 f64 值。
-/// - `scale`: 目标小数位数。
+/// 返回：返回目标精度的值；输入非有限或十进制文本转换失败或对齐指数、展开超界时返回对应错误。
 pub fn align_decimal_f64(val: f64, scale: i64) -> Result<BigDecimal> {
     align(&from_f64(val)?, scale)
 }
 
-/// 业务作用: `alignUpDecimal(String,scale)`。
+/// 业务作用：将十进制文本转换为十进制数后按 Ceiling 对齐。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待转换及对齐的十进制文本。
+/// - `scale`：目标 scale，可为负数。
 ///
-/// - `val`: 需要向正无穷方向对齐的十进制文本。
-/// - `scale`: 目标小数位数。
+/// 返回：返回目标精度的值；文本解析失败或对齐指数、展开超界时返回对应错误。
 pub fn align_up_decimal_str(val: &str, scale: i64) -> Result<BigDecimal> {
     align_up(&parse(val)?, scale)
 }
 
-/// 业务作用: `alignUpDecimal(double,scale)`。
+/// 业务作用：将有限 f64转换为十进制数后按 Ceiling 对齐。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待转换及对齐的有限 f64。
+/// - `scale`：目标 scale，可为负数。
 ///
-/// - `val`: 需要向正无穷方向对齐的 f64 值。
-/// - `scale`: 目标小数位数。
+/// 返回：返回目标精度的值；输入非有限或十进制文本转换失败或对齐指数、展开超界时返回对应错误。
 pub fn align_up_decimal_f64(val: f64, scale: i64) -> Result<BigDecimal> {
     align_up(&from_f64(val)?, scale)
 }
 
-/// 业务作用: `alignDownDecimal(String,scale)`。
+/// 业务作用：将十进制文本转换为十进制数后按 Floor 对齐。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待转换及对齐的十进制文本。
+/// - `scale`：目标 scale，可为负数。
 ///
-/// - `val`: 需要向负无穷方向对齐的十进制文本。
-/// - `scale`: 目标小数位数。
+/// 返回：返回目标精度的值；文本解析失败或对齐指数、展开超界时返回对应错误。
 pub fn align_down_decimal_str(val: &str, scale: i64) -> Result<BigDecimal> {
     align_down(&parse(val)?, scale)
 }
 
-/// 业务作用: `alignDownDecimal(double,scale)`。
+/// 业务作用：将有限 f64转换为十进制数后按 Floor 对齐。
 ///
-/// # 参数
+/// 参数说明：
+/// - `val`：待转换及对齐的有限 f64。
+/// - `scale`：目标 scale，可为负数。
 ///
-/// - `val`: 需要向负无穷方向对齐的 f64 值。
-/// - `scale`: 目标小数位数。
+/// 返回：返回目标精度的值；输入非有限或十进制文本转换失败或对齐指数、展开超界时返回对应错误。
 pub fn align_down_decimal_f64(val: f64, scale: i64) -> Result<BigDecimal> {
     align_down(&from_f64(val)?, scale)
 }
 
-/// 业务作用: 精确解析并求和十进制文本，任一输入非法时返回错误，不跳过无效项。
+/// 业务作用：逐项转换十进制文本序列并精确求和。
 ///
-/// # 参数
+/// 参数说明：
+/// - `vals`：任一项转换失败都拒绝的十进制文本列表。
 ///
-/// - `vals`: 待求和的一组十进制文本；任一项解析失败会返回错误。
+/// 返回：返回精确和，空输入返回零；文本解析失败或求和对齐失败返回对应错误。
 pub fn sum_decimal_str(vals: &[&str]) -> Result<BigDecimal> {
     let parsed: Result<Vec<BigDecimal>> = vals.iter().map(|s| parse(s)).collect();
     sum(&parsed?)
 }
 
-/// 业务作用: `sumDecimal(double...)`。
+/// 业务作用：逐项转换有限 f64序列并精确求和。
 ///
-/// # 参数
+/// 参数说明：
+/// - `vals`：任一项转换失败都拒绝的有限 f64列表。
 ///
-/// - `vals`: 待求和的一组 f64 值；非有限值会返回解析错误。
+/// 返回：返回精确和，空输入返回零；输入非有限或十进制文本转换失败或求和对齐失败返回对应错误。
 pub fn sum_decimal_f64(vals: &[f64]) -> Result<BigDecimal> {
     let parsed: Result<Vec<BigDecimal>> = vals.iter().map(|v| from_f64(*v)).collect();
     sum(&parsed?)
 }
 
-/// 业务作用: `avgDecimal(String[],scale)`。
+/// 业务作用：逐项转换十进制文本后以 HalfUp 计算平均值。
 ///
-/// # 参数
+/// 参数说明：
+/// - `vals`：待求平均值的十进制文本列表。
+/// - `scale`：非空输入平均值的目标 scale。
 ///
-/// - `vals`: 待求平均值的一组十进制文本；空数组返回 `0`。
-/// - `scale`: 平均值需要保留的小数位数。
+/// 返回：返回舍入平均值，空输入返回默认 scale 的零；文本解析失败、求和或除法失败返回对应错误。
 pub fn avg_decimal_str(vals: &[&str], scale: i64) -> Result<BigDecimal> {
     let parsed: Result<Vec<BigDecimal>> = vals.iter().map(|s| parse(s)).collect();
     avg(&parsed?, scale)
 }
 
-/// 业务作用: `avgDecimal(double[],scale)`。
+/// 业务作用：逐项转换有限 f64后以 HalfUp 计算平均值。
 ///
-/// # 参数
+/// 参数说明：
+/// - `vals`：待求平均值的有限 f64列表。
+/// - `scale`：非空输入平均值的目标 scale。
 ///
-/// - `vals`: 待求平均值的一组 f64 值；空数组返回 `0`，非有限值会返回解析错误。
-/// - `scale`: 平均值需要保留的小数位数。
+/// 返回：返回舍入平均值，空输入返回默认 scale 的零；输入非有限或十进制文本转换失败、求和或除法失败返回对应错误。
 pub fn avg_decimal_f64(vals: &[f64], scale: i64) -> Result<BigDecimal> {
     let parsed: Result<Vec<BigDecimal>> = vals.iter().map(|v| from_f64(*v)).collect();
     avg(&parsed?, scale)

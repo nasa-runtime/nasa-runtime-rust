@@ -46,18 +46,11 @@ pub struct NacosImport {
 
 /// 业务作用：从合并后的配置树解析 `yml.imports` 列表。
 ///
-/// # 参数
-/// - `tree`: 已合并并解析占位符后的配置 Value 树。
-/// - `base_dir`: 本地 `file:` import 相对路径的基准目录。
+/// 参数说明：
+/// - `tree`：已经完成上层加载的配置树。
+/// - `base_dir`：将相对 file import 定位到实际路径的基准目录。
 ///
-/// 顺序 = 覆盖顺序(后加载覆盖先加载),file 与 nacos 交错保序。
-/// `base_dir`:本地 `file:` 相对路径的基准目录(通常是主配置文件所在目录,默认 `zcf/`);
-///   以 `/` 开头的路径按绝对路径处理,不 join base_dir。
-///
-/// 只读 `yml.imports`:纯 Nacos 简写已迁到顶层 `nacos.imports`(config-boot 的 `NacosImportSpec`),
-/// 本 crate 不再解析 `yml.nacos.imports`。
-///
-/// 无法识别的条目(未知前缀、缺 file/nacos 的 map)会 warn 并跳过,不误当成本地文件或 Nacos。
+/// 返回：读取 yml.imports 数组并按声明顺序保留可识别条目；路径不存在或不是数组时返回空列表，非法条目告警并跳过，不读取本地文件或 Nacos。
 pub fn parse_imports_from_tree(tree: &serde_json::Value, base_dir: &Path) -> Vec<YmlImport> {
     let mut out = Vec::new();
 
@@ -77,12 +70,13 @@ pub fn parse_imports_from_tree(tree: &serde_json::Value, base_dir: &Path) -> Vec
     out
 }
 
-/// 业务作用：解析 `yml.imports` 的一项:字符串(`file:`/`optional:file:`/`nacos:`/`optional:nacos:`)或
-/// map(`{file, optional?}` / `{nacos, group?, optional?}`)。
+/// 业务作用：解析 `yml.imports` 的一项:字符串(`file:`/`optional:file:`/`nacos:`/`optional:nacos:`)或 map(`{file, optional?}` / `{nacos, group?, optional?}`)。
 ///
-/// # 参数
-/// - `entry`: `yml.imports` 中的一条字符串或 map 声明。
-/// - `base_dir`: 相对配置导入路径的基准目录。
+/// 参数说明：
+/// - `entry`：数组中单个字符串或映射形式的 import 声明。
+/// - `base_dir`：相对本地路径使用的基准目录。
+///
+/// 返回：字符串或对象交给对应解析器；其它类型记录原条目警告并返回 None，不阻止其它条目继续解析。
 fn parse_mixed_entry(entry: &serde_json::Value, base_dir: &Path) -> Option<YmlImport> {
     match entry {
         serde_json::Value::String(s) => parse_import_string(s, base_dir),
@@ -94,16 +88,13 @@ fn parse_mixed_entry(entry: &serde_json::Value, base_dir: &Path) -> Option<YmlIm
     }
 }
 
-/// 业务作用：字符串条目解析。
+/// 业务作用：字符串条目解析。 ⚠️【optional 默认值:字符串形式与 map 形式【故意不同】】 - 字符串形式:**无 `optional:` 前缀 = required**(如 `file:common.yml` 是必需)。 `optional:` 前缀表示可缺;不写就是必需。 - map 形式:**省略 `optional` = optional(true)**(见 [`read_optional_default_true`])。
 ///
-/// ⚠️【optional 默认值:字符串形式与 map 形式【故意不同】】
-///   - 字符串形式:**无 `optional:` 前缀 = required**(如 `file:common.yml` 是必需)。
-///     `optional:` 前缀表示可缺;不写就是必需。
-///   - map 形式:**省略 `optional` = optional(true)**(见 [`read_optional_default_true`])。
+/// 参数说明：
+/// - `raw`：import 的原始字符串声明。
+/// - `base_dir`：裸路径和 file: 相对路径的解析基准。
 ///
-/// # 参数
-/// - `raw`: 待解析的原始字符串、字节或配置值。
-/// - `base_dir`: 相对配置导入路径的基准目录。
+/// 返回：去除首尾空白后解析 optional:、file:、nacos: 或裸路径；未声明 optional 时为必需源。空 Nacos 标识、未知 scheme 或父目录段告警跳过；不验证来源存在或可访问。
 fn parse_import_string(raw: &str, base_dir: &Path) -> Option<YmlImport> {
     let s = raw.trim();
     // `optional:` 前缀决定可缺性;不带前缀的字符串形式默认 required(false)。
@@ -140,9 +131,11 @@ fn parse_import_string(raw: &str, base_dir: &Path) -> Option<YmlImport> {
 
 /// 业务作用：map 条目解析:`{file: ..., optional?}` 或 `{nacos: ..., group?, optional?}`。optional 省略默认 true。
 ///
-/// # 参数
-/// - `entry`: `yml.imports` 中的 map 声明。
-/// - `base_dir`: 相对配置导入路径的基准目录。
+/// 参数说明：
+/// - `entry`：对象形式的 import 声明。
+/// - `base_dir`：相对文件路径使用的基准目录。
+///
+/// 返回：优先读取 file 字符串，否则读取 nacos 字符串；optional 缺失或非布尔默认 true，Nacos 同时保留可选分组与格式。无法识别或标识为空时告警并返回 None，不检查未知字段。
 fn parse_import_map(entry: &serde_json::Value, base_dir: &Path) -> Option<YmlImport> {
     let optional = read_optional_default_true(entry);
 
@@ -166,14 +159,14 @@ fn parse_import_map(entry: &serde_json::Value, base_dir: &Path) -> Option<YmlImp
     None
 }
 
-/// 业务作用：造 `File` 导入:相对路径 join base_dir;以 `/` 开头按绝对路径(不 join)。
-/// 防穿越:拒绝含 `..` 组件的路径——尤其 Nacos 远端下发的 import 列表(不受信),避免 `file:../../secret`
-/// 把配置根外的任意本地文件读进有效配置。绝对路径允许(bootstrap 常用绝对配置路径,是本地可信输入)。
+/// 业务作用：造 `File` 导入:相对路径 join base_dir;以 `/` 开头按绝对路径(不 join)。 防穿越:拒绝含 `..` 组件的路径——尤其 Nacos 远端下发的 import 列表(不受信),避免 `file:../../secret` 把配置根外的任意本地文件读进有效配置。绝对路径允许(bootstrap 常用绝对配置路径,是本地可信输入)。
 ///
-/// # 参数
-/// - `path`: `file:` import 声明中的本地配置文件路径。
-/// - `base_dir`: 相对配置导入路径的基准目录。
-/// - `optional`: 资源缺失时是否允许跳过。
+/// 参数说明：
+/// - `path`：已经从声明中取出的本地路径。
+/// - `base_dir`：相对路径的拼接基准。
+/// - `optional`：后续加载时是否允许该来源缺失。
+///
+/// 返回：含 ParentDir 路径分量时告警并返回 None；否则绝对路径保留，相对路径拼接 base_dir。空路径可指向基准目录，不验证存在、类型、符号链接或目录边界。
 fn file_import(path: &str, base_dir: &Path, optional: bool) -> Option<YmlImport> {
     let p = Path::new(path);
     if p.components()
@@ -195,8 +188,10 @@ fn file_import(path: &str, base_dir: &Path, optional: bool) -> Option<YmlImport>
 
 /// 业务作用：读 map 的 `group` 字段(缺省 `None`)。
 ///
-/// # 参数
-/// - `entry`: `yml.imports` 中的 nacos map 声明。
+/// 参数说明：
+/// - `entry`：可能包含 group 字段的 import 对象。
+///
+/// 返回：group 为非空白字符串时返回去除首尾空白的副本，否则 None，不验证注册中心分组规则。
 fn read_group(entry: &serde_json::Value) -> Option<String> {
     entry
         .get("group")
@@ -207,8 +202,10 @@ fn read_group(entry: &serde_json::Value) -> Option<String> {
 
 /// 业务作用：读 map 的 `optional` 字段,**缺省 `true`**(显式配置 optional 默认 true)。
 ///
-/// # 参数
-/// - `entry`: `yml.imports` 中的 map 声明。
+/// 参数说明：
+/// - `entry`：可能包含 optional 字段的 import 对象。
+///
+/// 返回：optional 为布尔时使用其值，缺失或其它类型均返回 true，不报配置类型错误。
 fn read_optional_default_true(entry: &serde_json::Value) -> bool {
     entry
         .get("optional")
@@ -218,8 +215,10 @@ fn read_optional_default_true(entry: &serde_json::Value) -> bool {
 
 /// 业务作用：读 map 的 `file_extension` 字段(snake_case;缺省 `None` → 门面层回退全局 `nacos.file_extension`,仍缺默认 yaml)。
 ///
-/// # 参数
-/// - `entry`: `yml.imports` 中的 nacos map 声明。
+/// 参数说明：
+/// - `entry`：可能包含内容格式标识的 import 对象。
+///
+/// 返回：file_extension 为非空白字符串时返回规范边缘空白后的值，否则 None，不判断是否为受支持格式。
 fn read_file_extension(entry: &serde_json::Value) -> Option<String> {
     entry
         .get("file_extension")
@@ -228,11 +227,12 @@ fn read_file_extension(entry: &serde_json::Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// 业务作用：是否形似 `scheme:...`(scheme 为 `[A-Za-z][A-Za-z0-9+.-]*`)。用于把 `file:`/`nacos:` 之外的
-/// 已知 scheme(http:/classpath: 等)识别出来 warn+skip,而不把裸文件名误判成 scheme。
+/// 业务作用：是否形似 `scheme:...`(scheme 为 `[A-Za-z][A-Za-z0-9+.-]*`)。用于把 `file:`/`nacos:` 之外的 已知 scheme(http:/classpath: 等)识别出来 warn+skip,而不把裸文件名误判成 scheme。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：准备区分为带 scheme 声明或裸文件路径的文本。
+///
+/// 返回：冒号之前非空且以 ASCII 字母起始、其余仅 ASCII 字母数字或 +.- 时返回 true，否则 false；只判断词法前缀，不验证完整 URL。
 fn looks_like_scheme(s: &str) -> bool {
     match s.split_once(':') {
         Some((scheme, _)) if !scheme.is_empty() => {

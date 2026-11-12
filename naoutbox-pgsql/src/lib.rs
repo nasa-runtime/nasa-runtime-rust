@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+mod dispatch;
+pub use dispatch::AggregateCursor;
 mod retention;
 pub use retention::{RETENTION_COMMIT_UNCERTAIN_REASON, RETENTION_LOCK_CONTENTION_REASON};
 
@@ -51,6 +53,9 @@ CREATE TABLE IF NOT EXISTS outbox_event (
 CREATE INDEX IF NOT EXISTS outbox_dispatchable_idx ON outbox_event (id)
     WHERE NOT dispatched AND NOT dead;
 CREATE INDEX IF NOT EXISTS outbox_lane_dispatchable_idx ON outbox_event (channel, id)
+    WHERE NOT dispatched AND NOT dead;
+CREATE INDEX IF NOT EXISTS outbox_aggregate_dispatchable_idx
+    ON outbox_event (aggregate_type, aggregate_id, id)
     WHERE NOT dispatched AND NOT dead;
 CREATE INDEX IF NOT EXISTS outbox_tenant_dispatchable_idx ON outbox_event (tenant, id)
     WHERE NOT dispatched AND NOT dead;
@@ -211,7 +216,8 @@ pub async fn verify_outbox_event_schema() -> Result<(), OutboxStoreError> {
 
 /// 业务作用：在指定 PostgreSQL datasource 上校验 Outbox 通用事件表合同。
 ///
-/// 参数说明：`datasource` 是受管计划绑定的规范 datasource 名。
+/// 参数说明：
+/// - `datasource`：是受管计划绑定的规范 datasource 名。
 ///
 /// 返回：当前 schema 中存在租户归因列时成功；名称、连接或结构不满足时失败。
 pub async fn verify_outbox_event_schema_for(
@@ -224,7 +230,8 @@ pub async fn verify_outbox_event_schema_for(
 
 /// 业务作用：复用已取得的 PostgreSQL 会话检查事件表租户列，避免组合门禁重复占用连接池。
 ///
-/// 参数说明：`connection` 是 Ready 阶段当前 datasource 的独占会话。
+/// 参数说明：
+/// - `connection`：是 Ready 阶段当前 datasource 的独占会话。
 ///
 /// 返回：列存在时成功；缺列或查询失败时返回稳定错误。
 async fn verify_outbox_event_schema_on(
@@ -257,7 +264,8 @@ pub async fn verify_outbox_tenant_quota_schema() -> Result<(), OutboxStoreError>
 
 /// 业务作用：在指定 PostgreSQL datasource 上复验租户配额所需持久合同。
 ///
-/// 参数说明：`datasource` 是受管 Outbox 计划绑定的规范 datasource 名。
+/// 参数说明：
+/// - `datasource`：是受管 Outbox 计划绑定的规范 datasource 名。
 ///
 /// 返回：未启用配额或事件表、账本及受限租户初始化状态齐备时成功；否则失败。
 pub async fn verify_outbox_tenant_quota_schema_for(
@@ -459,7 +467,8 @@ impl PgOutbox {
     /// 业务作用：复用调用方已持有的 PostgreSQL 连接创建当前 Outbox 表和索引，使外层
     /// schema 互斥权覆盖整个结构操作。
     ///
-    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    /// 参数说明：
+    /// - `connection`：是调用方已取得 schema 互斥权的连接。
     ///
     /// 返回：结构已存在或创建成功时完成；DDL 失败返回脱敏错误。
     pub async fn ensure_schema_on_connection(
@@ -1128,7 +1137,8 @@ impl PgOutbox {
 
     /// 业务作用：订阅当前进程 PostgreSQL Outbox 的已确认提交代际。
     ///
-    /// 参数说明：`channel` 指定 lane 时只订阅该 lane；未指定时订阅当前 datasource 的全局代际。
+    /// 参数说明：
+    /// - `channel`：指定 lane 时只订阅该 lane；未指定时订阅当前 datasource 的全局代际。
     ///
     /// 返回：初值为当前代际的 watch 接收端；调用方仍须保留数据库轮询。
     pub fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {
@@ -1445,7 +1455,8 @@ impl DurableOutboxAppend for PgOutbox {
 impl DurableOutboxDispatch for PgOutbox {
     /// 业务作用：从本数据源已提交事件计算指定合同的最老排队时间。
     ///
-    /// 参数说明：`event_type` 是待观测的固定事件合同名。
+    /// 参数说明：
+    /// - `event_type`：是待观测的固定事件合同名。
     ///
     /// 返回：非负毫秒数；无待确认事件时为零，数据库失败时返回错误。
     async fn oldest_pending_age_ms(&self, event_type: &str) -> Result<u64, OutboxStoreError> {

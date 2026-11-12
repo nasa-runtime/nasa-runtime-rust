@@ -24,7 +24,10 @@ pub enum PartitionControl {
 
 impl PartitionControl {
     /// 业务作用：在派发任何目标前验证显式定位意图。
-    /// 参数说明：tp 为目标分区。
+    ///
+    /// 参数说明：
+    /// - `tp`：tp 为目标分区。
+    ///
     /// 返回：合法时成功，非法声明返回配置错误且不执行控制。
     pub(crate) fn validate(&self, tp: &Tp) -> Result<()> {
         if tp.topic.trim().is_empty()
@@ -37,21 +40,34 @@ impl PartitionControl {
     }
 
     /// 业务作用：将单目标意图送入已有 owner 权威和责任门禁。
-    /// 参数说明：tp 为经过验证的目标。
+    ///
+    /// 参数说明：
+    /// - `tp`：tp 为经过验证的目标。
+    ///
     /// 返回：只影响该目标的命令，空集合不能隐式扩展为全部分区。
     pub(crate) fn command(&self, tp: Tp) -> OwnerCommandKind {
         match self {
-            Self::Pause => OwnerCommandKind::Pause { tps: vec![tp] },
-            Self::Resume => OwnerCommandKind::Resume { tps: vec![tp] },
+            Self::Pause => OwnerCommandKind::Pause {
+                tps: vec![tp],
+            },
+            Self::Resume => OwnerCommandKind::Resume {
+                tps: vec![tp],
+            },
             Self::Seek(value) => OwnerCommandKind::Seek {
                 offsets: BTreeMap::from([(tp, *value)]),
             },
-            Self::Beginning => OwnerCommandKind::SeekBeginning { tps: vec![tp] },
-            Self::End => OwnerCommandKind::SeekEnd { tps: vec![tp] },
+            Self::Beginning => OwnerCommandKind::SeekBeginning {
+                tps: vec![tp],
+            },
+            Self::End => OwnerCommandKind::SeekEnd {
+                tps: vec![tp],
+            },
             Self::Timestamp(value) => OwnerCommandKind::SeekTimestamp {
                 times: BTreeMap::from([(tp, *value)]),
             },
-            Self::Committed => OwnerCommandKind::SeekCommitted { tps: vec![tp] },
+            Self::Committed => OwnerCommandKind::SeekCommitted {
+                tps: vec![tp],
+            },
         }
     }
 }
@@ -82,7 +98,9 @@ pub struct ControlReport {
 
 impl ControlReport {
     /// 业务作用：检查非空控制请求是否逐目标获得成功证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部 Applied 时为 true；空请求及任一非成功结果为 false。
     pub fn all_applied(&self) -> bool {
         !self.outcomes.is_empty()

@@ -182,9 +182,12 @@ impl DefinitionRegistry {
 
     /// 业务作用：按租户优先读取运行期 definition，并为静态全租户定义保留兼容回退。
     ///
-    /// 参数说明：`tenant`、`workflow` 与 `version` 共同定位实例冻结的流程合同。
+    /// 参数说明：
+    /// - `tenant`：需要解析定义的租户身份。
+    /// - `workflow`：实例绑定的工作流名。
+    /// - `version`：实例绑定的业务定义版本。
     ///
-    /// 返回：存在租户专属或全局静态定义时返回引用；否则为空。
+    /// 返回：存在租户条目时返回其定义，不按 accepts_new 过滤；否则回退 get 的全局定义，均不存在时 None。只读注册表，不验证摘要。
     pub fn get_for_tenant(
         &self,
         tenant: &TenantId,
@@ -203,9 +206,12 @@ impl DefinitionRegistry {
 
     /// 业务作用：只返回当前允许创建新实例的租户 definition，deprecated 合同仍可供旧实例收敛。
     ///
-    /// 参数说明：`tenant`、`workflow` 与 `version` 定位调用方请求的流程版本。
+    /// 参数说明：
+    /// - `tenant`：需要解析定义的租户身份。
+    /// - `workflow`：实例绑定的工作流名。
+    /// - `version`：实例绑定的业务定义版本。
     ///
-    /// 返回：active 租户定义或静态全局定义存在时返回引用；未知、deprecated 或 retired 时为空。
+    /// 返回：存在租户条目时仅在 accepts_new 为 true 返回定义，拒绝时不回退全局；无租户条目才按全局 accepts_new 选择，未知或不接受新实例时 None。
     pub fn get_for_start(
         &self,
         tenant: &TenantId,
@@ -225,17 +231,13 @@ impl DefinitionRegistry {
             .map(|entry| &entry.definition)
     }
 
-    /// 业务作用：启动预检——校验全部非终态实例引用的 definition 可用且摘要一致。
-    ///
-    /// 缺失或摘要漂移时必须拒绝 Ready 而不是带病启动：用新内容驱动旧实例会让补偿
-    /// 顺序、身份派生与冻结计划全部失真。
+    /// 业务作用：启动预检——校验全部非终态实例引用的 definition 可用且摘要一致。 缺失或摘要漂移时必须拒绝 Ready 而不是带病启动：用新内容驱动旧实例会让补偿 顺序、身份派生与冻结计划全部失真。
     ///
     /// 参数说明：
-    /// - `store`: Saga store。
-    /// - `scan_limit`: 单次扫描的非终态实例上限。
+    /// - `store`：用于分页读取非终态实例的持久化后端。
+    /// - `scan_limit`：单次扫描的实例条数上限，须由调用方确保非零且后端支持。
     ///
-    /// 返回：全部一致返回 `Ok`；任一实例缺 definition 或摘要不一致返回聚合错误
-    /// （只含 workflow/version 计数，不回显业务键）。
+    /// 返回：本次分页扫描遇到的实例定义都存在且摘要一致时成功；缺失或漂移返回聚合计数，读取失败原样传播 store 错误。不建立跨页一致快照，scan_limit 本层不校验非零。
     pub async fn verify_non_terminal<S>(&self, store: &S, scan_limit: u32) -> anyhow::Result<()>
     where
         S: SagaInstanceStore,
@@ -263,8 +265,8 @@ impl DefinitionRegistry {
                     Some(_) => {}
                 }
             }
-            // keyset cursor 来自本页最后一行；下一页严格使用 `saga_id > cursor`，
-            // 既不会重复统计，也不会因 OFFSET 上游插入/删除而跳行。
+            // 以本页末尾身份续读，避免 OFFSET 因前页数量变化而位移；这不构成跨页快照，
+            // 并发出现且位于游标之前的实例仍需宿主通过启动期写入边界或后续复验约束。
             cursor = instances.last().map(|instance| instance.saga_id.clone());
             if instances.len() < scan_limit as usize {
                 break;

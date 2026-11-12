@@ -12,7 +12,10 @@ pub(super) struct RouteHeaders<'a> {
 impl<'a> RouteHeaders<'a> {
     /// 业务作用：在路由查找前验证声明，避免未知路由绕过非法 codec 的处置策略。
     ///
-    /// 参数说明：`headers` 为按原始顺序借用的名称和值；`strict` 表示拒绝重复保留头。
+    /// 参数说明：
+    /// - `headers`：为按原始顺序借用的名称和值
+    /// - `strict`：表示拒绝重复保留头。
+    ///
     /// 返回：缺失 event 使用 DEFAULT；重复、null、非法 UTF-8、空白事件或未知 codec 返回脱敏原因。
     pub fn parse(
         headers: impl Iterator<Item = (&'a str, Option<&'a [u8]>)>,
@@ -41,15 +44,29 @@ impl<'a> RouteHeaders<'a> {
         if codec.is_some_and(|value| value != PAYLOAD_CODEC_PROTOCOL_BYTES) {
             return Err("未知 codec");
         }
-        Ok(Self { event, codec, mode })
+        Ok(Self {
+            event,
+            codec,
+            mode,
+        })
     }
 
-    /// 业务作用：在解码前核对线路声明和 route 的静态类型，禁止带 mode 的 JSON 被默认为纯 JSON。
+    /// 业务作用：在解码前核对线路声明和固定类型，防止 raw、JSON 与 ProtocolBytes 互相误读。
     ///
-    /// 参数说明：`expected` 为注册时冻结的 codec 和 ProtocolBytes 模式。
-    /// 返回：声明匹配时成功；JSON 携带 codec/mode 或二进制声明不匹配时返回 Codec。
+    /// 参数说明：
+    /// - `expected`：注册时冻结的 codec 和 ProtocolBytes 模式。
+    ///
+    /// 返回：声明匹配时成功；raw 仅接受无 codec 且无 mode 或 mode 为 raw，其它不一致返回 Codec。
     pub fn validate_codec(&self, expected: PayloadCodec) -> Result<()> {
         match expected {
+            PayloadCodec::Raw
+                if self.codec.is_none() && matches!(self.mode, None | Some("raw")) =>
+            {
+                Ok(())
+            }
+            PayloadCodec::Raw => Err(NafkaError::Codec(
+                "raw route 不接受其它 codec/mode 声明".into(),
+            )),
             PayloadCodec::Json if self.codec.is_none() && self.mode.is_none() => Ok(()),
             PayloadCodec::Json => Err(NafkaError::Codec(
                 "JSON route 不接受 codec/mode 声明".into(),
@@ -75,7 +92,9 @@ impl<'a> RouteHeaders<'a> {
 
 /// 业务作用：区分缺失声明与显式 null，避免无效字节经有损替换后改变路由身份。
 ///
-/// 参数说明：`value` 的外层 None 表示缺失，内层 None 表示显式 null。
+/// 参数说明：
+/// - `value`：的外层 None 表示缺失，内层 None 表示显式 null。
+///
 /// 返回：缺失为 None，合法 UTF-8 为借用文本；其它情况返回固定原因。
 fn singleton_text(value: Option<Option<&[u8]>>) -> std::result::Result<Option<&str>, &'static str> {
     match value {

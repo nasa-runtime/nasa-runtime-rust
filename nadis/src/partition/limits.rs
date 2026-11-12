@@ -47,7 +47,9 @@ pub struct PartitionLimits {
 
 impl Default for PartitionLimits {
     /// 业务作用：给出共享预算默认值，使正常批次可在执行前取得所有后继责任。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：默认最多保留 4096 条非终态记录与 256 MiB 估算正文。
     fn default() -> Self {
         Self {
@@ -75,7 +77,9 @@ impl Default for PartitionLimits {
 
 impl PartitionLimits {
     /// 业务作用：计算整批预留策略下可同时保证所有执行后继的记录数。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：每个记录各预留一个可能后继对象时的共同上限。
     pub(crate) fn record_limit(&self) -> usize {
         [
@@ -96,10 +100,14 @@ impl PartitionLimits {
     }
 
     /// 业务作用：拒绝无法预留一批合法响应的配置，避免读取后才发现后继责任无处登记。
-    /// 参数说明：`batch` 为解析组覆盖后的 COUNT。
+    ///
+    /// 参数说明：
+    /// - `batch`: 当前组应用覆盖配置后的单次读取条数上限，用于计算整批最坏正文及后继责任。
+    ///
     /// 返回：所有数量非零且最坏批次可预留时成功；乘法溢出或预算不足返回配置错误。
     pub(crate) fn validate(&self, batch: usize) -> Result<()> {
         let bytes = batch.checked_mul(self.max_record_bytes);
+        // 所有后继责任必须在读取前有确定容量，任何零容量或最坏批次无法容纳都拒绝启动。
         if batch == 0
             || self.record_limit() < batch
             || self.max_record_bytes == 0
@@ -155,7 +163,9 @@ pub struct PartitionExecutorCfg {
 
 impl Default for PartitionExecutorCfg {
     /// 业务作用：为 Redis 消费提供独立且有界的默认执行域。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：八个本地执行槽，最多 4096 个任务和类型状态。
     fn default() -> Self {
         Self {
@@ -172,7 +182,10 @@ impl Default for PartitionExecutorCfg {
 
 impl PartitionExecutorCfg {
     /// 业务作用：冻结 runner 配置并验证全部计划的最坏类型状态占用。
-    /// 参数说明：`plans` 为不可变消费计划总数。
+    ///
+    /// 参数说明：
+    /// - `plans`: 全部不可变消费计划的总数，用于为每个执行槽预留有序和无序两种任务类型状态。
+    ///
     /// 返回：规范化配置；空计划、数量溢出或类型容量不足时拒绝激活。
     pub(crate) fn runner_config(&self, plans: usize) -> Result<napart::RunnerConfig> {
         let config = napart::RunnerConfig {
@@ -184,6 +197,7 @@ impl PartitionExecutorCfg {
         }
         .validated()
         .map_err(|e| NasaRedisError::Config(e.to_string()))?;
+        // 最坏情况下每个计划可落到全部执行槽，有序和无序任务各需独立类型状态，不能靠运行时淘汰兜底。
         if plans == 0
             || config
                 .partitions

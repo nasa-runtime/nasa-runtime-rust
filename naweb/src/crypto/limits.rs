@@ -45,9 +45,9 @@ pub struct CryptoLimits {
 impl Default for CryptoLimits {
     /// 业务作用：建立适合普通 JSON API 的保守资源上限。
     ///
-    /// # 返回
+    /// 返回：返回适合普通 JSON API 的默认限制，应用仍应按业务负载显式配置。
     ///
-    /// 返回适合普通 JSON API 的默认限制，应用仍应按业务负载显式配置。
+    /// 参数说明: 无。
     fn default() -> Self {
         Self {
             max_request_envelope_bytes: 1_100_000,
@@ -69,9 +69,9 @@ impl Default for CryptoLimits {
 impl CryptoLimits {
     /// 业务作用：校验上限之间不会形成明显的无界或自相矛盾配置。
     ///
-    /// # 返回
+    /// 返回：配置可用时返回空值；零值、异常 JSON 深度或密文上限倒置会拒绝启动。
     ///
-    /// 配置可用时返回空值；零值、异常 JSON 深度或密文上限倒置会拒绝启动。
+    /// 参数说明: 无。
     pub fn validate(&self) -> Result<(), MappingBuildError> {
         let non_zero = self.max_request_envelope_bytes > 0
             && self.max_response_envelope_bytes > 0
@@ -109,9 +109,9 @@ impl CryptoLimits {
     /// 外层 HTTP body、JSON 信封中的 Base64 文本、解码密文和解密明文可能同时存在，因此不能
     /// 等读取完成后再按实际长度申请，否则大量并发请求可以在 admission 前突破进程预算。
     ///
-    /// # 返回
+    /// 返回：返回使用饱和加法计算的最坏并存字节数；溢出会得到 `usize::MAX`，随后由预算校验拒绝。
     ///
-    /// 返回使用饱和加法计算的最坏并存字节数；溢出会得到 `usize::MAX`，随后由预算校验拒绝。
+    /// 参数说明: 无。
     pub fn request_memory_reservation(&self) -> usize {
         self.max_request_envelope_bytes
             .saturating_mul(2)
@@ -124,9 +124,9 @@ impl CryptoLimits {
     /// handler body、可清零的拥有明文、provider 密文和最终信封在响应改写期间可能重叠；提前按
     /// 上限计费可防止并发大响应绕过同一全进程预算。
     ///
-    /// # 返回
+    /// 返回：返回使用饱和加法计算的最坏并存字节数；溢出由预算容量检查收敛为启动错误。
     ///
-    /// 返回使用饱和加法计算的最坏并存字节数；溢出由预算容量检查收敛为启动错误。
+    /// 参数说明: 无。
     pub fn response_memory_reservation(&self) -> usize {
         self.max_response_plaintext_bytes
             .saturating_mul(2)
@@ -146,13 +146,11 @@ pub struct CryptoMemoryBudget {
 impl std::fmt::Debug for CryptoMemoryBudget {
     /// 业务作用：输出容量和当前可用量，不输出任何缓冲区内容。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CryptoMemoryBudget")
@@ -165,14 +163,12 @@ impl std::fmt::Debug for CryptoMemoryBudget {
 impl CryptoMemoryBudget {
     /// 业务作用：建立全进程加权内存预算。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `total_bytes`: 所有并发密码请求可共同持有的临时字节数，范围为 1 到 `u32::MAX`。
     /// - `acquire_timeout`: 等待预算的最长时间，超时后快速拒绝请求。
     ///
-    /// # 返回
-    ///
-    /// 配置合法时返回预算；范围不合法会拒绝启动。
+    /// 返回：配置合法时返回预算；范围不合法会拒绝启动。
     pub fn new(total_bytes: usize, acquire_timeout: Duration) -> Result<Self, MappingBuildError> {
         if total_bytes == 0
             || total_bytes > u32::MAX as usize
@@ -191,13 +187,11 @@ impl CryptoMemoryBudget {
 
     /// 业务作用：验证进程预算至少容纳一条最大请求或最大响应的临时缓冲区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `limits`: 与该预算放入同一密码运行时快照的单请求限制。
     ///
-    /// # 返回
-    ///
-    /// 两个方向的最坏申请都不超过总容量时返回空值，否则拒绝启动，避免服务启动后所有最大合法
+    /// 返回：两个方向的最坏申请都不超过总容量时返回空值，否则拒绝启动，避免服务启动后所有最大合法
     /// 请求都稳定失败。
     pub fn validate_limits(&self, limits: &CryptoLimits) -> Result<(), MappingBuildError> {
         let required = limits
@@ -214,13 +208,11 @@ impl CryptoMemoryBudget {
 
     /// 业务作用：为一次请求按最坏并存缓冲区申请预算。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `bytes`: 本次阶段可能同时持有的最大字节数，不得超过进程总预算。
     ///
-    /// # 返回
-    ///
-    /// 成功返回 RAII permit；等待超时或容量不足返回 overload，始终 fail closed。
+    /// 返回：成功返回 RAII permit；等待超时或容量不足返回 overload，始终 fail closed。
     pub async fn reserve(&self, bytes: usize) -> Result<OwnedSemaphorePermit, CryptoError> {
         if bytes == 0 || bytes > self.total_bytes || bytes > u32::MAX as usize {
             return Err(CryptoError::new(

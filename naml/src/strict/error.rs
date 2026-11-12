@@ -66,7 +66,10 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 
 impl ConfigError {
     /// 业务作用：创建不会携带原值的拒绝原因。
-    /// 参数说明：`kind` 指定失败类别。
+    ///
+    /// 参数说明：
+    /// - `kind`：指定失败类别。
+    ///
     /// 返回：尚未关联来源或字段的错误。
     pub fn new(kind: ErrorKind) -> Self {
         Self {
@@ -78,16 +81,26 @@ impl ConfigError {
         }
     }
 
-    /// 业务作用：保留解析器提供的位置而丢弃其包含原文的错误信息。
-    /// 参数说明：`line/column` 是从一开始的来源位置。
-    /// 返回：带行列信息的安全错误。
+    /// 业务作用：给安全错误附加解析器来源位置，位置数据由调用方提供，原始解析器文本应在构造错误时丢弃。
+    ///
+    /// 参数说明：
+    /// - `line`：解析器提供的从一开始的行号。
+    /// - `column`：解析器提供的从一开始的列号。
+    ///
+    /// 返回：覆盖位置后返回原错误；不检查行列是否大于零，也不在本方法删除已有原因文本。
     pub fn positioned(mut self, line: usize, column: usize) -> Self {
-        self.position = Some(SourcePosition { line, column });
+        self.position = Some(SourcePosition {
+            line,
+            column,
+        });
         self
     }
 
     /// 业务作用：关联本轮文档身份，避免输出文件或远端地址。
-    /// 参数说明：`source_id` 是本轮有序文档编号。
+    ///
+    /// 参数说明：
+    /// - `source_id`：是本轮有序文档编号。
+    ///
     /// 返回：带来源身份的错误。
     pub fn in_source(mut self, source_id: usize) -> Self {
         self.source_id = Some(source_id);
@@ -95,7 +108,10 @@ impl ConfigError {
     }
 
     /// 业务作用：关联失败字段供调用方定位配置。
-    /// 参数说明：`path` 是结构化字段路径。
+    ///
+    /// 参数说明：
+    /// - `path`：是结构化字段路径。
+    ///
     /// 返回：带字段位置的安全错误。
     pub fn at(mut self, path: &ConfigPath) -> Self {
         self.path = Some(path.clone());
@@ -105,7 +121,10 @@ impl ConfigError {
 
 impl fmt::Display for ConfigError {
     /// 业务作用：仅输出稳定类别和受限字段信息。
-    /// 参数说明：`f` 是格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：是格式化目标。
+    ///
     /// 返回：格式化结果，不输出任何字段值。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "naml: {:?}", self.kind)?;
@@ -135,7 +154,10 @@ pub struct SourcePosition {
 
 impl fmt::Debug for ConfigError {
     /// 业务作用：默认调试输出沿用有界安全摘要，循环完整路径只经显式字段访问。
-    /// 参数说明：`f` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：为格式化目标。
+    ///
     /// 返回：无原值、无底层错误链的摘要。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)

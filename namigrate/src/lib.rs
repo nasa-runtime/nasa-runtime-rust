@@ -30,14 +30,19 @@ pub use namigrate_core::{
 /// 与门面收敛穿透一次)。它是嵌入式常量数据,`Send + Sync + 'static`,可跨阶段存放。
 pub use sqlx::migrate::Migrator;
 
-/// 业务作用: 把任意数据库细节收敛为不泄露 SQL、schema 或凭据的稳定错误。
+/// 业务作用：把任意数据库细节收敛为不泄露 SQL、schema 或凭据的稳定错误。
+///
+/// 参数说明：
+/// - `_error`：仅用于归类的底层数据库或连接错误。
+///
+/// 返回：丢弃底层值并返回固定 database error，不保留 SQL、schema 或连接详情。
 fn backend<E>(_error: E) -> MigrationError {
     MigrationError::Backend("database error".to_owned())
 }
 
 /// 业务作用: 提取不含 SQL 正文的 MySQL up migration 描述供 core 执行一致性比较。
 ///
-/// # 参数
+/// 参数说明：
 /// - `migrator`: 当前业务嵌入式 migrator。
 ///
 /// 返回: 按版本升序排列的版本、checksum、可逆性与事务属性。
@@ -58,7 +63,7 @@ fn embedded_ups(migrator: &Migrator) -> Vec<EmbeddedMigration> {
 
 /// 业务作用: 查询 MySQL 已应用与未完成 migration；catalog 不存在时保持首次启动语义。
 ///
-/// # 参数
+/// 参数说明：
 /// - `connection`: 当前 datasource 的专有 MySQL 连接。
 ///
 /// 返回: 按版本排序的 catalog 记录；表不存在返回空集合，查询失败返回脱敏错误。
@@ -98,10 +103,12 @@ async fn applied_state(
     Ok(applied)
 }
 
-/// 业务作用: 与 SQLx MySQL migrator 使用同一算法计算 advisory lock ID。
+/// 业务作用：与 SQLx MySQL migrator 使用同一算法计算 advisory lock ID。 SQLx 内部是 `format!("{:x}", 0x3d32ad9e * CRC32(database_name))`；在服务端计算可避免复制 私有 Rust helper，同时保证其它直接使用 SQLx migrator 的进程与本门禁互斥。
 ///
-/// SQLx 内部是 `format!("{:x}", 0x3d32ad9e * CRC32(database_name))`；在服务端计算可避免复制
-/// 私有 Rust helper，同时保证其它直接使用 SQLx migrator 的进程与本门禁互斥。
+/// 参数说明：
+/// - `connection`：后续锁竞争所使用的同一 MySQL session。
+///
+/// 返回：查询成功返回基于当前 DATABASE() 的锁名；查询或解码失败返回脱敏错误。这里只计算身份，不取得 advisory lock。
 async fn sqlx_lock_id(connection: &mut MySqlConnection) -> Result<String, MigrationError> {
     sqlx::query_scalar("SELECT LOWER(HEX(1026731422 * CRC32(DATABASE())))")
         .fetch_one(connection)
@@ -120,7 +127,12 @@ struct MigrationLock {
 
 impl MigrationLock {
     /// 业务作用: 在单一端到端预算内取得池连接、计算 SQLx lock ID 并竞争 MySQL advisory lock。
-    /// 参数说明：`pool` 为目标池，`datasource` 为冻结目录身份，`timeout_ms` 为完整取锁预算。
+    ///
+    /// 参数说明：
+    /// - `pool`：为目标池
+    /// - `datasource`：为冻结目录身份
+    /// - `timeout_ms`：为完整取锁预算。
+    ///
     /// 返回：持有专有 session 的锁；获取失败保持稳定门禁分类。
     async fn acquire(
         pool: &MySqlPool,
@@ -176,19 +188,31 @@ impl MigrationLock {
         }
     }
 
-    /// 业务作用: 借用仍由 lock guard 独占的底层 MySQL 连接。
+    /// 业务作用：借用仍由 lock guard 独占的底层 MySQL 连接。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 guard 仍持有的独占连接借用；内部连接已被取走时 panic，不另外获取连接。
     fn connection(&mut self) -> &mut MySqlConnection {
         self.connection
             .as_mut()
             .expect("migration lock connection must exist until release")
     }
 
-    /// 业务作用: 移走连接使 Drop 不再执行 close-on-drop；仅用于确认未取得 session lock 的路径。
+    /// 业务作用：移走连接使 Drop 不再执行 close-on-drop；仅用于确认未取得 session lock 的路径。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；取走连接并按普通池连接释放，使本 guard 的 Drop 不再强制关闭；调用方必须已经确认该 session 未持锁。
     fn disarm(mut self) {
         let _ = self.connection.take();
     }
 
-    /// 业务作用: 显式释放 advisory lock；只有服务端确认释放后才允许连接安全回池。
+    /// 业务作用：显式释放 advisory lock；只有服务端确认释放后才允许连接安全回池。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；仅当服务端确认释放返回 1 时允许连接普通回池，其它回复、I/O 失败或取消均由 Drop 标记关闭连接。释放失败不以错误返回调用方。
     async fn release(mut self) {
         let lock_id = self.lock_id.clone();
         let released: Result<Option<i64>, _> = sqlx::query_scalar("SELECT RELEASE_LOCK(?)")
@@ -202,7 +226,11 @@ impl MigrationLock {
 }
 
 impl Drop for MigrationLock {
-    /// 业务作用: 未确认 RELEASE_LOCK 的路径关闭物理连接，防止 session lock 随池连接泄漏。
+    /// 业务作用：未确认 RELEASE_LOCK 的路径关闭物理连接，防止 session lock 随池连接泄漏。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；尚持有连接时设置 close-on-drop，物理连接关闭由池连接销毁继续完成，不在本方法等待服务端锁释放。
     fn drop(&mut self) {
         if let Some(connection) = self.connection.as_mut() {
             connection.close_on_drop();
@@ -210,7 +238,12 @@ impl Drop for MigrationLock {
     }
 }
 
-/// 业务作用: 复制业务 migrator 的完整设置，仅关闭 SQLx 自带的无限等待 lock；外层已经取得同 ID 的有界锁。
+/// 业务作用：复制业务 migrator 的完整设置，仅关闭 SQLx 自带的无限等待 lock；外层已经取得同 ID 的有界锁。
+///
+/// 参数说明：
+/// - `migrator`：业务原始 SQLx migrator 配置。
+///
+/// 返回：返回保留迁移、ignore_missing、no_tx、表名和 schema 设置但关闭内建 locking 的副本；调用方必须已经取得对应外部锁。
 fn unlocked_migrator(migrator: &Migrator) -> Migrator {
     Migrator {
         migrations: migrator.migrations.clone(),
@@ -224,7 +257,7 @@ fn unlocked_migrator(migrator: &Migrator) -> Migrator {
 
 /// 业务作用: 按 `settings.mode` 运行 migration 门禁。见 crate 文档。
 ///
-/// # 参数
+/// 参数说明：
 /// - `pool`:目标 datasource 连接池。
 /// - `migrator`:业务嵌入的 [`Migrator`]。
 /// - `settings`:门禁配置。
@@ -239,7 +272,13 @@ pub async fn run_gate(
 }
 
 /// 业务作用：按数据源身份运行 MySQL migration 门禁，并把真实池等待归入 migration 用途。
-/// 参数说明：`pool` 是目标池，`datasource` 为冻结目录身份，`migrator` 为业务迁移，`settings` 为门禁策略。
+///
+/// 参数说明：
+/// - `pool`：是目标池
+/// - `datasource`：为冻结目录身份
+/// - `migrator`：为业务迁移
+/// - `settings`：为门禁策略。
+///
 /// 返回：门禁摘要或原有稳定失败；观测不会改变门禁结果，advisory lock 等待不计入池等待。
 pub async fn run_gate_for(
     pool: &MySqlPool,
@@ -290,8 +329,14 @@ pub async fn run_gate_for(
 }
 
 /// 业务作用：在擦除 SQLx 错误前记录 migration 的真实连接池等待，保留外层锁预算。
-/// 参数说明：`pool`、`datasource` 指定连接身份；`deadline`、`timeout_ms` 表达可选端到端预算。
-/// 返回：池连接或脱敏门禁错误；取消由观测守卫记录，取得连接后立即结束等待计时。
+///
+/// 参数说明：
+/// - `pool`：需要获取物理连接的目标 MySQL 池。
+/// - `datasource`：仅用于已登记观测槽选择的数据源身份，不验证其与 pool 的对应关系。
+/// - `deadline`：获取连接与后续锁竞争共用的可选绝对截止时刻。
+/// - `timeout_ms`：绝对预算耗尽时写入 LockTimeout 的原始毫秒配置。
+///
+/// 返回：成功返回池连接并结束等待观测；绝对预算耗尽返回 LockTimeout，其它池错误返回脱敏 Backend。取消由观测守卫记录，不在此处取得数据库锁。
 async fn acquire_connection(
     pool: &MySqlPool,
     datasource: &str,
@@ -322,7 +367,12 @@ async fn acquire_connection(
     result.map_err(backend)
 }
 
-/// 业务作用: 把 sqlx `MigrateError` 脱敏映射(checksum 漂移单列,其余归 Backend)。
+/// 业务作用：把 sqlx `MigrateError` 脱敏映射(checksum 漂移单列,其余归 Backend)。
+///
+/// 参数说明：
+/// - `error`：SQLx 执行迁移产生的错误。
+///
+/// 返回：VersionMismatch 保留为 ChecksumMismatch，Dirty 保留未完成版本，其余错误统一为 migration apply failed，不回显 SQLx 原始文本。
 fn map_migrate_err(error: sqlx::migrate::MigrateError) -> MigrationError {
     match error {
         sqlx::migrate::MigrateError::VersionMismatch(version) => {

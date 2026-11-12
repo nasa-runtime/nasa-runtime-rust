@@ -1,9 +1,9 @@
 //! NASA 业务审计事件。
 //!
-//! 日志是运维诊断,审计是**不可抵赖的业务事实**:谁(actor)在何时(occurred_at)对什么(resource)
-//! 做了什么(action)、结果如何(outcome)。审计事件必须**可靠投递**——[`OutboxAuditSink`] 把事件写进
-//! Outbox(可靠投递复用 Outbox),与业务写同事务落库、由 dispatcher/CDC 发出,避免"业务成功但
-//! 审计丢失"。
+//! 用统一事件记录执行者、发生时间、资源、动作与结局。调用方负责核实事实和脱敏，
+//! 本组件不提供签名或防篡改存储。需要与业务写原子提交时使用 [`TransactionalAuditSink`]，
+//! 并将写入错误传播至业务事务边界；事务适配器与后续投递端共同承担持久投递。
+//! [`OutboxAuditSink`] 仅适配同步写入端，其持久性与事务保证取决于具体 [`OutboxWriter`] 实现。
 //!
 //! 本 crate **不依赖 `napp`**;时间由调用方传入(可使用 `nabase::date::UtcClock`),context 只放**已脱敏**字段。
 
@@ -22,7 +22,12 @@ pub struct AuditWriteError {
 }
 
 impl AuditWriteError {
-    /// 业务作用：创建脱敏错误。
+    /// 业务作用：保存供业务调用方处理的稳定审计失败原因，不自动过滤传入文本。
+    ///
+    /// 参数说明：
+    /// - `reason`：调用方已脱敏的失败分类，不得包含 SQL、凭据或审计正文。
+    ///
+    /// 返回：持有该原因的错误值，不执行日志输出或审计写入。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -31,7 +36,12 @@ impl AuditWriteError {
 }
 
 impl std::fmt::Display for AuditWriteError {
-    /// 业务作用：输出不包含 SQL、凭据或审计载荷的稳定错误摘要。
+    /// 业务作用：以固定前缀输出保存的失败原因，脱敏由错误构造方保证。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收错误摘要的格式化输出目标。
+    ///
+    /// 返回：摘要写入成功时返回 `Ok`，目标拒绝写入时传播格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "audit write failed: {}", self.reason)
     }
@@ -67,7 +77,16 @@ pub struct AuditEvent {
 }
 
 impl AuditEvent {
-    /// 业务作用：用必填字段创建审计事件(无附加 context)。
+    /// 业务作用：组装审计事实的主体、动作与结果；真实性、脱敏和字段有效性由调用方保证。
+    ///
+    /// 参数说明：
+    /// - `actor`：已认证执行者的稳定标识，不携带认证凭据。
+    /// - `action`：业务动作名称，用作 Outbox 事件类型。
+    /// - `resource`：被操作资源的安全标识。
+    /// - `outcome`：本次业务操作的实际结局。
+    /// - `occurred_at_millis`：业务事实发生时的 Unix 时间戳，单位为毫秒。
+    ///
+    /// 返回：附加上下文为空的事件；不校验空值、不读取时钟，也不持久化。
     pub fn new(
         actor: impl Into<String>,
         action: impl Into<String>,
@@ -85,20 +104,27 @@ impl AuditEvent {
         }
     }
 
-    /// 业务作用：追加一条脱敏上下文键值。
+    /// 业务作用：为审计事实附加调用方已脱敏的上下文，供后续检索和关联。
+    ///
+    /// 参数说明：
+    /// - `key`：上下文名称，相同名称覆盖原值。
+    /// - `value`：可安全存储的上下文值，不得传入令牌或敏感正文。
+    ///
+    /// 返回：更新后的事件；不自动脱敏，也不改变事件的主体、动作或发生时间。
     pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.insert(key.into(), value.into());
         self
     }
 
-    /// 业务作用：按统一映射约定转成 outbox 事件:aggregate_type=`Audit`、aggregate_id=actor、event_type=action、
-    /// payload=事件 JSON。
+    /// 业务作用：按统一映射将审计事实编码为 Outbox 事件，供同步写入端和持久事务适配器共用。
     ///
-    /// [`OutboxAuditSink`](同步 `OutboxWriter` 路径)与**异步持久 outbox**(如 `MySqlOutbox::append`,在
-    /// `natx` 事务内与业务写同提交)共用本转换——异步后端不实现同步 `OutboxWriter`,业务在事务内直接
-    /// `outbox.append(&event.into_outbox_event()).await` 即可,映射口径与 sink 完全一致。
+    /// 参数说明：无。
+    ///
+    /// 返回：聚合类型为 `Audit`、聚合标识为执行者、事件类型为动作的事件，正文为审计 JSON。
+    /// 新事件生成独立事件 ID，使用默认系统租户；转换本身不建立事务或执行投递。
+    /// JSON 编码返回错误时正文为空，调用方无法通过本接口取得编码错误。
     pub fn into_outbox_event(self) -> OutboxEvent {
-        // 序列化恒成功(全字段可序列化);极端失败降级为空 payload,不因审计序列化 panic 业务。
+        // 当前字段仅含 JSON 可表示值；仍保留编码错误时的空正文分支，不将编码错误向业务传播。
         let payload = serde_json::to_vec(&self).unwrap_or_default();
         OutboxEvent::new("Audit", self.actor, self.action, payload)
     }
@@ -106,7 +132,12 @@ impl AuditEvent {
 
 /// 审计投递端。
 pub trait AuditSink {
-    /// 业务作用：记录一条审计事件(实现负责可靠投递)。
+    /// 业务作用：将审计事实交给同步记录端，存储介质与投递保证由实现决定。
+    ///
+    /// 参数说明：
+    /// - `event`：已核实并脱敏的审计事件。
+    ///
+    /// 返回：实现完成同步调用后返回，不提供持久化确认或可传播的错误结果。
     fn record(&self, event: AuditEvent);
 }
 
@@ -116,26 +147,45 @@ pub trait AuditSink {
 /// 或“业务提交但审计失败”的双写窗口。
 #[async_trait::async_trait]
 pub trait TransactionalAuditSink: Send + Sync {
-    /// 业务作用：在当前业务事务内记录事件。
+    /// 业务作用：将审计事实加入当前业务事务，要求实现拒绝脱离该事务的独立提交。
+    ///
+    /// 参数说明：
+    /// - `event`：需要与业务写入共同提交或回滚的审计事件。
+    ///
+    /// 返回：加入事务成功时返回 `Ok`，此时事务尚未由本接口提交；缺少有效事务或写入失败
+    /// 返回脱敏错误，调用方应将错误传播至业务事务边界以阻止不完整提交。
     async fn record_transactional(&self, event: AuditEvent) -> Result<(), AuditWriteError>;
 }
 
-/// 经 Outbox 可靠投递的审计 sink:事件序列化为 JSON 写入 outbox,与业务写同事务落库。
+/// 将审计 JSON 交给同步 Outbox 写入端的适配器，不额外提供持久性或事务保证。
 ///
 /// `OutboxEvent` 字段:aggregate_type=`Audit`、aggregate_id=actor、event_type=action、payload=事件 JSON。
 pub struct OutboxAuditSink<W: OutboxWriter> {
+    /// 承担实际存储与投递保证的同步写入端。
     writer: W,
 }
 
 impl<W: OutboxWriter> OutboxAuditSink<W> {
-    /// 业务作用：用一个 outbox writer 构造。
+    /// 业务作用：绑定同步 Outbox 写入端，使审计事件沿用该写入端的存储与投递方式。
+    ///
+    /// 参数说明：
+    /// - `writer`：接收转换后事件的写入端，其实现决定是否持久化及是否加入业务事务。
+    ///
+    /// 返回：持有该写入端的适配器；构造时不写入事件，不创建数据库事务。
     pub fn new(writer: W) -> Self {
-        Self { writer }
+        Self {
+            writer,
+        }
     }
 }
 
 impl<W: OutboxWriter> AuditSink for OutboxAuditSink<W> {
-    /// 业务作用：把审计事实映射为 outbox 事件，交由同步 writer 加入当前可靠投递路径。
+    /// 业务作用：将审计事实转换后同步交给绑定的 Outbox 写入端。
+    ///
+    /// 参数说明：
+    /// - `event`：已核实并脱敏的审计事实，转换后使用执行者作为聚合标识。
+    ///
+    /// 返回：底层追加调用完成后返回，不独立确认事务提交或下游投递，也不捕获写入端 panic。
     fn record(&self, event: AuditEvent) {
         // 与异步持久路径共用同一映射约定(单一来源,见 `AuditEvent::into_outbox_event`)。
         self.writer.append(event.into_outbox_event());

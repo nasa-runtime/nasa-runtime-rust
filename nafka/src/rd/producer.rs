@@ -89,6 +89,7 @@ pub(crate) struct ProducerClient {
     max_record_bytes: u64,
     /// 框架实际交付责任的条数与字节上限，独立于 native 对缓冲的计费口径。
     max_pending_records: usize,
+    /// 已准入原文字节总上限，覆盖等待入队及交付观察阶段。
     max_pending_bytes: u64,
     /// 非 fatal 无成功 delivery 触发 generation 切换的持续时长。
     stalled_rebuild_after: Duration,
@@ -139,13 +140,17 @@ pub(crate) struct ProducerClient {
 /// 有界准入账本；完成凭据随请求结束从账本移除，已有屏障可继续观察其终态。
 #[derive(Default)]
 struct Admissions {
+    /// 下一个请求责任序号，区分当前账本中的独立发布。
     next: u64,
+    /// 尚未退出的请求及其共享终态凭据，供 flush 冻结当前集合。
     pending: BTreeMap<u64, Arc<AtomicU8>>,
+    /// 全部未退出请求占用的原始记录字节。
     bytes: u64,
 }
 
 /// 调用时的发布责任集合，包含旧原生代次，不包含随后准入的请求。
 pub(crate) struct ProducerBarrier {
+    /// 冻结时的终态凭据；请求退出后仍可观察，不把后续准入算入屏障。
     completions: Vec<Arc<AtomicU8>>,
 }
 
@@ -163,19 +168,27 @@ struct NativeProducerSnapshot {
 /// 所有 producer 代次的真实析构责任，独立于发布准入和调用方句柄寿命。
 #[derive(Default)]
 struct NativeLifetime {
+    /// 包括旧代次在内尚未完成析构的原生客户端数。
     live: AtomicUsize,
+    /// 实际析构完成后唤醒等待资源关闭的任务。
     changed: Notify,
 }
 
 /// 原生 producer 及其析构凭据；最后一个快照退出后才确认后台线程与连接已释放。
 struct NativeProducer {
+    /// 包装器独占的原生客户端，析构时先取出并等待其线程退出。
     producer: Option<FutureProducer<ProducerClientContext>>,
+    /// 所属 lane 跨代次共享的资源生命周期账本。
     lifetime: Arc<NativeLifetime>,
 }
 
 impl NativeProducer {
     /// 业务作用：登记一个新代次的实际资源责任，覆盖后续所有借用快照。
-    /// 参数说明：producer 为已构造的原生客户端；lifetime 为所属 lane 的总资源账本。
+    ///
+    /// 参数说明：
+    /// - `producer`：producer 为已构造的原生客户端。
+    /// - `lifetime`：lifetime 为所属 lane 的总资源账本。
+    ///
     /// 返回：独立可共享的原生资源；责任仅在最后一次真实析构结束后归还。
     fn track(
         producer: FutureProducer<ProducerClientContext>,
@@ -193,7 +206,10 @@ impl std::ops::Deref for NativeProducer {
     type Target = FutureProducer<ProducerClientContext>;
 
     /// 业务作用：在快照责任内借用原生发布能力，避免绕过资源账本复制客户端。
-    /// 参数说明：无。返回：只在包装器存活期间有效的原生引用。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只在包装器存活期间有效的原生引用。
     fn deref(&self) -> &Self::Target {
         self.producer
             .as_ref()
@@ -203,7 +219,10 @@ impl std::ops::Deref for NativeProducer {
 
 impl Drop for NativeProducer {
     /// 业务作用：等待原生析构真实结束后归还关闭责任，不能把发送队列为空视作连接已退出。
-    /// 参数说明：无。返回：最后一个快照的后台线程及连接已释放后通知关闭等待者。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：最后一个快照的后台线程及连接已释放后通知关闭等待者。
     fn drop(&mut self) {
         // FutureProducer 析构会等待原生 poll 线程；先析构再发布零占用，防止过早报告 Stopped。
         drop(self.producer.take());
@@ -243,7 +262,11 @@ struct ProducerClientContext {
 
 impl ClientContext for ProducerClientContext {
     /// 业务作用：把后台连接错误中的永久类别写入单槽，阻止无进展策略重建已知无权写入的 lane。
-    /// 参数说明：error 为客户端错误，_reason 为不对外传播的原生描述。
+    ///
+    /// 参数说明：
+    /// - `error`：error 为客户端错误。
+    /// - `_reason`：_reason 为不对外传播的原生描述。
+    ///
     /// 返回：只记录固定错误码，不携带 broker 返回的自由文本。
     fn error(&self, error: KafkaError, _reason: &str) {
         if let Some(code) = error
@@ -268,7 +291,9 @@ impl ClientContext for ProducerClientContext {
 
 impl ProducerClient {
     /// 业务作用：导出交付未决、远端未知和实际原生退出的关闭证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：非阻塞独立采样，只有永久关闭且资源与交付归零才报告 lane 退出。
     pub(crate) fn close_report(&self) -> crate::CloseLane {
         let stats = self.stats();
@@ -283,7 +308,15 @@ impl ProducerClient {
         }
     }
     /// 业务作用：创建独立原生 producer，并冻结本 lane 的准入与交付责任预算。
-    /// 参数说明：config 为源配置；lane 为物理通道名；runtime 驱动异步观察；metrics 为源级异步指标出口，回执不直接调用用户后端。
+    ///
+    /// 参数说明：
+    /// - `config`：config 为源配置。
+    /// - `lane`：lane 为物理通道名。
+    /// - `runtime`：runtime 驱动异步观察。
+    /// - `metrics`：metrics 为源级异步指标出口。
+    ///
+    /// 共同约束：回执不直接调用用户后端。
+    ///
     /// 返回：可接受有界发布的 lane；配置或原生构造失败返回错误。原生后台线程可开始连接，构造成功不证明 broker 交付可用。
     pub(crate) fn create(
         config: &KafkaConfig,
@@ -361,7 +394,9 @@ impl ProducerClient {
     /// 业务作用：返回该物理 lane 的只读容量与累计结果快照。
     /// 无锁读取队列压力：`(in_use, capacity)`。
     ///
-    /// 参数说明：无。返回：只读取原子量与不可变容量，不等待 native generation 锁。
+    /// 参数说明: 无。
+    ///
+    /// 返回：只读取原子量与不可变容量，不等待 native generation 锁。
     pub(crate) fn queue_pressure(&self) -> QueuePressure {
         QueuePressure {
             observer_in_use: self
@@ -373,7 +408,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：汇总当前 generation、准入阶段与累计结果计数，生成管理面 lane 快照。
-    /// 参数说明：无。返回：最后一次原生代次及当前占用；读取关闭后的统计不保留原生连接。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：最后一次原生代次及当前占用；读取关闭后的统计不保留原生连接。
     pub(crate) fn stats(&self) -> ProducerLaneStats {
         let observer_available = self.fire_slots.available_permits();
         let native_generation = self.native_generation.load(Ordering::Acquire);
@@ -410,7 +448,12 @@ impl ProducerClient {
     }
 
     /// 业务作用：让producer span与原生交付观察共同存活，调用方取消或超时不提前结束链路。
-    /// 参数说明：record为编码后的记录，deadline为编码前冻结的期限，span为可选已采样记录器凭证。
+    ///
+    /// 参数说明：
+    /// - `record`：record为编码后的记录。
+    /// - `deadline`：deadline为编码前冻结的期限。
+    /// - `span`：span为可选已采样记录器凭证。
+    ///
     /// 返回：调用方交付结局；native接管后span随独立观察者完成。
     pub(crate) async fn send_traced(
         self: &Arc<Self>,
@@ -423,7 +466,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：由不可中断的框架 worker 持有实际交付责任，取消任务只关闭下一条准入。
-    /// 参数说明：record 为批准的原文目的记录；调用者必须持续驱动本 future 到终态。
+    ///
+    /// 参数说明：
+    /// - `record`：record 为批准的原文目的记录。
+    ///
     /// 返回：native 实际回执；入队等待仍受发布预算约束，入队后不使用业务等待超时。
     pub(crate) async fn send_actual(
         self: &Arc<Self>,
@@ -434,7 +480,14 @@ impl ProducerClient {
     }
 
     /// 业务作用：统一原生准入和交付计数，并区分外部可取消等待与框架同步实际责任。
-    /// 参数说明：record 为原文，deadline 为本次发布的统一期限，internal 允许关闭收尾，actual 指定不可中断 worker 的直接观察，span随真实回执收口。
+    ///
+    /// 参数说明：
+    /// - `record`：record 为原文。
+    /// - `deadline`：deadline 为本次发布的统一期限。
+    /// - `internal`：internal 允许关闭收尾。
+    /// - `actual`：actual 指定不可中断 worker 的直接观察。
+    /// - `span`：span随真实回执收口。
+    ///
     /// 返回：外部等待可超时；实际责任路径仅在原生回执终结后返回。
     async fn send_with_completion(
         self: &Arc<Self>,
@@ -530,7 +583,13 @@ impl ProducerClient {
     }
 
     /// 业务作用：把fire的span与已接纳原生消息一起移交给后台观察者，准入成功本身不结束span。
-    /// 参数说明：record为编码记录，deadline为编码前冻结的期限，internal允许框架收尾，span为有限链路凭证。
+    ///
+    /// 参数说明：
+    /// - `record`：record为编码记录。
+    /// - `deadline`：deadline为编码前冻结的期限。
+    /// - `internal`：internal允许框架收尾。
+    /// - `span`：span为有限链路凭证。
+    ///
     /// 返回：确定准入结果；已准入的span等实际交付终结后完成。
     pub(crate) fn fire_traced(
         self: &Arc<Self>,
@@ -583,13 +642,20 @@ impl ProducerClient {
     }
 
     /// 业务作用：在编码开始前冻结本次发布的绝对期限。
-    /// 参数说明：无。返回：编码、准入和调用方结果等待共用的单调时钟截止时间。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：编码、准入和调用方结果等待共用的单调时钟截止时间。
     pub(crate) fn publish_deadline(&self) -> Instant {
         Instant::now() + self.publish_timeout
     }
 
     /// 业务作用：拒绝尚未交给 native 且已经耗尽预算的消息。
-    /// 参数说明：topic 为目标，deadline 为本次统一期限。
+    ///
+    /// 参数说明：
+    /// - `topic`：topic 为目标。
+    /// - `deadline`：deadline 为本次统一期限。
+    ///
     /// 返回：仍有预算时通过；超时为确定未发送的发布失败，不冒充交付未知。
     fn check_deadline(&self, topic: &str, deadline: Instant) -> Result<()> {
         if Instant::now() >= deadline {
@@ -603,7 +669,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：在 native 头复制和入队前验证完整原文的共同发布边界。
-    /// 参数说明：record 为普通消息或框架内部 DLT、Transfer 的最终输出。
+    ///
+    /// 参数说明：
+    /// - `record`：record 为普通消息或框架内部 DLT、Transfer 的最终输出。
+    ///
     /// 返回：完整 key、payload、头名 UTF-8 与非空头值的字节和；非法头或超限不取得交付责任。
     fn validate_record(&self, record: &OutboundRecord<'_>) -> Result<u64> {
         let invalid = |message: &str| NafkaError::Publish {
@@ -631,7 +700,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：在任何 native 写入前保留独立交付观察额度。
-    /// 参数说明：topic 为确定拒绝时的目标归因。
+    ///
+    /// 参数说明：
+    /// - `topic`：topic 为确定拒绝时的目标归因。
+    ///
     /// 返回：可移交给后台观察者的 permit；饱和时立即拒绝，不影响已有责任。
     fn reserve_observer(&self, topic: &str) -> Result<OwnedSemaphorePermit> {
         Arc::clone(&self.fire_slots)
@@ -648,7 +720,9 @@ impl ProducerClient {
     }
 
     /// 业务作用：从真实观察额度发布 lane 压力，send 与 fire 使用相同分母。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：向有界观测出口提交瞬时值；不等待后端。
     fn report_pressure(&self) {
         let pressure = self.queue_pressure();
@@ -671,6 +745,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：拒绝新的业务发布，保留框架内部收尾入口。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：开放相位推进到 Draining，已经处于更后关闭阶段时保持原值；不等待或取消已有交付。
     pub(crate) fn begin_draining(&self) {
         let _ = self.phase.compare_exchange(
             LanePhase::Open as u8,
@@ -681,6 +759,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：进入仅允许框架内部发布的收尾阶段。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：原子推进相位且不回退 Closed；已有交付继续，内部新准入仍受容量、期限和永久错误证据限制。
     pub(crate) fn enter_internal_only(&self) {
         // 必须原子取最大值：并发 shutdown 下 load-then-store 可能被另一路的 close_until() 插入，
         // 把相位从 Closed 退回 InternalOnly，等于在已声明关闭之后重新放开内部准入。
@@ -689,7 +771,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：冻结当前全部发布责任，避免持续流量让flush追逐未来请求。
-    /// 参数说明：无。返回：仅引用此刻尚未收口的有界凭据，跨原生代次仍可观察。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅引用此刻尚未收口的有界凭据，跨原生代次仍可观察。
     pub(crate) fn capture_barrier(&self) -> ProducerBarrier {
         let admissions = self
             .admissions
@@ -701,7 +786,11 @@ impl ProducerClient {
     }
 
     /// 业务作用：等到冻结责任真实退出，再报告其中是否存在未成功交付。
-    /// 参数说明：barrier为调用时凭据集合，deadline为所有lane共用期限。
+    ///
+    /// 参数说明：
+    /// - `barrier`：barrier为调用时凭据集合。
+    /// - `deadline`：deadline为所有lane共用期限。
+    ///
     /// 返回：集合全部成功时成功，存在失败返回发布错误；超时或取消不取消原交付责任。
     pub(crate) async fn await_barrier(
         &self,
@@ -748,7 +837,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：在共同关闭期限内等待观察任务及原生队列排空。
-    /// 参数说明：deadline 为异步等待与阻塞 flush 共用的绝对期限。
+    ///
+    /// 参数说明：
+    /// - `deadline`：deadline 为异步等待与阻塞 flush 共用的绝对期限。
+    ///
     /// 返回：已接纳发布排空时成功；等待超时或原生失败返回错误。超时、取消不终止已开始的 flush，也不释放其资源责任。
     pub(crate) async fn flush_until(self: &Arc<Self>, deadline: Instant) -> Result<()> {
         // 关停/排空是投递失败风暴的自然终点：把窗口尾部还没输出的聚合数补出来，
@@ -795,7 +887,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：永久封闭全部准入，排干实际回执并释放所有原生代次，长期句柄只保留诊断状态。
-    /// 参数说明：deadline 为整次停机共享的绝对截止时刻；仅在所有消费及转发责任退出后调用。
+    ///
+    /// 参数说明：
+    /// - `deadline`：deadline 为整次停机共享的绝对截止时刻。
+    ///
     /// 返回：原生客户端真实析构后成功；超时保留关闭态和资源责任，后续调用继续等待。
     pub(crate) async fn close_until(self: &Arc<Self>, deadline: Instant) -> Result<()> {
         // 消费者及转发已经退出，先永久关闭内部准入，再等待既有请求；不能出现排空与新发送竞态。
@@ -823,7 +918,11 @@ impl ProducerClient {
     }
 
     /// 业务作用：等待已接纳发布的实际责任结束，调用者结束等待不撤销回执观察。
-    /// 参数说明：deadline 为共享关闭预算。返回：active 归零或包含本 lane 的关闭超时。
+    ///
+    /// 参数说明：
+    /// - `deadline`：deadline 为共享关闭预算。
+    ///
+    /// 返回：active 归零或包含本 lane 的关闭超时。
     async fn await_active(&self, deadline: Instant) -> Result<()> {
         loop {
             // 先登记通知再复验计数，避免最后一个回执与关闭等待交错时遗失唤醒。
@@ -839,7 +938,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：让关闭调用者识别仍未完成的物理发布域。
-    /// 参数说明：无。返回：包含当前 lane 名的超时，不能解释为未发送或已释放连接。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：包含当前 lane 名的超时，不能解释为未发送或已释放连接。
     fn close_timeout(&self) -> NafkaError {
         NafkaError::ShutdownTimeout {
             groups: Vec::new(),
@@ -848,13 +950,21 @@ impl ProducerClient {
     }
 
     /// 业务作用：拒绝关闭后重新构造或借用已经释放的原生客户端。
-    /// 参数说明：无。返回：带本 lane 身份的生命周期错误。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：带本 lane 身份的生命周期错误。
     fn closed_error(&self) -> NafkaError {
         NafkaError::Lifecycle(format!("producer lane `{}` 已关闭原生资源入口", self.lane))
     }
 
     /// 业务作用：在发布前同时预留条数、字节和实际执行责任，并用 RAII 跟踪归还。
-    /// 参数说明：internal 表示框架收尾发布；topic 用于拒绝归因；retained 为完整原文的计费字节。
+    ///
+    /// 参数说明：
+    /// - `internal`：internal 表示框架收尾发布。
+    /// - `topic`：topic 用于拒绝归因。
+    /// - `retained`：retained 为完整原文的计费字节。
+    ///
     /// 返回：持有责任的准入凭据；阶段不允许、额度不足或序号耗尽时拒绝，收尾发布同样受容量约束。
     fn admit(
         self: &Arc<Self>,
@@ -928,7 +1038,12 @@ impl ProducerClient {
     }
 
     /// 业务作用：完成请求账本与active责任，并唤醒可能只等其子集的发布屏障。
-    /// 参数说明：sequence为准入序号，retained为实际退出请求的原始字节。返回：归还同一责任的条数和字节，通知关闭和所有已冻结屏障。
+    ///
+    /// 参数说明：
+    /// - `sequence`：sequence为准入序号。
+    /// - `retained`：retained为实际退出请求的原始字节。
+    ///
+    /// 返回：归还同一责任的条数和字节，通知关闭和所有已冻结屏障。
     fn release_active(&self, sequence: u64, retained: u64) {
         let mut admissions = self
             .admissions
@@ -944,10 +1059,12 @@ impl ProducerClient {
 
     /// 业务作用：构造带 lane/topic 归因的确定性发布错误。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic 或内部操作名。
     /// - `message`: 已脱敏诊断信息。
+    ///
+    /// 返回：带 lane、topic 和原始 ToString 内容的 Publish 错误；不再脱敏，不改变准入或恢复状态，确定性由调用场景保证。
     fn publish_error(&self, topic: &str, message: impl ToString) -> NafkaError {
         NafkaError::Publish {
             lane: self.lane.to_string(),
@@ -957,7 +1074,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：为已准入请求借用当前代次，关闭前允许按恢复策略切换，关闭后只保留既有责任。
-    /// 参数说明：无。返回：仍存活的原生快照；永久错误或资源已释放时拒绝。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仍存活的原生快照；永久错误或资源已释放时拒绝。
     fn current_native(&self) -> Result<NativeProducerSnapshot> {
         if let Some((_, code, detail)) = self
             .terminal_fatal
@@ -989,7 +1109,11 @@ impl ProducerClient {
     }
 
     /// 业务作用：仅当观察代次仍是当前 fatal 代次且准入未关闭时替换客户端。
-    /// 参数说明：observed 为失败请求实际使用的代次。返回：当前可用快照，关闭后禁止重建连接。
+    ///
+    /// 参数说明：
+    /// - `observed`：observed 为失败请求实际使用的代次。
+    ///
+    /// 返回：当前可用快照，关闭后禁止重建连接。
     fn replace_fatal_native(
         &self,
         observed: &NativeProducerSnapshot,
@@ -1081,7 +1205,13 @@ impl ProducerClient {
         Ok(current.clone())
     }
 
-    /// 业务作用：在返回当前发布错误前尝试收敛 fatal generation，并追加不含凭据的诊断。
+    /// 业务作用：在返回发布错误前按 fatal 代次执行恢复裁决，并补充后续请求的处理状态。
+    ///
+    /// 参数说明：
+    /// - `message`: 已有错误文本，调用方负责避免携带凭据或业务原文。
+    /// - `observed`: 本次失败请求实际使用的原生代次快照。
+    ///
+    /// 返回：未见 fatal 时保留原文；存在 fatal 时追加切换或拒绝恢复原因。可能替换后续请求使用的代次，不重发当前记录，也不对任意文本进行脱敏。
     fn native_error_detail(&self, message: String, observed: &NativeProducerSnapshot) -> String {
         let Some((code, detail)) = native_fatal_error(observed) else {
             return message;
@@ -1099,6 +1229,13 @@ impl ProducerClient {
     }
 
     /// 业务作用：把底层错误与 fatal generation 诊断合并为稳定公共错误。
+    ///
+    /// 参数说明：
+    /// - `topic`: 当前发布目标，用于错误归因。
+    /// - `message`: 当前失败的诊断文本，不能包含业务原文或凭据。
+    /// - `observed`: 实际发生失败的原生代次。
+    ///
+    /// 返回：附加代次恢复诊断的 Publish 错误；可为后续请求切换客户端，但不自动重发本条消息。
     fn publish_native_error(
         &self,
         topic: &str,
@@ -1109,6 +1246,11 @@ impl ProducerClient {
     }
 
     /// 业务作用：记录当前 generation 的成功 delivery，并清零连续失败窗口。
+    ///
+    /// 参数说明：
+    /// - `observed`: 已收到成功回执的请求所使用的原生快照。
+    ///
+    /// 返回：恢复窗口代次匹配时清零失败次数并更新时间，再复验当前原生代次后清零认证次数；旧回执不重置新代次，不解除已保存的永久错误。
     fn note_delivery_success(&self, observed: &NativeProducerSnapshot) {
         let mut recovery = self
             .native_recovery
@@ -1128,6 +1270,11 @@ impl ProducerClient {
     }
 
     /// 业务作用：记录非 fatal 终态 delivery failure，并判断是否达到无进展切换阈值。
+    ///
+    /// 参数说明：
+    /// - `observed`: 当前失败请求实际使用的原生代次。
+    ///
+    /// 返回：同代次累计失败后，同时满足次数、无成功时长与冷却条件才为 true；旧代次为 false 且不改计数，此结果只是候选，替换前还须复验。
     fn note_stalled_failure(&self, observed: &NativeProducerSnapshot) -> bool {
         let now = Instant::now();
         let mut recovery = self
@@ -1144,7 +1291,11 @@ impl ProducerClient {
     }
 
     /// 业务作用：在写锁内复验非 fatal 无进展窗口，关闭后禁止恢复动作重建连接。
-    /// 参数说明：observed 为实际失败的代次。返回：满足恢复条件时的新快照或无需恢复，关闭时拒绝。
+    ///
+    /// 参数说明：
+    /// - `observed`：observed 为实际失败的代次。
+    ///
+    /// 返回：满足恢复条件时的新快照或无需恢复，关闭时拒绝。
     fn replace_stalled_native(
         &self,
         observed: &NativeProducerSnapshot,
@@ -1235,6 +1386,12 @@ impl ProducerClient {
     }
 
     /// 业务作用：合并终态 delivery failure、fatal 与非 fatal 无进展切换诊断。
+    ///
+    /// 参数说明：
+    /// - `message`: 当前交付失败或结果未知的原因文本。
+    /// - `observed`: 本次交付关联的稳定原生代次。
+    ///
+    /// 返回：优先处理 fatal，否则累计无进展证据并按条件尝试切换；返回补充后的诊断，不重发本条消息，也不把结果未知改为确定未交付。
     fn delivery_error_detail(&self, message: String, observed: &NativeProducerSnapshot) -> String {
         if native_fatal_error(observed).is_some() {
             return self.native_error_detail(message, observed);
@@ -1256,6 +1413,13 @@ impl ProducerClient {
     }
 
     /// 业务作用：把 delivery 错误和两级 generation 恢复诊断合并为稳定公共错误。
+    ///
+    /// 参数说明：
+    /// - `topic`: 本次发布目标，用于错误归因。
+    /// - `message`: 原始交付失败原因。
+    /// - `observed`: 该请求实际使用的原生代次。
+    ///
+    /// 返回：带 lane、topic 和恢复诊断的发布错误；可能触发后续请求的代次切换，不重发当前消息。
     fn publish_delivery_error(
         &self,
         topic: &str,
@@ -1267,11 +1431,12 @@ impl ProducerClient {
 
     /// 业务作用：记录认证、授权、fencing 等永久 producer 错误，禁止随后按无进展策略循环重建。
     ///
+    /// 参数说明：
     /// - `topic`: 当前发布目标，用于公共错误归因。
-    /// - `error`: delivery 或同步入队返回的底层稳定错误。
+    /// - `error`: delivery 或同步入队返回的原生错误证据。
+    /// - `observed`: 该请求实际使用的原生代次。
     ///
-    /// 参数说明：topic为目标，error为原生证据，observed为该请求实际使用的代次。
-    /// 返回：当前代次达到永久保护条件时返回错误；旧代次不改变新代次保护或认证计数。
+    /// 返回：当前代次达到永久保护条件时记录并返回错误；旧代次只返回授权错误，不改变保护或认证计数。其它情况返回 None，由调用者继续分类。
     fn record_terminal_error(
         &self,
         topic: &str,
@@ -1291,10 +1456,8 @@ impl ProducerClient {
         }
         let code = error.rdkafka_error_code()?;
         if is_recoverable_auth_code(code) {
-            // librdkafka 把「broker 明确拒绝认证(code 58)」和「token 刷新失败 / auth 阶段
-            // POLLHUP / 滚动重启」都映射成 `_AUTHENTICATION`(rdkafka_request.c:3388)，
-            // 无法从错误码本身区分。因此不立即 latch(否则一次抖动永久打死 lane)，
-            // 也不永不 latch(否则口令配错会无限重建)：连续 AUTH_FAILURE_LATCH 次才判永久。
+            // 单次 Authentication 不足以决定永久封闭；累计达到阈值才停止后续发布，
+            // 避免短暂认证失败立即封闭，同时限制持续认证失败下的原生客户端重建。
             let seen = self.auth_failures.fetch_add(1, Ordering::AcqRel) + 1;
             if seen < AUTH_FAILURE_LATCH {
                 return None;
@@ -1317,6 +1480,10 @@ impl ProducerClient {
     }
 
     /// 业务作用：决定本次 fire delivery 失败是否打印详细日志，并返回上一窗口聚合数。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：首次或距上次详细日志已满十秒时允许打印并取走累计数；窗口内只累计抑制数并返回 (false, 0)，本函数不输出日志。
     fn fire_failure_log_decision(&self) -> (bool, u64) {
         const WINDOW: Duration = Duration::from_secs(10);
         let now = Instant::now();
@@ -1340,6 +1507,10 @@ impl ProducerClient {
     /// 业务作用：输出并清零当前窗口累计的被抑制失败条数。
     ///
     /// 由排空/关停调用：失败风暴停止后不会再有新的 delivery 失败把尾段带出来。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：累计数非零时输出一次聚合日志；保留详细日志窗口起点，不改变交付计数或消息结果。
     fn flush_failure_log_tail(&self) {
         let suppressed = {
             let mut state = self
@@ -1358,6 +1529,12 @@ impl ProducerClient {
     }
 
     /// 业务作用：构造确定未入队的容量错误，供上层只按 variant 映射背压。
+    ///
+    /// 参数说明：
+    /// - `topic`: 被拒绝的发布目标。
+    /// - `queue`: 调用者已确认耗尽的容量类别。
+    ///
+    /// 返回：包含当前 lane 和目标的 ProducerQueueFull；不执行准入判断，不改变容量或统计。
     fn queue_full(&self, topic: &str, queue: ProducerQueue) -> NafkaError {
         NafkaError::ProducerQueueFull {
             lane: self.lane.to_string(),
@@ -1371,8 +1548,11 @@ impl ProducerClient {
 struct AdmissionGuard {
     /// 负责 active 计数的 lane。
     owner: Arc<ProducerClient>,
+    /// 本次准入在 lane 账本中的唯一序号。
     sequence: u64,
+    /// 退出前为零，退出时发布成功、失败或远端未知类别的共享凭据。
     completion: Arc<AtomicU8>,
+    /// 待发布终态：1 成功、2 失败、3 远端未知；未写回执时按失败收口。
     outcome: u8,
     /// 随实际观察者存活的原始字节，调用方取消等待不能归还。
     retained: u64,
@@ -1380,11 +1560,17 @@ struct AdmissionGuard {
 
 impl AdmissionGuard {
     /// 业务作用：保存真实回执类别，屏障不得把交付未知降为确定失败。
-    /// 参数说明：result为原生交付观察的最终结果。返回：只更新待发布终态，凭据仍在实际退出时才可见。
+    ///
+    /// 参数说明：
+    /// - `result`：result为原生交付观察的最终结果。
+    ///
+    /// 返回：只更新待发布终态，凭据仍在实际退出时才可见。
     fn record_outcome(&mut self, result: &Result<Delivery>) {
         self.outcome = match result {
             Ok(_) => 1,
-            Err(NafkaError::OutcomeUnknown { .. }) => 3,
+            Err(NafkaError::OutcomeUnknown {
+                ..
+            }) => 3,
             Err(_) => 2,
         };
     }
@@ -1392,6 +1578,10 @@ impl AdmissionGuard {
 
 impl Drop for AdmissionGuard {
     /// 业务作用：释放发布资格并通知关闭排空逻辑。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：先发布保存的终态，再移除准入账目、归还字节额度并唤醒排空等待者；未记录回执时使用默认失败类别。
     fn drop(&mut self) {
         // 完成凭据只在真实责任退出时发布，不能把调用方取消或oneshot发送当成交付完成。
         self.completion.store(self.outcome, Ordering::Release);
@@ -1401,9 +1591,11 @@ impl Drop for AdmissionGuard {
 
 /// 业务作用：把公共自有 headers 转换为底层拥有型 headers。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `headers`: 保序且允许同名重复、可空值的公共 headers。
+///
+/// 返回：复制名称和值后的原生自有 headers，保留顺序、同名项以及空值与空字节串的区别。
 fn to_owned_headers(headers: &KafkaHeaders) -> OwnedHeaders {
     headers.iter().fold(
         OwnedHeaders::new_with_capacity(headers.len()),
@@ -1418,9 +1610,11 @@ fn to_owned_headers(headers: &KafkaHeaders) -> OwnedHeaders {
 
 /// 业务作用：构造借用数据的底层发布记录；底层同步入队时完成必要复制。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `record`: 自有隔离层发布记录。
+///
+/// 返回：借用 topic、key 和 payload 的待发送记录，headers 已独立复制；保留可选分区、时间戳以及 tombstone 语义，本函数不入队。
 fn to_future_record<'a>(record: OutboundRecord<'a>) -> FutureRecord<'a, [u8], [u8]> {
     let mut native =
         FutureRecord::<[u8], [u8]>::to(record.topic).headers(to_owned_headers(record.headers));
@@ -1441,9 +1635,11 @@ fn to_future_record<'a>(record: OutboundRecord<'a>) -> FutureRecord<'a, [u8], [u
 
 /// 业务作用：返回指定底层 generation 的 fatal 诊断。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `native`: 待检查的稳定 generation 快照。
+///
+/// 返回：该快照关联客户端的 fatal 错误码和文本；没有 fatal 时返回 None，不查询其它代次，也不执行恢复。
 fn native_fatal_error(native: &NativeProducerSnapshot) -> Option<(RDKafkaErrorCode, String)> {
     native.producer.client().fatal_error()
 }
@@ -1454,27 +1650,29 @@ fn native_fatal_error(native: &NativeProducerSnapshot) -> Option<(RDKafkaErrorCo
 /// 太大则口令配错时无限重建、运维看不到确定信号。一次成功投递即清零。
 const AUTH_FAILURE_LATCH: u64 = 5;
 
-/// 业务作用：判断错误码是否属于"可能可恢复、也可能是永久拒绝"的认证类。
+/// 业务作用：识别需要累计失败证据后才封闭发布的认证错误。
 ///
-/// librdkafka 把 broker 明确拒绝(code 58)与 token 刷新失败、auth 阶段 POLLHUP、
-/// SASL 重认证失败全部映射成同一个 `_AUTHENTICATION`(rdkafka_request.c:3388)，
-/// 无法从错误码本身区分，只能靠连续次数裁决（见 `record_terminal_error`）。
+/// Authentication 由 `record_terminal_error` 累计次数；一次匹配不足以证明认证可恢复。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `code`: librdkafka 稳定错误码。
+///
+/// 返回：仅 Authentication 返回 true；其它码交给各自的错误分类，不更新计数或保护状态。
 fn is_recoverable_auth_code(code: RDKafkaErrorCode) -> bool {
     matches!(code, RDKafkaErrorCode::Authentication)
 }
 
-/// 业务作用：判断 producer 错误码是否永久不可恢复；与 consumer 分类保持同一安全边界。
+/// 业务作用：识别 producer 应立即进入永久保护的配置、授权和 fencing 错误。
 ///
 /// 本函数只收「码值唯一、语义确定」的永久错误。`Authentication` 不在其中：
 /// 它由 `is_recoverable_auth_code` 走有界 latch，避免一次抖动永久打死 lane。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `code`: librdkafka 稳定错误码。
+///
+/// 返回：命中列举的保护类别时返回 true；Authentication 使用独立累计策略，未命中不代表发布成功或必然可恢复。
 fn is_fatal_producer_code(code: RDKafkaErrorCode) -> bool {
     matches!(
         code,
@@ -1496,9 +1694,11 @@ fn is_fatal_producer_code(code: RDKafkaErrorCode) -> bool {
 
 /// 业务作用：判断同步入队错误是否为可退避的本地队列满。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `error`: 底层入队错误。
+///
+/// 返回：仅 MessageProduction 中的 QueueFull 返回 true，表示原生入队容量不足；其它错误不能据此当作队列背压重试。
 fn is_queue_full(error: &KafkaError) -> bool {
     matches!(
         error,
@@ -1508,7 +1708,12 @@ fn is_queue_full(error: &KafkaError) -> bool {
 
 /// 业务作用：持续观察真实 native 回执，并在观察终态时记录一次交付结果。
 ///
-/// 参数说明：owner 为所属 lane；native 为入队时的 producer 代次；topic 为目标；delivery 为原生回执。
+/// 参数说明：
+/// - `owner`：owner 为所属 lane。
+/// - `native`：native 为入队时的 producer 代次。
+/// - `topic`：topic 为目标。
+/// - `delivery`：delivery 为原生回执。
+///
 /// 返回：已确认的交付坐标或失败；此等待不受业务调用方的超时或取消影响。
 async fn observe_delivery(
     owner: &ProducerClient,
@@ -1589,7 +1794,16 @@ async fn observe_delivery(
 }
 
 /// 业务作用：让 fire 交付保持独立观察责任，失败日志按窗口有界聚合。
-/// 参数说明：owner 为 lane；native 为入队代次；topic 为目标；delivery 为回执；admission 与 permit 为关闭责任及容量，span随实际回执结束。
+///
+/// 参数说明：
+/// - `owner`：owner 为 lane。
+/// - `native`：native 为入队代次。
+/// - `topic`：topic 为目标。
+/// - `delivery`：delivery 为回执。
+/// - `admission`：保持本次发布的关闭责任、完成凭据和字节额度。
+/// - `permit`：保持异步交付观察者的数量额度。
+/// - `span`：span随实际回执结束。
+///
 /// 返回：真实回执终结后才释放观察额度，入队成功本身不记为交付成功。
 async fn observe_fire_delivery(
     owner: Arc<ProducerClient>,

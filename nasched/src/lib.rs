@@ -41,6 +41,10 @@ pub enum ClusterMode {
 /// 该边界允许接入不同选主实现，调度层不依赖具体租约客户端。
 pub trait LeaderGate: Send + Sync + 'static {
     /// 业务作用：返回当前节点此刻是否拥有任务触发权。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回本次触发时刻的节点资格；true 不提供持续租约、外部写 fencing 或任务执行成功证明。
     fn is_leader(&self) -> bool;
 }
 
@@ -55,7 +59,7 @@ pub struct ClusterOptions {
 /// 调度器启动选项。`#[non_exhaustive]` 要求调用方使用构造器与 `with_*` builder，新增字段不会破坏调用方。
 #[non_exhaustive]
 pub struct SchedulerOptions {
-    /// 默认集群执行配置;未设置时所有 `cluster="leader"` 任务都会跳过。
+    /// 默认 leader gate；任务未匹配分组 gate 且没有默认 gate 时，leader 任务拒绝启动。
     pub cluster: Option<ClusterOptions>,
     /// 运行记录器；默认 `NoopRecorder`（不记录）。用 `with_recorder` 设置。
     pub recorder: Arc<dyn ExecutionRecorder>,
@@ -112,17 +116,21 @@ impl SchedulerOptions {
 
     /// 业务作用：集群模式,`gate_id` 默认 `"custom"`(简单场景)。
     ///
-    /// # 参数
-    /// - `gate`: leader 判断实现,调度器只在它返回 leader 时触发 leader 任务。
+    /// 参数说明：
+    /// - `gate`：leader 判断实现,调度器只在它返回 leader 时触发 leader 任务。
+    ///
+    /// 返回：返回使用 custom 标识的集群选项及其它默认值，不执行选主或启动任务。
     pub fn clustered(gate: Arc<dyn LeaderGate>) -> Self {
         Self::clustered_with_id("custom", gate)
     }
 
     /// 业务作用：集群模式 + 稳定 `gate_id`(生产建议;同进程误换 gate 会被启动指纹发现)。
     ///
-    /// # 参数
-    /// - `gate_id`: leader gate 的稳定业务标识,会进入启动指纹。
-    /// - `gate`: leader 判断实现,调度器只在它返回 leader 时触发 leader 任务。
+    /// 参数说明：
+    /// - `gate_id`：leader gate 的稳定业务标识,会进入启动指纹。
+    /// - `gate`：leader 判断实现,调度器只在它返回 leader 时触发 leader 任务。
+    ///
+    /// 返回：返回记录标识和 gate 的集群选项，不验证稳定标识、不获取租约、不启动任务。
     pub fn clustered_with_id(gate_id: impl Into<String>, gate: Arc<dyn LeaderGate>) -> Self {
         Self {
             cluster: Some(ClusterOptions {
@@ -135,8 +143,10 @@ impl SchedulerOptions {
 
     /// 业务作用：设运行记录器(builder;不调用就是 `NoopRecorder`)。
     ///
-    /// # 参数
-    /// - `recorder`: 任务 started/finished/skipped 事件的记录器实现。
+    /// 参数说明：
+    /// - `recorder`：任务 started/finished/skipped 事件的记录器实现。
+    ///
+    /// 返回：返回替换记录器后的选项，不记录事件、不启动后台任务。
     pub fn with_recorder(mut self, recorder: Arc<dyn ExecutionRecorder>) -> Self {
         self.recorder = recorder;
         self
@@ -177,8 +187,10 @@ impl SchedulerOptions {
 
     /// 业务作用：设 misfire 巡检周期(builder;默认 30s)。
     ///
-    /// # 参数
-    /// - `interval`: 后台 misfire sweep 的执行间隔。
+    /// 参数说明：
+    /// - `interval`：后台 misfire sweep 的执行间隔。
+    ///
+    /// 返回：返回保存原间隔的选项，不校验；启动要求非零且不超过 365 天。
     pub fn with_misfire_sweep_interval(mut self, interval: Duration) -> Self {
         self.misfire_sweep_interval = interval;
         self
@@ -186,8 +198,10 @@ impl SchedulerOptions {
 
     /// 业务作用：设 misfire claim 容差 ms(builder;默认 5000)。
     ///
-    /// # 参数
-    /// - `tolerance_ms`: 判定某一拍是否可被补偿 claim 的容差毫秒数。
+    /// 参数说明：
+    /// - `tolerance_ms`：判定某一拍是否可被补偿 claim 的容差毫秒数。
+    ///
+    /// 返回：返回保存原毫秒值的选项，不校验；启动时拒绝负数。
     pub fn with_misfire_tolerance_ms(mut self, tolerance_ms: i64) -> Self {
         self.misfire_tolerance_ms = tolerance_ms;
         self
@@ -195,23 +209,24 @@ impl SchedulerOptions {
 
     /// 业务作用：注册一个分组 leader gate(builder;`group="g"` 的 leader 任务用它,负载分散到不同节点)。
     ///
-    /// # 参数
-    /// - `group`: 任务分组名,匹配 `ScheduledTask::group`。
-    /// - `gate`: 该分组使用的 leader 判断实现。
+    /// 参数说明：
+    /// - `group`：任务分组名,匹配 `ScheduledTask::group`。
+    /// - `gate`：该分组使用的 leader 判断实现。
+    ///
+    /// 返回：返回按组名插入或替换 gate 的选项；不自动清除之前登记的 group gate_id，不在此处判断领导权。
     pub fn with_group_gate(mut self, group: impl Into<String>, gate: Arc<dyn LeaderGate>) -> Self {
         self.group_gates.insert(group.into(), gate);
         self
     }
 
-    /// 业务作用：同 [`with_group_gate`](Self::with_group_gate),但额外带该 group gate 的**稳定标识** `gate_id`
-    /// (建议填该 group 的 leader lock key)→ 进启动指纹,使"同进程二次启动、同 group 名换了底层 gate"被
-    /// 通过启动指纹 fail-fast 捕获。不暴露 `nadis::Leader` 内部字段，由业务显式传入 id。
-    /// 未调用本方法而只用 `with_group_gate` 时,指纹只能确认 group 集合是否变化,不能确认底层 gate 是否替换。
+    /// 业务作用：同 [`with_group_gate`](Self::with_group_gate),但额外带该 group gate 的**稳定标识** `gate_id` (建议填该 group 的 leader lock key)→ 进启动指纹,使"同进程二次启动、同 group 名换了底层 gate"被 通过启动指纹 fail-fast 捕获。不暴露 `nadis::Leader` 内部字段，由业务显式传入 id。 未调用本方法而只用 `with_group_gate` 时,指纹只能确认 group 集合是否变化,不能确认底层 gate 是否替换。
     ///
-    /// # 参数
-    /// - `group`: 任务分组名,匹配 `ScheduledTask::group`。
-    /// - `gate_id`: 该分组 leader gate 的稳定业务标识,会进入启动指纹。
-    /// - `gate`: 该分组使用的 leader 判断实现。
+    /// 参数说明：
+    /// - `group`：任务分组名,匹配 `ScheduledTask::group`。
+    /// - `gate_id`：该分组 leader gate 的稳定业务标识,会进入启动指纹。
+    /// - `gate`：该分组使用的 leader 判断实现。
+    ///
+    /// 返回：返回同时替换该组 gate 与稳定标识的选项；不获取领导权，指纹仅比较标识而非对象身份。
     pub fn with_group_gate_id(
         mut self,
         group: impl Into<String>,
@@ -244,7 +259,11 @@ enum StartFingerprint {
 }
 
 impl SchedulerOptions {
-    /// 业务作用：生成启动参数指纹；用于避免重复启动同一个调度任务。
+    /// 业务作用：提取同进程重复启动可比较的有限配置身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：没有默认 cluster 时仅返回 Local，忽略分组 gate、FireLog 及其它选项；集群时纳入默认 gate_id、排序组名及可选 ID、FireLog 存在性与可选指纹，不比较对象、记录器或全部调度选项。
     fn fingerprint(&self) -> StartFingerprint {
         match &self.cluster {
             None => StartFingerprint::Local,
@@ -267,11 +286,12 @@ impl SchedulerOptions {
         }
     }
 
-    /// 业务作用：解析某任务应使用的 leader gate:`group=Some(g)` 且已注册 → 用 `group_gates[g]`;否则用 `cluster` 默认 gate。
-    /// 启动期为每个 `cluster=leader` 任务调用一次,把结果随任务一起带到 driver(不在触发热路径反复解析)。
+    /// 业务作用：解析某任务应使用的 leader gate:`group=Some(g)` 且已注册 → 用 `group_gates[g]`;否则用 `cluster` 默认 gate。 启动期为每个 `cluster=leader` 任务调用一次,把结果随任务一起带到 driver(不在触发热路径反复解析)。
     ///
-    /// # 参数
-    /// - `group`: 任务声明的分组名；`None` 表示未分组,直接回落到默认集群 gate。
+    /// 参数说明：
+    /// - `group`：任务声明的分组名；`None` 表示未分组,直接回落到默认集群 gate。
+    ///
+    /// 返回：组名存在且已登记时克隆该 gate，否则克隆默认 cluster gate，均无则返回 None。
     fn gate_for(&self, group: Option<&str>) -> Option<Arc<dyn LeaderGate>> {
         group
             .and_then(|g| self.group_gates.get(g))
@@ -280,12 +300,13 @@ impl SchedulerOptions {
     }
 }
 
-/// 业务作用：触发时刻判定本节点是否应执行该任务。
-/// `Local` 恒 true;`Leader` 读 gate;`Leader` 但无 gate = 不应发生(启动期已 fail-fast),保守 false。
+/// 业务作用：触发时刻判定本节点是否应执行该任务。 `Local` 恒 true;`Leader` 读 gate;`Leader` 但无 gate = 不应发生(启动期已 fail-fast),保守 false。
 ///
 /// 参数说明：
-/// - `cluster`: 当前任务的集群执行模式。
-/// - `gate`: 启动期为该任务解析出的 leader gate；本地任务可为 `None`。
+/// - `cluster`：当前任务的集群执行模式。
+/// - `gate`：启动期为该任务解析出的 leader gate；本地任务可为 `None`。
+///
+/// 返回：Local 始终返回 true；Leader 只有 gate 存在且本次本地判定为 leader 才返回 true，不做持续复验。
 fn should_run(cluster: ClusterMode, gate: &Option<Arc<dyn LeaderGate>>) -> bool {
     match cluster {
         ClusterMode::Local => true,
@@ -364,20 +385,23 @@ pub struct RunEvent<'a> {
 /// 业务实现它把运行记录落 Redis/DB。**同步、非阻塞**:实现内部应缓冲/批量/spawn 落库,
 /// 不在本方法里做阻塞 I/O;记录失败只能内部吞掉或自记日志,不得上抛影响任务。
 pub trait ExecutionRecorder: Send + Sync + 'static {
-    /// 业务作用：记录 record 事件；用于保存运行过程中的观测数据。
+    /// 业务作用：约定接收任务运行事件的同步观测入口。
     ///
-    /// # 参数
-    /// - `event`: 单次任务运行或跳过事件,包含任务名、稳定 id、节点、名义触发时间和阶段。
+    /// 参数说明：
+    /// - `event`：Started、Finished 或 Skipped 阶段的任务运行事件。
+    ///
+    /// 返回：同步提交事件供实现记录；接口没有持久确认或失败返回，实现应避免阻塞调度，不得以观测成功代替任务结果。
     fn record(&self, event: &RunEvent<'_>);
 }
 
 /// 默认实现:什么都不记。runtime 恒持有一个 recorder(默认它),避免 Option 分支。
 pub struct NoopRecorder;
 impl ExecutionRecorder for NoopRecorder {
-    /// 业务作用：记录 record 事件；用于保存运行过程中的观测数据。
+    /// 业务作用：提供不记录任务事件的默认观测实现。
     ///
-    /// # 参数
-    /// - `_`: 被忽略的运行事件；默认记录器不做任何持久化。
+    /// 参数说明: 无。
+    ///
+    /// 返回：直接忽略传入事件，不产生记录和持久副作用。
     fn record(&self, _: &RunEvent<'_>) {}
 }
 
@@ -391,18 +415,24 @@ pub struct CompositeRecorder {
 impl CompositeRecorder {
     /// 业务作用：用一组子 recorder 构造;空列表 = 等价 [`NoopRecorder`]。
     ///
-    /// # 参数
-    /// - `recorders`: 需要并行接收运行事件的子记录器列表。
+    /// 参数说明：
+    /// - `recorders`：按登记顺序同步接收同一事件的子记录器。
+    ///
+    /// 返回：返回保存该顺序的复合记录器，空列表不记录事件，不主动建立外部连接。
     pub fn new(recorders: Vec<Arc<dyn ExecutionRecorder>>) -> Self {
-        Self { recorders }
+        Self {
+            recorders,
+        }
     }
 }
 
 impl ExecutionRecorder for CompositeRecorder {
-    /// 业务作用：记录 record 事件；用于保存运行过程中的观测数据。
+    /// 业务作用：按登记顺序将任务事件分发给多个记录器。
     ///
-    /// # 参数
-    /// - `event`: 需要扇出给所有子 recorder 的运行事件。
+    /// 参数说明：
+    /// - `event`：需要分发给所有子记录器的同一运行事件。
+    ///
+    /// 返回：按顺序调用全部子记录器，每次经 safe_record 隔离普通展开；不并发，不保证调用不阻塞或记录持久。
     fn record(&self, event: &RunEvent<'_>) {
         for r in &self.recorders {
             safe_record(r.as_ref(), event); // 逐个隔离:一个子 recorder panic 不吞掉其它子 recorder
@@ -411,15 +441,21 @@ impl ExecutionRecorder for CompositeRecorder {
 }
 
 /// 业务作用：读取当前毫秒时间戳；用于调度器计算下一次触发时间。
+///
+/// 参数说明: 无。
+///
+/// 返回：返回当前 UTC 墙钟的 Unix 毫秒时间，墙钟可回退，不是单调计时器。
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// 业务作用：best-effort 调用 recorder:`catch_unwind` 隔离 panic,记录失败/ panic 不影响任务。
+/// 业务作用：将普通记录器展开限制在观测调用边界，减少对任务执行的干扰。
 ///
-/// # 参数
-/// - `recorder`: 业务注入的记录器实现。
-/// - `event`: 需要记录的运行事件。
+/// 参数说明：
+/// - `recorder`：接收事件的业务观测实现。
+/// - `event`：本次需要记录的任务运行事件。
+///
+/// 返回：同步调用记录器并捕获普通 unwind，失败记录固定任务上下文；不提供超时、异步排队或持久确认，abort 和展开载荷析构再次展开不在隔离保证内。
 fn safe_record(recorder: &dyn ExecutionRecorder, event: &RunEvent<'_>) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| recorder.record(event)));
     if r.is_err() {
@@ -430,16 +466,18 @@ fn safe_record(recorder: &dyn ExecutionRecorder, event: &RunEvent<'_>) {
     }
 }
 
-/// 业务作用：记一次"本拍未执行"(`Skipped`)事件;非阻塞、panic 隔离(同 [`safe_record`])。
+/// 业务作用：记录本次名义触发因门禁或执行条件而跳过的观测事件。
 ///
-/// # 参数
-/// - `recorder`: 记录跳过事件的 recorder。
-/// - `name`: 任务展示名。
-/// - `id`: 稳定任务 id,用于关联 claim 和 repeatable 任务。
-/// - `cluster`: 当前任务的集群模式。
-/// - `node_id`: 当前执行节点标识。
-/// - `fire_at_ms`: 本拍名义触发时间。
-/// - `reason`: 本拍被跳过的业务原因。
+/// 参数说明：
+/// - `recorder`：记录跳过事件的 recorder。
+/// - `name`：任务展示名。
+/// - `id`：稳定任务 id,用于关联 claim 和 repeatable 任务。
+/// - `cluster`：当前任务的集群模式。
+/// - `node_id`：当前执行节点标识。
+/// - `fire_at_ms`：本拍名义触发时间。
+/// - `reason`：本拍被跳过的业务原因。
+///
+/// 返回：构造 Skipped 事件后同步交给 safe_record；不执行任务，不保证记录器非阻塞或事件持久。
 #[allow(clippy::too_many_arguments)]
 fn record_skip(
     recorder: &dyn ExecutionRecorder,
@@ -458,7 +496,9 @@ fn record_skip(
             cluster,
             fire_at_ms,
             node: node_id,
-            phase: RunPhase::Skipped { reason },
+            phase: RunPhase::Skipped {
+                reason,
+            },
         },
     );
 }
@@ -552,7 +592,10 @@ fn recorded_run(
                 cluster,
                 fire_at_ms,
                 node: &node_id,
-                phase: RunPhase::Finished { status, elapsed_ms },
+                phase: RunPhase::Finished {
+                    status,
+                    elapsed_ms,
+                },
             },
         );
     })
@@ -665,18 +708,20 @@ type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait FireLog: Send + Sync + 'static {
     /// 业务作用：读取最近一次 fire；用于续跑和幂等判断。
     ///
-    /// # 参数
-    /// - `task`: 稳定任务 id,不是展示名；Redis/DB 实现通常把它作为 field 或唯一键。
+    /// 参数说明：
+    /// - `task`：跨节点共用的稳定任务 ID。
+    ///
+    /// 返回：返回借用后端的 future；成功为已认领名义时间或 None，依赖读取失败返回错误。记录表示认领事实，不证明任务完成。
     fn last_fire<'a>(&'a self, task: &'a str) -> BoxFut<'a, anyhow::Result<Option<i64>>>;
 
-    /// 业务作用：**原子 claim**:仅当现存值为空或 `< stale_before_ms` 时写入 `scheduled_at_ms` 并返回 true;否则 false。
-    /// 正常触发:`stale_before = scheduled_at`(去掉双主窗口同一拍重复);补偿:`stale_before = scheduled_at - tol`。
-    /// Redis 实现 = HASH 字段上一段 Lua(GET→比较→HSET,原子)。
+    /// 业务作用：**原子 claim**:仅当现存值为空或 `< stale_before_ms` 时写入 `scheduled_at_ms` 并返回 true;否则 false。 正常触发:`stale_before = scheduled_at`(去掉双主窗口同一拍重复);补偿:`stale_before = scheduled_at - tol`。 Redis 实现 = HASH 字段上一段 Lua(GET→比较→HSET,原子)。
     ///
-    /// # 参数
-    /// - `task`: 稳定任务 id,作为 claim 存储键。
-    /// - `scheduled_at_ms`: 本拍名义触发时间(epoch ms),claim 成功后写入存储。
-    /// - `stale_before_ms`: 旧值小于该时间才允许覆盖,用于正常去重和 misfire 补偿窗口。
+    /// 参数说明：
+    /// - `task`：跨节点共用、在本命名空间内唯一的稳定任务 ID。
+    /// - `scheduled_at_ms`：成功认领后写入的名义触发 Unix 毫秒时刻。
+    /// - `stale_before_ms`：允许替换旧认领的严格下界，只有旧值小于它时可覆盖。
+    ///
+    /// 返回：返回执行原子比较与写入的 future；缺记录或旧值严格小于 stale_before_ms 时写入 scheduled_at_ms 并返回 true，其它情况 false。后端错误返回失败，不能据此证明认领未发生；不证明业务执行成功。
     fn try_claim_fire<'a>(
         &'a self,
         task: &'a str,
@@ -684,8 +729,11 @@ pub trait FireLog: Send + Sync + 'static {
         stale_before_ms: i64,
     ) -> BoxFut<'a, anyhow::Result<bool>>;
 
-    /// 业务作用：本 FireLog 的稳定启动指纹（例如 Redis key），供 `StartFingerprint` 检测同进程
-    /// 二次启动时 FireLog 底层 key 漂移。默认 `None`(不可标识的实现 → 仅按"是否装了 FireLog"判定)。
+    /// 业务作用：本 FireLog 的稳定启动指纹（例如 Redis key），供 `StartFingerprint` 检测同进程 二次启动时 FireLog 底层 key 漂移。默认 `None`(不可标识的实现 → 仅按"是否装了 FireLog"判定)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：默认返回 None，表示未提供可比较后端身份；不影响后端读写能力。
     fn fingerprint(&self) -> Option<String> {
         None
     }
@@ -702,8 +750,10 @@ enum CronZone {
 
 /// 业务作用：把 zone 字符串解析成 [`CronZone`](复用 [`parse_fixed_offset`];与 [`build_cron_job`] 的 zone 语义一致)。
 ///
-/// # 参数
-/// - `zone`: 注解里的 cron 时区；空/`UTC`/`GMT`/`Z` 走 UTC,带 `/` 走 IANA,其余按固定 offset 解析。
+/// 参数说明：
+/// - `zone`：注解里的 cron 时区；空/`UTC`/`GMT`/`Z` 走 UTC,带 `/` 走 IANA,其余按固定 offset 解析。
+///
+/// 返回：缺省、空白、忽略大小写 UTC/GMT 或精确 Z 返回 UTC；含斜线时解析 IANA，其它按固定偏移解析。无法识别返回错误，不读取进程本地时区。
 fn resolve_cron_zone(zone: Option<&str>) -> anyhow::Result<CronZone> {
     let z = zone.map(|s| s.trim()).unwrap_or("");
     if z.is_empty() || z.eq_ignore_ascii_case("UTC") || z.eq_ignore_ascii_case("GMT") || z == "Z" {
@@ -729,26 +779,31 @@ pub struct CronPlan {
 }
 
 impl CronPlan {
-    /// 业务作用：启动期解析。croner `with_seconds_required`:**强制 6 字段含秒**(秒 分 时 日 月 周),与
-    /// `Schedule::Cron` 文档约定一致;5 字段 fail-fast(避免缺秒被静默误解)。
-    /// 失败 → Err(由调用方转启动失败)。
+    /// 业务作用：启动期解析。croner `with_seconds_required`:**强制 6 字段含秒**(秒 分 时 日 月 周),与 `Schedule::Cron` 文档约定一致;5 字段 fail-fast(避免缺秒被静默误解)。 失败 → Err(由调用方转启动失败)。
     ///
-    /// # 参数
-    /// - `expr`: 6 字段 cron 表达式。
-    /// - `zone`: 可选 cron 时区,语义同 [`resolve_cron_zone`]。
+    /// 参数说明：
+    /// - `expr`：6 字段 cron 表达式。
+    /// - `zone`：可选 cron 时区,语义同 [`resolve_cron_zone`]。
+    ///
+    /// 返回：表达式与时区都解析成功时返回计划，否则返回错误；要求 croner 的含秒字段模式，不建立 driver 或触发任务。
     fn parse(expr: &str, zone: Option<&str>) -> anyhow::Result<Self> {
         let cron = croner::Cron::new(expr)
             .with_seconds_required()
             .parse()
             .map_err(|e| anyhow::anyhow!("非法 cron 表达式 \"{expr}\"(需 6 字段含秒): {e}"))?;
         let zone = resolve_cron_zone(zone)?;
-        Ok(Self { cron, zone })
+        Ok(Self {
+            cron,
+            zone,
+        })
     }
 
     /// 业务作用：严格晚于 `after_ms` 的下一个名义触发时刻(epoch ms)。
     ///
-    /// # 参数
-    /// - `after_ms`: 基准时间(epoch ms),返回值必须严格晚于它。
+    /// 参数说明：
+    /// - `after_ms`：基准时间(epoch ms),返回值必须严格晚于它。
+    ///
+    /// 返回：返回严格晚于 after_ms 的下一个名义 Unix 毫秒时刻；时间戳无效或无后续触发时返回错误，使用计划固定的时区。
     fn next_after(&self, after_ms: i64) -> anyhow::Result<i64> {
         let after = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(after_ms)
             .ok_or_else(|| anyhow::anyhow!("非法时间戳 {after_ms}"))?;
@@ -771,8 +826,10 @@ impl CronPlan {
 
     /// 业务作用：`now_ms` 之前(含)最近的名义触发时刻;无则 `None`。croner 无 prev API,用 doubling 反向窗口。
     ///
-    /// # 参数
-    /// - `now_ms`: 当前或指定墙钟时间(epoch ms),用于查找最近一拍。
+    /// 参数说明：
+    /// - `now_ms`：当前或指定墙钟时间(epoch ms),用于查找最近一拍。
+    ///
+    /// 返回：在有界反向窗口搜索中找到结果时返回不晚于 now_ms 的名义毫秒时刻；无效时间戳或窗口内未找到返回 None，不证明全部历史都没有触发。
     fn prev_before_or_equal(&self, now_ms: i64) -> Option<i64> {
         let now = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms)?;
         match &self.zone {
@@ -789,9 +846,11 @@ impl CronPlan {
 
 /// 业务作用：doubling 反向窗口:从 `now - window` 向前迭代,取 ≤ now 的最后一个;找不到则翻倍窗口,上限 ~5 年(1830 天)。
 ///
-/// # 参数
-/// - `cron`: 已解析的 croner 表达式。
-/// - `now`: 带时区的基准时间,返回值不会晚于它。
+/// 参数说明：
+/// - `cron`：已解析的 croner 表达式。
+/// - `now`：带时区的基准时间,返回值不会晚于它。
+///
+/// 返回：从两分钟前窗口起逐次扩展至 1830 天，返回首个有结果窗口内不晚于 now 的最后已枚举时刻；每窗口至多保留 100001 项。无结果返回 None，极端时间减法越出 chrono 范围会展开。
 fn latest_before<Tz: chrono::TimeZone>(
     cron: &croner::Cron,
     now: chrono::DateTime<Tz>,
@@ -1080,13 +1139,12 @@ const MISFIRE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_MISFIRE_SWEEP_INTERVAL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 const MISFIRE_TOLERANCE_MS: i64 = 5_000;
 
-/// 业务作用：FireOnce/ClaimOnly 的 claim 以稳定 **task id** 作 key(见 [`ScheduledTask::id`];`NadisFireLog` 用它当 Redis HASH field)。
-/// 两个任务若 id 相同(= 同 `name` + 同 `cron`+`zone`)会共享同一 claim field → `scheduled_at` 序列互相覆盖/阻塞,
-/// 因此必须在启动期 fail-fast。id 已含 cron 签名，repeatable 的“同名 + 不同 cron”天然不冲突；
-/// 只有真正等价的两个任务才会触发本错误。
+/// 业务作用：FireOnce/ClaimOnly 的 claim 以稳定 **task id** 作 key(见 [`ScheduledTask::id`];`NadisFireLog` 用它当 Redis HASH field)。 两个任务若 id 相同(= 同 `name` + 同 `cron`+`zone`)会共享同一 claim field → `scheduled_at` 序列互相覆盖/阻塞, 因此必须在启动期 fail-fast。id 已含 cron 签名，repeatable 的“同名 + 不同 cron”天然不冲突； 只有真正等价的两个任务才会触发本错误。
 ///
-/// # 参数
-/// - `ids`: 本次启动收集到的 FireOnce/ClaimOnly 稳定任务 id 集合。
+/// 参数说明：
+/// - `ids`：本次启动收集到的 FireOnce/ClaimOnly 稳定任务 id 集合。
+///
+/// 返回：全部 ID 不重复时成功，发现首个重复立即返回错误；空字符串不在此处单独拒绝。
 fn ensure_unique_fireonce_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> anyhow::Result<()> {
     let mut seen = std::collections::HashSet::new();
     for id in ids {
@@ -1118,18 +1176,18 @@ pub struct SchedulerHandle;
 impl SchedulerHandle {
     /// 业务作用：查询调度库是否已经提交启动指纹。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；读取与启动、关闭共用同一把异步锁，结果不会看到提交到一半的状态。
+    /// 返回：启动指纹已登记返回 true，否则 false；与启停共用异步锁，不代表每个后台任务仍存活或当前节点拥有触发权。
     pub async fn is_running(&self) -> bool {
         START_STATE.lock().await.is_some()
     }
 
     /// 业务作用：返回当前二进制在编译期收集到的调度任务数量。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；数量包含配置为禁用的任务，是否实际触发仍由任务声明决定。
+    /// 返回：返回链接期注册表条数，包括禁用任务，不查询实际运行数量。
     pub fn declared_task_count(&self) -> usize {
         SCHEDULED_TASKS.len()
     }
@@ -1137,9 +1195,9 @@ impl SchedulerHandle {
 
 /// 业务作用：创建不带生命周期所有权的只读调度运行时句柄。
 ///
-/// # 参数
+/// 参数说明: 无。
 ///
-/// 本函数无参数；宿主应在自己的调度组件已经启动后再把句柄交给业务。
+/// 返回：返回无状态只读句柄，不启动或持有调度生命周期。
 pub const fn scheduler_handle() -> SchedulerHandle {
     SchedulerHandle
 }
@@ -1150,15 +1208,13 @@ pub const fn scheduler_handle() -> SchedulerHandle {
 //   - 其它任意返回类型 + 裸名 `Result` + 类型别名 + 自定义 `xxx::Result` → 直接忽略(裸名无法解析来源,保守忽略防误判)。
 // 故运行端不再用 trait 兜(blanket `impl<T>` 与 `impl Result` 在稳定 Rust 会冲突),改在宏展开处按真 Result 路径分派。
 
-/// 业务作用：记录一次执行的 JoinHandle/JoinSet 退出状态(带任务名上下文)。
+/// 业务作用：记录一次执行的 JoinHandle/JoinSet 退出状态(带任务名上下文)。 任务体里的 `Result::Err` 已由宏生成的 run 包装在内部打了日志;这里兜的是**另一类失败**:任务体 **panic** 或被 **cancel**(shutdown)。每次执行都用 `tokio::spawn` 跑、再看其退出码——这样一次 panic 只损失这一次执行, 不会打掉外层调度 driver(否则该任务后续周期会永久停摆),且生产里能按任务名聚合 panic 而非只靠 stderr 的 panic hook。
 ///
-/// 任务体里的 `Result::Err` 已由宏生成的 run 包装在内部打了日志;这里兜的是**另一类失败**:任务体 **panic**
-/// 或被 **cancel**(shutdown)。每次执行都用 `tokio::spawn` 跑、再看其退出码——这样一次 panic 只损失这一次执行,
-/// 不会打掉外层调度 driver(否则该任务后续周期会永久停摆),且生产里能按任务名聚合 panic 而非只靠 stderr 的 panic hook。
+/// 参数说明：
+/// - `res`：JoinSet/JoinHandle 返回的执行结果。
+/// - `name`：任务展示名,用于日志定位。
 ///
-/// # 参数
-/// - `res`: JoinSet/JoinHandle 返回的执行结果。
-/// - `name`: 任务展示名,用于日志定位。
+/// 返回：成功时不输出；取消记录低级别日志，其它 JoinError 记录错误，不重启任务或 driver。
 fn log_join(res: Result<(), tokio::task::JoinError>, name: &str) {
     match res {
         Ok(()) => {}
@@ -1169,29 +1225,21 @@ fn log_join(res: Result<(), tokio::task::JoinError>, name: &str) {
     }
 }
 
-/// 业务作用：启动所有 #[scheduled] 任务(由 #[EnableScheduling](及兼容别名 #[EnableAsync])在 main 体首部 .await 调用,此时已在 tokio runtime 内)。
+/// 业务作用：以本地默认选项启动链接期登记的调度任务。
 ///
-/// **幂等**:重复调用直接 `Ok(())`,不重复注册/重复后台 loop。
-/// **非 cron 任务用 `tokio::time` 真毫秒精度**:`tokio-cron-scheduler` 的 one-shot/repeated 内部按
-/// `Duration::as_secs()` 截断到秒 + 固定 500ms tick,`_ms` 名不副实;故 delay/every/delay+every 改为自管 tokio 任务。
-/// cron:misfire=Skip 走 `tokio-cron-scheduler`;misfire=FireOnce/ClaimOnly 走自管 `CronPlan` driver。
+/// 参数说明: 无。
 ///
-/// **两阶段 + 失败不污染启动状态**:先做全部可失败步骤(校验周期、建 cron job、起 cron 调度器),
-/// **全部成功后**才 spawn non-cron 后台 loop——避免"cron 失败但 non-cron 已在跑"的半启动;失败则保持"未启动",
-/// 使重试不被误判为"已启动"。`cron = "-"` 跳过注册。
-/// **并发安全**:持启动锁串行化,后到的并发调用要么看到已启动直接返回、要么等首启结束后真正启动,不会拿到假成功。
-///
+/// 返回：同一有限启动指纹已登记时直接成功，不重新核验全部选项或任务存活；不同指纹拒绝。首次完整初始化成功后才登记指纹；配置或调度库失败返回错误，取消等待和展开不提供事务回滚保证。
 pub async fn start_scheduled() -> anyhow::Result<()> {
     start_scheduled_with(SchedulerOptions::local()).await
 }
 
-/// 业务作用：用显式 [`SchedulerOptions`] 启动(本地或集群)。`start_scheduled()` = `start_scheduled_with(local())`。
+/// 业务作用：串行校验有限启动指纹并按选项初始化调度 driver。
 ///
-/// # 参数
-/// - `opts`: 调度器启动选项,包含本地/集群模式、记录器、misfire 和分组 gate 配置。
+/// 参数说明：
+/// - `opts`：默认与分组 gate、记录器、FireLog 和补漏选项；需调用方持有有效的后端生命周期。
 ///
-/// 启动指纹保证幂等：同配置重复调用返回 Ok；不同配置（如先 local 后 clustered，或更换
-/// gate_id)返回 Err,提示先 `shutdown_scheduled()`。校验在 spawn 任何 loop 之前完成,失败不留半启动。
+/// 返回：同一有限启动指纹已登记时直接成功，不重新核验全部选项或任务存活；不同指纹拒绝。首次完整初始化成功后才登记指纹；配置或调度库失败返回错误，取消等待和展开不提供事务回滚保证。
 pub async fn start_scheduled_with(opts: SchedulerOptions) -> anyhow::Result<()> {
     let fp = opts.fingerprint();
     let mut state = START_STATE.lock().await; // 全程持锁:start 与并发 start/shutdown 严格串行
@@ -1207,16 +1255,19 @@ pub async fn start_scheduled_with(opts: SchedulerOptions) -> anyhow::Result<()> 
         }
         None => {}
     }
-    start_scheduled_inner(&opts).await?; // 失败:state 仍 None,允许重试;`?` 把错误传给本次调用
+    // 启动失败时保留未登记状态并向调用方报告，允许后续重新尝试。
+    start_scheduled_inner(&opts).await?;
+    // 完整初始化成功后才发布启动登记；该指纹只覆盖有限身份字段，不代表所有选项相等。
     *state = Some(fp);
     Ok(())
 }
 
-/// 业务作用：把固定 offset 字符串解析为 `FixedOffset`。容忍多种写法:`+08:00` / `+0800` / `+8` / `-05:30`,
-/// 以及带 `GMT`/`UTC` 前缀的 `GMT+08:00` / `UTC+8`(剥前缀后同上)。空(仅 `GMT`/`UTC`)= 0 偏移。
+/// 业务作用：把固定 offset 字符串解析为 `FixedOffset`。容忍多种写法:`+08:00` / `+0800` / `+8` / `-05:30`, 以及带 `GMT`/`UTC` 前缀的 `GMT+08:00` / `UTC+8`(剥前缀后同上)。空(仅 `GMT`/`UTC`)= 0 偏移。
 ///
-/// # 参数
-/// - `s`: 用户配置的固定时区 offset 字符串。
+/// 参数说明：
+/// - `s`：用户配置的固定时区 offset 字符串。
+///
+/// 返回：识别 UTC/GMT 前缀和有符号时分后返回固定偏移；小时须 0 至 23、分钟 0 至 59。普通格式错误返回 None；无冒号路径按字节切分，非 ASCII 输入的切分位置非法时可能展开。
 fn parse_fixed_offset(s: &str) -> Option<chrono::FixedOffset> {
     // 剥掉可选的 GMT/UTC 前缀。
     let body = s
@@ -1464,13 +1515,22 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
             },
         };
         match task.schedule {
-            Schedule::FixedRate { period_ms: 0, .. } => {
+            Schedule::FixedRate {
+                period_ms: 0,
+                ..
+            } => {
                 anyhow::bail!("#[scheduled] 任务 {name} 的 fixed_rate_ms/every_ms 必须 > 0");
             }
-            Schedule::FixedDelay { delay_ms: 0, .. } => {
+            Schedule::FixedDelay {
+                delay_ms: 0,
+                ..
+            } => {
                 anyhow::bail!("#[scheduled] 任务 {name} 的 fixed_delay_ms 必须 > 0");
             }
-            Schedule::Cron { expr, zone } => {
+            Schedule::Cron {
+                expr,
+                zone,
+            } => {
                 // cron = "-" 表示显式禁用,跳过注册且不创建调度器。
                 if expr.trim() == "-" {
                     tracing::info!("[scheduled] cron 任务 {} 已禁用(cron=\"-\")", name);
@@ -1580,7 +1640,9 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
             gate,
         } = nc;
         let handle = match schedule {
-            Schedule::OneShot { delay_ms } => {
+            Schedule::OneShot {
+                delay_ms,
+            } => {
                 // one-shot 仅 Local(Leader+one-shot 已在阶段 1 fail-fast),无需门控。
                 tracing::info!(
                     "[scheduled] 注册一次性任务 {} (启动后 {}ms 跑一次)",
@@ -1728,7 +1790,9 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                     }
                 })
             }
-            Schedule::Cron { .. } => unreachable!("cron 已在阶段 1 处理"),
+            Schedule::Cron {
+                ..
+            } => unreachable!("cron 已在阶段 1 处理"),
         };
         handles.push(handle);
     }
@@ -1788,9 +1852,11 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 业务作用：【优雅停机】停掉所有 #[scheduled] 任务:abort non-cron 后台 loop + shutdown cron 调度器,并复位启动状态
-/// (之后可再 `start_scheduled` 重启)。**纯 Rust(无 DI)**:句柄/调度器存在进程 static,直接取出 abort/shutdown。
+/// 业务作用：撤销调度启动登记并请求停止各类触发 driver，允许后续重新启动。
 ///
+/// 参数说明: 无。
+///
+/// 返回：串行请求中止非 cron driver，尝试关闭 cron 库后清空启动指纹并成功；不等待被中止任务退出，忽略 cron 关闭错误，不能作为业务副作用已停止或全部记录落库的证明。标准锁中毒会展开。
 pub async fn shutdown_scheduled() -> anyhow::Result<()> {
     // 持启动锁:与 start_scheduled 串行,停机期间不会有并发启动穿插。
     let mut state = START_STATE.lock().await;
@@ -1804,7 +1870,7 @@ pub async fn shutdown_scheduled() -> anyhow::Result<()> {
     if let Some(mut s) = sched {
         let _ = s.shutdown().await;
     }
-    // 3. 复位指纹:允许后续用另一套配置重新启动
+    // 已请求停止触发后解除启动登记；尚未等待被中止的任务退出，后续启动可能与其清理阶段重叠。
     *state = None;
     tracing::info!("[scheduled] 已停机(non-cron loop 已 abort,cron 调度器已 shutdown)");
     Ok(())
@@ -1848,18 +1914,25 @@ mod cluster_adapter {
     }
 
     impl NadisLeaderGate {
-        /// 业务作用：业务要"nadis gate + 自定义 options" 组合时:
-        /// `SchedulerOptions::clustered_with_id(id, Arc::new(NadisLeaderGate::new(leader)))`。
+        /// 业务作用：将既有 Redis Leader 句柄适配为调度触发资格来源。
         ///
-        /// # 参数
-        /// - `leader`: 已初始化的 nadis leader 对象,本适配器只读取它的本地 leader 状态。
+        /// 参数说明：
+        /// - `leader`：已初始化的 nadis leader 对象,本适配器只读取它的本地 leader 状态。
+        ///
+        /// 返回：返回共享传入 Leader 的只读适配器，不启动选主或访问 Redis。
         pub fn new(leader: Arc<nadis::Leader>) -> Self {
-            Self { leader }
+            Self {
+                leader,
+            }
         }
     }
 
     impl LeaderGate for NadisLeaderGate {
         /// 业务作用：返回绑定的 Redis leader 当前是否仍由本进程持有。
+        ///
+        /// 参数说明: 无。
+        ///
+        /// 返回：返回绑定 Leader 的本地资格判断，不执行 Redis 往返，也不持续保护任务的后续外部写。
         fn is_leader(&self) -> bool {
             self.leader.is_leader()
         }
@@ -1869,10 +1942,10 @@ mod cluster_adapter {
     ///
     /// 存储 = **单个 HASH**:`field = 稳定 task id`(= [`crate::ScheduledTask::id`],非展示 name),`value = 已认领的名义 scheduled_at`(epoch ms)。
     /// [`try_claim_fire`](FireLog::try_claim_fire) 用一段 Lua **原子**完成「HGET→比较→HSET」:仅当字段为空
-    /// 或 `current < stale_before` 时写入 `scheduled_at` 并返回 `true`(与 trait 契约/内存版 `FakeFireLog` 同义)。
+    /// 或按 Lua 数值比较满足 `current < stale_before` 时写入 `scheduled_at` 并返回 `true`。
     /// 正常触发(`stale = scheduled_at`)去重同一拍双主;misfire 巡检(`stale = scheduled_at - tol`)补漏一拍。
     ///
-    /// **不会无界增长**:HASH 字段数 = `fire_once`/`claim_only` 任务数(linkme 静态、有界),值原地覆盖,故**无需 TTL/清理**。
+    /// 按当前链接表任务 ID 调用时字段原地覆盖；历史部署遗留 ID 不自动清理，直接调用时也不限制动态 ID 数量。
     /// `key` 由业务给(**建议含 app/namespace**,避免多服务任务名碰撞);跨进程共用同一 `key` 才能共享 claim。
     ///
     /// ```ignore
@@ -1886,7 +1959,7 @@ mod cluster_adapter {
     }
 
     // 原子 claim:KEYS[1]=HASH key;ARGV[1]=task id(field;调用方传稳定 id)、ARGV[2]=scheduled_at_ms、ARGV[3]=stale_before_ms。
-    // 语义对齐 trait 契约 + 内存版 FakeFireLog:空 或 current<stale_before → 写 scheduled_at、返 1;否则返 0。
+    // 比较与写入必须在同一脚本内完成，避免多个节点同时接纳同一名义触发。
     const CLAIM_LUA: &str = r"
 local cur = redis.call('HGET', KEYS[1], ARGV[1])
 if (not cur) or (tonumber(cur) < tonumber(ARGV[3])) then
@@ -1899,9 +1972,11 @@ return 0
     impl NadisFireLog {
         /// 业务作用：`key` = 存 claim 的 HASH key(建议含 app/namespace,如 `"myapp:scheduling:firelog"`)。
         ///
-        /// # 参数
-        /// - `client`: 已初始化的 Redis 客户端,用于执行 Lua claim 和读取 HASH。
-        /// - `key`: 存放 misfire claim 的 Redis HASH key。
+        /// 参数说明：
+        /// - `client`：已初始化的 Redis 客户端,用于执行 Lua claim 和读取 HASH。
+        /// - `key`：存放 misfire claim 的 Redis HASH key。
+        ///
+        /// 返回：返回记录客户端和 HASH 键的认领后端，不验证键、不读取或写入 Redis。
         pub fn new(client: Arc<nadis::RedisClient>, key: impl Into<String>) -> Self {
             Self {
                 client,
@@ -1911,17 +1986,21 @@ return 0
     }
 
     impl FireLog for NadisFireLog {
-        /// 业务作用：返回启动指纹。
+        /// 业务作用：返回启动指纹。 指纹使用 Redis HASH key；同进程二次启动如果换了 key,调度器能通过 `StartFingerprint` 识别状态漂移。
         ///
-        /// 指纹使用 Redis HASH key；同进程二次启动如果换了 key,调度器能通过 `StartFingerprint` 识别状态漂移。
+        /// 参数说明: 无。
+        ///
+        /// 返回：返回 HASH 键的副本；不包含 Redis 连接、数据库或部署身份，相同键不证明同一后端。
         fn fingerprint(&self) -> Option<String> {
             Some(self.key.clone())
         }
 
         /// 业务作用：读取最近一次 fire；用于续跑和幂等判断。
         ///
-        /// # 参数
-        /// - `task`: 调度任务或业务任务标识。
+        /// 参数说明：
+        /// - `task`：作为 HASH 字段的稳定任务 ID。
+        ///
+        /// 返回：返回异步 HGET future；成功为已认领的 i64 时刻或 None，读取或解码失败返回错误，不确认任务执行结果。
         fn last_fire<'a>(
             &'a self,
             task: &'a str,
@@ -1939,12 +2018,14 @@ return 0
             })
         }
 
-        /// 业务作用：尝试执行 claim fire；用于在失败时返回可处理错误。
+        /// 业务作用：通过 Redis Lua 对共享任务字段原子比较并登记名义触发认领。
         ///
-        /// # 参数
-        /// - `task`: 调度任务或业务任务标识。
-        /// - `scheduled_at_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
-        /// - `stale_before_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
+        /// 参数说明：
+        /// - `task`：跨节点共用、在本命名空间内唯一的稳定任务 ID。
+        /// - `scheduled_at_ms`：成功认领后写入的名义触发 Unix 毫秒时刻。
+        /// - `stale_before_ms`：允许替换旧认领的严格下界，只有旧值小于它时可覆盖。
+        ///
+        /// 返回：返回执行 Lua 的 future；缺记录或按 Lua tonumber 比较的旧值小于阈值时写入并将非零回复视为成功，其余 false。调用失败返回错误且可能已经执行；超出 Lua 精确整数范围时不保证 i64 比较精度。
         fn try_claim_fire<'a>(
             &'a self,
             task: &'a str,
@@ -2007,19 +2088,23 @@ return 0
     impl NadisExecutionRecorder {
         /// 业务作用：`key` = 运行记录 Stream 的 key(建议含 app/namespace)。默认保留 ~1 万条、channel 容量 8192。
         ///
-        /// # 参数
-        /// - `client`: 已初始化的 Redis 客户端,后台任务通过它写入 Stream。
-        /// - `key`: 运行记录 Stream key。
+        /// 参数说明：
+        /// - `client`：已初始化的 Redis 客户端,后台任务通过它写入 Stream。
+        /// - `key`：运行记录 Stream key。
+        ///
+        /// 返回：返回带有界通道与后台 Stream 写入任务的记录器；容量和近似保留目标均至少为 1。需要有效 Tokio 运行时，构造不等待 Redis 可用；后续写入和裁剪失败只告警，不重试或返回持久确认。
         pub fn new(client: Arc<nadis::RedisClient>, key: impl Into<String>) -> Self {
             Self::with_maxlen(client, key, DEFAULT_RUNLOG_MAXLEN)
         }
 
         /// 业务作用：同 [`new`](Self::new),但指定 stream 保留上限(`XTRIM MAXLEN ~ maxlen`)。
         ///
-        /// # 参数
-        /// - `client`: 已初始化的 Redis 客户端,后台任务通过它写入 Stream。
-        /// - `key`: 运行记录 Stream key。
-        /// - `maxlen`: Stream 近似保留条数上限,最小会兜底为 1。
+        /// 参数说明：
+        /// - `client`：已初始化的 Redis 客户端,后台任务通过它写入 Stream。
+        /// - `key`：运行记录 Stream key。
+        /// - `maxlen`：Stream 近似保留条数上限,最小会兜底为 1。
+        ///
+        /// 返回：返回带有界通道与后台 Stream 写入任务的记录器；容量和近似保留目标均至少为 1。需要有效 Tokio 运行时，构造不等待 Redis 可用；后续写入和裁剪失败只告警，不重试或返回持久确认。
         pub fn with_maxlen(
             client: Arc<nadis::RedisClient>,
             key: impl Into<String>,
@@ -2030,11 +2115,13 @@ return 0
 
         /// 业务作用：同 [`with_maxlen`](Self::with_maxlen)，并指定有界 channel 容量 `capacity`；满时丢弃以限制背压。
         ///
-        /// # 参数
-        /// - `client`: 已初始化的 Redis 客户端,后台任务通过它写入 Stream。
-        /// - `key`: 运行记录 Stream key。
-        /// - `maxlen`: Stream 近似保留条数上限,最小会兜底为 1。
-        /// - `capacity`: 本地有界 channel 容量,满时 `record` 丢弃新运行记录。
+        /// 参数说明：
+        /// - `client`：已初始化的 Redis 客户端,后台任务通过它写入 Stream。
+        /// - `key`：运行记录 Stream key。
+        /// - `maxlen`：Stream 近似保留条数上限,最小会兜底为 1。
+        /// - `capacity`：本地有界 channel 容量,满时 `record` 丢弃新运行记录。
+        ///
+        /// 返回：返回带有界通道与后台 Stream 写入任务的记录器；容量和近似保留目标均至少为 1。需要有效 Tokio 运行时，构造不等待 Redis 可用；后续写入和裁剪失败只告警，不重试或返回持久确认。
         pub fn with_capacity(
             client: Arc<nadis::RedisClient>,
             key: impl Into<String>,
@@ -2047,7 +2134,7 @@ return 0
             let key = key.into();
             let trim_every = (maxlen / 10).max(1);
             // 后台落库 task:① rx 随 recorder(tx)drop 关闭 → recv 返回 None → 退出(自清理);
-            // ② shutdown 信号 → 把已缓冲的 try_recv 干完再退，保证优雅停机不丢运行记录。
+            // ② 关闭信号使任务转为 try_recv 排队列；调用方应先停生产，写入错误只告警，不保证持久。
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
             let shutdown_drain = shutdown.clone();
             let handle = tokio::spawn(async move {
@@ -2102,13 +2189,19 @@ return 0
         }
 
         /// 业务作用：channel 满时累计丢弃的运行记录数(可观测;0 = 没丢过)。
+        ///
+        /// 参数说明: 无。
+        ///
+        /// 返回：返回 try_send 因通道满或已关闭而丢弃的累计数；不包括后台 Redis 写入失败，零值不证明全部事件持久。
         pub fn dropped(&self) -> u64 {
             self.dropped.load(std::sync::atomic::Ordering::Relaxed)
         }
 
-        /// 业务作用：优雅停机：通知后台 drain 把**已缓冲**的运行记录写完，再 await 它退出。
-        /// 用于优雅停机前确保尾部记录落库(默认 drop 路径是 best-effort,进程立即退可能丢尾部)。
-        /// 幂等:重复调用 / drop 后调用安全(handle 已 take 则直接返回);停机后再 `record` 的事件会被丢弃。
+        /// 业务作用：请求结束运行记录接收，并由取得任务句柄的调用方等待写入尝试结束。
+        ///
+        /// 参数说明: 无。
+        ///
+        /// 返回：通知后台改为排空现有队列；仅第一个取走 JoinHandle 的调用等待退出，退出错误忽略。调用方应先停止事件生产，重复调用或取消首个等待不能作为排干证明，Redis 写入失败也不会返回。
         pub async fn shutdown(&self) {
             // notify 只负责把后台 task 从 recv/select 唤醒;drain handle 用 Mutex<Option<_>> 保证只有首个调用者等待真实退出。
             self.shutdown.notify_one();
@@ -2120,10 +2213,12 @@ return 0
     }
 
     impl ExecutionRecorder for NadisExecutionRecorder {
-        /// 业务作用：记录 record 事件；用于保存运行过程中的观测数据。
+        /// 业务作用：将任务运行事件提交给有界本地观测队列。
         ///
-        /// # 参数
-        /// - `e`: 错误对象或外部错误值。
+        /// 参数说明：
+        /// - `e`：需要编码为 Stream 字段的任务运行阶段事件。
+        ///
+        /// 返回：将阶段字段复制后 try_send，队列满或关闭则丢弃、增加计数并按倍增频率告警；不执行 Redis I/O、不返回确认，后台写入仍可能失败。
         fn record(&self, e: &RunEvent<'_>) {
             let mut fields: Vec<(&'static str, String)> = vec![
                 ("task", e.task.to_owned()), // 展示名
@@ -2133,12 +2228,17 @@ return 0
             ];
             match &e.phase {
                 RunPhase::Started => fields.push(("phase", "started".to_owned())),
-                RunPhase::Finished { status, elapsed_ms } => {
+                RunPhase::Finished {
+                    status,
+                    elapsed_ms,
+                } => {
                     fields.push(("phase", "finished".to_owned()));
                     fields.push(("status", format!("{status:?}")));
                     fields.push(("elapsed_ms", elapsed_ms.to_string()));
                 }
-                RunPhase::Skipped { reason } => {
+                RunPhase::Skipped {
+                    reason,
+                } => {
                     fields.push(("phase", "skipped".to_owned()));
                     fields.push(("reason", format!("{reason:?}")));
                 }
@@ -2160,20 +2260,23 @@ return 0
         }
     }
 
-    /// 业务作用：集群模式启动:默认 `gate_id = "nadis"`。仅"一个进程只有一套 leader gate"的简单场景用;
-    /// 多 gate / 想要可辨识的启动指纹时用 [`start_scheduled_clustered_with_id`]。
+    /// 业务作用：集群模式启动:默认 `gate_id = "nadis"`。仅"一个进程只有一套 leader gate"的简单场景用; 多 gate / 想要可辨识的启动指纹时用 [`start_scheduled_clustered_with_id`]。
     ///
-    /// # 参数
-    /// - `leader`: 已初始化的 nadis leader 对象,用于构造默认集群 leader gate。
+    /// 参数说明：
+    /// - `leader`：已初始化的 nadis leader 对象,用于构造默认集群 leader gate。
+    ///
+    /// 返回：将传入 Leader 包装为 gate 后执行共享启动协议；成功与错误沿用有限指纹检查，不执行新一轮选主，也不自动安装 FireLog。
     pub async fn start_scheduled_clustered(leader: Arc<nadis::Leader>) -> anyhow::Result<()> {
         start_scheduled_clustered_with_id("nadis", leader).await
     }
 
     /// 业务作用：集群模式启动并设置稳定 `gate_id`，建议使用 leader lock key 以参与启动指纹校验。
     ///
-    /// # 参数
-    /// - `gate_id`: nadis leader gate 的稳定业务标识,会进入启动指纹。
-    /// - `leader`: 已初始化的 nadis leader 对象,用于构造集群 leader gate。
+    /// 参数说明：
+    /// - `gate_id`：nadis leader gate 的稳定业务标识,会进入启动指纹。
+    /// - `leader`：已初始化的 nadis leader 对象,用于构造集群 leader gate。
+    ///
+    /// 返回：将传入 Leader 包装为 gate 后执行共享启动协议；成功与错误沿用有限指纹检查，不执行新一轮选主，也不自动安装 FireLog。
     pub async fn start_scheduled_clustered_with_id(
         gate_id: impl Into<String>,
         leader: Arc<nadis::Leader>,

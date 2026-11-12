@@ -1,110 +1,88 @@
 # naws-proto
 
-`naws-proto` 是 NASA 长连接协议层，提供 wire schema、`WireCodec` 编解码 trait，以及 VARINT_TLV、BITPACK_TLV、JSON_BYTES 等模式的逐字节兼容实现。`naws` 在网络层收发 frame，协议细节由本 crate 处理。
+`naws-proto` 提供 ProtocolBytes 的 typed codec、已有长连接 schema 和有界字节读取。JSON_BYTES、VARINT_TLV、BITPACK_TLV 与 FAST_FIXED 的格式由调用方显式选择；本组件不决定路由权限、业务时间、投递期限或消息目标。
 
-## 协议架构
+## 编解码与网络边界
 
 ```text
-业务 schema ──→ derive 或手写 WireCodec ──→ payload 字节
-payload 字节 + Mode ──→ naws 外层 frame ──→ TCP / WebSocket
+schema + 显式 Mode → WireCodec → payload 字节
+payload + 外层 frame → naws → TCP / WebSocket
 ```
 
-本 crate 只校验并转换完整 payload，不拥有连接、鉴权、重试或指标。非法 mode、越界长度、截断字段和
-尾随字节返回 `CodecError`；外层 frame 完整性、连接观测和流量限制由 `naws` 负责。
+本组件不读取 YAML、不建立连接，也不拥有认证或重试。外层帧负责完整 payload 的边界，应用负责业务字段校验。字符串和字节字段的读取上限为 16 MiB，字符串数组最多 65536 个元素；非法长度、截断、位图和 wire type 返回 `CodecError`。
 
-业务类型优先从 `nasa::ws` 门面取得；自定义协议结构体还需要派生宏包：
+## 派生自定义 schema
 
-```toml
-[dependencies]
-nasa = { version = "2.0.0", features = ["ws"] }
-naws-proto-derive = { version = "2.0.0" }
-```
-
-## 派生消息体
+直接依赖 `naws-proto` 时，可从同一 crate 导入 `ProtocolBytes` 宏和 `WireCodec`。生成代码也支持 Cargo 依赖别名；经 `naws::proto` 或 `nasa::ws::proto` 使用时，运行时路径解析到对应门面。
 
 ```rust
-use nasa::ws::{Mode, WireCodec};
-use naws_proto_derive::ProtocolBytes;
+use naws_proto::{Mode, ProtocolBytes, WireCodec};
+use serde::{Deserialize, Serialize};
 
-#[derive(ProtocolBytes)]
-struct ChatMessage {
-    room_id: i64,
-    content: String,
+#[derive(Default, Serialize, Deserialize, ProtocolBytes)]
+struct Sample {
+    #[proto(tag = 10)]
+    sequence: i64,
+    #[proto(tag = 20)]
+    reading: f64,
 }
 
-fn encode(msg: &ChatMessage) -> anyhow::Result<Vec<u8>> {
-    Ok(msg.encode(Mode::BitpackTlv)?)
-}
+let sample = Sample { sequence: 7, reading: 1.5 };
+let bytes = sample.encode(Mode::FastFixed)?;
+let decoded = Sample::decode(Mode::FastFixed, &bytes)?;
 ```
 
-## 手动解码
+字段必须显式标注唯一的非零 tag，具名结构体最多 64 个字段，需要 `Default`、`Serialize` 和 `Deserialize`。当前 derive 支持 `i8`、`i16`、`i32`、`i64`、`u16`、`bool`、`f32`、`f64`、`Option<String>`、`Option<Vec<u8>>`、`Option<Vec<Option<String>>>`。其它集合、嵌套、枚举、可空数值和泛型结构体不在当前 derive 类型集合中。
 
-```rust
-use nasa::ws::{Mode, WireCodec};
+## 各模式的合同
 
-fn decode(bytes: &[u8]) -> anyhow::Result<ChatMessage> {
-    Ok(ChatMessage::decode(Mode::BitpackTlv, bytes)?)
-}
-```
-
-## JSON_BYTES 场景
-
-JSON_BYTES 适合需要与 JSON 网关、socket.io 兼容层或调试工具交互的消息。结构体仍通过 serde 控制字段名和默认值。
-
-```rust
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JsonPayload {
-    user_id: i64,
-    display_name: String,
-}
-```
-
-## 边界
-
-- 本 crate 只处理字节协议，不启动 TCP/WebSocket 服务。
-- 修改 schema 时必须保持字段 tag、顺序、可空性和 mode ordinal 的线协议兼容。
-- 业务项目通常通过 `naws::proto` 或 `nasa::ws::proto` 使用。
-
-## 行为边界
-
-- JSON_BYTES / VARINT_TLV / BITPACK_TLV 三模式 round-trip 稳定(含 CJK、负数、bytes);FAST_FIXED 未实现,编码解码均返回 `Unsupported`。
-- **`Some("")` 与 `None` 归一**:字符串数组元素的空串与 null 在全部模式下同编码,解码一律还原为 `None`;业务不要依赖 `Some("")` round-trip。
-- 防御性解码：varint ≤10 字节、声明长度/count 不超剩余字节、单字段 ≤16MiB、单数组 ≤65536 元素、
-  尾随字节报错；截断或噪声输入返回错误，不触发 panic。
-- TLV 无总长度字段:截断恰落在字段边界时前缀仍可解码(后续字段按缺省),字段中间截断必报错——依赖外层帧长度保证完整性。
-
-## YML 配置与使用
-
-`naws-proto` 不读取 yml。协议模式和消息 schema 应由代码显式选择；运行期网络配置放在 `naws` 的 `ws:` 段。
-
-推荐把默认协议模式写入应用配置，启动时映射为 `Mode`：
-
-```yaml
-ws:
-  protocol:
-    default_mode: BitpackTlv
-    max_frame_bytes: 16777216
-```
-
-字段说明：
-
-| 键 | 说明 |
+| 模式 | 布局与限制 |
 | --- | --- |
-| `default_mode` | 编码消息时默认使用的 wire 模式，可映射为 `Mode::BitpackTlv`、`Mode::VarintTlv` 或 `Mode::JsonBytes`。 |
-| `max_frame_bytes` | 网络层帧大小上限；由 `naws` 使用，本 crate 只处理 payload 编解码。 |
+| JSON_BYTES | 使用 serde 字段名称和属性，UTF-8 JSON；自定义 schema 的 JSON 映射由 serde 定义 |
+| VARINT_TLV | 按 tag 排序写 key 与 value；可空字段缺失时不写，未知字段按 wire type 跳过 |
+| BITPACK_TLV | 按 tag 排序确定存在位，位图采用小端；禁止 schema 外的位和尾随字节 |
+| FAST_FIXED | 按 tag 排序连续写小端基础类型，解码必须恰好等于 schema 总长度；任何可空或变长字段均返回 `Unsupported` |
 
-使用代码：
+FAST_FIXED 中 bool/i8 为 1 字节，i16/u16 为 2 字节，i32/f32 为 4 字节，i64/f64 为 8 字节。空 schema 合法，编码为空字节。包含字符串的已有 `Message`、`AuthRequest` 等 schema 不满足固定布局，调用其 FAST_FIXED 入口仍会拒绝。
+
+二进制模式的有符号整数使用 ZigZag（FAST_FIXED 使用原始补码），u16 使用无符号值，对应 Java 的 char 字段二进制布局；JSON 默认是数值，并不自动转换为 Java 字符串。TLV 浮点使用规范 NaN 位模式，FAST_FIXED 保留原始浮点位；JSON 非有限浮点的行为由 serde 决定，不能依赖其无损往返。窄整数超出 schema 位宽返回 `VarintOverflow`，不会截断。
+
+VARINT_TLV 在字段边界结束时，缺失字段保留 `Default`；不能据此检测整条消息被截去若干完整字段，完整性由外层 framing 保证。BITPACK_TLV 与 FAST_FIXED 依赖双方 schema 一致，修改字段集合、类型或排序时必须协调协议合同。
+
+## 已有 schema 与跨语言映射
+
+已有 `Message`、`AuthRequest`、`AuthResponse`、`CloseReason`、`ClusterEvent` 保留既有 tag 和 JSON 属性。内置 byte[] 的 JSON 映射使用有符号字节；自定义 `Vec<u8>` 的 serde 默认映射不会自动继承这一规则。字符串数组元素的空串和 null 在现有内置 schema 中按约定归一，业务不应依赖空串元素与 null 的区别。
+
+派生宏只生成字节转换，不校验业务身份、时间戳、授权版本和领域状态。应用应在自己的模型与准入边界处理这些不变量。
+
+## 动态 schema 与 JSON 边界
+
+`dynamic::SchemaPlan` 将封闭的 `SchemaDescriptor` 目录编译为可共享的不可变计划。它支持
+基础数值、可空字段、字符串、字节、枚举、单层集合和嵌套对象，拒绝循环引用、任意代码与网络类型加载。
+每份计划固定一个 Mode，嵌套对象使用同一模式。FAST_FIXED 仍只接受不可空的定宽基础字段。
 
 ```rust
-let mode = match cfg.ws.protocol.default_mode.as_str() {
-    "BitpackTlv" => nasa::ws::Mode::BitpackTlv,
-    "VarintTlv" => nasa::ws::Mode::VarintTlv,
-    "JsonBytes" => nasa::ws::Mode::JsonBytes,
-    other => anyhow::bail!("unsupported protocol mode: {other}"),
-};
+use naws_proto::{Mode, dynamic::{Limits, SchemaDescriptor, SchemaPlan}};
+use std::collections::BTreeMap;
 
-let bytes = message.encode(mode)?;
+let schema: SchemaDescriptor = serde_json::from_str(r#"{
+  "schemaId":"sample",
+  "fields":[{"tag":1,"name":"number","type":{"kind":"i64"}}]
+}"#)?;
+let catalog = BTreeMap::from([(schema.schema_id.clone(), schema)]);
+let plan = SchemaPlan::compile("sample", &catalog, Mode::BitpackTlv, Limits::default())?;
+let object = plan.import_json(br#"{"number":9223372036854775807}"#)?;
+let bytes = plan.encode(&object)?;
+let decoded = plan.decode(bytes)?;
+let json = plan.export_json(&decoded)?;
 ```
 
-协议字段类型、字段顺序和是否可空不应交给 yml 动态控制，必须保持在结构体定义中。
+默认预算为消息 1 MiB、引用深度 8、展开字段 4096 和动态值 65536；每个字段还可限制字节数与集合元素数。
+JSON 导入拒绝重复键、超深结构和整数窄化溢出；i64 保留整数词法精度。二进制字节字段可共享输入 Bytes，
+对象、集合和字符串仍有分配，JSON 转换也会构造中间值，不承诺整个过程零拷贝。
+
+动态 JSON 遵循 ProtocolBytes 字段映射：直接 byte[] 是有符号字节数组，集合里的 byte[] 是 Base64 字符串；
+char 是单个 UTF-16 单元的字符串，孤立 surrogate 拒绝。空引用按约定省略，NaN 与 Infinity 使用明确字符串。
+Java JSON 解码可能将负零归一为正零，JSON 转换不保证保留浮点原始位；需要保留 NaN 原始位时使用合法
+FAST_FIXED schema。VARINT/BITPACK 的零长度集合元素归一为 null，不能区分空字节、空字符串和 null。
+`import_json` 与 `export_json` 不改变计划模式，只在 HTTP 或配置边界转换同一 schema 的表示。

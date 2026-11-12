@@ -19,7 +19,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
       # 必须使用清单声明的最低 Rust 版本覆盖完整 feature 图。
-      - run: cargo check --workspace --all-features
+      - run: python3 .github/scripts/verify-workspace-sources.py
+      - run: cargo check --workspace --all-features --locked
 
   nafka-policy:
     name: facade feature isolation
@@ -70,7 +71,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
-      # workspace 与 registry 可以同时存在同名 nafka；按 manifest 分开选择，避免 -p 把依赖来源误判为歧义。
+      # 组件构建必须使用同一工作区来源，避免同名 registry 实现掩盖源码接口差异。
+      - run: python3 .github/scripts/verify-workspace-sources.py
       - run: cargo clippy --manifest-path nafka/Cargo.toml --all-targets -- -D warnings
       - run: cargo clippy --manifest-path naws/Cargo.toml --features kafka --all-targets -- -D warnings
       - run: cargo test --manifest-path nafka/Cargo.toml
@@ -98,12 +100,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
       # 全 feature 下运行 clippy(-D warnings 由 RUSTFLAGS 生效),覆盖所有可选模块。
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo build --workspace --all-features
+      - run: python3 .github/scripts/verify-workspace-sources.py
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo build --workspace --all-features --locked
       # 产品工作区只执行随源码发布的目标与文档示例。
-      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --all-features --locked
       # 公开 API 文档是当前合同的一部分，缺失项和失效链接均阻止发布。
-      - run: RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
+      - run: RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --all-features --no-deps --locked
+      # 实际归档必须编译并保留公开资源；配套源码构建不代表 registry 版本已经可用。
+      - run: python3 .github/scripts/package-workspace.py --target-dir target/archive
       # 每个归档必须携带其声明许可对应的正文和名称声明，不能给 Apache 单许可组件增加未授权许可。
       - name: verify archive notices
         shell: bash

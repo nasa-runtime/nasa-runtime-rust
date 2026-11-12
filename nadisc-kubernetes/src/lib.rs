@@ -149,7 +149,10 @@ struct Slice {
 }
 
 /// 业务作用：接受控制器以 null 或数组表达的空 EndpointSlice 字段。
-/// 参数说明：`deserializer` 读取完整响应中的端点或端口列表。
+///
+/// 参数说明：
+/// - `deserializer`：读取完整响应中的端点或端口列表。
+///
 /// 返回：null 成为空列表；缺席字段、错误类型或非法成员仍使整份响应解码失败。
 fn deserialize_slice_list<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
 where
@@ -198,7 +201,9 @@ struct ListMetadata {
 
 impl KubernetesConfig {
     /// 业务作用：在认证文件和网络访问前校验完整 Service 作用域及预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：静态配置有效时成功，非法绑定和容量拒绝构造。
     pub fn validate(&self) -> Result<()> {
         if self.services.is_empty()
@@ -247,7 +252,10 @@ impl KubernetesConfig {
 
 impl KubernetesProvider {
     /// 业务作用：在首个网络操作前校验作用域并加载显式认证材料。
-    /// 参数说明：`config` 包含精确 Service/端口映射，认证来源不得隐式回退。
+    ///
+    /// 参数说明：
+    /// - `config`：包含精确 Service/端口映射，认证来源不得隐式回退。
+    ///
     /// 返回：无后台任务的只读 adapter；不安全认证模式和非法范围拒绝。
     pub async fn new(config: KubernetesConfig) -> Result<Self> {
         config.validate()?;
@@ -279,7 +287,10 @@ impl KubernetesProvider {
     }
 
     /// 业务作用：为每次请求读取既定 token 来源，支持 ServiceAccount 文件轮换。
-    /// 参数说明：`url` 是已限制 scope 的 API 路径。
+    ///
+    /// 参数说明：
+    /// - `url`：是已限制 scope 的 API 路径。
+    ///
     /// 返回：包含当前认证材料的只读请求；既定 token 来源不可用返回认证失败，凭据不进入诊断或查询串。
     async fn request(&self, url: Url) -> Result<RequestBuilder> {
         if self.closed.load(Ordering::Acquire) {
@@ -331,7 +342,12 @@ impl KubernetesProvider {
     }
 
     /// 业务作用：构造只读 namespaced 资源地址，不扩大到集群目录。
-    /// 参数说明：`binding` 是明确 Service，`slices` 选择 EndpointSlice 集合，`collection` 选择 Service 集合 watch。
+    ///
+    /// 参数说明：
+    /// - `binding`：是明确 Service
+    /// - `slices`：选择 EndpointSlice 集合
+    /// - `collection`：选择 Service 集合 watch。
+    ///
     /// 返回：已经逐段转义的 API URL。
     fn url(&self, binding: &ServiceBinding, slices: bool, collection: bool) -> Result<Url> {
         let mut url = self.server.clone();
@@ -359,7 +375,10 @@ impl KubernetesProvider {
     }
 
     /// 业务作用：取得严格限定作用域的服务映射。
-    /// 参数说明：`service` 是本地服务别名。
+    ///
+    /// 参数说明：
+    /// - `service`：是本地服务别名。
+    ///
     /// 返回：明确 namespace、Service、端口及地址族。
     fn binding(&self, service: &str) -> Result<&ServiceBinding> {
         self.config.services.get(service).ok_or_else(|| {
@@ -371,7 +390,10 @@ impl KubernetesProvider {
     }
 
     /// 业务作用：读取 Service UID 和接流政策，避免同名重建后使用旧 EndpointSlice。
-    /// 参数说明：`binding` 是明确 Service 目标。
+    ///
+    /// 参数说明：
+    /// - `binding`：是明确 Service 目标。
+    ///
     /// 返回：当前 Service 或真实 404 缺失；权限失败不当作空服务。
     async fn service(&self, binding: &ServiceBinding) -> Result<Option<Service>> {
         let request = self.request(self.url(binding, false, false)?).await?;
@@ -383,7 +405,10 @@ impl KubernetesProvider {
     }
 
     /// 业务作用：原子收集完整分页结果，限制累计字节并核对列表游标一致性。
-    /// 参数说明：`binding` 限定 namespace 和 Service 标签。
+    ///
+    /// 参数说明：
+    /// - `binding`：限定 namespace 和 Service 标签。
+    ///
     /// 返回：全部 EndpointSlice 与原始 opaque resourceVersion；分页错误不返回部分候选。
     async fn slices(&self, binding: &ServiceBinding) -> Result<(Vec<Slice>, String)> {
         let mut continuation = String::new();
@@ -441,7 +466,12 @@ impl KubernetesProvider {
     }
 
     /// 业务作用：把 Service 所有权、端口和 EndpointSlice 条件转换为保守接流集合。
-    /// 参数说明：`binding` 提供受信端口与地址族，`service` 是前后复验的 Service，`slices` 是完整列表。
+    ///
+    /// 参数说明：
+    /// - `binding`：提供受信端口与地址族
+    /// - `service`：是前后复验的 Service
+    /// - `slices`：是完整列表。
+    ///
     /// 返回：去重后的实例；已确认 Service 身份、来源或端口不符时撤销旧证据，重复记录资格冲突使用更严格状态。
     fn project(
         &self,
@@ -586,7 +616,12 @@ impl KubernetesProvider {
     }
 
     /// 业务作用：监听已观察资源的后续变化，只用于触发完整重读。
-    /// 参数说明：`binding` 是固定目标，`slices` 选择资源类型，`version` 是后端 opaque 游标。
+    ///
+    /// 参数说明：
+    /// - `binding`：是固定目标
+    /// - `slices`：选择资源类型
+    /// - `version`：是后端 opaque 游标。
+    ///
     /// 返回：对象变化或同步失败；bookmark 不更新健康期限。
     async fn watch(&self, binding: &ServiceBinding, slices: bool, version: &str) -> Result<()> {
         let mut url = self.url(binding, slices, true)?;
@@ -617,7 +652,10 @@ impl KubernetesProvider {
 #[async_trait::async_trait]
 impl ManagedProvider for KubernetesProvider {
     /// 业务作用：以真实 API 与查询过滤条件识别服务集合，使本地别名不改变后端身份。
-    /// 参数说明：`service` 是已声明的服务别名。
+    ///
+    /// 参数说明：
+    /// - `service`：是已声明的服务别名。
+    ///
     /// 返回：包含规范化 API 地址、namespace、Service、命名端口和地址族的键；未知别名返回错误，不包含认证材料。
     fn service_key(&self, service: &str) -> Result<String> {
         let binding = self.binding(service)?;
@@ -637,7 +675,10 @@ impl ManagedProvider for KubernetesProvider {
     }
 
     /// 业务作用：保留 Service 与目标对象的代次，避免地址复用使新旧端点共享公开身份。
-    /// 参数说明：`instance` 来自本 provider 已验证的 TCP EndpointSlice 投影。
+    ///
+    /// 参数说明：
+    /// - `instance`：来自本 provider 已验证的 TCP EndpointSlice 投影。
+    ///
     /// 返回：包含 API 地址、Service UID、目标 UID、地址族、规范化地址、端口及 TCP 协议的稳定键；无目标 UID 时显式采用 Service 代次内的地址身份，不能区分该代次内无 UID 的地址复用。
     fn instance_key(&self, instance: &Instance) -> String {
         let service_uid = instance
@@ -681,7 +722,9 @@ impl ManagedProvider for KubernetesProvider {
     }
 
     /// 业务作用：声明只读后端健康发现，禁止业务误以为可以注册 Kubernetes 实例。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：本 adapter 不提供注册能力。
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -692,7 +735,9 @@ impl ManagedProvider for KubernetesProvider {
     }
 
     /// 业务作用：在精确服务范围验证 API 权限，不申请 Pod、Node、Secret 访问。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：每个绑定可完整读取；目标暂时不存在也可以准备完成。
     async fn prepare(&self) -> Result<()> {
         for service in self.config.services.keys() {
@@ -702,7 +747,10 @@ impl ManagedProvider for KubernetesProvider {
     }
 
     /// 业务作用：读取 Service、分页端点并复验 Service 代次，防止同名重建混用。
-    /// 参数说明：`service` 是明确服务别名。
+    ///
+    /// 参数说明：
+    /// - `service`：是明确服务别名。
+    ///
     /// 返回：完整候选；分页未完成、权限不足及 Service 变化均拒绝发布。
     async fn observe(&self, service: &str) -> Result<ProviderSnapshot> {
         let binding = self.binding(service)?;
@@ -748,7 +796,9 @@ impl ManagedProvider for KubernetesProvider {
     }
 
     /// 业务作用：提供不占用普通请求信号量的长观察上限。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：watch 和完整重读分别计时。
     fn change_wait_timeout(&self) -> Option<Duration> {
         Some(Duration::from_millis(
@@ -757,14 +807,19 @@ impl ManagedProvider for KubernetesProvider {
     }
 
     /// 业务作用：同时观察 Service 和 EndpointSlice 时按两个实际长连接计费。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：两个额度；额度不足时 owner 仍可通过周期完整查询取得证据。
     fn change_wait_streams(&self) -> u32 {
         2
     }
 
     /// 业务作用：同时感知 Service 政策与 EndpointSlice 成员变化。
-    /// 参数说明：`service` 必须与已发布完整观察使用同一绑定。
+    ///
+    /// 参数说明：
+    /// - `service`：必须与已发布完整观察使用同一绑定。
+    ///
     /// 返回：任一资源变化后退出并取消另一 watch，交给 owner 全量复验。
     async fn wait_for_change(&self, service: &str) -> Result<()> {
         let binding = self.binding(service)?;
@@ -782,14 +837,18 @@ impl ManagedProvider for KubernetesProvider {
     }
 
     /// 业务作用：枚举本连接声明的服务别名，不扫描 namespace 中其他资源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：冻结的显式绑定列表。
     async fn services(&self) -> Result<Vec<String>> {
         Ok(self.config.services.keys().cloned().collect())
     }
 
     /// 业务作用：关闭 API 传输并清除 watch 游标。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：owner 已取消在途观察，后续请求拒绝。
     async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::Release);
@@ -803,7 +862,10 @@ impl ManagedProvider for KubernetesProvider {
 }
 
 /// 业务作用：限制 namespaced 绑定中的资源与端口名称，拒绝路径语义字符。
-/// 参数说明：`value` 是 Kubernetes DNS label。
+///
+/// 参数说明：
+/// - `value`：是 Kubernetes DNS label。
+///
 /// 返回：仅接纳长度有限且首尾为字母数字的名称。
 fn dns_label(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -816,31 +878,41 @@ fn dns_label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 /// 业务作用：设置一次 API 请求的默认期限。
+///
 /// 参数说明：无。
+///
 /// 返回：三秒预算。
 fn request_timeout() -> u64 {
     3000
 }
 /// 业务作用：设置 watch 默认最大连续等待。
+///
 /// 参数说明：无。
+///
 /// 返回：三十秒预算，不作为健康证明期限。
 fn watch_timeout() -> u64 {
     30000
 }
 /// 业务作用：限制完整分页同步的累计字节。
+///
 /// 参数说明：无。
+///
 /// 返回：四 MiB 上限。
 fn byte_limit() -> usize {
     4 * 1024 * 1024
 }
 /// 业务作用：限制一项服务同步期间检查的地址数。
+///
 /// 参数说明：无。
+///
 /// 返回：四千零九十六条地址。
 fn instance_limit() -> usize {
     4096
 }
 /// 业务作用：要求 API 分页，避免单页无界增长。
+///
 /// 参数说明：无。
+///
 /// 返回：每页二百五十个 EndpointSlice。
 fn page_size() -> usize {
     250

@@ -49,6 +49,12 @@ Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可；
 
 ## 命名资源运行架构
 
+业务结构化指标通过 `Application::register_metrics_source` 汇入同一个 MetricHub。
+标签集合会随运行状态出现的来源可在 UserHook 调用
+`Application::register_metrics_source_reserved(source, worst_case_series)`，在登记描述符时一次预留
+全部允许标签组合和直方图 bucket/sum/count 展开的最坏序列数。容量不足或目录冲突会拒绝整个登记，
+空初始样本不减小预留；Ready 后不能新登记来源。来源仍须自行限制标签集合，预留不会使无界标签合法。
+
 ```text
 Service：配置与 feature 校验 → 来源启动 → UserHook 登记计划
          → Prepare 迁移与命名资源装配 → initializer 取得句柄
@@ -476,6 +482,21 @@ Service 与 Batch 都可使用静态迁移计划。业务直接依赖 `linkme`�
 Batch 的 DB Prepare 早于静态 initializer 和工作负载 UserHook，因此必须用静态计划参与自动迁移门禁；
 在工作负载中调用 `configure_migrations` 会被拒绝。声明静态计划时必须同时声明 `"db"` 组件，
 迁移失败会阻止 initializer 与工作负载执行。
+
+### 显式关闭可选 MQ 来源
+
+组件已编入并在 application 宏中声明，但当前部署不需要对应来源时，可使用严格关闭声明：
+
+```yaml
+redis:
+  enabled: false
+kafka:
+  enabled: false
+```
+
+关闭块只能包含布尔 `enabled: false`，不能同时保留连接、消费或派生计划。关闭时不创建该来源的客户端、健康任务或来源指标；资源查询和依赖该来源的消费计划仍会失败，不产生隐式默认客户端。Kafka 的静态 consumer 声明也不能指向关闭的来源。
+
+省略 `enabled` 保留既有单源/多源行为；单源 `kafka` 和 Redis 根可以显式写 `enabled: true`，其它字段仍须满足原有完整配置校验。`kafka` 与 `kafkas` 始终互斥。组件已经声明却缺少配置根，不等同于显式关闭。此开关属于启动配置，不提供运行期重建连接或热切换来源。
 
 ### Redis 单源
 
@@ -1303,6 +1324,10 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 槽预算、控制部分结果与静态成员身份约束见 [nafka 组内多消费者](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#组内多消费者)。
 槽数变更与其它 Kafka 运行配置一样需要重启。
 
+`KafkaHandle::transact_on_assignment` 以实际单分区分配决定稳定事务 producer 的初始化，空分配备用实例不触发 fencing；资源仍归同一 Kafka 组件两段停机管理。组分配、原生初始化与事务 commit 各自有明确失败语义，详见 [nafka 的事务合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#单分区事务主备)。只读 Admin 同时提供 `read_committed_page`，用于固定已提交边界内的有界恢复。
+
+Kafka 原生 `properties` 可使用 `[{ name, value }]` 列表；naml 严格配置应使用这种形式，点号留在 `name` 的字符串值中，不放入字段名。旧映射形式的公共类型和独立配置入口保持可用，同名重复属性均拒绝。
+
 `KafkaHandle` 提供 client lifecycle/readiness、`ProducerLane`、group health/assignment/position、`group_slots_health`、`group_readiness`、
 pause/resume、seek、逐目标 `control_partitions` 报告、动态 subscribe/unsubscribe、人工 restart，以及受管 admin 的只读 metadata、位点观测与 topic 合同核验；`KafkaAdmin::client_name()` 可复验管理操作的 client 归属。它不会
 返回原始 `KafkaProxy`、consumer registry、`connect` 或
@@ -1357,6 +1382,14 @@ Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选�
 
 同时启用 `application,web` feature 并声明 `#[nasa::application("web")]` 后，`"web"` 组件独占明文
 TCP listener、协议判定、连接容量、路由服务图与停机排空。在这些前提成立时，业务只需设置
+`ws.enabled` 默认为 `true`。设为 `false` 时不执行长连接 builder 定制，不建立 TCP/WebSocket
+监听、集群消费和发送器，不登记长连接就绪贡献；`ws_addr()` 返回空值，`ws_sender()` 返回未就绪。
+开关在启动时冻结，修改后需重启应用。其它受管组件仍按各自配置运行。
+
+`server.enabled` 默认为 `true`。设为 `false` 时不构造 HTTP 路由运行时、不登记其就绪贡献、
+不绑定 HTTP 端口；应用的其它受管组件照常运行。该开关在启动时冻结，修改后需要重启；
+依赖 Web listener 的注册或指标出口必须改用已启用的独立监听。
+
 `server.http2.enabled=true` 即可接受 h2c，其余 HTTP/2 transport 字段均可省略。HTTP/2 不依赖
 `grpc` 或其它 feature 的传递依赖：`enabled=false` 时只接受 HTTP/1.0/1.1；显式开启后，同一端口按
 HTTP/2 固定前言接受 h2c prior knowledge，并继续兼容 HTTP/1。该 listener 不实现 `Upgrade: h2c`，
@@ -1468,6 +1501,36 @@ Ready 安装的路由覆盖合同会继续约束运行期策略更新：`PolicyR
 `napp_authz_unmatched_denied_total` 两 counter 与 `napp_authz_routes_covered`、
 `napp_authz_routes_uncovered` 两 gauge，仅在装配授权层时注册)，也可经
 `unmatched_observed_total()` / `unmatched_denied_total()` 直接读取。
+
+## HTTP 幂等身份与重放
+
+Web 幂等层在认证授权之后工作。没有 `Idempotency-Key` 时请求透传；有键时必须具有已认证的
+subject 或 client 身份，后端按租户、主体、稳定路由及客户端键确定占位范围。请求指纹按长度分隔
+方法、稳定路由、实际 URI 路径、原始查询串、Content-Type 与正文，再计算 SHA-256。
+同一路由模板的不同资源路径不能重放彼此的响应；不同路径编码、查询顺序或正文空白也可能形成不同指纹。
+
+超长命名空间与以 `overflow-sha256:` 开头的原始文本都进入摘要表示，避免普通租户名称与另一租户的
+摘要文本重名。使用同一幂等存储的所有实例必须采用一致的命名空间与指纹算法；不兼容的算法不能混用。
+切换算法前需要停止旧入口并核对未决业务结果，等待原记录安全到期或完成显式迁移；不得通过清空占位
+绕过未知结果保护。该中间件不提供持久记录自动迁移。
+
+相同键和指纹已完成时重放，仍在执行时返回 409，指纹不同返回 422。取得执行权后，取消或异常不会
+自动放弃占位；完成确认失败也不能证明业务未提交。仅缓存容量有界的正文与固定头白名单，不能代替
+业务事务幂等；加密路由拒绝携带幂等键的请求，避免重放旧密文。
+
+English: HTTP idempotency runs after authentication and authorization. Requests without a key pass through.
+Keyed requests require an authenticated subject or client. The reservation namespace includes tenant, principal,
+stable route and client key. The SHA-256 fingerprint length-delimits method, stable route, actual URI path,
+raw query, Content-Type and body. Different resource paths under one route template cannot replay each other.
+Path encoding, query order and body whitespace remain significant. Long namespaces and original values beginning
+with `overflow-sha256:` are hashed to keep raw names separate from digest representations.
+All instances sharing a store must use compatible namespace and fingerprint algorithms. Before changing them,
+stop old admission, reconcile uncertain outcomes, and allow safe expiry or perform an explicit migration.
+Clearing reservations is not a safe migration strategy; automatic record migration is not provided.
+Completed matching requests replay, in-flight requests return 409, and fingerprint conflicts return 422.
+Cancellation does not release uncertain reservations, and failed completion acknowledgement does not prove that
+business work was uncommitted. Bounded body/header caching does not replace transactional business idempotency;
+encrypted routes reject keyed requests.
 
 ## gRPC listener 受管模式
 
@@ -1687,7 +1750,7 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 
 ## 生命周期要点
 
-- `zcf/application.yml` 必须存在（内容可为 `{}`）；整个 `application.*`（name/mode/worker_threads/超时）是 bootstrap-only，远端首拉改写拒绝启动，运行期改写拒绝整份候选并要求重启。
+- 主配置优先使用非空环境变量 `APP_CONFIG_FILE` 指定的路径，未设置或为空时使用 `zcf/application.yml`；相对路径按进程工作目录解析，所选文件必须存在（内容可为 `{}`）。显式配置工厂仍可用 `base_file` 覆盖主路径；默认 profile 模板不随主路径改变。整个 `application.*`（name/mode/worker_threads/超时）是 bootstrap-only，远端首拉改写拒绝启动，运行期改写拒绝整份候选并要求重启。
 - `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/discovery/scheduling 任一长生命周期组件，或收集到静态 `hosted` initializer 时解析为 Service，否则 Batch；显式 Batch 不允许这些长生命周期能力。
 - Service 启动顺序为 `Bootstrap -> Start -> UserHook -> InitializerFreeze -> Prepare -> Initialization -> Seal -> Ready`；全部阶段共用 `application.startup_timeout_ms` 形成的一个绝对 deadline。
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。

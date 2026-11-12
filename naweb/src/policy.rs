@@ -19,13 +19,11 @@ pub enum AuthRequirement {
 impl AuthRequirement {
     /// 业务作用：把宏参数中的稳定小写文本解析为身份要求。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `value`: 过程宏已经限制长度的静态文本；允许 `required`、`optional`、`public`。
     ///
-    /// # 返回
-    ///
-    /// 返回对应身份要求；未知文本返回 `None`，由宏生成定位准确的编译错误。
+    /// 返回：返回对应身份要求；未知文本返回 `None`，由宏生成定位准确的编译错误。
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "required" => Some(Self::Required),
@@ -66,13 +64,11 @@ pub struct CryptoDirections {
 impl CryptoDirections {
     /// 业务作用：从路由静态合同建立初始方向。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `policy`: 已匹配真实路由的不可变策略。
     ///
-    /// # 返回
-    ///
-    /// 返回 condition 尚未收窄前的方向集合。
+    /// 返回：返回 condition 尚未收窄前的方向集合。
     pub fn declared(policy: &RoutePolicy) -> Self {
         Self {
             request: policy.crypto_request == CryptoRequirement::Required,
@@ -82,9 +78,9 @@ impl CryptoDirections {
 
     /// 业务作用：判断两个方向是否都被关闭。
     ///
-    /// # 返回
+    /// 返回：请求和响应方向均为 `false` 时返回 `true`。
     ///
-    /// 请求和响应方向均为 `false` 时返回 `true`。
+    /// 参数说明: 无。
     pub fn is_empty(self) -> bool {
         !self.request && !self.response
     }
@@ -149,16 +145,14 @@ pub struct RouteSecurityPlan {
 impl RoutePolicy {
     /// 业务作用：构造不带身份和加密策略的兼容路由。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `route_id`: 编译期生成的稳定路由标识。
     /// - `method`: 大写 HTTP 方法。
     /// - `path_template`: 静态路径模板。
     /// - `handler`: handler 的稳定模块路径。
     ///
-    /// # 返回
-    ///
-    /// 返回可供旧 `register_all` 安全注册的空策略。
+    /// 返回：返回可供旧 `register_all` 安全注册的空策略。
     pub const fn plain(
         route_id: &'static str,
         method: &'static str,
@@ -188,9 +182,9 @@ impl RoutePolicy {
 
     /// 业务作用：判断路由是否声明了需要安全运行时参与的能力。
     ///
-    /// # 返回
+    /// 返回：身份、任一加解密方向或依赖安全运行时解释的附属元数据已声明时返回 `true`。
     ///
-    /// 身份、任一加解密方向或依赖安全运行时解释的附属元数据已声明时返回 `true`。
+    /// 参数说明: 无。
     pub const fn has_security(self) -> bool {
         !matches!(self.auth, AuthRequirement::Unspecified)
             || self.auth_provider.is_some()
@@ -207,9 +201,9 @@ impl RoutePolicy {
 
     /// 业务作用：判断路由是否启用了任一加解密方向。
     ///
-    /// # 返回
+    /// 返回：请求或响应方向为 required 时返回 `true`。
     ///
-    /// 请求或响应方向为 required 时返回 `true`。
+    /// 参数说明: 无。
     pub const fn has_crypto(self) -> bool {
         !matches!(self.crypto_request, CryptoRequirement::Disabled)
             || !matches!(self.crypto_response, CryptoRequirement::Disabled)

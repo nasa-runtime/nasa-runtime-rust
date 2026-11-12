@@ -6,7 +6,9 @@ use anyhow::Context;
 use serde::de::DeserializeOwned;
 
 use crate::placeholder::resolve_with_environment;
-use crate::source::{read_local_source, resolve_local_sources};
+use crate::source::{
+    read_local_source, resolve_local_sources, standard_base_file, CONFIG_FILE_ENV,
+};
 use crate::YmlLocalSources;
 
 /// 配置内容格式。
@@ -26,8 +28,10 @@ pub enum ConfigFormat {
 impl ConfigFormat {
     /// 业务作用：由 `file_extension` 字符串映射:`yaml`/`yml`→Yaml、`json`→Json、`toml`→Toml;其它 **fail-fast**。
     ///
-    /// # 参数
-    /// - `ext`: 配置文件扩展名或远端配置显式声明的格式名。
+    /// 参数说明：
+    /// - `ext`：配置文件扩展名或远端配置显式声明的格式名。
+    ///
+    /// 返回：去除首尾空白并转 ASCII 小写后，yaml/yml、json、toml 映射为对应格式，其它值返回不支持错误；不推断内容。
     pub fn from_extension(ext: &str) -> anyhow::Result<Self> {
         match ext.trim().to_ascii_lowercase().as_str() {
             "yaml" | "yml" => Ok(ConfigFormat::Yaml),
@@ -40,6 +44,10 @@ impl ConfigFormat {
     }
 
     /// 业务作用：转换为 file format 表示；用于对接下游接口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 config 解析器对应的 YAML、JSON 或 TOML 格式枚举，不读取来源。
     fn to_file_format(self) -> config::FileFormat {
         match self {
             ConfigFormat::Yaml => config::FileFormat::Yaml,
@@ -94,7 +102,10 @@ impl<T> LoadedYml<T> {
 
 impl std::fmt::Debug for YmlOverlay {
     /// 业务作用：默认诊断仅展示格式、必需性与大小，避免来源名称和正文暴露。
-    /// 参数说明：`f` 是格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：是格式化目标。
+    ///
     /// 返回：不含原始配置材料的摘要。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("YmlOverlay")
@@ -108,10 +119,12 @@ impl std::fmt::Debug for YmlOverlay {
 impl YmlOverlay {
     /// 业务作用：必需 overlay(内容空/解析失败即 `Err`)。
     ///
-    /// # 参数
-    /// - `name`: overlay 名称,用于日志和错误定位。
-    /// - `content`: overlay 配置原文。
-    /// - `format`: overlay 内容格式,由调用方显式指定。
+    /// 参数说明：
+    /// - `name`：overlay 名称,用于日志和错误定位。
+    /// - `content`：overlay 配置原文。
+    /// - `format`：overlay 内容格式,由调用方显式指定。
+    ///
+    /// 返回：返回 required=true 的内存覆盖源；保留名称、原文与格式，不预解析。加载时必需源空白或非法会失败，可选源则告警跳过。
     pub fn required(
         name: impl Into<String>,
         content: impl Into<String>,
@@ -127,10 +140,12 @@ impl YmlOverlay {
 
     /// 业务作用：可选 overlay(内容空/解析失败则 warn+skip)。
     ///
-    /// # 参数
-    /// - `name`: overlay 名称,用于日志和错误定位。
-    /// - `content`: overlay 配置原文。
-    /// - `format`: overlay 内容格式,由调用方显式指定。
+    /// 参数说明：
+    /// - `name`：overlay 名称,用于日志和错误定位。
+    /// - `content`：overlay 配置原文。
+    /// - `format`：overlay 内容格式,由调用方显式指定。
+    ///
+    /// 返回：返回 required=false 的内存覆盖源；保留名称、原文与格式，不预解析。加载时必需源空白或非法会失败，可选源则告警跳过。
     pub fn optional(
         name: impl Into<String>,
         content: impl Into<String>,
@@ -160,22 +175,27 @@ pub struct YmlLoader {
 }
 
 impl YmlLoader {
-    /// 业务作用：标准约定加载器。
+    /// 业务作用：创建标准约定加载器，并按环境选择主配置路径。
     ///
-    /// 默认本地路径为 `zcf/application.yml`。
+    /// 创建时读取 `APP_CONFIG_FILE`；未设置或为空时使用 `zcf/application.yml`。
+    /// 同一实例保留所选路径，后续显式调用 `base_file` 可覆盖该选择。
     ///
     /// 默认值:
-    ///   - 主配置    `zcf/application.yml`(格式按扩展名推断,这里是 YAML)
+    ///   - 主配置    `APP_CONFIG_FILE` 或 `zcf/application.yml`(格式按扩展名推断)
     ///   - profile   `zcf/application-{APP_PROFILE}`(**仅当 `APP_PROFILE` 显式非空时才加载**;文件缺失不报错)
     ///   - 环境变量  前缀 `APP`、分隔 `__`(`APP__DATABASE__URL` → `database.url`),最后叠加、最高优先级
     ///
     /// ⚠️【profile 无默认】:**不指定 `APP_PROFILE` 就是普通启动,不是 dev 启动**;
     ///   未设置时【不加载】任何 `application-{profile}` 文件,即便磁盘上存在 `application-dev.yml`。
     ///
-    /// 路径相对【进程工作目录】。
+    /// 路径相对【进程工作目录】；主路径选择不改变 profile 文件名模式。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：已选择主路径的加载器；创建时不读取文件，必需文件不可读时加载失败。
     pub fn standard() -> Self {
         Self {
-            base_file: PathBuf::from("zcf/application.yml"),
+            base_file: standard_base_file(std::env::var_os(CONFIG_FILE_ENV).map(PathBuf::from)),
             profile_env: "APP_PROFILE".to_string(),
             profile_pattern: "zcf/application-{profile}".to_string(),
             env_prefix: "APP".to_string(),
@@ -186,10 +206,12 @@ impl YmlLoader {
         }
     }
 
-    /// 业务作用：覆盖主配置文件路径(默认 `zcf/application.yml`;格式按扩展名推断)。
+    /// 业务作用：显式覆盖主配置路径，优先于 `APP_CONFIG_FILE` 和默认路径；格式按扩展名推断。
     ///
-    /// # 参数
-    /// - `path`: 主配置文件路径,相对进程工作目录或绝对路径均可。
+    /// 参数说明：
+    /// - `path`：主配置文件路径，相对进程工作目录或绝对路径均可。
+    ///
+    /// 返回：使用指定主路径的加载器，不改变 profile 模式；文件读取推迟到加载阶段。
     pub fn base_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.base_file = path.into();
         self
@@ -197,18 +219,21 @@ impl YmlLoader {
 
     /// 业务作用：覆盖决定 profile 的环境变量名(默认 `APP_PROFILE`)。
     ///
-    /// # 参数
-    /// - `name`: 用于读取 profile 名称的环境变量名。
+    /// 参数说明：
+    /// - `name`：用于读取 profile 名称的环境变量名。
+    ///
+    /// 返回：返回保存原选项的加载器，不立即读取环境或验证格式；后续来源规划与环境合并使用此值。
     pub fn profile_env(mut self, name: impl Into<String>) -> Self {
         self.profile_env = name.into();
         self
     }
 
-    /// 业务作用：覆盖 profile 文件名模式(默认 `zcf/application-{profile}`,`{profile}` 会被替换;
-    /// 不写扩展名,`with_name` 自动探测 `.yml`/`.yaml`/`.json`/`.toml`)。
+    /// 业务作用：设置 profile 配置来源的文件名模式。
     ///
-    /// # 参数
-    /// - `pattern`: profile 文件名模式,其中 `{profile}` 会替换为环境变量读取到的 profile。
+    /// 参数说明：
+    /// - `pattern`：profile 文件名模式,其中 `{profile}` 会替换为环境变量读取到的 profile。
+    ///
+    /// 返回：返回保存原模式的加载器；实际替换 profile 和选择本地文件推迟到来源规划，不创建或读取文件。
     pub fn profile_file_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.profile_pattern = pattern.into();
         self
@@ -216,8 +241,10 @@ impl YmlLoader {
 
     /// 业务作用：覆盖环境变量前缀(默认 `APP`)。
     ///
-    /// # 参数
-    /// - `prefix`: 环境变量前缀,用于筛选参与配置覆盖的变量。
+    /// 参数说明：
+    /// - `prefix`：环境变量前缀,用于筛选参与配置覆盖的变量。
+    ///
+    /// 返回：返回保存原选项的加载器，不立即读取环境或验证格式；后续来源规划与环境合并使用此值。
     pub fn env_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.env_prefix = prefix.into();
         self
@@ -225,8 +252,10 @@ impl YmlLoader {
 
     /// 业务作用：覆盖环境变量层级分隔符(默认 `__`)。
     ///
-    /// # 参数
-    /// - `sep`: 环境变量键映射为配置层级时使用的分隔符。
+    /// 参数说明：
+    /// - `sep`：环境变量键映射为配置层级时使用的分隔符。
+    ///
+    /// 返回：返回保存原选项的加载器，不立即读取环境或验证格式；后续来源规划与环境合并使用此值。
     pub fn env_separator(mut self, sep: impl Into<String>) -> Self {
         self.env_separator = sep.into();
         self
@@ -234,9 +263,10 @@ impl YmlLoader {
 
     /// 业务作用：是否在合并配置源后解析 `${...}` 占位符(默认 true)。
     ///
-    /// # 参数
-    /// - `enabled`: `true` 表示保持默认配置占位符解析;`false` 表示保留 `${...}` 字面量,
-    ///   交给调用方自己的 DSL / 运行期变量系统解释。
+    /// 参数说明：
+    /// - `enabled`：是否在合并后解析占位符；false 保留原文，交给调用方的 DSL 或运行期变量系统解释。
+    ///
+    /// 返回：返回更新解析开关后的加载器；关闭后保留表达式原文，启用时在合并完成后按占位符规则解析。
     pub fn resolve_placeholders(mut self, enabled: bool) -> Self {
         self.resolve_placeholders = enabled;
         self
@@ -244,9 +274,10 @@ impl YmlLoader {
 
     /// 业务作用：是否在解析时保留未命中的 `${...}` 字面量(默认 false,即 fail-fast)。
     ///
-    /// # 参数
-    /// - `enabled`: `true` 表示已能解析的配置/env/default 占位符照常解析,未命中的
-    ///   占位符保留给调用方自己的 DSL / 运行期变量系统解释。
+    /// 参数说明：
+    /// - `enabled`：解析启用时，true 保留未命中引用的完整字面量；已命中的配置、环境和默认值引用仍照常解析。
+    ///
+    /// 返回：返回更新后的加载器；解析启用时控制未解析引用是否保留原文，不影响成功解析的引用，也不自动启动加载。
     pub fn preserve_unresolved_placeholders(mut self, enabled: bool) -> Self {
         self.preserve_unresolved_placeholders = enabled;
         self
@@ -254,7 +285,8 @@ impl YmlLoader {
 
     /// 业务作用：限制主配置和 profile 的单文件读取量，防止配置源异常增长造成无界内存占用。
     ///
-    /// 参数说明：`max_bytes` 是每个本地配置文件允许读取的最大字节数；overlay 仍由调用方控制。
+    /// 参数说明：
+    /// - `max_bytes`：是每个本地配置文件允许读取的最大字节数；overlay 仍由调用方控制。
     ///
     /// 返回：带读取上限的新 loader；文件超过上限时所有加载入口均失败闭合。
     pub fn max_file_bytes(mut self, max_bytes: usize) -> Self {
@@ -263,6 +295,10 @@ impl YmlLoader {
     }
 
     /// 业务作用：加载并反序列化成 `T`(等价于无 overlay 的 [`load_with_overlays`](Self::load_with_overlays))。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：来源读取、合并、可选占位符解析和目标 T 反序列化均成功时返回值；任一失败返回错误，不返回部分目标或自动发布配置。
     pub fn load<T: DeserializeOwned>(&self) -> anyhow::Result<T> {
         self.load_with_overlays(&[])
     }
@@ -281,7 +317,7 @@ impl YmlLoader {
     /// **overlay 顺序就是覆盖顺序**:`overlays[i+1]` 覆盖 `overlays[i]` 的同名 key。
     /// Nacos 多配置就走这里 —— 门面层把 import 列表按声明顺序拉成 overlay 传进来。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `overlays`: 按优先级叠加的配置 overlay 列表。
     ///
     /// 返回：全部来源合并并成功反序列化时返回强类型配置；任一必需来源失败时返回错误。
@@ -295,7 +331,8 @@ impl YmlLoader {
 
     /// 业务作用：叠加内存 overlay 后加载强类型配置，并保留本轮实际本地来源供热更新对账。
     ///
-    /// 参数说明：`overlays` 按数组顺序覆盖本地来源，环境变量仍具有最高优先级。
+    /// 参数说明：
+    /// - `overlays`：按数组顺序覆盖本地来源，环境变量仍具有最高优先级。
     ///
     /// 返回：完整合并和反序列化成功时返回配置及来源；失败时不产生部分结果。
     pub fn load_tracked_with_overlays<T: DeserializeOwned>(
@@ -304,20 +341,24 @@ impl YmlLoader {
     ) -> anyhow::Result<LoadedYml<T>> {
         let (tree, sources) = self.build_tree(overlays, None)?;
         let value = serde_json::from_value(tree).context("yml: 反序列化目标类型失败")?;
-        Ok(LoadedYml { value, sources })
+        Ok(LoadedYml {
+            value,
+            sources,
+        })
     }
 
-    /// 业务作用：加载并返回【合并 + 占位符已解析】的 Value 树(不做强类型反序列化)。
+    /// 业务作用：读取本地来源与环境覆盖后的通用配置树，供引导及上层配置编排使用。
     ///
-    /// 用途:引导阶段需在【拉取远端配置之前】先从本地树解析出 import 列表(见门面 `nasa::yml::nacos`);
-    /// 此时占位符已解析,`nacos:${server.name}.yml` 里的 `${}` 已解开、能算出真正的 dataId。
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回无内存 overlay 的完整合并树，按当前开关决定是否解析表达式；读取、格式或表达式失败返回错误，不作强类型反序列化或自动读取远端 import。
     pub fn load_tree(&self) -> anyhow::Result<serde_json::Value> {
         self.load_tree_with_overlays(&[])
     }
 
     /// 业务作用：同 [`load_tree`](Self::load_tree),但先按顺序叠加内存 overlay。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `overlays`: 叠加到本地主配置/profile 之后的内存配置列表,后者覆盖前者。
     ///
     /// 返回：成功时返回占位符已解析的通用配置树；来源读取或合并失败时返回错误。
@@ -343,7 +384,11 @@ impl YmlLoader {
         )
     }
 
-    /// 业务作用：主配置文件所在目录(本地 `file:` import 的相对基准;`standard()` 下为 `zcf/`)。
+    /// 业务作用：提供所选主配置目录，作为本地 `file:` import 的相对基准。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：所选主配置路径的父目录；没有父目录时为当前目录。
     pub fn base_file_dir(&self) -> &std::path::Path {
         self.base_file
             .parent()
@@ -362,7 +407,7 @@ impl YmlLoader {
     ///
     /// config crate 对各 source 做【叶子级深合并】(Nacos 的 `log:` 只补/改单键,不换整段)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `overlays`: 按优先级叠加的配置 overlay 列表。
     /// - `env_override`: 环境变量 overlay 映射,优先级高于文件和内存 overlay。
     ///
@@ -477,17 +522,14 @@ impl YmlLoader {
         Ok((tree, sources))
     }
 
-    /// 业务作用：把环境层中覆盖既有字符串字段的值恢复为原始文本。
+    /// 业务作用：把环境层中覆盖既有字符串字段的值恢复为原始文本。 通用环境源会主动推断布尔值与数值。该行为适合端口、开关等字段，却会让全数字 口令从字符串变成整数。本方法只依据环境层之前已经存在的叶子类型做定向恢复， 不改变数值、布尔值、新增字段或复合结构的原有解析规则。
     ///
-    /// 通用环境源会主动推断布尔值与数值。该行为适合端口、开关等字段，却会让全数字
-    /// 口令从字符串变成整数。本方法只依据环境层之前已经存在的叶子类型做定向恢复，
-    /// 不改变数值、布尔值、新增字段或复合结构的原有解析规则。
+    /// 参数说明：
+    /// - `tree`：已经合入环境层、可能发生类型推断的可变配置树。
+    /// - `base_tree`：环境覆盖之前固定的树，作为已有字符串字段的类型依据。
+    /// - `env_override`：可选的完整环境映射；缺省时读取当前进程环境。
     ///
-    /// # 参数
-    ///
-    /// - `tree`：已经叠加环境层、即将解析占位符的最终配置树。
-    /// - `base_tree`：叠加环境层之前的配置树，用于判断字段声明类型。
-    /// - `env_override`：调用方可注入的环境映射；为空时读取当前进程环境。
+    /// 返回：按当前前缀和分隔符映射环境键，只在环境前基线对应值为字符串且目标路径存在时原样恢复文本；不创建路径或改变其它类型。Some 使用指定映射，None 枚举进程环境，不进行占位符解析。
     fn restore_declared_string_overrides(
         &self,
         tree: &mut serde_json::Value,
@@ -528,10 +570,11 @@ impl YmlLoader {
 
     /// 业务作用：按点号分隔路径借用配置树中的叶子值。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `tree`：需要查询的通用配置树。
+    /// - `path`：以点分隔对象字段的路径文本。
     ///
-    /// - `tree`：需要查询的配置树根节点。
-    /// - `path`：由环境变量层级分隔符归一得到的点号路径。
+    /// 返回：全部点分隔段都能按对象键访问时返回借用，否则 None；不把数字段当作数组下标，也不解释转义。
     fn tree_value<'a>(tree: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
         path.split('.')
             .try_fold(tree, |current, segment| current.get(segment))
@@ -539,10 +582,11 @@ impl YmlLoader {
 
     /// 业务作用：按点号分隔路径可变借用配置树中的叶子值。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `tree`：需要定位可变字段的配置树。
+    /// - `path`：以点分隔对象字段的路径文本。
     ///
-    /// - `tree`：需要修改的配置树根节点。
-    /// - `path`：由环境变量层级分隔符归一得到的点号路径。
+    /// 返回：路径全部存在时返回可变借用，否则 None；不创建字段、扩容数组或解释路径转义。
     fn tree_value_mut<'a>(
         tree: &'a mut serde_json::Value,
         path: &str,
@@ -555,6 +599,10 @@ impl YmlLoader {
     }
 
     /// 业务作用：base_file 的格式(按扩展名推断;无扩展名默认 YAML —— base 通常是 `application.yml`)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：主文件有可识别 UTF-8 扩展时返回对应格式，缺扩展或扩展不是 UTF-8 时默认 YAML；其它 UTF-8 扩展返回不支持错误。
     fn base_format(&self) -> anyhow::Result<ConfigFormat> {
         match self.base_file.extension().and_then(|e| e.to_str()) {
             Some(ext) => ConfigFormat::from_extension(ext),
@@ -565,9 +613,11 @@ impl YmlLoader {
 
 /// 业务作用：单个 overlay 的独立语法校验(按其 format;供 optional overlay 的 warn+skip 判定)。
 ///
-/// # 参数
-/// - `content`: 待处理的文本内容。
-/// - `format`: 配置文本格式,决定使用 YAML、JSON 或 TOML parser。
+/// 参数说明：
+/// - `content`：待处理的文本内容。
+/// - `format`：配置文本格式,决定使用 YAML、JSON 或 TOML parser。
+///
+/// 返回：原文能由指定格式构建配置时成功，否则返回解析错误；不合并到外部树、不读取文件，也不施加文件读取字节上限。
 fn validate_overlay(content: &str, format: ConfigFormat) -> anyhow::Result<()> {
     config::Config::builder()
         .add_source(config::File::from_str(content, format.to_file_format()))

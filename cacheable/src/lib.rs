@@ -10,15 +10,8 @@ pub use local_work::LocalCacheRuntimeGuard;
 mod durable_owner;
 pub use durable_owner::DurableInvalidationOwner;
 
-// ============================================================================
-// rust-cache/cacheable.rs —— Cacheable-lite 的【运行期支持】
-//
-// #[cached] / #[cache_invalidate] 这两个宏(在 cache-macro crate)只负责"拼 key + 调用",
-// 真正的两级缓存逻辑在这里。三件事:
-//   ① init(layer)            —— main 启动时把 L2(CacheLayer)注入静态变量
-//   ② get_or_load_2level(..) —— 读:L1(local_cache moka)→ L2(CacheLayer Redis 三防)→ loader(DB)
-//   ③ invalidate(..)         —— 写后删除 L1/L2，并通过 Redis Pub/Sub 广播跨节点失效。
-// ============================================================================
+// nacache-macro 的缓存宏构造场景键并调用本模块入口；宿主负责装配后端及关闭运行时。
+// 读取依次使用 L1、L2 和业务回源，写后失效以尽力广播通知其他节点，不提供强一致读取。
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,8 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-// 同目录的兄弟模块(都是 rcache 的子模块),用 super:: 引用
-use crate::cache::CacheLayer; // L2:Redis 三防 cache-aside
+use crate::cache::CacheLayer;
 
 // ── 进程级缓存运行时──
 // `CacheRuntime` 的可撤销槽保存当前后端与发布器，宏入口读取当前代次。
@@ -41,10 +33,11 @@ use crate::cache::CacheLayer; // L2:Redis 三防 cache-aside
 pub struct CacheRuntime {
     /// L2(Redis 三防)后端句柄;`init`(首装)/`install_generation`(换代)注入,`revoke_runtime` 清空。
     backend: RwLock<Option<Arc<CacheLayer>>>,
-    /// 失效广播有界发布器;`start_invalidate_broadcast` 注入(换代覆盖——二次启动广播不再被旧值挡住)。
+    /// 由拥有式 guard 安装的失效广播发布器；独立创建广播句柄不会自动写入此槽。
     publisher: RwLock<Option<Arc<BoundedInvalidatePublisher>>>,
     /// 显式 record_invalidation 使用的持久意图入口；执行失效不会调用它。
     durable_sink: RwLock<Option<Arc<dyn DurableInvalidationSink>>>,
+    /// 持久策略 owner 尚未释放的独占声明；即使全局槽已清空，也拒绝其他策略争用。
     durable_owned: std::sync::atomic::AtomicBool,
     /// 槽代次:任何 install/revoke 单调 +1,供诊断观察换代。
     generation: AtomicU64,
@@ -58,6 +51,10 @@ pub struct CacheRuntime {
 
 impl CacheRuntime {
     /// 业务作用：返回进程级唯一运行时(懒初始化;槽内容由 CacheComponent/guard 拥有生命周期)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：共享运行时槽；首次调用仅初始化空槽和控制状态，不连接 Redis 或装配缓存后端。
     fn global() -> &'static CacheRuntime {
         static RUNTIME: OnceLock<CacheRuntime> = OnceLock::new();
         RUNTIME.get_or_init(|| CacheRuntime {
@@ -73,6 +70,11 @@ impl CacheRuntime {
     }
 
     /// 业务作用：首装 L2 后端:槽空时写入并换代;已有则忽略(保持 `init` 的既有“重复注入被忽略”契约)。
+    ///
+    /// 参数说明：
+    /// - `layer`：已构建的 L2 后端；只有全局后端槽为空时才接管。
+    ///
+    /// 返回：空槽获得后端并递增配置代次；已有后端时不修改任何槽，不分配新的 owner。
     fn set_backend(layer: Arc<CacheLayer>) {
         let runtime = Self::global();
         let _transition = runtime
@@ -89,7 +91,12 @@ impl CacheRuntime {
         }
     }
 
-    /// 业务作用：换代覆盖 L2 后端(无条件写入 + generation+1)。
+    /// 业务作用：重新装配 L2 后端并分配新 owner，防止旧 guard 关闭时撤销替换后的后端。
+    ///
+    /// 参数说明：
+    /// - `layer`：替换全局后端槽的新缓存层。
+    ///
+    /// 返回：后端和 owner 已更新、配置代次递增；保留发布器与持久策略槽，已借出的旧后端继续有效。
     fn replace_backend(layer: Arc<CacheLayer>) {
         let runtime = Self::global();
         let _transition = runtime
@@ -106,6 +113,10 @@ impl CacheRuntime {
     }
 
     /// 业务作用：取 L2 后端句柄(clone 当前代的 Arc)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：已安装后端的共享句柄，未装配或已撤销时返回 None；此后换代不改变已经借出的句柄。
     fn backend() -> Option<Arc<CacheLayer>> {
         let runtime = Self::global();
         let _transition = runtime
@@ -120,6 +131,12 @@ impl CacheRuntime {
     }
 
     /// 业务作用：由拥有式 guard 安装一代 backend + 可选 publisher，返回唯一 owner id。
+    ///
+    /// 参数说明：
+    /// - `layer`：安装到当前运行时的 L2 后端。
+    /// - `publisher`：已准备好的失效广播发布器；None 会清除先前的发布器槽。
+    ///
+    /// 返回：控制后端与发布器撤销权限的新 owner 标识；两槽在同一转换锁内更新后递增配置代次。
     fn install_owned(layer: Arc<CacheLayer>, publisher: Option<BoundedInvalidatePublisher>) -> u64 {
         let runtime = Self::global();
         let _transition = runtime
@@ -140,13 +157,19 @@ impl CacheRuntime {
         owner
     }
 
-    /// 业务作用：仅当前 owner 匹配时撤销；返回是否确实撤销。
+    /// 业务作用：凭 owner 标识收回全局缓存入口，阻止旧 guard 关闭时清空后续 owner 的运行时。
+    ///
+    /// 参数说明：
+    /// - `owner`：执行撤销的 guard 在安装时取得的 owner 标识。
+    ///
+    /// 返回：匹配时清空后端、发布器和持久策略槽并递增配置代次，返回 true；不匹配时保持现状并返回 false。
     fn revoke_if_owner(owner: u64) -> bool {
         let runtime = Self::global();
         let _transition = runtime
             .transition
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 比较控制身份与清空槽受同一转换锁保护，旧 guard 不得撤销后续安装的资源。
         if runtime
             .owner
             .compare_exchange(owner, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -171,6 +194,10 @@ impl CacheRuntime {
     }
 
     /// 业务作用：取失效广播发布器(clone 当前代的 Arc)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：当前发布器的共享句柄；未安装时返回 None，取得句柄不代表广播已被远端接收。
     fn publisher() -> Option<Arc<BoundedInvalidatePublisher>> {
         let runtime = Self::global();
         let _transition = runtime
@@ -184,7 +211,11 @@ impl CacheRuntime {
             .clone()
     }
 
-    /// 业务作用：取 durable 失效 sink(clone 当前代的 Arc)。
+    /// 业务作用：取得当前持久失效记录策略，供业务事务显式记录失效意图。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：策略共享句柄或 None；是否仍接纳记录由策略自身的关闭门禁决定，此处不执行持久写入。
     fn durable_sink() -> Option<Arc<dyn DurableInvalidationSink>> {
         let runtime = Self::global();
         let _transition = runtime
@@ -206,20 +237,21 @@ impl CacheRuntime {
 /// Pub/Sub 是尽力通知，离线节点仍可能漏收；该接口不提供持久广播或 cache-aside 强一致保证。
 #[async_trait::async_trait]
 pub trait DurableInvalidationSink: Send + Sync {
-    /// 业务作用：持久记录一次失效。
+    /// 业务作用：在调用方的同源业务事务中持久记录失效意图，供提交后的执行器应用。
     ///
-    /// # 参数
-    /// - `scene`: 缓存场景名。
-    /// - `key`: 完整缓存 key。
+    /// 参数说明：
+    /// - `scene`：需要失效的缓存场景名。
+    /// - `key`：该场景内需要失效的完整缓存键。
     ///
-    /// # 错误
-    ///
-    /// 持久化失败时返回错误；调用方必须传播到业务事务，不得视为已经记录。
+    /// 返回：意图成功记录或持久化错误；调用方必须向业务事务传播失败，成功也不代表缓存已经失效。
     async fn record(&self, scene: &str, key: &str) -> anyhow::Result<()>;
 }
 
 /// 业务作用：为独立使用方安装持久意图策略，避免覆盖受管 owner。
-/// 参数说明：`sink` 为参与同源事务的意图记录器。
+///
+/// 参数说明：
+/// - `sink`：参与同源事务的意图记录器；允许替换既有的非受管策略。
+///
 /// 返回：非受管槽安装成功；受管 owner 存在时拒绝且保留现有策略。
 pub fn set_durable_invalidation_sink(sink: Arc<dyn DurableInvalidationSink>) -> anyhow::Result<()> {
     let runtime = CacheRuntime::global();
@@ -227,6 +259,7 @@ pub fn set_durable_invalidation_sink(sink: Arc<dyn DurableInvalidationSink>) -> 
         .transition
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // 受管 owner 可能正在排空事务记录，即使槽已撤下也不能抢先替换策略。
     anyhow::ensure!(
         !runtime.durable_owned.load(Ordering::Acquire),
         "durable invalidation has a managed owner"
@@ -239,22 +272,22 @@ pub fn set_durable_invalidation_sink(sink: Arc<dyn DurableInvalidationSink>) -> 
     Ok(())
 }
 
-/// 业务作用：换代安装 L2 后端:无条件覆盖当前槽并 generation+1。
+/// 业务作用：替换全局 L2 后端，供调用方重新装配缓存资源后切换后续读取。
 ///
-/// 与首装且重复调用会被忽略的 [`init`] 不同,本入口用于**重新装配**(组件重启/重新装配):
-/// 新请求立刻使用新后端,
-/// 已借出的旧 `Arc` 持旧代直至释放。
+/// 参数说明：
+/// - `layer`：已准备好的新 L2 缓存层。
 ///
-/// # 参数
-/// - `layer`: 新一代 L2 缓存层。
+/// 返回：更新后端、owner 和配置代次；保留发布器及持久策略，旧请求继续持有原 Arc，调用方仍负责关闭旧资源。
 pub fn install_generation(layer: Arc<CacheLayer>) {
     CacheRuntime::replace_backend(layer);
 }
 
-/// 业务作用：撤销缓存运行时:清空 L2 后端/广播发布器/durable sink 三槽并 generation+1。
+/// 业务作用：无条件收回全局缓存后端、广播发布器与持久意图策略入口，供宿主主动撤销运行时。
 ///
-/// 撤销后宏入口([`get_or_load_2level`]/[`invalidate`])返回明确错误(不 panic);同进程随后可经
-/// [`init`]/[`install_generation`] 重新装配。`CacheRuntimeGuard::shutdown` 停机时自动调用。
+/// 参数说明：无。
+///
+/// 返回：清空三个槽与 owner 并递增配置代次；依赖后端的新调用返回未装配错误，可重新安装。
+/// 本操作不等待在途请求、不终止已借出的资源，也不替代各生命周期句柄的 shutdown。
 pub fn revoke_runtime() {
     let runtime = CacheRuntime::global();
     let _transition = runtime
@@ -299,11 +332,19 @@ pub struct CacheHandle;
 
 impl CacheHandle {
     /// 业务作用：返回当前代的配置/装配摘要，不暴露连接串或缓存 key。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：在同一转换锁内读取的代次与能力安装状态；不触发网络探测。
     pub fn snapshot(self) -> CacheRuntimeSnapshot {
         runtime_snapshot()
     }
 
     /// 业务作用：对当前代 L2 后端执行只读健康探针。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：固定本次后端句柄后等待探针结果；后端未安装或探针失败时返回错误，不读写业务缓存键。
     pub async fn health_check(self) -> anyhow::Result<()> {
         let backend = CacheRuntime::backend()
             .ok_or_else(|| anyhow::anyhow!("cache runtime has no installed backend"))?;
@@ -312,16 +353,28 @@ impl CacheHandle {
 }
 
 /// 业务作用：返回进程级缓存运行时的只读句柄。
+///
+/// 参数说明：无。
+///
+/// 返回：不持有资源所有权的能力句柄；创建句柄不要求后端已安装，也不具备停机权限。
 pub const fn cache_handle() -> CacheHandle {
     CacheHandle
 }
 
-/// 业务作用：当前运行时代次(任何 install/revoke 单调 +1;0 = 从未装配)。诊断用。
+/// 业务作用：读取缓存运行时的配置变化计数，供宿主观察安装、替换与撤销。
+///
+/// 参数说明：无。
+///
+/// 返回：当前代次；零表示尚无槽变更，单独读取该计数不构成其他槽的原子快照或健康证明。
 pub fn runtime_generation() -> u64 {
     CacheRuntime::global().generation.load(Ordering::Acquire)
 }
 
 /// 业务作用：返回不含连接信息、业务 key 或 secret 的运行时摘要。
+///
+/// 参数说明：无。
+///
+/// 返回：同一转换锁保护下读取的代次及三个槽的安装状态；只反映装配情况，不证明依赖服务可用。
 pub fn runtime_snapshot() -> CacheRuntimeSnapshot {
     let runtime = CacheRuntime::global();
     let _transition = runtime
@@ -348,16 +401,22 @@ pub fn runtime_snapshot() -> CacheRuntimeSnapshot {
     }
 }
 
-/// 业务作用：注入 L2 缓存层。★ main 构造好 CacheLayer 后调用一次(见 main.rs)。
+/// 业务作用：为独立调用方首次安装 L2 缓存层，使两级缓存读取具备后端入口。
 ///
-/// # 参数
-/// - `layer`: 已建好的 `Arc<CacheLayer>`,内部持有 Redis 集群连接和 TTL 配置。
+/// 参数说明：
+/// - `layer`：已经构建的 L2 缓存层，由调用方准备连接与过期配置。
+///
+/// 返回：空槽写入并递增配置代次；已有后端时忽略本次安装，不自动启动本地后台任务或失效广播。
 pub fn init(layer: Arc<CacheLayer>) {
     // 只注入一次:重复注入被忽略(保持既有语义)。
     CacheRuntime::set_backend(layer);
 }
 
 /// 业务作用：取当前代 L2 句柄(clone 一份 Arc)。未装配/已撤销返回明确错误(撤销后宏入口不 panic)。
+///
+/// 参数说明：无。
+///
+/// 返回：本次操作使用的共享 L2 后端；全局槽为空时返回未装配错误，不尝试隐式建连。
 fn try_l2() -> anyhow::Result<Arc<CacheLayer>> {
     CacheRuntime::backend().ok_or_else(|| {
         anyhow::anyhow!(
@@ -366,29 +425,17 @@ fn try_l2() -> anyhow::Result<Arc<CacheLayer>> {
     })
 }
 
-/// 业务作用：两级缓存读取(#[cached] 生成的代码调它)。
+/// 业务作用：为缓存宏提供 L1、L2 与业务回源的读取链路，在软刷新窗口内允许返回旧值。
 ///
-/// 数据流:**L1(moka,µs 级,返旧值+后台刷)→ miss/刷新走 L2(Redis 三防)→ 再 miss 跑 loader(查 DB)+ 双回填**。
+/// 参数说明：
+/// - `scene`：本地场景名；读写失效必须一致，不得与会缓存空哨兵的直接调用共用相同条目。
+/// - `key`：宏已构造的完整缓存键，同时用于 L1 和 L2。
+/// - `refresh_ms`：首次建 L1 场景时绑定的软刷新阈值，单位毫秒。
+/// - `expire_ms`：首次建 L1 场景时绑定的硬过期时长，单位毫秒；已有场景保持原配置。
+/// - `loader`：L2 也未命中时执行的业务回源闭包，可能由受管后台刷新任务持有。
 ///
-/// 参数:
-///   scene      L1 池名(local_cache 按 scene 分池)
-///   key        完整缓存 key(宏已用模板拼好,如 "kline:BTCUSDC:1")
-///   refresh_ms L1 软刷新阈值(到点先返旧值、后台异步重载)
-///   expire_ms  L1 硬过期(到点 moka 淘汰,下次必重载)
-///   loader     回源闭包 = 被注解函数的原体(查 DB),返回 `anyhow::Result<T>`
-///
-/// 泛型约束:
-///   T: Serialize + DeserializeOwned —— 要存进/读出 L2(Redis 里是 JSON 文本)
-///      + Clone                      —— L1 存 `Arc<T>`,返回时 clone 出 T
-///      + Send + Sync + 'static      —— 要放进 moka(并发缓存)、能跨 await/线程
-///   F/Fut: + Send + 'static         —— loader 可能被 L1 的【后台刷新任务】(tokio::spawn)持有,故必须 'static+Send
-///
-/// # 参数
-/// - `scene`: L1 本地缓存池名,同一业务缓存读写失效必须使用同一个 scene。
-/// - `key`: 完整缓存 key,宏已按模板拼好并同时用于 L1 和 L2。
-/// - `refresh_ms`: L1 软刷新阈值毫秒数,到点后可返回旧值并触发刷新。
-/// - `expire_ms`: L1 硬过期毫秒数,到点后本地条目被淘汰并阻塞重载。
-/// - `loader`: L1/L2 都未命中时执行的真实回源闭包。
+/// 返回：从共享 L1 值克隆的业务结果；未安装 L2 或未命中后的加载失败返回错误，软刷新失败仍保留旧值。
+/// 同名场景类型冲突，或其他入口在相同条目写入空哨兵时 panic；该入口不提供强一致读取。
 pub async fn get_or_load_2level<T, F, Fut>(
     scene: &'static str,
     key: String,
@@ -405,7 +452,7 @@ where
     let l2_key = key.clone(); // L1/L2 用同一个 key;L1 会消费 key,故给 L2 留一份
 
     // L1:getRefresh —— 命中且新鲜直接返;到刷新窗口返旧值+后台刷;硬过期/缺失则跑下面的闭包(走 L2)。
-    //   sync=false:刷新走后台(请求侧永不阻塞),所以闭包要 Send+'static(上面已约束)。
+    //   sync=false 只让软刷新走后台；缓存缺失时请求仍等待加载，闭包须能被后台任务持有。
     let arc: Option<Arc<T>> = local_cache::getRefresh::<String, T, _, _>(
         scene,
         key,
@@ -425,17 +472,14 @@ where
     Ok((*arc.expect("2-level loader 恒返回 Some,理论上必有值")).clone())
 }
 
-/// 业务作用：失效 key 对应的 L1 + L2(#[cache_invalidate] 生成的代码调它)。
+/// 业务作用：为失效宏执行即时缓存撤销，复用提交后失效入口但不自动记录持久意图。
 ///
-/// 参数:
-///   scene  L1 池名(要和对应 #[cached] 一致)
-///   key    完整缓存 key(宏已拼好)
-/// 泛型 `V` 保留宏调用签名；实际按 scene/key 清理。即时失效不代表外层事务已提交，
-/// 也不自动记录持久意图。需要事务语义时显式调用 `record_invalidation` 并传播错误。
+/// 参数说明：
+/// - `scene`：与读取入口一致的本地缓存场景名。
+/// - `key`：宏构造的完整缓存键；泛型 V 保留宏签名，不参与运行时场景匹配。
 ///
-/// # 参数
-/// - `scene`: L1 本地缓存池名,必须与对应读取入口使用的 scene 一致。
-/// - `key`: 完整缓存 key,宏已按模板拼好。
+/// 返回：共享缓存删除成功后发起本地失效与尽力广播；未装配或 L2 删除失败返回错误。
+/// 成功不证明外层业务事务已提交，也不证明所有远端节点已失效；事务意图须显式调用 record_invalidation。
 pub async fn invalidate<V>(scene: &'static str, key: String) -> anyhow::Result<()>
 where
     V: Send + Sync + 'static,
@@ -444,7 +488,11 @@ where
 }
 
 /// 业务作用：仅持久记录失效意图，使调用方可在业务事务中原子提交意图与数据。
-/// 参数说明：`scene` 为缓存场景；`key` 为完整缓存身份。
+///
+/// 参数说明：
+/// - `scene`：失效意图对应的缓存场景名。
+/// - `key`：该场景内需要在事务提交后失效的完整缓存键。
+///
 /// 返回：sink 成功记录时成功；未安装或记录失败直接返回错误，不访问 L1、L2 或广播队列。
 pub async fn record_invalidation(scene: &str, key: &str) -> anyhow::Result<()> {
     let sink = CacheRuntime::durable_sink()
@@ -453,8 +501,12 @@ pub async fn record_invalidation(scene: &str, key: &str) -> anyhow::Result<()> {
 }
 
 /// 业务作用：执行已提交的失效意图，供 dispatcher 和显式即时失效共用。
-/// 参数说明：`scene` 为缓存场景；`key` 为完整缓存身份。
-/// 返回：L2 删除成功后清理本节点 L1 并尝试广播；纯 L1 直接清理本节点。
+///
+/// 参数说明：
+/// - `scene`：与缓存读取一致的本地场景名。
+/// - `key`：待失效的完整缓存键，同时用于 L2 删除与 L1 失效。
+///
+/// 返回：L2 删除成功后发起本节点 L1 失效并尝试广播；纯 L1 只需开放的本地任务 owner。
 /// 未安装运行态或 L2 失败返回错误以供重试，不再记录意图。
 /// 并发旧 loader 可能在删除后回填，Pub/Sub 也可能丢失；该入口不提供强一致读取。
 pub async fn apply_invalidation(scene: &str, key: &str) -> anyhow::Result<()> {
@@ -473,9 +525,8 @@ pub async fn apply_invalidation(scene: &str, key: &str) -> anyhow::Result<()> {
 // 跨节点 L1 失效广播（Redis Pub/Sub）
 // ════════════════════════════════════════════════════════════════════════════
 // 本地缓存失效广播：
-//   写节点 invalidate 时,除了删本地 L1 + 删 L2,还 PUBLISH 一条 {scene|key} 到固定频道;
-//   每个节点启动时都 spawn 一个订阅任务,收到广播就 remove_any(删本节点 L1)。
-// 这样某节点改了数据,所有节点的 L1 都会被清掉,而不是只清写节点自己的。
+//   写节点先删 L2，再提交本地 L1 失效和包含 scene/key 的 JSON 广播。
+//   订阅节点收到广播后提交本地失效；离线、队列满或发布失败均可能使远端保留旧值。
 //
 // 注:用一条【专用的普通 redis 连接】做 pub/sub(SUBSCRIBE 会独占连接,不能复用 CacheLayer 的命令连接;
 //   且 pub/sub 用单节点连接即可——Redis Cluster 会把普通 PUBLISH 跨节点传播给所有订阅者)。
@@ -486,8 +537,7 @@ use redis::AsyncCommands; // 提供 conn.publish(...) // 提供 pubsub 消息流
 // 失效广播频道名(所有节点订阅同一个)
 const INVALIDATE_CHANNEL: &str = "cacheable:invalidate";
 
-/// 失效广播有界队列的默认容量。突发失效在此上限内缓冲;超过按策略丢弃并记日志,
-/// 不再像旧实现每次调用 `tokio::spawn` 制造无限 detached 任务。
+/// 失效广播有界队列的默认容量；突发失效在此范围内缓冲，超出时丢弃并告警。
 const INVALIDATE_QUEUE_CAPACITY: usize = 1024;
 
 /// 一条待广播的失效消息(scene + key)。
@@ -512,31 +562,38 @@ pub enum PublishOutcome {
 
 /// 有界失效广播发布器:业务侧 `try_publish` 只做非阻塞入队,单个 drainer 任务负责真正 PUBLISH。
 ///
-/// 取代旧的"每次调用 `tokio::spawn` 且丢句柄":满队列按策略丢弃并记"远端广播未保证",
-/// 不再制造无限 detached 任务;drainer 的取消/join 由持有 [`InvalidateBroadcast`] 的一方负责。
+/// 满队列时丢弃并告警；发布任务的取消与等待由持有 [`InvalidateBroadcast`] 的一方负责。
 #[derive(Clone)]
 pub struct BoundedInvalidatePublisher {
+    /// 有界发送入口；克隆发布器只共享队列，队列接纳不代表 Redis 已完成发布。
     sender: tokio::sync::mpsc::Sender<InvalidateMessage>,
 }
 
 impl BoundedInvalidatePublisher {
-    /// 业务作用：创建发布器与接收端；非 fallible 入口把容量收敛到 Tokio 有界队列可表达范围。
+    /// 业务作用：建立失效广播的有界队列，将业务入队与异步 Redis 发布分离。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `capacity`：期望队列容量；自动限制在 1 到 Tokio Semaphore::MAX_PERMITS 之间。
     ///
-    /// - `capacity`:有界队列容量,必须大于 0。
+    /// 返回：共享发布器与唯一接收端；本操作不连接 Redis，也不启动消费任务。
     pub fn channel(capacity: usize) -> (Self, tokio::sync::mpsc::Receiver<InvalidateMessage>) {
         let capacity = capacity.clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
         let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
-        (Self { sender }, receiver)
+        (
+            Self {
+                sender,
+            },
+            receiver,
+        )
     }
 
-    /// 业务作用：非阻塞入队一条失效消息;队列满或 drainer 已停时丢弃并返回对应结果(绝不阻塞、不 panic)。
+    /// 业务作用：非阻塞提交失效广播，限制发布压力并向调用方区分队列接纳与丢弃。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `scene`：失效事件所属的缓存场景名。
+    /// - `key`：需要从各节点 L1 撤销的完整缓存键。
     ///
-    /// - `scene`:缓存事件所属业务场景名。
-    /// - `key`:需从各节点 L1 删除的业务缓存 key。
+    /// 返回：成功入队、队列满丢弃或接收端关闭丢弃；入队不代表 Redis 发布成功，也不修改本地缓存。
     pub fn try_publish(&self, scene: &str, key: &str) -> PublishOutcome {
         let message = InvalidateMessage {
             scene: scene.to_owned(),
@@ -558,12 +615,10 @@ impl BoundedInvalidatePublisher {
 
 /// 业务作用：建立两级缓存 L2 使用的 Redis Cluster 连接。
 ///
-/// 由本 crate 提供而不是让调用方自己拼:`CacheLayer` 与 mapper L2 吃的都是
-/// `redis::cluster_async::ClusterConnection`,这是个具体的第三方类型——调用方自建就必须直接依赖
-/// 同一个 redis crate 版本,版本一错类型就不同一。这里集中建连,宿主只需要拿到不透明的连接值。
+/// 参数说明：
+/// - `url`：逗号分隔的 Redis Cluster 种子节点连接串；各项去除两侧空白并忽略空项。
 ///
-/// # 参数
-/// - `url`: Redis Cluster 连接串;逗号分隔可给多个种子节点。
+/// 返回：与当前缓存组件 Redis 依赖类型一致的异步集群连接；节点列表为空、地址无效或建连失败返回错误。
 pub async fn connect_cluster(url: &str) -> anyhow::Result<redis::cluster_async::ClusterConnection> {
     let nodes: Vec<String> = url
         .split(',')
@@ -581,10 +636,13 @@ pub async fn connect_cluster(url: &str) -> anyhow::Result<redis::cluster_async::
 /// 订阅循环是常驻后台任务:没有句柄的话,宿主(应用容器)既不能取消它,也无法确认它已经退出,
 /// 只能等进程结束回收。持有本句柄的一方负责在停机时显式 `shutdown().await`。
 pub struct InvalidateBroadcast {
+    /// 订阅监督循环的停止通知；重连退避也监听此信号。
     stop: std::sync::Arc<tokio::sync::Notify>,
+    /// 订阅监督任务句柄，用于等待实际退出或请求中止。
     handle: tokio::task::JoinHandle<()>,
-    /// 发布端 drainer 的停止信号与句柄;停机时先让它排空有界队列再退出。
+    /// 发布任务的停止信号，通知其尽力排空已经接纳的队列。
     publisher_stop: std::sync::Arc<tokio::sync::Notify>,
+    /// 发布任务句柄，先于订阅任务等待退出。
     publisher_handle: tokio::task::JoinHandle<()>,
     /// 尚未发布到全局 runtime 的有界发布器；由 owner 安装阶段统一发布。
     publisher: BoundedInvalidatePublisher,
@@ -593,12 +651,10 @@ pub struct InvalidateBroadcast {
 impl InvalidateBroadcast {
     /// 业务作用：通知发布 drainer 与订阅循环退出并等待二者真正结束。
     ///
-    /// 消费 self:句柄只能用一次,避免"关了又关"或关完还以为任务在跑。先停发布 drainer(它会排空
-    /// 有界队列里剩余的失效再退出,best-effort flush),再停订阅循环。
+    /// 参数说明：无。
     ///
-    /// # 参数
-    ///
-    /// 本方法无参数;等待上限由调用方在外层用 timeout 施加。
+    /// 返回：先等待发布任务尽力排空队列并退出，再等待订阅任务退出；不保证消息被远端收到。
+    /// 消费句柄且不设置内置等待期限，任务异常也视为已退出；宿主取消等待时由 Drop 请求中止任务。
     pub async fn shutdown(mut self) {
         // notify_one 在任务尚未首次 poll 时会保存一个 permit；notify_waiters 不保存，极早停机可能
         // 丢失通知并让 join 永久等待。每个单消费者任务各用一个独立 Notify、各一个 permit。
@@ -611,10 +667,14 @@ impl InvalidateBroadcast {
 }
 
 impl Drop for InvalidateBroadcast {
-    /// 业务作用：在显式 shutdown 未完成时取消并终止两个后台任务，防止失效广播越过拥有者生命周期。
+    /// 业务作用：在显式关闭未完成时向两个广播任务发出取消和中止请求，防止仅丢弃句柄后继续常驻。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：已通知并请求 abort；不等待任务析构，不保证队列排空，确认实际退出须使用 shutdown。
     fn drop(&mut self) {
         // shutdown future 被外层 deadline 取消时，JoinHandle 的普通 Drop 只会 detach。兜底必须同时
-        // 发取消信号并 abort 两个任务，保证 listener/Redis I/O 不越过拥有者生命周期。
+        // 发取消信号并请求 abort；本析构不能等待实际退出，宿主需要确认退出时应使用 shutdown。
         self.publisher_stop.notify_one();
         self.stop.notify_one();
         self.publisher_handle.abort();
@@ -627,22 +687,23 @@ impl Drop for InvalidateBroadcast {
 /// 取代业务分散调 `init` + `start_invalidate_broadcast` + 自建 shutdown 资源;把"装配 + 拥有 + 停机"
 /// 收进单一对象，便于由 napp `CacheComponent` 统一构造并持有该 guard。
 pub struct CacheRuntimeGuard {
+    /// 本运行时负责关闭并等待的有界本地刷新与失效任务。
     local_work: Arc<local_work::LocalWork>,
+    /// 可选的跨节点广播任务；宿主停机时按发布、订阅顺序关闭。
     broadcast: Option<InvalidateBroadcast>,
+    /// 撤销全局运行时的控制身份，防止旧 guard 清空新 owner 的槽。
     owner: u64,
 }
 
 impl CacheRuntimeGuard {
-    /// 业务作用：装配 L2 后端并(可选)启动失效广播,返回统一生命周期句柄。
+    /// 业务作用：统一装配 L2、本地后台任务 owner 和可选失效广播，并持有其关闭责任。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `layer`：已准备好的 L2 缓存层，此入口不重新探测该后端。
+    /// - `broadcast_url`：可选的普通 Redis 广播地址；None 表示不启动跨节点失效广播。
     ///
-    /// - `layer`: 已建好的 L2 缓存层(Redis 三防)。
-    /// - `broadcast_url`: `Some(url)` 时启动跨实例 L1 失效广播;`None` 则仅本地失效。
-    ///
-    /// # 错误
-    ///
-    /// 广播发布/订阅连接建立失败时返回错误。
+    /// 返回：全局运行时安装后返回拥有式句柄；发布建连失败或已有本地任务 owner 时返回错误并保留原运行时。
+    /// 普通广播订阅在后台首次建连及重试，成功返回不代表已经订阅；需要首次订阅门禁时使用受管 Redis 入口。
     pub async fn start(
         layer: Arc<CacheLayer>,
         broadcast_url: Option<&str>,
@@ -688,12 +749,14 @@ impl CacheRuntimeGuard {
         })
     }
 
-    /// 业务作用：停机:排空并停止失效广播(发布 drainer + 订阅循环)。消费 self,只能停一次。
+    /// 业务作用：按依赖顺序关闭本地后台工作与广播，最后凭 owner 身份收回全局缓存入口。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数;等待上限由调用方在外层用 timeout 施加。
+    /// 返回：本地任务退出、广播关闭且所属运行时已撤销；旧 owner 不撤销新运行时。
+    /// 消费句柄，等待期限由宿主设置；中途取消会触发 Drop 收回入口并请求中止广播，不证明所有任务已退出。
     pub async fn shutdown(mut self) {
+        // 先阻止并等待本地后台工作，避免刷新继续使用已进入关闭流程的广播与后端。
         self.local_work.close();
         self.local_work.wait().await;
         if let Some(broadcast) = self.broadcast.take() {
@@ -706,7 +769,11 @@ impl CacheRuntimeGuard {
 }
 
 impl Drop for CacheRuntimeGuard {
-    /// 业务作用：撤销仍由本 guard 持有的全局 runtime，并由广播句柄兜底终止后台任务。
+    /// 业务作用：关闭本 guard 的本地任务准入并撤销仍属于自己的运行时，由广播句柄析构请求中止任务。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：取消本地工作并按 owner 匹配结果撤销槽；不会等待任务实际退出，也不会撤销后续 owner 的运行时。
     fn drop(&mut self) {
         // 正常 shutdown 和被取消/直接 drop 共用同一 owner fencing；重复撤销只会返回 false。
         // broadcast 的 Drop 会停止并 abort 尚未 join 的后台任务。
@@ -715,12 +782,13 @@ impl Drop for CacheRuntimeGuard {
     }
 }
 
-/// 业务作用：【B 步】启动失效广播:建发布连接 + 启动可取消的订阅任务,返回其生命周期句柄。
+/// 业务作用：建立普通 Redis 发布连接并启动有界发布任务与可重连订阅任务，交由调用方统一关闭。
 ///
-/// 调用方必须持有返回句柄并在停机时 shutdown；发布端句柄由拥有式 runtime guard 一起发布。
+/// 参数说明：
+/// - `redis_url`：用于发布和独立订阅连接的普通 Redis 地址。
 ///
-/// # 参数
-/// - `redis_url`: 普通 Redis 连接串,用于发布和订阅 L1 失效广播。
+/// 返回：发布建连成功后返回广播句柄；地址无效或发布建连失败返回错误，订阅首次建连和失败重试发生在后台。
+/// 调用方须持有句柄并显式关闭；此入口不发布全局运行时槽，队列接纳与订阅存活也不保证远端收到消息。
 pub async fn start_invalidate_broadcast(redis_url: &str) -> anyhow::Result<InvalidateBroadcast> {
     // 发布端:一条多路复用连接 + 有界队列 + 单 drainer 任务。业务侧只做非阻塞入队,
     // drainer 负责真正 PUBLISH;满队列丢弃并记日志,不再每次调用 detached spawn。
@@ -760,8 +828,7 @@ pub async fn start_invalidate_broadcast(redis_url: &str) -> anyhow::Result<Inval
 
     // 订阅端:独立 client(SUBSCRIBE 独占连接);重连等待也参与取消,停机时不必干等满一个退避周期。
     let sub_url = redis_url.to_string();
-    // 用 Notify 而不是 watch：每个单消费者只需一个可保存的停机 permit；拥有式句柄 Drop 会
-    // 通知并 abort，legacy 兼容入口则显式 forget 整个句柄以维持旧的常驻语义。
+    // 单消费者各保存一个停机 permit，使任务尚未首次运行时收到的关闭通知仍然有效。
     let stop = std::sync::Arc::new(tokio::sync::Notify::new());
     let task_stop = stop.clone();
     let handle = tokio::spawn(async move {
@@ -926,10 +993,12 @@ fn apply_invalidate_payload(payload: &str) {
     }
 }
 
-/// 业务作用：订阅循环:SUBSCRIBE 频道 → 每收到一条 {scene|key} → 删本节点 L1。正常不返回(除非连接断)。
+/// 业务作用：在专用 Redis 订阅连接上接收失效 JSON，并向本节点 L1 提交对应失效操作。
 ///
-/// # 参数
-/// - `redis_url`: 用于建立失效订阅连接的 Redis URL。
+/// 参数说明：
+/// - `redis_url`：用于建立普通 Redis 专用订阅连接的地址。
+///
+/// 返回：持续消费直到建连、订阅失败或消息流结束，返回错误交给外层重连；非字符串或无效 JSON 载荷跳过。
 async fn run_subscriber(redis_url: &str) -> anyhow::Result<()> {
     let client = redis::Client::open(redis_url)?;
     let mut pubsub = client.get_async_pubsub().await?; // 异步 pub/sub 连接
@@ -947,12 +1016,13 @@ async fn run_subscriber(redis_url: &str) -> anyhow::Result<()> {
     anyhow::bail!("pubsub 流结束(连接断开)")
 }
 
-/// 业务作用：发布一条失效广播(fire-and-forget:发布失败不影响写操作,仅本地已失效)。
-/// 未由拥有式 runtime guard 注入发布连接时跳过——退化为仅本地失效。
+/// 业务作用：向当前运行时的有界发布器尽力提交失效通知，使远端节点有机会撤销相同缓存键。
 ///
-/// # 参数
-/// - `scene`: 缓存事件所属的业务场景名称。
-/// - `key`: 需要从本节点 L1 中删除的业务缓存 key。
+/// 参数说明：
+/// - `scene`：失效事件对应的缓存场景名。
+/// - `key`：各节点应失效的完整缓存键。
+///
+/// 返回：不等待网络发布；未安装发布器时跳过，队列满或接收端关闭时丢弃，不改变已执行的缓存操作结果。
 fn publish_invalidate(scene: &str, key: &str) {
     // 非阻塞入有界队列;未启动广播(无 PUBLISHER)则跳过 → 退化为仅本地失效。
     // 满队列/drainer 已停时 try_publish 内部记日志并丢弃,调用方不阻塞、不 panic。
@@ -991,9 +1061,9 @@ pub static CACHE_SCENE_USAGES: [CacheSceneUsage] = [..];
 
 /// 业务作用：返回本进程编译期收集到的全部缓存场景使用 descriptor。
 ///
-/// # 返回
+/// 参数说明：无。
 ///
-/// 静态切片;顺序由链接器决定,消费者需自行按 scene 排序/去重。
+/// 返回：链接时汇集的静态声明切片；顺序由链接器决定，可包含同一场景的多处声明，调用方按需排序与核对。
 pub fn scene_usages() -> &'static [CacheSceneUsage] {
     &CACHE_SCENE_USAGES
 }
@@ -1010,8 +1080,10 @@ pub struct SceneAuditError {
 impl std::fmt::Display for SceneAuditError {
     /// 业务作用：输出稳定、无业务数据的冲突摘要。
     ///
-    /// # 参数
-    /// - `formatter`: 目标格式化缓冲。
+    /// 参数说明：
+    /// - `formatter`：错误展示的格式化目标，用于写入场景名和声明冲突详情。
+    ///
+    /// 返回：摘要写入成功或格式化目标的写入错误，不读取缓存内容或连接配置。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
@@ -1023,16 +1095,12 @@ impl std::fmt::Display for SceneAuditError {
 
 impl std::error::Error for SceneAuditError {}
 
-/// 业务作用：审计编译期收集的全部 `#[cached]` scene descriptor:同一 scene 名下所有声明必须有**一致的
-/// 值类型(`TypeId`)与 TTL 合同(`refresh_ms`/`expire_ms`)**。
+/// 业务作用：在启动阶段核对同名缓存场景的值类型及过期配置，提前拒绝类型冲突和配置歧义。
 ///
-/// 否则运行期 L1(按 scene 分池、类型擦除存 `Arc<dyn Any>`)会因值类型不一致 downcast panic,或因 TTL
-/// 分歧产生难查的软刷新/过期行为。本审计把这类声明冲突**前移到启动期**一次性拒绝(结构化运行时错误仍是最后
-/// 防线)。按 scene 名与 handler 名稳定排序后比对,冲突可复现。
+/// 参数说明：无。
 ///
-/// # 返回
-///
-/// 全部一致返回 `Ok(())`;首个冲突返回 `Err(SceneAuditError)`。
+/// 返回：全部编译期声明一致时成功；按场景及 handler 排序后返回首个值类型或刷新、过期时长冲突。
+/// 只核对声明间一致性，不验证时间范围、不建立缓存，也不覆盖绕过宏直接调用本地缓存的场景。
 pub fn audit_scenes() -> Result<(), SceneAuditError> {
     use std::collections::BTreeMap;
     let mut by_scene: BTreeMap<&'static str, Vec<&'static CacheSceneUsage>> = BTreeMap::new();
@@ -1043,6 +1111,7 @@ pub fn audit_scenes() -> Result<(), SceneAuditError> {
         usages.sort_by_key(|usage| usage.handler);
         let head = usages[0];
         for usage in &usages[1..] {
+            // 同名场景共享类型擦除状态；类型或过期配置分歧必须在开放业务前拒绝。
             if (head.value_type_id)() != (usage.value_type_id)() {
                 return Err(SceneAuditError {
                     scene: usage.scene,

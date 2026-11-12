@@ -52,7 +52,12 @@ pub enum TransferError {
     Capacity,
 }
 impl std::fmt::Display for TransferError {
-    /// 业务作用：对转发失败提供脱敏稳定诊断。参数说明：formatter 为输出目标。返回：固定类别，不包含底层异常正文。
+    /// 业务作用：对转发失败提供脱敏稳定诊断。
+    ///
+    /// 参数说明：
+    /// - `formatter`：formatter 为输出目标。
+    ///
+    /// 返回：固定类别，不包含底层异常正文。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "Kafka transfer: {self:?}")
     }
@@ -86,7 +91,13 @@ pub struct TransferTarget {
 }
 impl TransferTarget {
     /// 业务作用：从完整只读观测提取目标资源身份，排除不断移动的目标位点。
-    /// 参数说明：source_id/lane 为显式控制面选择，observation 为新观测，generations 为当前外部目录证据。
+    ///
+    /// 参数说明：
+    /// - `source_id`：控制面选定的目标 Kafka 源逻辑名称。
+    /// - `lane`：该目标源中批准使用的独立发布通道。
+    /// - `observation`：observation 为新观测。
+    /// - `generations`：generations 为当前外部目录证据。
+    ///
     /// 返回：合法固定目标；不发送消息或取得所有权。
     pub fn observed(
         source_id: String,
@@ -112,7 +123,10 @@ impl TransferTarget {
         Ok(target)
     }
     /// 业务作用：在使用公开可变字段之前拒绝不完整或非规范目标。
-    /// 参数说明：无。返回：逻辑身份、外部代次和完整有序分区合法时通过。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：逻辑身份、外部代次和完整有序分区合法时通过。
     pub fn validate(&self) -> TransferResult<()> {
         token(&self.source_id, 128)?;
         token(&self.cluster_id, 1024)?;
@@ -145,7 +159,11 @@ impl TransferTarget {
         Ok(())
     }
     /// 业务作用：发送前拒绝错连、同名重建和目标扩容，不重算已经批准的分区映射。
-    /// 参数说明：current 为完整新观测，generations 为重新查询的当前外部代次。
+    ///
+    /// 参数说明：
+    /// - `current`：current 为完整新观测。
+    /// - `generations`：generations 为重新查询的当前外部代次。
+    ///
     /// 返回：物理身份、代次和完整分区集合全部相同才通过，目标日志增长不影响合同。
     pub fn validate_current(
         &self,
@@ -209,7 +227,14 @@ pub enum TransferPayloadPolicy {
 }
 impl TransferPayloadPolicy {
     /// 业务作用：建立排序且无歧义的明确 schema 转发策略。
-    /// 参数说明：两个 registry 为稳定逻辑身份，schemas 为批准的 ID 与共同正文映射。
+    ///
+    /// 参数说明：
+    /// - `source_registry`：来源 registry 的稳定逻辑身份。
+    /// - `destination_registry`：目标 registry 的稳定逻辑身份。
+    /// - `schemas`：schemas 为批准的 ID 与共同正文映射。
+    ///
+    /// 共同约束：两个 registry 为稳定逻辑身份
+    ///
     /// 返回：合法策略；不会查询、注册或修改任一 Registry。
     pub fn confluent(
         source_registry: String,
@@ -226,7 +251,10 @@ impl TransferPayloadPolicy {
         Ok(policy)
     }
     /// 业务作用：拒绝公开字段中的重复 ID、无效摘要或缺失 Registry 身份。
-    /// 参数说明：无。返回：策略完整且有界时通过。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：策略完整且有界时通过。
     pub fn validate(&self) -> TransferResult<()> {
         if let Self::Confluent {
             source_registry,
@@ -273,7 +301,14 @@ impl TransferPlan {
     pub const MAX_ENCODED_BYTES: usize = 16 * 1024 * 1024;
 
     /// 业务作用：保留来源冻结范围，使用内置目标成功条件重新绑定 checkpoint 合同。
-    /// 参数说明：source_ranges 为只读来源范围，target/routes/payload_policy/max_hops 决定目标及处理语义。
+    ///
+    /// 参数说明：
+    /// - `source_ranges`：source_ranges 为只读来源范围。
+    /// - `target`：固定的目标物理身份、分区集合和发布通道。
+    /// - `routes`：覆盖全部来源分区的目标映射，冻结时按来源排序。
+    /// - `payload_policy`：原文保留或经过批准的跨 Registry 映射策略。
+    /// - `max_hops`：允许累计转发的次数上限，范围为 1 至 16。
+    ///
     /// 返回：新转发合同；不沿用原范围计划的 handler 指纹，已有不同 checkpoint 会明确冲突。
     pub fn freeze(
         mut source_ranges: ReplayPlan,
@@ -303,7 +338,10 @@ impl TransferPlan {
     }
 
     /// 业务作用：阻止恢复时静默更换目的地、分区或处理策略。
-    /// 参数说明：无。返回：来源范围、完整路由、目标白名单和处理摘要全部一致才通过。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：来源范围、完整路由、目标白名单和处理摘要全部一致才通过。
     pub fn validate(&self) -> TransferResult<()> {
         self.replay
             .validate()
@@ -338,7 +376,10 @@ impl TransferPlan {
     }
 
     /// 业务作用：保存完整转发合同，恢复不重新计算来源 latest 或目标映射。
-    /// 参数说明：无。返回：NSKTPL01 规范正文与SHA-256尾部，最大16MiB；摘要不承担认证。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：NSKTPL01 规范正文与SHA-256尾部，最大16MiB；摘要不承担认证。
     pub fn encode(&self) -> TransferResult<Vec<u8>> {
         self.validate()?;
         let ranges = self
@@ -363,14 +404,25 @@ impl TransferPlan {
     }
 
     /// 业务作用：从受控持久字节恢复原冻结合同，不授予执行权。
-    /// 参数说明：bytes 为完整编码。返回：规范合法计划；损坏、截断、无界字段或摘要不一致均为CorruptPlan。
+    ///
+    /// 参数说明：
+    /// - `bytes`：bytes 为完整编码。
+    ///
+    /// 返回：规范合法计划；损坏、截断、无界字段或摘要不一致均为CorruptPlan。
     pub fn decode(bytes: &[u8]) -> TransferResult<Self> {
         wire::decode(bytes)
     }
 }
 
 /// 业务作用：规范编码目的地及处理语义，作为来源checkpoint的处理指纹。
-/// 参数说明：target/routes/policy/hops 为固定转发字段。返回：已校验、有界、排序且采用大端整数的共同正文。
+///
+/// 参数说明：
+/// - `target`：包含源名、集群身份、通道和资源代次的目标声明。
+/// - `routes`：必须按来源分区严格递增的路由列表，本函数不替调用者排序。
+/// - `policy`：原文处理方式及经过批准的 schema 映射集合。
+/// - `hops`：写入处理合同的最大转发次数，范围为 1 至 16。
+///
+/// 返回：已校验、有界、排序且采用大端整数的共同正文。
 pub(crate) fn spec(
     target: &TransferTarget,
     routes: &[TransferRoute],
@@ -444,7 +496,13 @@ pub(crate) fn spec(
     }
     Ok(bytes)
 }
-/// 业务作用：限制跨语言稳定身份到有界可见ASCII。参数说明：value为身份，max为最大字节数。返回：合法时通过。
+/// 业务作用：限制跨语言稳定身份到有界可见ASCII。
+///
+/// 参数说明：
+/// - `value`：value为身份。
+/// - `max`：max为最大字节数。
+///
+/// 返回：合法时通过。
 fn token(value: &str, max: usize) -> TransferResult<()> {
     if value.is_empty()
         || value.len() > max
@@ -455,14 +513,24 @@ fn token(value: &str, max: usize) -> TransferResult<()> {
         Ok(())
     }
 }
-/// 业务作用：核对共同SHA-256文本格式。参数说明：value为摘要。返回：仅64位小写十六进制为true。
+/// 业务作用：核对共同SHA-256文本格式。
+///
+/// 参数说明：
+/// - `value`：value为摘要。
+///
+/// 返回：仅64位小写十六进制为true。
 fn fingerprint(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
-/// 业务作用：拒绝非法Kafka映射坐标。参数说明：tp为显式分区。返回：合法topic与非负分区通过。
+/// 业务作用：拒绝非法Kafka映射坐标。
+///
+/// 参数说明：
+/// - `tp`：tp为显式分区。
+///
+/// 返回：合法topic与非负分区通过。
 fn valid_partition(tp: &Tp) -> TransferResult<()> {
     ReplayPosition {
         topic: tp.topic.clone(),
@@ -474,12 +542,24 @@ fn valid_partition(tp: &Tp) -> TransferResult<()> {
     .validate()
     .map_err(|_| TransferError::InvalidConfiguration)
 }
-/// 业务作用：编码合法分区坐标。参数说明：bytes为内存缓冲，tp为坐标。返回：追加topic长度前缀与大端分区。
+/// 业务作用：编码合法分区坐标。
+///
+/// 参数说明：
+/// - `bytes`：bytes为内存缓冲。
+/// - `tp`：tp为坐标。
+///
+/// 返回：追加topic长度前缀与大端分区。
 fn partition(bytes: &mut Vec<u8>, tp: &Tp) {
     text(bytes, &tp.topic);
     bytes.extend_from_slice(&tp.partition.to_be_bytes());
 }
-/// 业务作用：生成身份文本的无歧义共同表达。参数说明：bytes为内存缓冲，value为已校验文本。返回：追加两字节长度与原字节。
+/// 业务作用：生成身份文本的无歧义共同表达。
+///
+/// 参数说明：
+/// - `bytes`：bytes为内存缓冲。
+/// - `value`：value为已校验文本。
+///
+/// 返回：追加两字节长度与原字节。
 fn text(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
     bytes.extend_from_slice(value.as_bytes());

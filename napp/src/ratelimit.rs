@@ -32,6 +32,10 @@ pub struct RateLimitOutcome {
 
 impl RateLimitOutcome {
     /// 业务作用：放行结果(无重试建议)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：allowed 为 true、retry_after 为空的裁决值，不执行计量、计数或下游调用。
     pub fn allow() -> Self {
         Self {
             allowed: true,
@@ -39,11 +43,13 @@ impl RateLimitOutcome {
         }
     }
 
-    /// 业务作用：拒绝结果 + 建议重试等待(补足窗口所需时长)。
+    /// 业务作用：构造携带等待建议的配额拒绝结果。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `retry_after`:建议客户端等待多久再试。
+    ///
+    /// 返回：allowed 为 false 且原样保存等待时长的值，不校验正数、等待计时或增加拒绝计数。
     pub fn deny(retry_after: Duration) -> Self {
         Self {
             allowed: false,
@@ -61,15 +67,13 @@ impl RateLimitOutcome {
 pub trait RateLimitProvider: Send + Sync + 'static {
     /// 业务作用：记一次命中并判定 `key` 是否在 `window` 内超过 `limit`。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `key`:配额主体标识(调用方决定粒度)。
     /// - `limit`:窗口内允许的最大命中数(应 > 0)。
     /// - `window`:配额窗口时长。
     ///
-    /// # 返回
-    ///
-    /// 放行 / 拒绝(拒绝含建议重试等待)。
+    /// 返回：放行 / 拒绝(拒绝含建议重试等待)。
     async fn check(&self, key: &str, limit: u32, window: Duration) -> RateLimitOutcome;
 }
 
@@ -78,8 +82,8 @@ pub type SharedRateLimitProvider = Arc<dyn RateLimitProvider>;
 
 /// 固定窗口计数脚本:`INCR` 计数,首次命中(计数=1)时 `PEXPIRE` 开窗;返回 `{当前计数, 剩余 TTL(ms)}`。
 ///
-/// 原子性由单条 Lua 在 Redis 服务端串行化保证:并发副本对同一 key 的自增不丢不重。窗口自首次命中起算、
-/// 到期自动清零重开(rolling fixed window),无需时钟或窗口序号 key。
+/// 单次脚本在 Redis 服务端串行执行，计数与首次设置到期时间不会与其他命令交错；
+/// 这不提供请求重试去重，也不承诺 Redis 故障恢复后的计数持久性。窗口从首次命中开始，到期后重新开窗。
 const FIXED_WINDOW_SCRIPT: &str = "local current = redis.call('INCR', KEYS[1])\n\
      if current == 1 then\n\
        redis.call('PEXPIRE', KEYS[1], ARGV[1])\n\
@@ -95,7 +99,13 @@ pub const MAX_DISTRIBUTED_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(365 
 const MAX_LEGACY_NAMESPACE_BYTES: usize = 128;
 const MAX_LEGACY_SUBJECT_BYTES: usize = 512;
 
-/// 业务作用：将窗口转换为 Redis 正 i64 毫秒范围，拒绝零值和截断。
+/// 业务作用：把配额窗口转换为 Redis 支持的正有符号整数毫秒，避免整数溢出。
+///
+/// 参数说明：
+/// - `window`：待交给 Redis 固定窗口脚本的时长，此入口不采用中间件的 365 天上限。
+///
+/// 返回：整毫秒部分在 1 到 i64::MAX 内时返回该值，不足一毫秒或超范围时为 None。
+/// 亚毫秒余量向下舍去；不验证服务端当前时间与 TTL 相加后是否仍可表示。
 fn redis_window_millis(window: Duration) -> Option<u64> {
     let millis = window.as_millis();
     if millis == 0 || millis > MAX_REDIS_WINDOW_MILLIS {
@@ -105,13 +115,25 @@ fn redis_window_millis(window: Duration) -> Option<u64> {
     }
 }
 
-/// 业务作用：判断输入是否可安全沿用不含分隔符的历史明文 key 片段。
+/// 业务作用：判断输入是否符合既有明文配额键片段的长度及分隔规则。
+///
+/// 参数说明：
+/// - `value`：命名空间或主体原文，保留大小写和空白，不做规范化。
+/// - `max_bytes`：当前片段允许的 UTF-8 字节数上限。
+///
+/// 返回：非空、不超长且不含冒号时为 true；不检查秘密、控制字符或身份可信性。
 fn legacy_key_segment(value: &str, max_bytes: usize) -> bool {
     !value.is_empty() && value.len() <= max_bytes && !value.contains(':')
 }
 
-/// 业务作用：历史简单 key 保持兼容；含分隔符或超长主体使用长度前缀摘要，既消除跨 namespace 拼接碰撞，也给
-/// Redis key 长度设置常数上界。摘要不用于认证，只用于无损域分隔。
+/// 业务作用：为共享配额派生有长度上界且区分命名空间与主体边界的 Redis 键，保留简单键的现有窗口。
+///
+/// 参数说明：
+/// - `namespace`：不同配额域的原始名称，不在此校验来源或授权。
+/// - `subject`：该配额域内的主体原文；凭据来源须由调用方先摘要，不能依赖此函数统一隐藏明文。
+///
+/// 返回：两个片段均符合明文规则时返回单冒号拼接，最多 641 字节；否则返回固定前缀和 SHA-256 摘要。
+/// 摘要对两项各自加入长度边界，其表示含两个冒号，与简单键形状分离；它不提供认证或可逆编码。
 fn redis_rate_limit_key(namespace: &str, subject: &str) -> String {
     if legacy_key_segment(namespace, MAX_LEGACY_NAMESPACE_BYTES)
         && legacy_key_segment(subject, MAX_LEGACY_SUBJECT_BYTES)
@@ -149,13 +171,11 @@ pub enum RateLimitFailurePolicy {
 impl RateLimitFailurePolicy {
     /// 业务作用：把配置文本解析为失败策略，供 YAML 与代码共用同一稳定词表。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `value`: 小写策略文本，允许 `open`、`closed`。
     ///
-    /// # 返回
-    ///
-    /// 合法文本返回对应策略；未知文本返回 `None`，由调用方给出定位明确的配置错误。
+    /// 返回：合法文本返回对应策略；未知文本返回 `None`，由调用方给出定位明确的配置错误。
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "open" => Some(Self::Open),
@@ -168,9 +188,7 @@ impl RateLimitFailurePolicy {
     ///
     /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// `open` / `closed`。
+    /// 返回：Open 对应 open，Closed 对应 closed；只表示配置策略，不反映后端当前健康。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -194,9 +212,8 @@ static RATE_LIMIT_MISSING_SUBJECT: std::sync::atomic::AtomicU64 =
 ///
 /// 参数说明: 无。
 ///
-/// # 返回
-///
-/// 进程启动以来的累计五元组。
+/// 返回：逐项读取的进程级累计五元组，不是统一原子快照，也不是集群总量。
+/// allowed/denied 由中间件记录最终裁决；直接调用 Redis provider 只记录它能识别的后端或配置错误。
 pub fn rate_limit_counters() -> (u64, u64, u64, u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
     (
@@ -233,7 +250,7 @@ pub(crate) const RATE_LIMIT_METRIC_SERIES: usize = RATE_LIMIT_EVENT_LABELS.len()
 /// 分布式配额观测源:把五类进程级事件计数投影为单 family 封闭 label 序列。
 ///
 /// 值与 [`rate_limit_counters`] 同源;event 词表编译期冻结,业务无法注入新 label 值,
-/// 序列数恒为五条,零流量时保持全零可见(部署据此确认策略与主体来源已生效)。
+/// 序列数恒为五条，零流量时仍显示零值；样本存在不证明请求经过了中间件或主体来源已正确装配。
 pub(crate) struct RateLimitMetricsSource;
 
 impl nametrics_core::LegacyMetricsSource for RateLimitMetricsSource {
@@ -300,7 +317,7 @@ pub struct RedisRateLimitProvider {
 impl RedisRateLimitProvider {
     /// 业务作用：用受管 Redis 客户端与命名空间构造分布式配额后端。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `client`:[`crate::Application::redis`] 按 qualifier 显式取得的受管客户端。
     /// - `namespace`:配额 key 前缀(如 `"ratelimit"`)。
@@ -316,27 +333,24 @@ impl RedisRateLimitProvider {
 
     /// 业务作用：冻结后端失效裁决策略；高保障路径以 `Closed` 把配额层失效转为拒绝而不是放行。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `policy`: 失效裁决策略。
     ///
-    /// # 返回
-    ///
-    /// 更新后的后端。
+    /// 返回：更新后的后端。
     pub fn with_failure_policy(mut self, policy: RateLimitFailurePolicy) -> Self {
         self.failure_policy = policy;
         self
     }
 
-    /// 业务作用：把一次失效按冻结策略折算为放行或保守拒绝，并归入对应计数。
+    /// 业务作用：把一次失效按冻结策略折算为放行或带正等待建议的拒绝。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `retry_hint`: `Closed` 拒绝时建议的重试等待；无可信窗口时给最小正值。
     ///
-    /// # 返回
-    ///
-    /// `Open` 返回放行；`Closed` 返回带 Retry-After 的拒绝。
+    /// 返回：Open 放行，Closed 拒绝并确保等待建议至少一毫秒；本函数不增加计数或输出日志。
+    /// 原因计数由调用分支记录，最终放行或拒绝计数由中间件记录。
     fn failure_outcome(&self, retry_hint: Duration) -> RateLimitOutcome {
         match self.failure_policy {
             RateLimitFailurePolicy::Open => RateLimitOutcome::allow(),
@@ -349,15 +363,16 @@ impl RedisRateLimitProvider {
 
 #[async_trait]
 impl RateLimitProvider for RedisRateLimitProvider {
-    /// 业务作用：对 `{namespace}:{key}` 原子自增计数并按 TTL 判定,失效按冻结策略裁决。
+    /// 业务作用：对派生的共享 Redis 键原子自增，按当前计数决定是否超额，并用 TTL 给出等待建议。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `key`:配额主体标识。
     /// - `limit`:窗口内允许的最大命中数。
     /// - `window`:配额窗口时长。
     ///
     /// 返回：计数未超额时放行，超额时返回窗口剩余等待；后端或参数异常按冻结失效策略裁决。
+    /// 拒绝请求同样参与计数，响应超时或错误不能证明 Redis 没有计数；本层不提供请求去重或退款。
     async fn check(&self, key: &str, limit: u32, window: Duration) -> RateLimitOutcome {
         use std::sync::atomic::Ordering::Relaxed;
         let policy = self.failure_policy.as_str();
@@ -483,11 +498,14 @@ pub struct DistributedRateLimit {
 impl DistributedRateLimit {
     /// 业务作用：绑定提供方与配额参数,供 [`distributed_rate_limit`] 中间件按 `State` 注入。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `provider`:跨副本配额提供方。
     /// - `limit`:每主体窗口内上限(> 0)。
     /// - `window`:配额窗口时长。
+    ///
+    /// 返回：参数合法时返回以客户端 IP 为主体、缺失主体时放行的冻结配置；非法参数直接 panic。
+    /// 外部配置应使用 try_new 处理错误；此处不探测 provider，也不保证其支持当前窗口精度。
     pub fn new(provider: SharedRateLimitProvider, limit: u32, window: Duration) -> Self {
         Self::try_new(provider, limit, window)
             .expect("distributed rate limit configuration must be valid")
@@ -526,13 +544,11 @@ impl DistributedRateLimit {
 
     /// 业务作用：冻结配额主体来源；按租户/subject/API key 计量时替换缺省的客户端 IP。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `subject`: 类型化主体来源。
     ///
-    /// # 返回
-    ///
-    /// 更新后的配置。
+    /// 返回：更新后的配置。
     pub fn with_subject(mut self, subject: QuotaSubject) -> Self {
         self.subject = subject;
         self
@@ -540,13 +556,11 @@ impl DistributedRateLimit {
 
     /// 业务作用：冻结主体缺失裁决；要求配额必须可归因的路径以 `Deny` 拒绝不可归因流量。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `policy`: 主体缺失时的裁决。
     ///
-    /// # 返回
-    ///
-    /// 更新后的配置。
+    /// 返回：更新后的配置。
     pub fn with_missing_subject_policy(mut self, policy: MissingSubjectPolicy) -> Self {
         self.missing_subject = policy;
         self
@@ -554,13 +568,11 @@ impl DistributedRateLimit {
 
     /// 业务作用：按冻结的主体来源从请求解析配额主体。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `request`: 入站请求(读扩展与 header,不读 body)。
     ///
-    /// # 返回
-    ///
-    /// 解析成功返回主体文本(header 来源为域分隔摘要)；来源缺失(无 ClientIp/匿名/缺头/
+    /// 返回：解析成功返回主体文本(header 来源为域分隔摘要)；来源缺失(无 ClientIp/匿名/缺头/
     /// 非 UTF-8 头)返回 `None`。
     fn resolve_subject(&self, request: &axum::extract::Request) -> Option<String> {
         match self.subject {
@@ -599,14 +611,12 @@ impl DistributedRateLimit {
 
 /// 业务作用：把 header 来源的配额主体折算为域分隔摘要，使凭证原文不离开中间件。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `name`: header 名，参与域分隔——同一值出现在不同 header 下不共享配额。
 /// - `value`: header 原文值。
 ///
-/// # 返回
-///
-/// 64 个十六进制字符的摘要文本；确定性映射保证同一凭证在所有副本共享同一配额 key。
+/// 返回：64 个十六进制字符的摘要文本；确定性映射保证同一凭证在所有副本共享同一配额 key。
 #[cfg(feature = "web")]
 fn digest_header_subject(name: &str, value: &str) -> String {
     let mut hasher = Sha256::new();
@@ -631,7 +641,7 @@ fn digest_header_subject(name: &str, value: &str) -> String {
 /// 认证主体来源依赖 authentication 写入的 `Principal`；header 来源在进入 provider 前完成摘要。
 /// 任一来源缺失时按冻结的 [`MissingSubjectPolicy`] 裁决，不会回退到另一种主体。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `config`:启动期冻结的提供方 + 配额参数。
 /// - `request`:入站请求(只读取 header 与已验证扩展，不读取 body)。

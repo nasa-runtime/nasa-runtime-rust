@@ -29,9 +29,13 @@ const NACOS_CONFIG_STALE_AFTER: Duration = Duration::from_secs(45);
 /// 最终配置，组件为纯校验空操作；`enabled=true` 时在 Bootstrap 合并并重发布 version=1，在 Ready 启动
 /// watch driver 作为受监督关键任务。
 pub(crate) struct NacosConfigComponent {
+    /// 已声明组件，用于首拉校验和后续目标热应用状态登记。
     components: Vec<ComponentId>,
+    /// preflight 固定的原始 application 段，不允许首拉覆盖运行时启动约束。
     pinned_application: Option<Value>,
+    /// Bootstrap 首拉成功后持有、Ready 建立 watch 时取走的连接上下文。
     connection: Option<NacosConnection>,
+    /// 准备完成后向 Runner 一次性移交的配置驱动任务。
     critical_task: Option<ApplicationFuture<'static>>,
     /// enabled+connected 时 Start(封口前)登记、Ready observe 的配置中心就绪贡献句柄。
     /// 首拉在 Bootstrap 已成功(否则 fail-closed 不启动),watch 在 Ready 启动后 observe Ready。
@@ -40,31 +44,51 @@ pub(crate) struct NacosConfigComponent {
 
 /// Bootstrap 建立、供 Ready 启动 watch 的配置中心连接上下文。
 struct NacosConnection {
+    /// 首拉使用的共享客户端，Ready 继续用于监听和定期补拉。
     client: Arc<NacosConfigClient>,
+    /// 启动阶段解析的导入顺序，供非严格来源按相同覆盖关系重建配置。
     imports: Vec<YmlImport>,
+    /// 启动时固定的连接与引用解析规则，在线候选不替换此连接身份。
     boot: NacosBootstrap,
 }
 
 /// 启动阶段为跨 feature `Send` 边界临时 spawn 的任务；阶段 future 一旦被取消，立即 abort，
 /// 不能采用 JoinHandle 普通 Drop 的 detached 语义。
 struct AbortOnDropTask<T> {
+    /// 必须随阶段取消请求终止的任务，避免句柄直接释放后任务脱离管理。
     handle: JoinHandle<T>,
 }
 
 impl<T> AbortOnDropTask<T> {
     /// 业务作用：包装一个必须由当前生命周期阶段负责 join 或 abort 的任务。
+    ///
+    /// 参数说明：
+    /// - `handle`：已经启动的任务，交由此 guard 在等待结束或阶段取消时管理。
+    ///
+    /// 返回：持有任务句柄的 guard，不创建新任务或等待当前任务完成。
     fn new(handle: JoinHandle<T>) -> Self {
-        Self { handle }
+        Self {
+            handle,
+        }
     }
 
-    /// 业务作用：等待任务完成；消费 guard 后不会再触发 Drop abort。
+    /// 业务作用：等待阶段拥有的任务完成，并在等待被取消时保留终止任务的责任。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：任务正常结束时交还其输出，任务 panic 或被取消时返回 JoinError。
+    /// guard 随等待结束或取消而析构并调用 abort；已完成任务不受该调用影响。
     async fn join(mut self) -> Result<T, tokio::task::JoinError> {
         (&mut self.handle).await
     }
 }
 
 impl<T> Drop for AbortOnDropTask<T> {
-    /// 业务作用：阶段 future 取消时立即 abort，禁止 JoinHandle 默认 detach。
+    /// 业务作用：guard 释放时请求终止尚未结束的任务，避免阶段取消后任务脱离宿主继续运行。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：同步发出 abort 请求，不等待任务实际结束；不能抢占不让出执行权的同步代码。
     fn drop(&mut self) {
         self.handle.abort();
     }
@@ -73,10 +97,12 @@ impl<T> Drop for AbortOnDropTask<T> {
 impl NacosConfigComponent {
     /// 业务作用：创建尚未连接配置中心的组件。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `components`：声明的组件列表，用于热刷新时构造同版本 reload 状态表。
     /// - `pinned_application`：同步 preflight 预读到的原始 `application.*`，作为 bootstrap-only 判定基准。
+    ///
+    /// 返回：尚无连接、watch 任务或就绪贡献项的组件；保存输入供后续生命周期使用。
     pub(crate) fn new(components: Vec<ComponentId>, pinned_application: Option<Value>) -> Self {
         Self {
             components,
@@ -91,18 +117,21 @@ impl NacosConfigComponent {
 impl ApplicationComponent for NacosConfigComponent {
     /// 业务作用：返回配置中心组件稳定身份。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；Runner 用它归类配置相关错误与顺序约束。
+    /// 返回：NacosConfig 身份，供 Runner 归类错误和生命周期顺序，不表示配置中心当前可用。
     fn id(&self) -> ComponentId {
         ComponentId::NacosConfig
     }
 
     /// 业务作用：读取本地 `nacos` 段；enabled=true 时连接、合并并重发布最终配置树。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供本地初始配置视图的 Bootstrap 上下文。
+    ///
+    /// 返回：禁用时发布禁用状态并保留本地树；启用时在首拉、合并与校验成功后先发布配置，再发布客户端。
+    /// 来源冲突、连接或配置失败阻止启动；配置发布后的后续失败由宿主停止启动，不承诺恢复旧快照。
     fn bootstrap<'a>(&'a mut self, context: &'a mut BootstrapContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let boot = read_nacos_bootstrap(context.application())?;
@@ -150,7 +179,7 @@ impl ApplicationComponent for NacosConfigComponent {
                         error,
                     )
                 })?;
-                // 二次读取必须与同步预读逐字节一致：否则 runtime 已按 A 创建、ConfigStore 却会记录 B。
+                // application 段必须与预读的 JSON 值一致，避免运行时参数与配置快照使用不同启动约束。
                 if local_tree.get("application") != self.pinned_application.as_ref() {
                     return Err(ApplicationError::new(
                         ComponentId::NacosConfig,
@@ -257,9 +286,12 @@ impl ApplicationComponent for NacosConfigComponent {
     /// 必须在 UserHook 封口前(Start)登记;首拉失败已在 Bootstrap fail-closed,故走到这里即首拉成功。
     /// Ready 启动 watch 后再 observe Ready。`enabled=false`(本地树)无远端可监控,不登记。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供 Application(据此登记 readiness)的 Start 上下文。
+    ///
+    /// 返回：有连接时登记仅供观测的 freshness 贡献项，登记失败返回错误；无连接时不登记。
+    /// 运行期短暂失败标记降级，45 秒无观测可变为 stale，但此贡献项不阻断应用整体就绪。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             if self.connection.is_some() {
@@ -282,9 +314,13 @@ impl ApplicationComponent for NacosConfigComponent {
 
     /// 业务作用：enabled 时启动 watch driver 作为受监督关键任务，并登记 guard 关闭动作。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供 Application 与 action 激活能力的 Ready 上下文。
+    ///
+    /// 返回：无连接时直接完成；有连接时建立 watch、记录首次健康事实、保存 driver 并登记停机动作。
+    /// 建立、就绪登记或本地监听准备失败则拒绝 Ready；driver 仍须由 Runner 取出并调度。
+    /// 阶段等待取消时请求终止建立任务，不把终止请求当作已经等待其退出。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let Some(connection) = self.connection.take() else {
@@ -379,9 +415,10 @@ impl ApplicationComponent for NacosConfigComponent {
 
     /// 业务作用：把 watch driver 交给 Runner 关键任务监督集合。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；driver 只允许被取出一次。
+    /// 返回：首次取出已准备任务时返回固定名称和 future；禁用、未准备或已取出时为 None。
+    /// 取出动作不启动任务，由 Runner 负责调度并判断退出是否符合生命周期预期。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.critical_task
             .take()
@@ -389,28 +426,34 @@ impl ApplicationComponent for NacosConfigComponent {
     }
 }
 
-/// 持有 watch guard 与配置 client 直到停机的可逆 action。
+/// 持有 watch guard 与配置 client 的停机动作，不负责回退已发布配置。
 struct NacosWatchShutdown {
+    /// 关闭时一次性取走的监听集合；释放 guard 仍按底层契约执行尽力清理。
     guard: Option<MultiWatchGuard>,
+    /// 保持配置客户端可用直至监听关闭动作释放。
     _client: Arc<NacosConfigClient>,
+    /// driver 的停止信号，发出取消不等于已等待 driver 退出。
     cancel: CancellationToken,
 }
 
 impl ShutdownAction for NacosWatchShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；名称不含配置值。
+    /// 返回：固定的 nacos-config-watch 名称，不包含文档名称、配置值或连接凭据。
     fn label(&self) -> &'static str {
         "nacos-config-watch"
     }
 
-    /// 业务作用：先取消 driver，再显式关闭 MultiWatchGuard（Drop 只 abort，不算优雅关闭）。
+    /// 业务作用：同步通知 driver 停止，再移交 watch guard 的显式关闭过程。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
-    /// - `_context`：共享停机预算，本 action 自身耗时极短。
+    /// - `_context`：宿主提供的共享停机上下文，本函数未直接读取其截止点，外层负责限制等待。
+    ///
+    /// 返回：guard 已取走或 close 成功时完成，close 返回错误则归类为停机错误。
+    /// 当前 MultiWatchGuard 对子监听器注销失败仅记日志，因此成功不证明全部远端注销成功；此处也不 join driver。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         self.cancel.cancel();
         Box::pin(async move {
@@ -430,31 +473,37 @@ impl ShutdownAction for NacosWatchShutdown {
 
 /// 一次 watch 循环运行所需的全部拥有状态。
 struct WatchDriver {
+    /// 可选严格来源，负责候选准备、来源复验与接受后的观察记录。
     source: Option<Arc<crate::config_source::StrictSource>>,
+    /// 仅保留最新全量 bundle 的通知通道，不保存完整变更历史。
     receiver: watch::Receiver<ConfigBundle>,
     /// 主动 freshness 探针与漏事件补拉使用的同一个受管 client。
     client: Arc<NacosConfigClient>,
     /// 与 watch 注册完全相同、顺序固定的配置引用。
     refs: Vec<nanacos::ConfigRef>,
+    /// 本地文件变化信号及监听安装状态，和远端候选共用同一发布流程。
     #[cfg(feature = "config-watch")]
     local: crate::config_watch::LocalWatch,
+    /// 非严格来源重建 overlay 时使用的固定导入顺序。
     imports: Vec<YmlImport>,
+    /// 启动固定的 Nacos 引用与加载规则。
     boot: NacosBootstrap,
+    /// 串行验证、准备、安装和发布候选的入口，维护各目标最后成功状态。
     publisher: crate::config_reload::CandidatePublisher,
     /// 运行期 last-good freshness 贡献项。
     readiness: ReadinessContributor,
+    /// 停止驱动循环及候选准备的信号，不抢占已经开始的同步安装。
     cancel: CancellationToken,
 }
 
 impl WatchDriver {
-    /// 业务作用：循环消费最新 bundle：合并失败保留旧快照，成功则发布新版本。
+    /// 业务作用：结合远端通知、定期全量补拉与可选本地通知，串行提交候选配置并报告 freshness。
     ///
-    /// 作为关键任务：取消时正常返回（停机阶段 reap 归类为预期）；receiver 意外关闭时返回
-    /// 让 Runner 在 Running 阶段 reap 归类为故障。
+    /// 参数说明：无。
     ///
-    /// # 参数
-    ///
-    /// 本方法消费 self；内部持有的 receiver 与 Application 均为拥有值。
+    /// 返回：取消或通知通道关闭时正常返回，由 Runner 按应用阶段判断关键任务退出是否异常。
+    /// 拉取或候选失败记录降级并继续处理；发布是否成功由 publisher 裁决，无变化不增加版本。
+    /// watch 只保存最新 bundle，不能作为逐次变更日志；已进入的拉取或发布不会被外层 select 立即抢占。
     async fn run(mut self) -> ApplicationResult<()> {
         let mut probe = tokio::time::interval(NACOS_CONFIG_PROBE_INTERVAL);
         probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -595,7 +644,7 @@ impl WatchDriver {
     /// 业务作用：对一帧 bundle 执行合并、校验并按需发布新配置版本。
     ///
     /// 参数说明：
-    /// - `bundle`：本轮全量重拉的逐文档原文，按启动时冻结的来源计划合并。
+    /// - `bundle`：本轮全量重拉的逐文档原文。
     ///
     /// 返回：整批提交新配置时为 Some(version)，内容与秘密未变化时为 None；取消时拒绝候选。
     /// 合并、校验、准备或安装失败均不发布候选；不支持热应用的字段要求重启且保留当前完整配置。
@@ -666,9 +715,12 @@ impl WatchDriver {
 
 /// 业务作用：读取本地 `nacos` 段；段缺失时返回 `enabled=false` 的默认引导配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：提供当前不可变配置快照的共享上下文。
+///
+/// 返回：缺省段使用禁用配置；启用时从独立秘密来源解析用户名和密码中的 secret:// 引用。
+/// 结构非法、秘密缺失或秘密不是 UTF-8 文本时拒绝；不建立连接，不允许远端配置补造自身信任根。
 fn read_nacos_bootstrap(application: &Application) -> ApplicationResult<NacosBootstrap> {
     let snapshot = application.config();
     if snapshot.value().get("nacos").is_none() {
@@ -710,10 +762,13 @@ fn read_nacos_bootstrap(application: &Application) -> ApplicationResult<NacosBoo
 /// 只包含 Nacos 文档：本地 base 文件不是可重拉来源，混进去会让订阅者误判本轮变更范围。
 /// nanacos 的 bundle 也不提供“究竟哪个 dataId 触发”的信息，因此这里如实列出本轮包含的全部文档。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `imports`：已解析的配置导入列表。
 /// - `boot`：提供默认分组和文件扩展名的引导配置。
+///
+/// 返回：本轮全部远端引用的 data_id 与 group 摘要，不识别实际触发变化的单一文档。
+/// 引用解析失败时返回空列表，调用方须在前置准备阶段完成有效性校验，不能把空列表当作配置合法的证据。
 fn nacos_sources(imports: &[YmlImport], boot: &NacosBootstrap) -> Vec<ConfigSource> {
     let Ok(refs) = nacos_refs_for_bootstrap(imports, boot) else {
         return Vec::new();
@@ -732,10 +787,13 @@ fn nacos_sources(imports: &[YmlImport], boot: &NacosBootstrap) -> Vec<ConfigSour
 ///
 /// 供配置热刷新在发布候选前使用；段缺失等价于 `enabled=false`，只有非法结构才拒绝整帧。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：合并、插值完成但尚未发布的候选配置树。
 /// - `phase`：本次无副作用校验所属的生命周期阶段。
+///
+/// 返回：段缺失或能严格绑定为 NacosBootstrap 时成功；未知字段、类型或绑定约束不符时返回指定阶段错误。
+/// 不验证远端可达性、账号权限或导入文档是否存在。
 pub(crate) fn validate_nacos_section(
     tree: &Value,
     phase: ApplicationPhase,
@@ -750,21 +808,25 @@ pub(crate) fn validate_nacos_section(
 
 /// 业务作用：创建不携带底层错误链的配置中心生命周期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含配置值和凭据的稳定摘要。
+///
+/// 返回：归属于 NacosConfig 及指定阶段的错误，不附加底层错误链，也不自动脱敏输入摘要。
 fn nacos_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::NacosConfig, phase, message)
 }
 
 /// 业务作用：创建带底层错误链的配置中心错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含配置值和密码的稳定摘要。
-/// - `source`：只供诊断、输出前统一脱敏的底层错误。
+/// - `source`：保留在错误链中的底层错误，调用方须避免引入凭据或敏感配置内容。
+///
+/// 返回：归属于 NacosConfig 及指定阶段的带来源错误；本函数原样保留原因，不执行脱敏或输出。
 fn nacos_error_src(
     phase: ApplicationPhase,
     message: impl Into<String>,

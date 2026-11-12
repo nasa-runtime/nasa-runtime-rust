@@ -29,10 +29,12 @@ pub enum Conn {
 }
 
 impl redis::aio::ConnectionLike for Conn {
-    // Routes one packed command through the selected connection mode.
+    /// 业务作用：将单条 Redis 命令交给已选择的单节点或集群传输，不额外重试业务操作。
     ///
-    /// # 参数
-    /// 业务作用：- `cmd`: 底层 Redis 命令对象。
+    /// 参数说明：
+    /// - `cmd`：待发送命令及参数，集群路由由底层连接根据命令键决定。
+    ///
+    /// 返回：底层响应值或传输、协议及服务器错误；错误不证明命令未在远端执行。
     fn req_packed_command<'a>(
         &'a mut self,
         cmd: &'a redis::Cmd,
@@ -43,12 +45,14 @@ impl redis::aio::ConnectionLike for Conn {
         }
     }
 
-    // Routes a packed command batch through the selected connection mode.
+    /// 业务作用：将命令管线交给对应传输，并保留底层响应窗口语义。
     ///
-    /// # 参数
-    /// 业务作用：- `cmd`: 底层 Redis 命令对象。
-    /// - `offset`: 列表、字符串或分页操作的偏移量。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `cmd`：包含待发送命令的完整管线。
+    /// - `offset`：响应中跳过的前缀数量，不是业务列表或键的偏移量。
+    /// - `count`：本次需要保留的响应数量。
+    ///
+    /// 返回：指定窗口的响应集合或底层错误；部分命令可能已经执行，不自动保证批次原子性。
     fn req_packed_commands<'a>(
         &'a mut self,
         cmd: &'a redis::Pipeline,
@@ -63,7 +67,9 @@ impl redis::aio::ConnectionLike for Conn {
 
     /// 业务作用：返回当前 Redis 连接配置的逻辑库编号。
     ///
-    /// 单机连接返回实际 `SELECT` 的 db；cluster 连接返回配置值,用于上层保持统一的客户端配置视图。
+    /// 参数说明：无。
+    ///
+    /// 返回：底层传输记录的逻辑库编号；此操作不查询服务器，也不证明连接当前可用。
     fn get_db(&self) -> i64 {
         match self {
             Conn::Single(c) => c.get_db(),
@@ -72,21 +78,22 @@ impl redis::aio::ConnectionLike for Conn {
     }
 }
 
-/// 业务作用：协议标记 key。
+/// 业务作用：为同一 Redis 命名空间定位共享协议标记，使连接时能检查数据布局兼容性。
 ///
-/// # 参数
-/// - `namespace`: Redis key 使用的业务命名空间。
+/// 参数说明：
+/// - `namespace`：已通过配置校验的业务命名空间。
+///
+/// 返回：固定前缀加命名空间形成的标记键，不访问 Redis。
 fn marker_key(namespace: &str) -> String {
     format!("nasa:protocol:{namespace}")
 }
 
-/// 业务作用：canonical 命名配置串:字段顺序固定、缺省值展开。
-///**存完整 canonical 串做相等比对**,不再用 CRC16——16 位摘要碰撞域仅 65536,
-/// 不同命名配置可能撞同摘要使 fail-closed 判重 **fail-open**(误配被当幂等放行)。CRC16 是校验位非
-/// 抗碰撞摘要;完整串相等比对零碰撞,成本仅几十字节。
+/// 业务作用：按固定顺序生成协议与命名配置的比较文本，避免仅凭短摘要判断配置一致。
 ///
-/// # 参数
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
+/// 参数说明：
+/// - `cfg`：已校验的 Redis 配置，包含协议、锁前缀、默认组及分区布局。
+///
+/// 返回：完整配置比较文本；存在隔离组时附加继承解析后的分组 JSON，不执行远端标记写入。
 fn naming_config_canonical(cfg: &RedisConfig) -> String {
     let base = format!(
         "v1|profile={}|lock.prefix={}|partition.default_group={}|partition.count={}",
@@ -98,7 +105,7 @@ fn naming_config_canonical(cfg: &RedisConfig) -> String {
     //**多组 marker**——`partition.groups` 直接决定 topic 路由 / stream 前缀 / consumer
     // group 名 / lock·fence·disposition·DLQ key 命名空间 / cluster hash-tag,异构 groups 配置必须 fail-closed,
     // 否则同 namespace 一部分节点走隔离组、一部分走默认组 → 同 topic 物理队列分裂(高频/低频隔离最怕)。
-    // **空 groups 逐字节保持旧 v1 串**(不破坏现存单组/legacy CRC16 部署);非空才追加稳定序列化 groups。
+    // 空 groups 使用基础协议格式；非空时纳入所有继承后的组参数，防止同名 topic 被异构布局拆分。
     if cfg.partition.groups.is_empty() {
         base
     } else {
@@ -115,37 +122,54 @@ fn naming_config_canonical(cfg: &RedisConfig) -> String {
 ///
 /// 所有字段 resolved(`0 继承`与显式父级值同 canonical,不误 fail-closed);BTreeMap 排序键稳定。
 ///
-/// # 参数
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
+/// 参数说明：
+/// - `cfg`：包含父级分区参数、默认 Stream 参数及各隔离组覆盖值的配置。
+///
+/// 返回：按组名和 topic 排序、展开继承值的 JSON 文本；相同有效组配置得到相同文本。
 fn canonical_groups(cfg: &RedisConfig) -> String {
     let p = &cfg.partition;
     let s = &cfg.stream;
-    /// 保存 CanonRuntime 运行状态；用于管理后台任务和共享资源。
+    /// 参与协议标记比较的有效运行参数，不持有任务或连接。
     #[derive(serde::Serialize)]
     struct CanonRuntime {
+        /// 本组物理分区数量，决定键空间布局。
         count: u32,
+        /// 所有权再均衡周期，单位毫秒。
         rebalance_ms: u64,
+        /// 待处理消息被回收前的最小空闲时间，单位毫秒。
         min_idle_ms: u64,
+        /// 持有权复验周期，单位毫秒。
         holds_check_interval_ms: u64,
+        /// 撤销所有权后的本地排空期限，单位毫秒。
         drain_timeout_ms: u64,
+        /// 单条处理任务的等待上限，单位毫秒。
         handler_timeout_ms: u64,
+        /// 达到毒消息处置前允许的重投次数。
         max_redeliver: u32,
+        /// 重投预算耗尽后的消息处置策略。
         poison_policy: crate::config::PoisonPolicy,
+        /// 每次读取允许的消息数量。
         batch_size: usize,
+        /// 单次阻塞读取的有效毫秒数。
         poll_timeout_ms: u64,
+        /// 本组允许的在途消息上限。
         inflight_max: usize,
     }
     /// 承载规范化后的分组名；用于统一 Redis 分组标记的比较口径。
     #[derive(serde::Serialize)]
     struct CanonGroup<'a> {
+        /// 按名称排序的路由主题，空配置已解析为逻辑组名。
         topics: Vec<&'a str>,
+        /// 覆盖和继承均已展开的组参数，与主题一并比较。
         #[serde(flatten)]
         rt: CanonRuntime,
     }
     /// 承载规范化后的分片名；用于统一 Redis 分片标记的比较口径。
     #[derive(serde::Serialize)]
     struct CanonPartition<'a> {
+        /// 未被隔离组接管主题所使用的默认组参数。
         default: CanonRuntime,
+        /// 以逻辑组名排序的隔离组布局。
         groups: std::collections::BTreeMap<&'a str, CanonGroup<'a>>,
     }
     // 默认组 resolved runtime = 父级 partition + 全局 stream(默认组无 per-group 覆盖)。
@@ -198,18 +222,21 @@ fn canonical_groups(cfg: &RedisConfig) -> String {
             },
         );
     }
-    serde_json::to_string(&CanonPartition { default, groups })
-        .expect("canonical partition json 序列化不应失败")
+    serde_json::to_string(&CanonPartition {
+        default,
+        groups,
+    })
+    .expect("canonical partition json 序列化不应失败")
 }
 
-/// 业务作用：兼容**旧格式 marker**( 升级前的 `{"profile":..,"naming_config_hash":"<crc16>"}`):
-/// 升级到完整 canonical 串后,既有部署里残留的旧 marker **不应因格式变更被 fail-closed 拒启动**。
-/// 旧 marker 仍按其 CRC16 语义校验(profile 相等 + hash==crc16(本节点 canonical));通过即放行(不重写)。
-/// 新建一律写完整串(零碰撞);旧 marker 自然老化(删/重建后变新格式)。返回 true=旧 marker 校验通过。
+/// 业务作用：按兼容标记的协议名与 CRC16 摘要语义检查当前命名配置。
 ///
-/// # 参数
-/// - `existing`: Redis 中已存在的协议标记或缓存值。
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
+/// 参数说明：
+/// - `existing`：从协议标记键读取的 JSON 文本。
+/// - `cfg`：本节点已校验的配置，用于生成协议名与命名配置摘要。
+///
+/// 返回：协议名与摘要均匹配时为真；格式非法、字段缺失或不一致时为假，不改写标记。
+/// CRC16 仅提供兼容格式的比较能力，不能提供完整文本比较或抗碰撞身份保证。
 fn legacy_marker_matches(existing: &str, cfg: &RedisConfig) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(existing) else {
         return false;
@@ -231,15 +258,12 @@ fn legacy_marker_matches(existing: &str, cfg: &RedisConfig) -> bool {
     }
 }
 
-/// 业务作用：协议标记**语义相等**:把两边 parse 成 `serde_json::Value` 比较(键值集合相等,
-/// 与键序无关)。先前依赖 serde_json 默认字母序做裸字符串相等,开启 preserve_order
-/// 后键序变为声明序,旧部署里残留的字母序 marker 会被误判不一致——故改成语义比对。
-/// parse 失败(非 JSON)退回原始字符串相等(保守)。
-/// 构造协议标记 payload:`{"profile": <wire_name>, "naming_config": <canonical>}`。
-/// profile 用**持久 wire 名**(`wire_name()`),而非枚举 Debug 名,保升级兼容。
+/// 业务作用：构造待写入或比较的协议标记，使用稳定协议名和完整命名配置文本。
 ///
-/// # 参数
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
+/// 参数说明：
+/// - `cfg`：本节点通过校验的协议及命名配置。
+///
+/// 返回：含 `profile` 和 `naming_config` 的 JSON 文本，字符串内容按 JSON 规则转义；不访问 Redis。
 fn marker_payload(cfg: &RedisConfig) -> String {
     serde_json::json!({
         "profile": cfg.profile.wire_name(),
@@ -248,11 +272,14 @@ fn marker_payload(cfg: &RedisConfig) -> String {
     .to_string()
 }
 
-/// 业务作用：比较协议标记的语义等价性；用于兼容旧格式和新格式的启动校验。
+/// 业务作用：比较协议标记内容，避免仅因 JSON 对象字段顺序不同拒绝等价配置。
 ///
-/// # 参数
-/// - `existing`: Redis 中已存在的协议标记或缓存值。
-/// - `payload`: 当前配置生成的协议标记 JSON 字符串。
+/// 参数说明：
+/// - `existing`：Redis 中已存在的协议标记文本。
+/// - `payload`：本节点配置生成的完整协议标记文本。
+///
+/// 返回：双方可解析时按 JSON 值比较；任一解析失败时仅接受原始文本相同。
+/// 本方法不验证 CRC16 兼容标记，调用方须单独裁决该格式。
 fn marker_semantically_equal(existing: &str, payload: &str) -> bool {
     match (
         serde_json::from_str::<serde_json::Value>(existing),
@@ -265,12 +292,9 @@ fn marker_semantically_equal(existing: &str, payload: &str) -> bool {
 
 /// Redis 客户端。
 pub struct RedisClient {
+    /// 建连前校验并冻结的连接、协议和各子系统参数。
     cfg: RedisConfig,
-    /// 连接管理器:clone 共享同一 socket,**断线后台自动重连**(direct command 角色,
-    /// 连接角色表;裸 MultiplexedConnection 断线后不恢复,改用
-    /// ConnectionManager)。**注意**:重连是后台进行的,**命中断开的
-    /// 那一条命令仍会返回 IO 错误**(不是透明重试成功)——框架不能透明重试非幂等命令;
-    /// 后续命令在重连完成后恢复。调用方必须自行处理首次 IO 错误 / ExecutionUnknown。
+    /// 普通命令共享传输；底层重连不证明已发命令的执行结果，调用方须处理断链后的结果不确定性。
     conn: Conn,
     /// 底层 client:派生专用连接(Pub/Sub、阻塞命令)用(cluster 下为 seed 节点;classic pubsub 跨节点)。
     raw: redis::Client,
@@ -294,13 +318,14 @@ pub struct RedisClient {
         std::sync::OnceLock<crate::idempotent::runtime::IdempotentCounterRuntime>,
 }
 
-/// 业务作用：给建连 future 套整体 deadline(`ms=0` 不限)。超时返回 IoError(Redis 不可达
-/// 时 `connect()` 不再永久 pending,启动 fail-fast 生效)。
+/// 业务作用：限制一次建连阶段的总等待，覆盖该阶段的解析、握手及拓扑建立。
 ///
-/// # 参数
-/// - `fut`: 需要在 Redis 执行上下文中运行的异步任务。
-/// - `ms`: 毫秒时间值。
-/// - `what`: 错误或超时日志中标识当前操作的名称。
+/// 参数说明：
+/// - `fut`：返回 Redis 连接结果的异步操作。
+/// - `ms`：该阶段最大等待毫秒数，零表示不设置本层截止时间。
+/// - `what`：用于超时归因的固定操作名称，不应包含凭据。
+///
+/// 返回：操作完成时保留其结果；截止时间到达时取消本地等待并返回 Redis I/O 类错误。
 async fn await_with_deadline<F, T>(
     fut: F,
     ms: u64,
@@ -322,12 +347,36 @@ where
     }
 }
 
+/// 业务作用：从拓扑响应取得唯一且明确的集群模式，拒绝凭缺失字段推断单节点连接。
+///
+/// 参数说明：
+/// - `info`：`INFO cluster` 的完整文本响应，允许其它信息行及 CRLF 或 LF 换行。
+///
+/// 返回：唯一 `cluster_enabled` 字段为 `0` 或 `1` 时返回对应模式；缺失、重复或值非法时
+/// 返回固定解析错误，不携带响应正文，也不允许继续创建协议标记。
+fn parse_cluster_mode(info: &str) -> std::result::Result<bool, redis::RedisError> {
+    let mut modes = info
+        .lines()
+        .filter_map(|line| line.strip_prefix("cluster_enabled:"));
+    // 重复值即使相同也不是唯一拓扑证据，不能按首值或子串匹配选择业务传输。
+    match (modes.next(), modes.next()) {
+        (Some("0"), None) => Ok(false),
+        (Some("1"), None) => Ok(true),
+        _ => Err(redis::RedisError::from((
+            redis::ErrorKind::Parse,
+            "INFO cluster requires exactly one cluster_enabled field with value 0 or 1",
+        ))),
+    }
+}
+
 /// 业务作用：把某建连阶段的底层 redis 错误包装成带阶段与脱敏 endpoint 的 [`NasaRedisError::ConnectProbe`]。
 ///
-/// # 参数
+/// 参数说明：
 /// - `stage`: 失败阶段词(`connect`/`topology`/`cluster-discovery`/`protocol-marker`)。
 /// - `cfg`: 当前 Redis 配置,取其 `safe_endpoint()` 作定位信息(不含凭据)。
 /// - `source`: 底层 redis 错误,原样保留为错误链根因。
+///
+/// 返回：携带固定阶段与安全端点的错误；底层错误链保持原文，上层对外输出时仍须控制披露范围。
 fn connect_probe(
     stage: &'static str,
     cfg: &RedisConfig,
@@ -341,13 +390,13 @@ fn connect_probe(
 }
 
 impl RedisClient {
-    /// 业务作用：构造即就绪:建连接 → 校验/创建协议标记 → 返回 Arc。
+    /// 业务作用：校验配置、建立 Redis 传输并核对共享协议标记，完成后才交付客户端。
     ///
-    /// 各建连阶段的失败都经内部 `connect_probe` 标注阶段与脱敏 endpoint 并保留底层错误链,让启动
-    /// 诊断能一次性定位是哪一步、什么根因;单连接建连/拓扑探测/标记读写的所有权语义保持不变。
-    ///
-    /// # 参数
+    /// 参数说明：
     /// - `cfg`: Redis 连接、命名空间、profile 和各子模块运行参数。
+    ///
+    /// 返回：协议标记新建或兼容校验通过后返回共享客户端；配置非法、连接失败或标记冲突时拒绝。
+    /// 成功不启动消费、锁看门狗或 Job 任务；阶段超时按连接配置分别生效，并非整个启动过程共享一个截止点。
     pub async fn connect(cfg: RedisConfig) -> Result<Arc<RedisClient>> {
         cfg.validate()?;
         let raw =
@@ -392,7 +441,11 @@ impl RedisClient {
                     .await
                 {
                     Ok(info) => {
-                        detected = Some(info.contains("cluster_enabled:1"));
+                        // 只有明确拓扑证据才能选择连接模式；协议响应异常时在任何标记写入前拒绝。
+                        detected = Some(
+                            parse_cluster_mode(&info)
+                                .map_err(|error| connect_probe("topology", &cfg, error))?,
+                        );
                         break;
                     }
                     Err(e) => {
@@ -493,11 +546,19 @@ impl RedisClient {
     }
 
     /// 业务作用：返回目标是否为 Cluster 模式；partition 多键脚本通过 group 级 relayout 保证同槽。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：建连阶段确定并冻结的拓扑模式，不重新探测服务器或证明当前集群健康。
     pub fn is_cluster(&self) -> bool {
         self.is_cluster
     }
 
     /// 业务作用：返回当前连接使用的兼容性 profile。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：已通过命名空间标记校验的协议配置，不根据收到的业务消息切换协议。
     pub fn profile(&self) -> CompatibilityProfile {
         self.cfg.profile
     }
@@ -512,19 +573,29 @@ impl RedisClient {
     }
 
     /// 业务作用：返回当前客户端的冻结配置。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：创建客户端时使用的配置借用，不开放修改；其中可能包含连接凭据，不应直接对外输出。
     pub fn config(&self) -> &RedisConfig {
         &self.cfg
     }
 
-    /// 业务作用：direct command 连接(`Conn`:单节点 ConnectionManager 或 cluster ClusterConnection,
-    /// clone 共享多路复用句柄 + 自动重连/重路由; 角色表第一行)。
+    /// 业务作用：取得普通命令使用的共享传输句柄，避免每条命令独立建立连接。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：当前单节点或集群传输的克隆句柄；共享底层连接，不提供阻塞命令隔离或本层命令超时。
     pub fn conn(&self) -> Conn {
         self.conn.clone()
     }
 
-    /// 业务作用：**pipeline 专用连接**:`pipeline.dedicated_conn=true`(默认)时返回一条
-    /// 与 direct/control/lock 隔离的独立多路复用连接(**惰性创建**,首次调用建连、之后 clone 复用);
-    /// `=false` 则退回共享 `conn()`(旧行为)。pipeline 路径(`PipelineSession`/`AutoPipeline`)走此。
+    /// 业务作用：按配置为管线提供独立传输，降低大批次对普通命令和控制操作的排队影响。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：启用 `pipeline.dedicated_conn` 时惰性建立并共享专用句柄，失败返回连接错误且不保存失败值。
+    /// 关闭时直接返回普通命令的共享句柄，不提供管线流量隔离。
     pub(crate) async fn pipe_conn(&self) -> Result<Conn> {
         if !self.cfg.pipeline.dedicated_conn {
             return Ok(self.conn());
@@ -538,9 +609,10 @@ impl RedisClient {
 
     /// 业务作用：为单个 Job source 建立启用 RESP3 Push 的独占 Pub/Sub lane，通知断线与重订不影响控制命令。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：
+    /// - `push_sender`：由调用方持有消费责任的 RESP3 推送接收入口，用于承接订阅事件。
     ///
-    /// 返回：支持普通或 Sharded 订阅的连接与 Push 接收端；握手或拓扑建立失败时拒绝 source 启动。
+    /// 返回：绑定推送入口的独立连接，订阅命令由调用方继续发送；握手或拓扑建立失败返回错误。
     #[cfg(feature = "job")]
     pub(crate) async fn job_pubsub_conn(
         &self,
@@ -606,7 +678,7 @@ impl RedisClient {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：首次调用建立独立 transport，后续复用其可克隆句柄；建连失败返回脱敏后的连接错误。
+    /// 返回：首次调用建立独立传输，后续复用其可克隆句柄；建连失败保留底层错误，不缓存失败值。
     #[cfg(feature = "job")]
     pub(crate) async fn job_control_conn(&self) -> Result<Conn> {
         let conn = self
@@ -630,9 +702,9 @@ impl RedisClient {
         Ok(conn.clone())
     }
 
-    /// 业务作用：新建一条独立 transport(与 connect() 的主连接同款建法;供 pipeline lane 惰性建连)。
+    /// 业务作用：按冻结拓扑新建独立传输，隔离管线、Job 控制或阻塞读取的连接排队。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `what`: 错误或超时日志中标识当前操作的名称。
     ///
     /// 返回：按已探测拓扑建立独立单节点或 Cluster transport；建连或截止时间失败返回带操作归因的传输错误。
@@ -670,23 +742,30 @@ impl RedisClient {
         }
     }
 
-    /// 业务作用：派生专用连接(Pub/Sub / 阻塞命令角色;调用方持有生命周期)。
+    /// 业务作用：向需要自行派生专用连接的内部组件提供底层客户端配置入口。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：种子端点客户端的借用，不立即建连；调用方负责新连接的超时、拓扑和生命周期。
     pub(crate) fn raw_client(&self) -> &redis::Client {
         &self.raw
     }
 
-    /// 业务作用：派生一条**独立 transport**(与主连接同款建法),供 stream 阻塞订阅等【阻塞命令】专用。
-    /// 关键:XREAD/XREADGROUP `BLOCK` 若走共享 `conn()` 会把并发命令排在阻塞响应之后，
-    /// 故订阅任务持有自己的一条连接。cluster 下是独立 `ClusterConnection`(按 stream key slot 路由,非 seed 单连接)。
-    /// 连接级 `response_timeout_ms`(默认 30s)照常生效——远大于典型 `block_ms`(500ms),不会误杀 `BLOCK`,
-    /// 但网络真断时能让阻塞读返错、订阅任务据此重建连接。
+    /// 业务作用：为阻塞读取派生独立传输，防止 `XREAD` 或 `XREADGROUP BLOCK` 阻塞普通命令的响应。
+    ///
+    /// 参数说明：
+    /// - `what`：连接角色的固定名称，用于失败归因，不携带业务载荷或凭据。
+    ///
+    /// 返回：由调用方独立持有的单节点或集群连接；建连失败返回错误。
+    /// 连接级响应超时仍有效，调用方须确保正常阻塞时长低于该上限。
     pub(crate) async fn dedicated_conn(&self, what: &str) -> Result<Conn> {
         self.build_transport(what).await
     }
 
     /// 业务作用：把客户端状态脚本事件绑定到当前 source generation 的固定指标容器。
     ///
-    /// 参数说明：`metrics` 必须与本客户端对应的 canonical source 一致。
+    /// 参数说明：
+    /// - `metrics`：当前运行代际的指标容器，必须与本客户端的规范化数据源身份一致。
     ///
     /// 返回：无；新 generation 原子替换旧弱引用，客户端不拥有运行时生命周期。
     #[cfg(feature = "job")]
@@ -715,12 +794,13 @@ impl RedisClient {
         }
     }
 
-    /// 业务作用：受控原始入口:不暴露 ConnectionManager 等底层类型,
-    /// 调用方组装 redis::Cmd,本方法执行——逃生舱,非常规路径。
-    /// 同样受 `command.timeout_ms` 约束，确保单命令逃生路径不会无限等待。
+    /// 业务作用：执行高层封装未覆盖的原始 Redis 命令，并沿用客户端的单命令时间预算。
     ///
-    /// # 参数
-    /// - `cmd`: 底层 Redis 命令对象。
+    /// 参数说明：
+    /// - `cmd`：调用方构造的命令及参数，调用方负责授权、键布局与命令副作用。
+    ///
+    /// 返回：按目标类型解码的结果；预算、传输、服务器或类型转换失败返回错误。
+    /// 超时或断链不证明远端未执行，非幂等命令不得据此无条件重试。
     pub async fn execute_raw<T: redis::FromRedisValue>(&self, cmd: &redis::Cmd) -> Result<T> {
         let mut c = self.conn();
         self.timed(cmd.query_async(&mut c)).await
@@ -731,17 +811,22 @@ impl RedisClient {
     /// 成功表示连接可用且服务器响应;沿用 `command.timeout_ms` 单命令超时。只做只读判活,
     /// 不改变任何拓扑或数据。上层据此发布运行期就绪观测。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 服务器正常应答返回 `Ok(())`;连接、超时或协议错误返回 `Err`。
+    /// 返回：命令取得有效 Redis 响应时返回 `Ok(())`；连接、超时或协议错误返回 `Err`。
+    /// 不检查响应文本是否为 `PONG`，也不证明业务脚本或所需 ACL 全部可用。
     pub async fn ping(&self) -> Result<()> {
         self.execute_raw::<redis::Value>(&redis::cmd("PING"))
             .await
             .map(|_| ())
     }
 
-    /// 业务作用：显式停机:multiplexed 连接随 Arc 释放;此处为对称占位,
-    /// 高级设施(锁看门狗等)各自持 CancellationToken 自行退出。
+    /// 业务作用：记录客户端的显式停机调用，供外层生命周期协调器关联停机阶段。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：记录日志后完成；不关闭仍被持有的连接，不取消消费或看门狗，也不拒绝后续命令。
+    /// 调用方须另行停止组件任务并释放所有传输句柄。
     pub async fn shutdown(&self) {
         tracing::info!(namespace = %self.cfg.namespace, "RedisClient shutdown");
     }
@@ -750,23 +835,29 @@ impl RedisClient {
 /// 显式注册表(重复 qualifier 拒绝、注销;主要注入方式仍是显式传 Arc)。
 #[derive(Default)]
 pub struct RedisRegistry {
+    /// 按冻结数据源身份持有的客户端表；读写锁保证注册与注销的单次原子性。
     map: RwLock<HashMap<String, Arc<RedisClient>>>,
 }
 
 impl RedisRegistry {
     /// 业务作用：创建空的命名客户端注册表。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：不含任何客户端的注册表，不建立连接或启动后台任务。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 业务作用：注册;重复 qualifier 返回错误(不静默覆盖)。
-    ///锁中毒**恢复**而非 panic——表内只存 `Arc` clone,panic 不会留下不一致状态,
-    /// `into_inner()` 拿回守卫继续用,比让整个注册表 API 在一次无关 panic 后全 panic 稳健。
+    /// 业务作用：以与客户端一致的数据源身份注册共享句柄，拒绝同名覆盖以免切换业务连接。
     ///
-    /// # 参数
-    /// - `qualifier`: 客户端在注册表中的唯一业务名。
+    /// 参数说明：
+    /// - `qualifier`: 必须与客户端冻结身份一致的注册名称。
     /// - `client`: 要注册的 Redis 客户端共享句柄。
+    ///
+    /// 返回：首次同名注册成功时保存句柄；身份不一致或名称已存在返回配置错误并保留原表项。
     pub fn register(&self, qualifier: &str, client: Arc<RedisClient>) -> Result<()> {
+        // 名称用于选择数据源；拒绝别名冒充，防止按一个身份取得另一个命名空间的连接。
         if qualifier != client.qualifier() {
             return Err(NasaRedisError::Config(format!(
                 "注册表 key {qualifier} 与 RedisClient qualifier {} 不一致",
@@ -774,6 +865,7 @@ impl RedisRegistry {
             )));
         }
         let mut m = self.map.write().unwrap_or_else(|e| e.into_inner());
+        // 已发布的同名句柄可能仍被业务持有，覆盖会产生同一身份指向不同连接的并行状态。
         if m.contains_key(qualifier) {
             return Err(NasaRedisError::Config(format!(
                 "qualifier 重复注册: {qualifier}"
@@ -785,8 +877,10 @@ impl RedisRegistry {
 
     /// 业务作用：返回指定 qualifier 对应的 Redis 客户端。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `qualifier`: 注册时使用的唯一业务名。
+    ///
+    /// 返回：存在时克隆共享句柄，调用方可在注册表注销后继续持有；不存在时返回 `None`。
     pub fn get(&self, qualifier: &str) -> Option<Arc<RedisClient>> {
         self.map
             .read()
@@ -797,8 +891,10 @@ impl RedisRegistry {
 
     /// 业务作用：注销指定 qualifier 对应的 Redis 客户端。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `qualifier`: 要从注册表移除的唯一业务名。
+    ///
+    /// 返回：移除并交还已有句柄，不存在时返回 `None`；不会取消其它持有者的连接或任务。
     pub fn deregister(&self, qualifier: &str) -> Option<Arc<RedisClient>> {
         self.map
             .write()

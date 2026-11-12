@@ -17,18 +17,22 @@ pub struct MySqlSagaTransactionRunner {
 impl MySqlSagaTransactionRunner {
     /// 业务作用：创建绑定已校验 datasource 的 MySQL Saga 事务执行器。
     ///
-    /// 参数说明：`datasource` 是将由 store、Inbox 与 Outbox 共同使用的 qualifier。
+    /// 参数说明：
+    /// - `datasource`：是将由 store、Inbox 与 Outbox 共同使用的 qualifier。
     ///
     /// 返回：不建连的轻量执行器；后续每轮操作在该 datasource 上建立事务。
     fn new(datasource: natx::DatasourceRef) -> Self {
-        Self { datasource }
+        Self {
+            datasource,
+        }
     }
 }
 
 impl SagaTransactionRunner for MySqlSagaTransactionRunner {
     /// 业务作用：执行 MySQL Saga 原子链，并把提交、回滚与结果不确定阶段封闭分类。
     ///
-    /// 参数说明：`operation` 是必须与 Inbox claim 和 Outbox append 同事务的组合操作。
+    /// 参数说明：
+    /// - `operation`：是必须与 Inbox claim 和 Outbox append 同事务的组合操作。
     ///
     /// 返回：提交明确成功时返回业务值；业务拒绝保留原错误，其它事务阶段转换为后端错误。
     fn run<'a, T, E>(
@@ -55,23 +59,27 @@ impl SagaTransactionRunner for MySqlSagaTransactionRunner {
                 Err(natx::TxEntryError::Run(natx::TxRunError::Rollback(error))) => {
                     Err(SagaTransactionRunError::Rollback(error))
                 }
-                Err(natx::TxEntryError::Run(natx::TxRunError::CommitUncertain { .. })) => {
+                Err(natx::TxEntryError::Run(natx::TxRunError::CommitUncertain {
+                    ..
+                })) => {
                     // COMMIT 已发出后无法证明服务端结果，禁止直接重执可能含外部副作用的闭包。
                     Err(SagaTransactionRunError::CommitUncertain)
                 }
-                Err(natx::TxEntryError::Run(natx::TxRunError::RollbackFailed { .. })) => {
+                Err(natx::TxEntryError::Run(natx::TxRunError::RollbackFailed {
+                    ..
+                })) => {
                     // 物理回滚未确认时不能向消息层证明零副作用，只能依靠 Inbox 持续收敛。
                     Err(SagaTransactionRunError::RollbackFailed)
                 }
-                Err(natx::TxEntryError::Run(natx::TxRunError::CommitRejected { .. })) => {
-                    Err(SagaTransactionRunError::CommitRejected)
-                }
-                Err(natx::TxEntryError::Run(natx::TxRunError::RollbackOnly { .. })) => {
-                    Err(SagaTransactionRunError::RollbackOnly)
-                }
-                Err(natx::TxEntryError::Run(natx::TxRunError::Infrastructure { .. })) => {
-                    Err(SagaTransactionRunError::Infrastructure)
-                }
+                Err(natx::TxEntryError::Run(natx::TxRunError::CommitRejected {
+                    ..
+                })) => Err(SagaTransactionRunError::CommitRejected),
+                Err(natx::TxEntryError::Run(natx::TxRunError::RollbackOnly {
+                    ..
+                })) => Err(SagaTransactionRunError::RollbackOnly),
+                Err(natx::TxEntryError::Run(natx::TxRunError::Infrastructure {
+                    ..
+                })) => Err(SagaTransactionRunError::Infrastructure),
                 Err(natx::TxEntryError::Lookup(_)) => Err(SagaTransactionRunError::Infrastructure),
             }
         })
@@ -118,7 +126,8 @@ impl MySqlSagaBackend {
 
     /// 业务作用：创建绑定命名 datasource 的 MySQL Saga 完整后端并复验四种角色同源。
     ///
-    /// 参数说明：`datasource` 是启动期已注册的 MySQL datasource 名称。
+    /// 参数说明：
+    /// - `datasource`：是启动期已注册的 MySQL datasource 名称。
     ///
     /// 返回：名称合法时返回同源组合；任一角色不能接受名称时在任何数据库 I/O 前失败。
     pub fn with_datasource(datasource: impl AsRef<str>) -> anyhow::Result<Self> {
@@ -143,31 +152,55 @@ impl SagaBackend for MySqlSagaBackend {
     type TransactionRunner = MySqlSagaTransactionRunner;
 
     /// 业务作用：读取组合内的 MySQL Saga store。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用已绑定的数据源 MySQL Saga store，不新建连接或转移关闭权。
     fn store(&self) -> &Self::Store {
         &self.store
     }
 
     /// 业务作用：读取与 Saga store 同源的 MySQL Inbox。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用组合内的 MySQL Inbox，不执行去重或开启事务。
     fn inbox(&self) -> &Self::Inbox {
         &self.inbox
     }
 
     /// 业务作用：读取与 Saga store 同源的 MySQL Outbox。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用组合内的 MySQL Outbox，不写入或投递事件。
     fn outbox(&self) -> &Self::Outbox {
         &self.outbox
     }
 
     /// 业务作用：读取绑定相同 datasource 的 MySQL 事务执行器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用组合内已绑定的事务执行器，本次读取不开始或提交事务。
     fn transaction_runner(&self) -> &Self::TransactionRunner {
         &self.transaction_runner
     }
 
     /// 业务作用：读取完整后端共享的 datasource qualifier。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用组合内共享的不可变 qualifier，不返回连接信息或取得数据库资源。
     fn datasource_ref(&self) -> &natx::DatasourceRef {
         &self.datasource
     }
 
     /// 业务作用：声明完整后端固定使用 MySQL driver。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回固定 MySQL 驱动标识，不探测实际数据库连接。
     fn driver(&self) -> natx::DatabaseDriver {
         natx::DatabaseDriver::MySql
     }
@@ -185,7 +218,8 @@ impl SagaBackendFactory for MySqlSagaBackend {
 
     /// 业务作用：为既有 MySQL 运行入口构造命名 datasource 组合。
     ///
-    /// 参数说明：`datasource` 是 Saga、Inbox 与 Outbox 共享的 qualifier。
+    /// 参数说明：
+    /// - `datasource`：是 Saga、Inbox 与 Outbox 共享的 qualifier。
     ///
     /// 返回：名称合法时返回同源后端；否则在 I/O 前返回基础设施分类。
     fn backend_for(datasource: &str) -> Result<Self, SagaBackendError> {

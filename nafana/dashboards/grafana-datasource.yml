@@ -1,8 +1,8 @@
-# Grafana provisioning sample for the Prometheus used by nafana.
+# Grafana provisioning 使用的 Prometheus 数据源配置，供 nafana Dashboard 查询指标。
 #
-# Keep name and uid unchanged so nafana-interfaces.json works without edits.
-# When Grafana cannot resolve the Docker service name "prometheus", change only
-# the url host:port to the Prometheus address reachable from the Grafana server.
+# 保留 name 和 uid，使 nafana-interfaces.json 中的数据源引用能够匹配此配置。
+# Grafana 无法解析 Docker 服务名 prometheus 时，将 url 的 host:port 改为
+# Grafana 服务端可以访问的 Prometheus 地址；浏览器可达并不等于服务端可达。
 
 apiVersion: 1
 

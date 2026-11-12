@@ -10,20 +10,24 @@ pub type MetricLabels<'a> = &'a [(&'static str, &'a str)];
 pub trait MetricsSink: Send + Sync + 'static {
     /// 业务作用：累加一个单调 counter。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`: nafka 定义的固定指标名。
     /// - `delta`: 本次增量，始终为正数。
     /// - `labels`: 固定低基数字段，不包含 payload、header value 或错误详情。
+    ///
+    /// 返回：同步回调结束，不要求远端持久化确认；受管出口捕获 unwind 并计入失败，但不能中断阻塞实现。
     fn counter(&self, name: &'static str, delta: u64, labels: MetricLabels<'_>);
 
     /// 业务作用：设置一个瞬时 gauge。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `name`: nafka 定义的固定指标名。
     /// - `value`: 当前观测值。
     /// - `labels`: 固定低基数字段。
+    ///
+    /// 返回：本次状态提交给实现后同步结束；不向业务路径返回导出错误，受管出口另行统计回调异常。
     fn gauge(&self, name: &'static str, value: i64, labels: MetricLabels<'_>);
 }
 
@@ -43,7 +47,11 @@ pub struct MetricsOptions {
     pub max_event_bytes: usize,
 }
 impl Default for MetricsOptions {
-    /// 业务作用：给指标出口建立有限默认预算。参数说明：无。返回：256 个排队事件，每事件最多 4096 字节。
+    /// 业务作用：给指标出口建立有限默认预算。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：256 个排队事件，每事件最多 4096 字节。
     fn default() -> Self {
         Self {
             queue_capacity: 256,
@@ -52,7 +60,11 @@ impl Default for MetricsOptions {
     }
 }
 impl MetricsOptions {
-    /// 业务作用：在创建导出线程前拒绝无界或不合理预算。参数说明：无。返回：有效时继续，非法配置返回 Config。
+    /// 业务作用：在创建导出线程前拒绝无界或不合理预算。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：有效时继续，非法配置返回 Config。
     pub(crate) fn validate(self) -> Result<()> {
         if !(1..=65536).contains(&self.queue_capacity)
             || !(64..=65536).contains(&self.max_event_bytes)
@@ -86,36 +98,64 @@ pub struct MetricsExportStats {
     pub worker_exited: bool,
 }
 
+/// 区分累计增量与瞬时值，确保后端使用对应指标接口。
 enum Value {
+    /// 单调计数器的本次增量。
     Counter(u64),
+    /// 瞬时状态采样。
     Gauge(i64),
 }
+/// 交给导出线程的自有事件，不借用业务调用栈。
 struct Event {
+    /// 固定指标名称。
     name: &'static str,
+    /// 已确定种类的观测数值。
     value: Value,
+    /// 已复制的低基数标签，包含来源标识。
     labels: Vec<(&'static str, String)>,
 }
+/// 准入与导出线程共同持有的队列和责任计数。
 struct Shared {
+    /// 尚未交给用户回调的有界事件队列。
     queue: Mutex<VecDeque<Event>>,
+    /// 新事件或关闭意图的唤醒信号。
     wake: Condvar,
+    /// 永久关闭标记，阻止后续观测进入队列。
     closing: AtomicBool,
+    /// 排队事件的独立观测计数。
     queued: AtomicUsize,
+    /// 正在用户代码中执行的回调数，为零或一。
     active: AtomicUsize,
+    /// 用户回调正常返回的累计次数，不代表远端持久化。
     exported: AtomicU64,
+    /// 因准入约束或关闭丢弃的累计事件数。
     dropped: AtomicU64,
+    /// 用户回调发生 unwind 的累计次数。
     failed: AtomicU64,
 }
 
 /// 热路径只进行有界复制和非等待准入，用户代码始终由专属线程执行。
 pub(crate) struct AsyncMetrics {
+    /// 在出口与实际导出线程之间共享的状态。
     shared: Arc<Shared>,
+    /// 用于判定实际退出并最终回收的唯一线程句柄。
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// 自动添加到每个事件中的受管源身份。
     source: String,
+    /// 冻结的事件数量和字节预算。
     options: MetricsOptions,
+    /// 是否安装后端；未安装时忽略观测而不累计丢弃。
     enabled: bool,
 }
 impl AsyncMetrics {
-    /// 业务作用：构造源级隔离的指标出口。参数说明：sink 为可选后端，source 为受管源名，options 为容量边界。返回：无后端不建线程；线程创建或配置失败拒绝构造。
+    /// 业务作用：构造源级隔离的指标出口。
+    ///
+    /// 参数说明：
+    /// - `sink`：sink 为可选后端。
+    /// - `source`：source 为受管源名。
+    /// - `options`：options 为容量边界。
+    ///
+    /// 返回：无后端不建线程；线程创建或配置失败拒绝构造。
     pub(crate) fn new(
         sink: Option<Arc<dyn MetricsSink>>,
         source: String,
@@ -153,7 +193,13 @@ impl AsyncMetrics {
         }))
     }
 
-    /// 业务作用：在专属线程执行用户回调并隔离失败。参数说明：shared 为有界队列与计数，sink 为后端。返回：关闭后退出；正在执行的用户代码只能等待其真实返回。
+    /// 业务作用：在专属线程执行用户回调并隔离失败。
+    ///
+    /// 参数说明：
+    /// - `shared`：shared 为有界队列与计数。
+    /// - `sink`：sink 为后端。
+    ///
+    /// 返回：关闭后退出；正在执行的用户代码只能等待其真实返回。
     fn run(shared: Arc<Shared>, sink: Arc<dyn MetricsSink>) {
         loop {
             let event = {
@@ -195,7 +241,14 @@ impl AsyncMetrics {
         }
     }
 
-    /// 业务作用：非等待地接纳一个有限观测事件。参数说明：name/value 为指标，labels 为固定身份标签。返回：成功入队或计入丢弃；绝不执行用户代码或等待容量。
+    /// 业务作用：非等待地接纳一个有限观测事件。
+    ///
+    /// 参数说明：
+    /// - `name`：框架固定指标名，计入事件字节预算。
+    /// - `value`：携带 counter 或 gauge 类别的观测值。
+    /// - `labels`：最多七个调用方标签，不能使用出口自动补入的 source 键。
+    ///
+    /// 返回：未安装后端时直接忽略；超限、关闭、锁竞争或队列满时计入丢弃，否则复制标签并入队，不执行用户代码或等待容量。
     fn enqueue(&self, name: &'static str, value: Value, labels: MetricLabels<'_>) {
         if !self.enabled {
             return;
@@ -240,7 +293,11 @@ impl AsyncMetrics {
         self.shared.wake.notify_one();
     }
 
-    /// 业务作用：关闭新观测准入并丢弃未执行的队列。参数说明：无。返回：不等待用户代码；活动回调责任留给 await_closed。
+    /// 业务作用：关闭新观测准入并丢弃未执行的队列。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：不等待用户代码；活动回调责任留给 await_closed。
     pub(crate) fn close(&self) {
         let mut queue = self
             .shared
@@ -257,7 +314,11 @@ impl AsyncMetrics {
         self.shared.wake.notify_all();
     }
 
-    /// 业务作用：读取不经过用户出口的自身状态。参数说明：无。返回：独立原子计数快照，worker_exited 以线程实际终态为准。
+    /// 业务作用：读取不经过用户出口的自身状态。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：独立原子计数快照，worker_exited 以线程实际终态为准。
     pub(crate) fn stats(&self) -> MetricsExportStats {
         MetricsExportStats {
             enabled: self.enabled,
@@ -276,7 +337,12 @@ impl AsyncMetrics {
         }
     }
 
-    /// 业务作用：在源关闭的共同期限内等待指标用户代码实际退出。参数说明：deadline 为单调绝对期限。返回：线程真正退出才成功；超时保留活动诊断，后续可继续等待。
+    /// 业务作用：在源关闭的共同期限内等待指标用户代码实际退出。
+    ///
+    /// 参数说明：
+    /// - `deadline`：deadline 为单调绝对期限。
+    ///
+    /// 返回：线程真正退出才成功；超时保留活动诊断，后续可继续等待。
     pub(crate) async fn await_closed(&self, deadline: Instant) -> bool {
         loop {
             if self.stats().worker_exited {
@@ -302,19 +368,37 @@ impl AsyncMetrics {
     }
 }
 impl MetricsSink for AsyncMetrics {
-    /// 业务作用：将计数增量送入有界观测队列。参数说明：name/delta/labels 为指标身份和增量。返回：零增量忽略，拥塞丢弃不影响业务确认。
+    /// 业务作用：将计数增量送入有界观测队列。
+    ///
+    /// 参数说明：
+    /// - `name`：固定 counter 名称。
+    /// - `delta`：本次非负增量，零值不创建事件。
+    /// - `labels`：受控身份标签，不含正文或错误详情。
+    ///
+    /// 返回：零增量忽略，拥塞丢弃不影响业务确认。
     fn counter(&self, name: &'static str, delta: u64, labels: MetricLabels<'_>) {
         if delta != 0 {
             self.enqueue(name, Value::Counter(delta), labels);
         }
     }
-    /// 业务作用：将瞬时状态送入有界观测队列。参数说明：name/value/labels 为指标身份和观测值。返回：拥塞丢弃，由后续采样更新状态。
+    /// 业务作用：将瞬时状态送入有界观测队列。
+    ///
+    /// 参数说明：
+    /// - `name`：固定 gauge 名称。
+    /// - `value`：本次采样的有符号状态值。
+    /// - `labels`：受控身份标签，由出口另加来源标识。
+    ///
+    /// 返回：拥塞丢弃，由后续采样更新状态。
     fn gauge(&self, name: &'static str, value: i64, labels: MetricLabels<'_>) {
         self.enqueue(name, Value::Gauge(value), labels);
     }
 }
 impl Drop for AsyncMetrics {
-    /// 业务作用：遗忘显式关闭时停止新导出并唤醒线程。参数说明：无。返回：不阻塞析构；活动用户代码仍需自行返回。
+    /// 业务作用：遗忘显式关闭时停止新导出并唤醒线程。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：不阻塞析构；活动用户代码仍需自行返回。
     fn drop(&mut self) {
         self.close();
     }

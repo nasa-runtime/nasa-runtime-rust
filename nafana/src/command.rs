@@ -78,15 +78,19 @@ pub struct Command {
 
 /// 执行区 RAII 守卫：构造时增加并发；Drop 时归还，并为未完成的 future 记录 canceled。
 struct InflightGuard<'a> {
+    /// 本次执行所属的命令，承接并发计数与最终结局。
     command: &'a Command,
+    /// 主结局是否已登记，防止析构重复记录取消。
     completed: bool,
 }
 
 impl<'a> InflightGuard<'a> {
     /// 业务作用：进入执行区:当前并发 +1、抬终身峰值,返回 (守卫, 进入后的并发数)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `command`: 当前执行所属命令。
+    ///
+    /// 返回：负责归还在途计数的守卫及进入后的并发数；同时更新进程生命周期并发峰值。
     fn enter(command: &'a Command) -> (Self, u64) {
         let cur = command.inflight.fetch_add(1, Ordering::Relaxed) + 1;
         command
@@ -102,6 +106,10 @@ impl<'a> InflightGuard<'a> {
     }
 
     /// 业务作用：标记执行已经产生 success/failure/timeout 结局，Drop 时不再补 canceled。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：将守卫标为已结算；析构仍归还并发，但不再追加 canceled 结局。
     fn complete(&mut self) {
         self.completed = true;
     }
@@ -109,6 +117,10 @@ impl<'a> InflightGuard<'a> {
 
 impl Drop for InflightGuard<'_> {
     /// 业务作用：离开执行区(正常返回/超时/取消)时归还并发计数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：归还一次并发计数；尚未结算时补记 canceled、滚动窗口及 TPS 权重。
     fn drop(&mut self) {
         self.command.inflight.fetch_sub(1, Ordering::Relaxed);
         if !self.completed {
@@ -123,12 +135,22 @@ impl Drop for InflightGuard<'_> {
 }
 
 /// 业务作用：并发上限归一化:0 视为"不限"，超大值收敛到 Tokio semaphore 可表达的上限。
+///
+/// 参数说明：
+/// - `v`：调用方指定的可选最大并发，零表示不限。
+///
+/// 返回：未配置或为零时返回 None；其它值限制在 Tokio semaphore 可表达的上限内。
 fn normalize_max_concurrent(v: Option<usize>) -> Option<usize> {
     v.filter(|n| *n > 0)
         .map(|limit| limit.min(tokio::sync::Semaphore::MAX_PERMITS))
 }
 
 /// 业务作用：超时归一化:0 时长视为"不超时"，超长值收敛到运行时安全上限。
+///
+/// 参数说明：
+/// - `v`：调用方指定的可选执行时限，零时长表示不启用超时。
+///
+/// 返回：未配置或零时长返回 None；其它值限制在运行时支持的最大请求时长内。
 fn normalize_timeout(v: Option<Duration>) -> Option<Duration> {
     v.filter(|d| !d.is_zero())
         .map(|duration| duration.min(MAX_COMMAND_TIMEOUT))
@@ -136,6 +158,10 @@ fn normalize_timeout(v: Option<Duration>) -> Option<Duration> {
 
 impl Command {
     /// 业务作用：取得滚动窗口锁；即使此前持锁线程 panic，也继续使用其中可恢复的数据。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：持有当前滚动状态的互斥守卫；锁中毒时保留并继续使用已有状态。
     fn rolling_state(&self) -> std::sync::MutexGuard<'_, RollingWindow> {
         self.rolling
             .lock()
@@ -144,12 +170,14 @@ impl Command {
 
     /// 业务作用：内部构造:只建实例与周期汇总任务,不进注册表(注册/去重在 monitor 系入口)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `command`: 命令名。
     /// - `group`: 分组名。
     /// - `max_concurrent`: 已归一化的并发上限。
     /// - `timeout`: 已归一化的单请求超时。
     /// - `tps_weight`: TPS 权重标记。
+    ///
+    /// 返回：未注册的共享命令；存在 Tokio 运行时时启动仅持弱引用的周期汇总任务。
     fn build(
         command: &str,
         group: &str,
@@ -201,12 +229,14 @@ impl Command {
     /// 同 key(group+command)重复调用:参数一致返回既有实例;参数不同 `warn` 后
     /// **复用既有实例**(合同)。要感知冲突用 [`Command::try_monitor`]。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `command`: 命令名(面板 tile 标题)。
     /// - `group`: 分组名。
     /// - `max_concurrent`: 可选并发上限;None 或 Some(0) = 不限。
     /// - `timeout`: 可选单请求超时;None 或 0 时长 = 不超时。
     /// - `tps_weight`: 可选 TPS 权重;None = 不计,Some(0) = 标记但权重 0。
+    ///
+    /// 返回：已注册的共享命令；同键参数冲突时记录告警并保持原实例的配置。
     pub fn monitor(
         command: &str,
         group: &str,
@@ -231,12 +261,14 @@ impl Command {
 
     /// 业务作用：同 [`Command::monitor`],但同 key 异参时返回 `Err((冲突, 既有实例))` 供显式调用方感知。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `command`: 命令名。
     /// - `group`: 分组名。
     /// - `max_concurrent`: 可选并发上限。
     /// - `timeout`: 可选单请求超时。
     /// - `tps_weight`: 可选 TPS 权重。
+    ///
+    /// 返回：首次创建或同键同参数时返回共享命令；参数冲突返回冲突详情与原实例，不替换注册项。
     #[allow(clippy::type_complexity)]
     pub fn try_monitor(
         command: &str,
@@ -264,23 +296,27 @@ impl Command {
     /// 业务作用：创建命令，不计入 TPS。
     /// `max_concurrent = 0` / 零时长 `timeout` 分别表示不限并发/不超时(合同)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `command`: 命令名。
     /// - `group`: 分组名。
     /// - `max_concurrent`: 并发上限(0 = 不限)。
     /// - `timeout`: 单请求超时(零时长 = 不超时)。
+    ///
+    /// 返回：不计 TPS 的共享命令；同键已有实例时沿用其配置，参数冲突会记录告警。
     pub fn new(command: &str, group: &str, max_concurrent: usize, timeout: Duration) -> Arc<Self> {
         Self::monitor(command, group, Some(max_concurrent), Some(timeout), None)
     }
 
     /// 业务作用：同 [`Command::new`]，但计入 TPS。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `command`: 命令名。
     /// - `group`: 分组名。
     /// - `max_concurrent`: 并发上限(0 = 不限)。
     /// - `timeout`: 单请求超时(零时长 = 不超时)。
     /// - `weight`: 每个请求给 TPS 累加的权重。
+    ///
+    /// 返回：按指定权重计 TPS 的共享命令；同键已有实例时沿用其配置，参数冲突会记录告警。
     pub fn with_tps(
         command: &str,
         group: &str,
@@ -299,8 +335,10 @@ impl Command {
 
     /// 业务作用：给本命令挂周期请求日志行尾的附加信息生成器(只能设一次,重复设忽略)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `f`: 闭包 `Fn(period_ms) -> String`,入参为统计周期毫秒数。
+    ///
+    /// 返回：首次调用保存附加信息生成器；后续调用不替换已安装的生成器。
     pub fn set_extra<F>(&self, f: F)
     where
         F: Fn(u64) -> String + Send + Sync + 'static,
@@ -310,17 +348,21 @@ impl Command {
 
     /// 业务作用：设置真实接口路由,影响周期请求日志与 `nafana_command_info{path}` 显示;只能设一次。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `path`: 真实接口路由字符串。
+    ///
+    /// 返回：首次调用保存展示路由；后续调用不改变已有路径，不影响请求匹配。
     pub fn set_path(&self, path: &str) {
         let _ = self.path.set(path.to_string());
     }
 
     /// 业务作用：【自定义限流返回】设 bulkhead 满时返回的 JSON body(以 HTTP 200 返回)。
-    /// 非法 JSON 静默忽略(回退默认 429 壳);要感知失败用 [`Command::try_set_reject_response_str`]。
+    /// 非法 JSON 静默忽略并保持已有配置；要感知失败用 [`Command::try_set_reject_response_str`]。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `json`: bulkhead 拒绝时返回的 JSON body 字符串。
+    ///
+    /// 返回：合法 JSON 首次安装后用于静态拒绝响应；无效输入或重复设置不改变已有配置。
     pub fn set_reject_response_str(&self, json: &str) {
         let _ = self.try_set_reject_response_str(json);
     }
@@ -328,8 +370,10 @@ impl Command {
     /// 业务作用：同 [`Command::set_reject_response_str`],但返回结果:非法 JSON → `Err`;
     /// 本次设入 → `Ok(true)`;之前已设过 → `Ok(false)`。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `json`: bulkhead 拒绝时返回的 JSON body 字符串。
+    ///
+    /// 返回：首次安装返回 Ok(true)，已有配置返回 Ok(false)；JSON 解析失败返回错误且不改变配置。
     pub fn try_set_reject_response_str(&self, json: &str) -> Result<bool, serde_json::Error> {
         let v = serde_json::from_str::<Value>(json)?;
         Ok(self.reject_body.set(v).is_ok())
@@ -337,16 +381,20 @@ impl Command {
 
     /// 业务作用：【自定义超时返回】设超时时返回的 JSON body(以 HTTP 200 返回);用法同 reject 侧。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `json`: 超时时返回的 JSON body 字符串。
+    ///
+    /// 返回：合法 JSON 首次安装后用于静态超时响应；无效输入或重复设置不改变已有配置。
     pub fn set_timeout_response_str(&self, json: &str) {
         let _ = self.try_set_timeout_response_str(json);
     }
 
     /// 业务作用：同 [`Command::set_timeout_response_str`],但返回结果供调用方感知。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `json`: 超时时返回的 JSON body 字符串。
+    ///
+    /// 返回：首次安装返回 Ok(true)，已有配置返回 Ok(false)；JSON 解析失败返回错误且不改变配置。
     pub fn try_set_timeout_response_str(&self, json: &str) -> Result<bool, serde_json::Error> {
         let v = serde_json::from_str::<Value>(json)?;
         Ok(self.timeout_body.set(v).is_ok())
@@ -354,32 +402,36 @@ impl Command {
 
     /// 业务作用：【自定义限流降级 fn】bulkhead 满时调用,优先级高于 reject_response;只能设一次。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `fb`: 产出 Response 的异步降级闭包。
+    ///
+    /// 返回：首次保存拒绝处理器；重复设置保持原处理器，执行时优先于静态拒绝响应。
     pub fn set_reject_fn(&self, fb: FallbackFn) {
         let _ = self.reject_fb.set(fb);
     }
 
     /// 业务作用：【自定义超时降级 fn】超时时调用,优先级高于 timeout_response;只能设一次。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `fb`: 产出 Response 的异步降级闭包。
+    ///
+    /// 返回：首次保存超时处理器；重复设置保持原处理器，执行时优先于静态超时响应。
     pub fn set_timeout_fn(&self, fb: FallbackFn) {
         let _ = self.timeout_fb.set(fb);
     }
 
     /// 业务作用：按“局部函数、局部静态响应、全局处理器、内置响应”的固定顺序解析一次降级。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `cause`: 已完成主结局记账的并发拒绝或执行超时原因。
     ///
-    /// # 返回
-    ///
-    /// 返回最终 HTTP 响应；全局处理器配置冲突、崩溃或递归时安全回退到内置响应。
+    /// 返回：最终 HTTP 响应；全局处理器配置冲突、崩溃或递归时安全回退到内置响应。
     async fn resolve_fallback(&self, cause: FallbackCause) -> Response {
         match cause {
-            FallbackCause::BulkheadRejected { .. } => {
+            FallbackCause::BulkheadRejected {
+                ..
+            } => {
                 if let Some(fallback) = self.reject_fb.get() {
                     return fallback().await;
                 }
@@ -387,7 +439,9 @@ impl Command {
                     return custom_response(body);
                 }
             }
-            FallbackCause::ExecutionTimeout { .. } => {
+            FallbackCause::ExecutionTimeout {
+                ..
+            } => {
                 if let Some(fallback) = self.timeout_fb.get() {
                     return fallback().await;
                 }
@@ -446,20 +500,24 @@ impl Command {
         }
 
         match cause {
-            FallbackCause::BulkheadRejected { max_concurrent, .. } => {
-                rejected_response(&self.command, max_concurrent)
-            }
-            FallbackCause::ExecutionTimeout { timeout, .. } => {
-                timeout_response(&self.command, timeout)
-            }
+            FallbackCause::BulkheadRejected {
+                max_concurrent,
+                ..
+            } => rejected_response(&self.command, max_concurrent),
+            FallbackCause::ExecutionTimeout {
+                timeout,
+                ..
+            } => timeout_response(&self.command, timeout),
         }
     }
 
     /// 业务作用：【中间件形态】用本命令保护下游,`run_fn` 的薄封装。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `req`: HTTP 请求对象。
     /// - `next`: axum 放行句柄。
+    ///
+    /// 返回：下游业务响应或命令降级响应；并发满时不进入下游，超时时取消下游 future。
     pub async fn run(self: Arc<Self>, req: Request, next: Next) -> Response {
         self.run_fn(move || next.run(req)).await
     }
@@ -470,13 +528,11 @@ impl Command {
     /// 包裹执行 → 结局归类(5xx=failure,429/504 由本组件自己产出不参与归类) → 双轨记录。
     /// 调用方丢弃执行 future 时由 RAII 守卫补记 canceled，并归还 inflight。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `f`: 被保护的异步执行体,只有通过 bulkhead 后才会被调用。
     ///
-    /// # 返回
-    ///
-    /// 返回业务响应、局部降级响应、全局降级响应或组件内置拒绝/超时响应。
+    /// 返回：业务响应、局部降级响应、全局降级响应或组件内置拒绝/超时响应。
     pub async fn run_fn<F, Fut>(self: Arc<Self>, f: F) -> Response
     where
         F: FnOnce() -> Fut,
@@ -575,6 +631,10 @@ impl Command {
     }
 
     /// 业务作用：若本命令标了 TPS,给单调 TPS 计数按权重累加(Some(0) 权重为 0,自然无增量)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅在已配置正权重时增加生命周期 TPS 累计；未标记或零权重不增加计数。
     fn add_tps(&self) {
         if let Some(w) = self.tps_weight {
             if w > 0 {
@@ -585,6 +645,10 @@ impl Command {
 
     /// 业务作用：每 10s 打一行最近窗口的请求结局汇总。
     /// 窗口内没有执行样本就不打,避免刷空日志。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：窗口存在成功、失败或超时样本时输出汇总日志；读取不清空有效窗口。
     fn log_cost(&self) {
         let w = self.rolling_state().snapshot();
         let count = w.success + w.failure + w.timeout;
@@ -622,15 +686,11 @@ impl Command {
         );
     }
 
-    /// 业务作用：导出 `/metrics` 所需的主请求、全局降级、TPS、并发与延迟一致性快照。
-    ///
-    /// # 参数说明
+    /// 业务作用：导出 `/metrics` 所需的主请求、全局降级、TPS、并发与延迟当前视图。
     ///
     /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// 返回当前命令的只读渲染视图；仅在取滚动窗口快照时短暂持锁。
+    /// 返回：当前命令的只读渲染视图；仅在取滚动窗口快照时短暂持锁，各原子计数不是同一时刻的事务快照。
     pub(crate) fn export(&self) -> CommandExport {
         let window = self.rolling_state().snapshot();
         let inflight = self.inflight.load(Ordering::Relaxed).max(0) as u64;
@@ -669,6 +729,10 @@ impl Command {
     }
 
     /// 业务作用：本命令窗口内的请求总数 × TPS 权重(current_tps 的被加项);未标 TPS 返回 None。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已标记命令返回窗口请求数乘权重；未标记返回 None，零权重返回 Some(0)。
     fn tps_window_contribution(&self) -> Option<u64> {
         self.tps_weight.map(|w| {
             let request_count = self.rolling_state().request_count();
@@ -679,7 +743,11 @@ impl Command {
 
 /// 业务作用：读取当前全局 TPS(每秒事务数):所有标了 TPS 的命令窗口请求数(×权重)之和 / 窗口秒数。
 /// 给周期请求日志行尾使用的当前 TPS；Prometheus 侧请用
-/// `sum(rate(nafana_tps_total[10s]))`，两者只差取整级别。
+/// `sum(rate(nafana_tps_total[10s]))`；查询采样与本地秒桶边界不同，二者不保证逐次相等。
+///
+/// 参数说明: 无。
+///
+/// 返回：全部已标记命令的窗口贡献除以窗口秒数；没有贡献时为零，不清空计数。
 pub fn current_tps() -> f64 {
     let total: u64 = registry::all()
         .iter()
@@ -734,9 +802,11 @@ pub(crate) struct CommandExport {
 
 /// 业务作用：bulkhead 满时的默认 429 响应壳。
 ///
-/// # 参数
+/// 参数说明：
 /// - `name`: 命令名,拼进提示信息。
 /// - `max`: 并发上限,拼进提示信息。
+///
+/// 返回：包含命令名和并发上限说明的 HTTP 429 JSON 响应，业务数据为空。
 fn rejected_response(name: &str, max: usize) -> Response {
     let body = Json(json!({
         "code": 429,
@@ -748,9 +818,11 @@ fn rejected_response(name: &str, max: usize) -> Response {
 
 /// 业务作用：超时时的默认 504 响应壳。
 ///
-/// # 参数
+/// 参数说明：
 /// - `name`: 命令名,拼进提示信息。
 /// - `dur`: 超时时长,拼进提示信息。
+///
+/// 返回：包含命令名和超时时长说明的 HTTP 504 JSON 响应，业务数据为空。
 fn timeout_response(name: &str, dur: Duration) -> Response {
     let body = Json(json!({
         "code": 504,
@@ -763,8 +835,10 @@ fn timeout_response(name: &str, dur: Duration) -> Response {
 /// 业务作用：自定义限流/超时返回:HTTP 200 + 用户给的 JSON body(业务码放 body 里,
 /// 前端 axios 不因 4xx/5xx 抛错。
 ///
-/// # 参数
+/// 参数说明：
 /// - `body`: 拒绝/超时时返回的 JSON body。
+///
+/// 返回：以 HTTP 200 承载 body 副本的 JSON 响应；不改写调用方的业务字段。
 fn custom_response(body: &Value) -> Response {
     (StatusCode::OK, Json(body.clone())).into_response()
 }

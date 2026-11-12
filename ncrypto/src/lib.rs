@@ -38,27 +38,44 @@ pub enum CryptoError {
 }
 
 impl CryptoError {
-    /// 业务作用: 加密 encrypt 数据；用于生成受保护的输出。
+    /// 业务作用：把加密阶段原因封装为统一加密错误。
+    ///
+    /// 参数说明：
+    /// - `m`：调用方提供的错误原因，展示时不会自动脱敏。
+    ///
+    /// 返回：返回保留原因文本的 Encrypt，不记录日志或改变密码学状态。
     pub(crate) fn encrypt(m: impl Into<String>) -> Self {
         CryptoError::Encrypt(m.into())
     }
 
-    /// 业务作用: 解密 decrypt 数据；用于还原受保护的输入。
+    /// 业务作用：把解码、认证或解密阶段原因封装为解密错误。
+    ///
+    /// 参数说明：
+    /// - `m`：调用方提供的错误原因，不应包含秘密材料。
+    ///
+    /// 返回：返回保留原因文本的 Decrypt，不额外脱敏。
     pub(crate) fn decrypt(m: impl Into<String>) -> Self {
         CryptoError::Decrypt(m.into())
     }
 
-    /// 业务作用: 创建加密配置构造器；用于选择算法模式并生成运行参数。
+    /// 业务作用：封装密钥、参数或能力约束不满足的配置错误。
+    ///
+    /// 参数说明：
+    /// - `m`：可对调用方展示的配置拒绝原因。
+    ///
+    /// 返回：返回 Config 并原样保留文本，不检查其中是否含秘密。
     pub(crate) fn config(m: impl Into<String>) -> Self {
         CryptoError::Config(m.into())
     }
 }
 
 impl std::fmt::Display for CryptoError {
-    /// 业务作用: 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：把密码学错误类别和已保存原因写入展示目标。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收类别及原因文本的格式化目标。
+    ///
+    /// 返回：写入成功时完成，否则传播格式化错误；原因文本不在此脱敏。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CryptoError::Encrypt(m) => write!(f, "crypto encrypt error: {m}"),

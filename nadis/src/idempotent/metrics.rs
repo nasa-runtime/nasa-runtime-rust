@@ -9,22 +9,32 @@ use super::result::IdempotentRejection;
 /// 幂等计数长期复用的线程安全指标容器；family 固定、label 封闭，进入统一指标目录无动态基数。
 #[derive(Debug, Default)]
 pub struct IdempotentCounterMetrics {
+    /// 已解析为首次成功结算的累计次数。
     applied: AtomicU64,
+    /// 已解析为窗口内重复 nonce 的累计次数。
     duplicate: AtomicU64,
+    /// 结算已成功但凭证过期设置未被确认的累计次数。
     ttl_missing: AtomicU64,
+    /// 未能完整确认全部主节点所需能力的探测次数。
     probe_failures: AtomicU64,
+    /// 因账本键被其它数据类型占用而拒绝的次数。
     rejected_ledger_type: AtomicU64,
+    /// 因操作类型或脚本配置无效而拒绝的次数。
     rejected_operation: AtomicU64,
+    /// 原生计数命令因类型或数值约束拒绝的次数。
     rejected_command: AtomicU64,
     /// `ttl_missing` 出现后置位并保持：凭证 TTL 未确认意味着回收风险，不能因后续成功自动清零。
     degraded: AtomicBool,
+    /// 将已确认模式与对应共享标记作为一份事实发布的锁。
     layout: Mutex<LayoutFact>,
 }
 
 /// 已解析布局的只读事实快照。
 #[derive(Debug, Clone, Default)]
 struct LayoutFact {
+    /// 远端实际生效的布局文本，未完成准备时为空。
     marker: String,
+    /// 已完成共享标记验证的字段过期或桶模式，准备前为空。
     mode: Option<IdempotentTtlMode>,
 }
 

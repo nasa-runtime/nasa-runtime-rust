@@ -78,20 +78,30 @@ pub struct TransactionHandle {
 
 impl TransactionHandle {
     /// 业务作用：取得当前阶段、权威与已确认成功计数。
-    /// 参数说明：无。返回：不发起网络请求的独立快照。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不发起网络请求的独立快照。
     pub fn status(&self) -> TransactionStatus {
         self.task.status()
     }
 
     /// 业务作用：关闭新批次并撤销尚未 commit 的实际业务权威。
-    /// 参数说明：无。返回：即时快照，在途 commit 仍等待真实结果。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：即时快照，在途 commit 仍等待真实结果。
     pub fn cancel(&self) -> TransactionStatus {
         self.task.cancel();
         self.status()
     }
 
     /// 业务作用：在共同绝对期限内等待当前有效分配和事务初始化。
-    /// 参数说明：deadline 为本次等待的绝对截止时刻。返回：就绪快照；失败、取消或超时拒绝。
+    ///
+    /// 参数说明：
+    /// - `deadline`：本次等待的绝对截止时刻。
+    ///
+    /// 返回：就绪快照；失败、取消或超时拒绝。
     pub async fn await_ready(&self, deadline: Instant) -> Result<TransactionStatus> {
         loop {
             let notified = self.task.changed.notified();
@@ -112,7 +122,11 @@ impl TransactionHandle {
     }
 
     /// 业务作用：等待实际资源退出，调用方取消等待不解除旧 owner 的责任。
-    /// 参数说明：deadline 为所有收尾共用的绝对截止时刻。返回：全部退出为 true，超时为 false。
+    ///
+    /// 参数说明：
+    /// - `deadline`：所有收尾共用的绝对截止时刻。
+    ///
+    /// 返回：全部退出为 true，超时为 false。
     pub async fn await_drained(&self, deadline: Instant) -> bool {
         loop {
             let notified = self.task.changed.notified();
@@ -142,13 +156,18 @@ static IDENTITIES: OnceLock<Mutex<BTreeSet<(String, String)>>> = OnceLock::new()
 
 impl Manager {
     /// 业务作用：读取尚未实际归还的事务资源数，不改变 owner 准入。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：目录当前责任数，业务结局继续从 TransactionHandle 查询。
     pub(crate) fn active_count(&self) -> usize {
         lock(&self.state).tasks.len()
     }
     /// 业务作用：封闭新事务准入并同时通知所有 owner。
-    /// 参数说明：无。返回：关闭流程必须排干的真实实例集合。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：关闭流程必须排干的真实实例集合。
     pub(crate) fn stop(&self) -> Vec<TransactionHandle> {
         let mut state = lock(&self.state);
         state.closed = true;
@@ -165,7 +184,11 @@ impl Manager {
     }
 
     /// 业务作用：阻止普通消费组注册与现有事务组共享提交责任。
-    /// 参数说明：group 为拟注册的完整组名。返回：该组是否仍有实际事务 owner。
+    ///
+    /// 参数说明：
+    /// - `group`：拟注册的完整组名。
+    ///
+    /// 返回：该组是否仍有实际事务 owner。
     pub(crate) fn contains(&self, group: &str) -> bool {
         lock(&self.state).tasks.contains_key(group)
     }
@@ -173,11 +196,51 @@ impl Manager {
 
 impl KafkaProxy {
     /// 业务作用：登记同集群消费、输出与组位点的专属原子 owner。
-    /// 参数说明：plan 为完整固定合同，processor 为同步有界处理入口。返回：已纳入两段停机的句柄，最多16个实际事务 owner；非法组或配置返回 InvalidConfiguration，隔离冲突为 IsolationMismatch。不支持手动 assign 或异步按键处理。
+    ///
+    /// 参数说明：
+    /// - `plan`：完整固定合同。
+    /// - `processor`：同步有界处理入口。
+    ///
+    /// 返回：已纳入两段停机的句柄，最多16个实际事务 owner；非法组或配置返回 InvalidConfiguration，隔离冲突为 IsolationMismatch。不支持手动 assign 或异步按键处理。
     pub async fn transact(
         &self,
         plan: TransactionPlan,
         processor: Arc<dyn TransactionProcessor>,
+    ) -> Result<TransactionHandle> {
+        self.start_transaction(plan, processor, false).await
+    }
+
+    /// 业务作用：让同组备用实例等待单分区分配，只有取得分配的实例才初始化稳定事务身份。
+    ///
+    /// 参数说明：
+    /// - `plan`：只有一个输入 topic 的完整合同，该 topic 必须始终只有分区 0。
+    /// - `processor`：同步有界处理入口，外部副作用不在 Kafka 原子范围内。
+    ///
+    /// 返回：受管句柄；空分配不触发 fencing，分配变化撤销旧批次，初始化结果未知或真实 fencing 使任务失败。
+    pub async fn transact_on_assignment(
+        &self,
+        plan: TransactionPlan,
+        processor: Arc<dyn TransactionProcessor>,
+    ) -> Result<TransactionHandle> {
+        if plan.input_topics.len() != 1 {
+            return Err(Error::InvalidConfiguration);
+        }
+        self.start_transaction(plan, processor, true).await
+    }
+
+    /// 业务作用：在同一生命周期门内登记事务组和稳定身份，避免可选启动策略绕过资源责任。
+    ///
+    /// 参数说明：
+    /// - `plan`：完整固定事务合同。
+    /// - `processor`：同步批次处理入口。
+    /// - `assignment_bound`：是否等待独占单分区分配后初始化 producer。
+    ///
+    /// 返回：实际退出前一直占用身份的句柄；配置、生命周期或容量不允许时拒绝登记。
+    async fn start_transaction(
+        &self,
+        plan: TransactionPlan,
+        processor: Arc<dyn TransactionProcessor>,
+        assignment_bound: bool,
     ) -> Result<TransactionHandle> {
         // 公开计划可由业务修改，必须在占用组与事务身份之前再次验证，不能依赖调用方曾执行过预检。
         plan.validate()?;
@@ -221,6 +284,7 @@ impl KafkaProxy {
             processor,
             id,
             self.inner.runtime.clone(),
+            assignment_bound,
         ));
         directory
             .tasks
@@ -243,7 +307,9 @@ impl KafkaProxy {
             lock(IDENTITIES.get_or_init(Mutex::default)).remove(&identity);
             return Err(Error::Capacity);
         }
-        Ok(TransactionHandle { task })
+        Ok(TransactionHandle {
+            task,
+        })
     }
 }
 
@@ -253,6 +319,7 @@ pub(crate) struct Task {
     pub(crate) plan: Arc<TransactionPlan>,
     pub(crate) processor: Arc<dyn TransactionProcessor>,
     pub(crate) runtime: tokio::runtime::Handle,
+    pub(crate) assignment_bound: bool,
     state: Mutex<Control>,
     changed: tokio::sync::Notify,
 }
@@ -271,13 +338,27 @@ struct Active {
 
 impl Task {
     /// 业务作用：为本批死信保留门禁复用源级管理资源，服从最终关闭边界。
-    /// 参数说明：无。返回：真实源仍存活时的共享Admin；退出或不可构造时拒绝，不创建业务句柄。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：真实源仍存活时的共享Admin；退出或不可构造时拒绝，不创建业务句柄。
     pub(crate) fn dlt_admin(&self) -> Result<Arc<crate::rd::admin::AdminHandle>> {
         let source = self.source.upgrade().ok_or(Error::Closed)?;
         crate::admin::shared_client(&source).map_err(|_| Error::BrokerError)
     }
     /// 业务作用：固定任务依赖和初始观测，不在构造时建立原生事务。
-    /// 参数说明：source 为生命周期弱引用，config/plan 为冻结配置，processor 为业务，id 为稳定事务 ID，runtime 用于等待原生交付。返回：尚未初始化的责任实例。
+    ///
+    /// 参数说明：
+    /// - `source`：所属来源的生命周期弱引用。
+    /// - `config`：冻结的连接和安全配置。
+    /// - `plan`：完整输入输出和资源合同。
+    /// - `processor`：同步业务入口。
+    /// - `id`：稳定事务身份。
+    /// - `runtime`：等待异步交付使用的受管运行时。
+    /// - `assignment_bound`：是否把初始化绑定到独占单分区分配。
+    ///
+    /// 返回：尚未初始化且没有业务权威的责任实例。
+    #[allow(clippy::too_many_arguments)]
     fn new(
         source: Weak<KafkaProxyInner>,
         config: KafkaConfig,
@@ -285,6 +366,7 @@ impl Task {
         processor: Arc<dyn TransactionProcessor>,
         id: String,
         runtime: tokio::runtime::Handle,
+        assignment_bound: bool,
     ) -> Self {
         let status = TransactionStatus {
             transactional_id: id,
@@ -308,6 +390,7 @@ impl Task {
             plan: Arc::new(plan),
             processor,
             runtime,
+            assignment_bound,
             state: Mutex::new(Control {
                 status,
                 cancelled: false,
@@ -319,7 +402,10 @@ impl Task {
     }
 
     /// 业务作用：计算每次查询时仍有效的 Ready，不锁存第一次成功。
-    /// 参数说明：无。返回：当前业务权威和资源状态。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前业务权威和资源状态。
     pub(crate) fn status(&self) -> TransactionStatus {
         let state = lock(&self.state);
         let mut status = state.status.clone();
@@ -332,7 +418,10 @@ impl Task {
     }
 
     /// 业务作用：撤销尚未进入 commit 的批次；已进入 commit 的操作继续承担实际责任。
-    /// 参数说明：无。返回：永久关闭新准入并通知等待方。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：永久关闭新准入并通知等待方。
     pub(crate) fn cancel(&self) {
         let mut state = lock(&self.state);
         state.cancelled = true;
@@ -345,14 +434,20 @@ impl Task {
     }
 
     /// 业务作用：读取取消与固定失败共同形成的永久准入门。
-    /// 参数说明：无。返回：不能开始新批次时为 true。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不能开始新批次时为 true。
     pub(crate) fn stopping(&self) -> bool {
         let state = lock(&self.state);
         state.cancelled || state.status.failure.is_some()
     }
 
     /// 业务作用：确认中止后的原生 producer 重建期间撤销业务就绪，但保留稳定身份和实际资源责任。
-    /// 参数说明：无。返回：新 producer 完成集群复验与初始化前不能开放下一批。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：新 producer 完成集群复验与初始化前不能开放下一批。
     pub(crate) fn recovering_producer(&self) {
         let mut state = lock(&self.state);
         state.initialized = false;
@@ -361,7 +456,10 @@ impl Task {
     }
 
     /// 业务作用：在稳定事务身份初始化成功后开放分配观测。
-    /// 参数说明：无。返回：进入 Idle，仍需实际 assignment 才能 Ready。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：进入 Idle，仍需实际 assignment 才能 Ready。
     pub(crate) fn initialized(&self) {
         let mut state = lock(&self.state);
         state.initialized = true;
@@ -370,10 +468,19 @@ impl Task {
     }
 
     /// 业务作用：使新的定位代次立即撤销旧批次的组 metadata 权威。
-    /// 参数说明：partitions 为变更集合，add 表示取得或撤回。返回：更新分配与代次，在途 commit 不被改为 abort。
+    ///
+    /// 参数说明：
+    /// - `partitions`：变更集合。
+    /// - `add`：取得或撤回。
+    ///
+    /// 返回：更新分配与代次，在途 commit 不被改为 abort。
     pub(crate) fn assignment_changed(&self, partitions: BTreeSet<Tp>, add: bool) {
         let mut state = lock(&self.state);
         state.status.assignment_epoch += 1;
+        if self.assignment_bound {
+            // 新代次必须重新取得 producer fencing，旧初始化成功不能授权新的组分配。
+            state.initialized = false;
+        }
         if add {
             state.status.assignment.extend(partitions);
         } else {
@@ -389,8 +496,39 @@ impl Task {
         self.changed.notify_waiters();
     }
 
+    /// 业务作用：在初始化和批次准入处复验同一独占分配，防止晚到初始化被误当成当前权威。
+    ///
+    /// 参数说明：
+    /// - `epoch`：准备 producer 时固定的分配代次。
+    ///
+    /// 返回：仍持有唯一输入分区时通过；取消、失败和分配变化均拒绝。
+    pub(crate) fn check_assignment(&self, epoch: u64) -> Result<()> {
+        let state = lock(&self.state);
+        if state.cancelled || state.status.failure.is_some() {
+            return Err(Error::Cancelled);
+        }
+        if state.status.assignment_epoch != epoch
+            || state.status.assignment.len() != 1
+            || !state.status.assignment.contains(&Tp::new(
+                self.plan
+                    .input_topics
+                    .first()
+                    .ok_or(Error::InvalidConfiguration)?,
+                0,
+            ))
+        {
+            return Err(Error::Rebalanced);
+        }
+        Ok(())
+    }
+
     /// 业务作用：将完整输入责任固定到当前分配代次。
-    /// 参数说明：starts/ends 为批次各分区完整输入范围。返回：本批定位代次与不可续期的事务截止时间。
+    ///
+    /// 参数说明：
+    /// - `starts`：本批各分区的首条输入位点，用于中止后的定位恢复。
+    /// - `ends`：本批各分区待原子提交的下一消费位点。
+    ///
+    /// 返回：当前分配仍有效时记录输入范围并进入 Processing，返回代次与不可续期的事务期限；已取消、尚未初始化或来源分区失权时拒绝。
     pub(crate) fn begin(
         &self,
         starts: BTreeMap<Tp, i64>,
@@ -399,6 +537,9 @@ impl Task {
         let mut state = lock(&self.state);
         if state.cancelled {
             return Err(Error::Cancelled);
+        }
+        if self.assignment_bound && !state.initialized {
+            return Err(Error::Rebalanced);
         }
         if !starts.keys().all(|tp| state.status.assignment.contains(tp)) {
             return Err(Error::Rebalanced);
@@ -420,7 +561,12 @@ impl Task {
     }
 
     /// 业务作用：以同一控制锁复验当前批次并转换副作用阶段，commit 准入不能与失权通知交错。
-    /// 参数说明：epoch 为冻结代次，stage 为可选下一阶段。返回：取消、超时或权威变化拒绝新副作用。
+    ///
+    /// 参数说明：
+    /// - `epoch`：冻结代次。
+    /// - `stage`：可选下一阶段。
+    ///
+    /// 返回：取消、超时或权威变化拒绝新副作用。
     pub(crate) fn check(&self, epoch: u64, stage: Option<TransactionState>) -> Result<()> {
         let mut state = lock(&self.state);
         let active = state.active.as_ref().ok_or(Error::ContextClosed)?;
@@ -448,7 +594,10 @@ impl Task {
     }
 
     /// 业务作用：让持续 poll 的 owner 撤销超时回调，不通过中断伪装回调已经退出。
-    /// 参数说明：无。返回：超时立即令 Ready 失效，实际线程继续受管。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：超时立即令 Ready 失效，实际线程继续受管。
     pub(crate) fn expire(&self) {
         let mut state = lock(&self.state);
         let stage = state.status.state;
@@ -470,7 +619,12 @@ impl Task {
     }
 
     /// 业务作用：发布已经取得原生确认的 commit 计数。
-    /// 参数说明：inputs/outputs 为完整批次条数。返回：只有真实 commit 成功才增加可见成功量。
+    ///
+    /// 参数说明：
+    /// - `inputs`：本次已提交事务覆盖的输入记录数量。
+    /// - `outputs`：本次已提交事务实际产生的输出记录数量，可以与输入数量不同。
+    ///
+    /// 返回：在同一状态锁内累加批次、输入和输出成功计数；调用者必须已取得真实 commit 确认，本函数不再次访问 broker。
     pub(crate) fn committed(&self, inputs: usize, outputs: usize) {
         let mut state = lock(&self.state);
         state.status.committed_batches += 1;
@@ -479,19 +633,29 @@ impl Task {
     }
 
     /// 业务作用：将整批带入合法中止阶段，不开放后续事务。
-    /// 参数说明：无。返回：开始等待原生 abort 确认。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：开始等待原生 abort 确认。
     pub(crate) fn aborting(&self) {
         lock(&self.state).status.state = TransactionState::Aborting;
     }
 
     /// 业务作用：登记已经确认作废的完整事务。
-    /// 参数说明：无。返回：增加已确认中止数，不推进任何输入成功位点。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：增加已确认中止数，不推进任何输入成功位点。
     pub(crate) fn aborted(&self) {
         lock(&self.state).status.aborted_batches += 1;
     }
 
     /// 业务作用：实际批次线程退出后归还单批槽位。
-    /// 参数说明：backoff 表示是否进入已确认 abort 后的退避。返回：清理当前权威，保留最后批次输入证据。
+    ///
+    /// 参数说明：
+    /// - `backoff`：是否进入已确认 abort 后的退避。
+    ///
+    /// 返回：清理当前权威，保留最后批次输入证据。
     pub(crate) fn settled(&self, backoff: bool) {
         let mut state = lock(&self.state);
         state.active = None;
@@ -504,7 +668,11 @@ impl Task {
     }
 
     /// 业务作用：保留首个固定失败并封闭 owner 的后续工作。
-    /// 参数说明：error 为脱敏分类。返回：立即撤销 Ready，实际资源由原生 owner 排干。
+    ///
+    /// 参数说明：
+    /// - `error`：脱敏分类。
+    ///
+    /// 返回：立即撤销 Ready，实际资源由原生 owner 排干。
     pub(crate) fn fail(&self, error: Error) {
         let mut state = lock(&self.state);
         state.status.failure.get_or_insert(error);
@@ -513,7 +681,10 @@ impl Task {
     }
 
     /// 业务作用：只有原生运行函数和其批次线程全部返回后才释放稳定身份。
-    /// 参数说明：无。返回：目录和实际身份归还，等待方可观察 drained。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：目录和实际身份归还，等待方可观察 drained。
     fn finish(&self) {
         let id = self.status().transactional_id;
         if let Some(source) = self.source.upgrade() {
@@ -536,7 +707,12 @@ impl Task {
 }
 
 /// 业务作用：让两段停机共享同一绝对期限，不因事务数量增加总预算。
-/// 参数说明：tasks 为关闭时冻结的责任，deadline 为总截止时间。返回：尚未实际退出的稳定事务任务名。
+///
+/// 参数说明：
+/// - `tasks`：关闭时冻结的责任。
+/// - `deadline`：总截止时间。
+///
+/// 返回：尚未实际退出的稳定事务任务名。
 pub(crate) async fn drain(tasks: &[TransactionHandle], deadline: Instant) -> Vec<String> {
     let mut pending = Vec::new();
     for task in tasks {
@@ -548,7 +724,11 @@ pub(crate) async fn drain(tasks: &[TransactionHandle], deadline: Instant) -> Vec
 }
 
 /// 业务作用：保护受管权威状态，panic 后仍保留并排干实际责任。
-/// 参数说明：mutex 为内部状态锁。返回：取得原状态，不因 poison 丢失目录或身份。
+///
+/// 参数说明：
+/// - `mutex`：内部状态锁。
+///
+/// 返回：取得原状态，不因 poison 丢失目录或身份。
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()

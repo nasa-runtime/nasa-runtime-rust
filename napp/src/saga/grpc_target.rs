@@ -41,7 +41,13 @@ pub(super) struct ManagedGrpcChannel {
 
 impl ManagedGrpcChannel {
     /// 业务作用：建立可原子切换已验证副本集合的受管调用入口。
-    /// 参数说明：`channel` 是单目标连接，空值关闭投递；`timeout` 是完整调用期限。
+    ///
+    /// 参数说明：
+    /// - `channel`：`channel` 是单目标连接。
+    /// - `timeout`：`timeout` 是完整调用期限。
+    ///
+    /// 共同约束：空值关闭投递
+    ///
     /// 返回：共享连接快照的入口，克隆者在下一次调用时读取同一快照。
     fn new(channel: Option<nagrpc::Channel>, timeout: Duration) -> Self {
         Self {
@@ -61,14 +67,20 @@ impl Service<http::Request<Body>> for ManagedGrpcChannel {
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     /// 业务作用：把底层就绪等待移入有期限的调用，避免 generated client 在计时开始前无限等待。
-    /// 参数说明：`_context` 是执行器唤醒上下文，本入口不在此阶段等待网络。
+    ///
+    /// 参数说明：
+    /// - `_context`：`_context` 是执行器唤醒上下文。
+    ///
     /// 返回：允许进入调用阶段；连接不可用仍由有期限的调用返回错误。
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     /// 业务作用：用同一截止时刻约束一次受管 RPC，并把剩余预算传播到远端。
-    /// 参数说明：`request` 保留 generated client 的方法、认证与追踪元数据。
+    ///
+    /// 参数说明：
+    /// - `request`：`request` 保留 generated client 的方法、认证与追踪元数据。
+    ///
     /// 返回：带同一期限的响应正文；无健康副本、连接失败或到期返回非成功状态，不能充当持久收据。
     fn call(&mut self, mut request: http::Request<Body>) -> Self::Future {
         let timeout = match managed_grpc_request_timeout(request.headers(), self.timeout) {
@@ -132,7 +144,11 @@ impl Service<http::Request<Body>> for ManagedGrpcChannel {
 }
 
 /// 业务作用：让通用 owner 同时接管 Saga 发现、连接和双向正文，保留精确业务身份门禁。
-/// 参数说明：`managed` 固定发现与凭据来源，`timeout` 限制完整 RPC。
+///
+/// 参数说明：
+/// - `managed`：`managed` 固定发现与凭据来源。
+/// - `timeout`：`timeout` 限制完整 RPC。
+///
 /// 返回：可直接供全部 Saga generated client 使用的统一目标。
 #[cfg(feature = "discovery-runtime")]
 pub(super) fn build_owner_grpc_target(
@@ -173,14 +189,21 @@ pub(super) type GrpcRoutesFuture<'a> =
 /// 业务作用：让协议连接池只接受受信发现解析器产生的完整端点代次，避免自行解释业务配置。
 pub(super) trait GrpcDiscoveryResolver: Send + Sync {
     /// 业务作用：在请求原期限内取得同一次发现的成员身份代次与完整端点。
-    /// 参数说明：`deadline` 是调用者原截止时刻。
+    ///
+    /// 参数说明：
+    /// - `deadline`：`deadline` 是调用者原截止时刻。
+    ///
     /// 返回：受信非空端点集合；空集或发现失败不能提供投递权威。
     fn routes(&self, deadline: Instant) -> GrpcRoutesFuture<'_>;
 }
 
 impl ManagedGrpcRefresh {
     /// 业务作用：逐请求复验发现与凭据，合并同代重叠探测并串行发布可用 channel。
-    /// 参数说明：`active` 是所有克隆调用入口共享的连接集合，`deadline` 是本次请求原期限。
+    ///
+    /// 参数说明：
+    /// - `active`：`active` 是所有克隆调用入口共享的连接集合。
+    /// - `deadline`：`deadline` 是本次请求原期限。
+    ///
     /// 返回：至少一个当前健康成员时成功；持锁刷新失败时关闭投递，等锁超时只终止该等待者。
     async fn refresh(
         &self,
@@ -237,7 +260,12 @@ impl ManagedGrpcRefresh {
     }
 
     /// 业务作用：在发布锁内复验同代健康证据，成员或凭据改变时丢弃旧证据并重新握手探测。
-    /// 参数说明：`snapshot` 是待发布快照；`observed` 为请求进入时已完成轮次；`deadline` 为原期限。
+    ///
+    /// 参数说明：
+    /// - `snapshot`：`snapshot` 是待发布快照。
+    /// - `observed`：`observed` 为请求进入时已完成轮次。
+    /// - `deadline`：`deadline` 为原期限。
+    ///
     /// 返回：成功结果可供重叠请求共享；失败、取消或到期不留下可共享结果，下一持锁者可重新探测。
     async fn refresh_snapshot(
         &self,
@@ -315,7 +343,10 @@ impl ManagedGrpcRefresh {
     }
 
     /// 业务作用：取得当前受信成员与凭据，避免发现等待消耗凭据有效窗口后仍选用旧材料。
-    /// 参数说明：`deadline` 限制发现查询，属于业务请求原期限。
+    ///
+    /// 参数说明：
+    /// - `deadline`：`deadline` 限制发现查询。
+    ///
     /// 返回：完整成员与不可变凭据快照；发现失败时不提供投递权威。
     async fn authority(
         &self,
@@ -340,7 +371,12 @@ impl ManagedGrpcRefresh {
 }
 
 /// 业务作用：建立每次调用都复验受信服务发现的 gRPC 入口，初始没有投递权威。
-/// 参数说明：`resolver` 固定服务身份与地址政策，`timeout` 为完整预算，`credential` 为客户端 mTLS 材料。
+///
+/// 参数说明：
+/// - `resolver`：`resolver` 固定服务身份与地址政策。
+/// - `timeout`：`timeout` 为完整预算。
+/// - `credential`：`credential` 为客户端 mTLS 材料。
+///
 /// 返回：尚未开放投递的目标；首次调用通过发现和逐成员 health 后发布可用池。
 pub(super) fn build_discovered_grpc_target(
     resolver: Arc<dyn GrpcDiscoveryResolver>,
@@ -351,7 +387,13 @@ pub(super) fn build_discovered_grpc_target(
 }
 
 /// 业务作用：为固定地址或发现成员建立统一凭据轮换入口，发布前必须取得当前 TLS 与 health 证据。
-/// 参数说明：`endpoints` 与 `resolver` 二选一；`timeout` 为总预算，`credential` 保留当前凭据来源。
+///
+/// 参数说明：
+/// - `endpoints`：未配置发现解析器时使用的固定成员地址，本构造器不建立连接。
+/// - `resolver`：可选的受信成员解析器；存在时由它提供地址集合，固定列表不参与成员选择。
+/// - `timeout`：`timeout` 为总预算。
+/// - `credential`：`credential` 保留当前凭据来源。
+///
 /// 返回：按请求原子刷新成员与凭据的目标，未确认的集合不参与投递。
 fn build_refreshing_grpc_target(
     endpoints: Vec<String>,
@@ -376,7 +418,11 @@ fn build_refreshing_grpc_target(
 }
 
 /// 业务作用：把请求已有的更短 gRPC 期限与受管传输上限合并，避免转发时延长调用者预算。
-/// 参数说明：`headers` 携带标准 grpc-timeout，`configured` 是受管目标的最大等待时间。
+///
+/// 参数说明：
+/// - `headers`：`headers` 携带标准 grpc-timeout。
+/// - `configured`：`configured` 是受管目标的最大等待时间。
+///
 /// 返回：两者中较短的期限；没有请求期限时使用配置值，非法协议值返回 InvalidArgument。
 fn managed_grpc_request_timeout(
     headers: &http::HeaderMap,
@@ -423,7 +469,10 @@ impl http_body::Body for ManagedGrpcBody {
     type Error = nagrpc::Status;
 
     /// 业务作用：在交付每个正文或 trailers frame 前复验原期限，迟到内容不能成为成功收据。
-    /// 参数说明：`context` 用于登记网络 frame 与期限计时器的唤醒。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 用于登记网络 frame 与期限计时器的唤醒。
+    ///
     /// 返回：原 frame 或待唤醒状态；到期返回 DeadlineExceeded 并释放剩余响应流，完整结束后返回空。
     fn poll_frame(
         mut self: Pin<&mut Self>,
@@ -469,13 +518,18 @@ pub(super) struct ManagedGrpcCredentialMaterial {
 /// 业务作用：把长期 client 句柄绑定到同代证书、私钥和信任根快照。
 pub(super) trait GrpcCredentialSource: Send + Sync {
     /// 业务作用：读取一次新 RPC 使用的完整 mTLS 材料，旧请求保留原连接身份。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已经准备校验的不可变材料；同一代返回同一 Arc，材料或重叠窗口变化时替换 Arc。
     fn credential(&self) -> Arc<ManagedGrpcCredentialMaterial>;
 }
 
 /// 业务作用：在配置发布前完成客户端证书、私钥和 CA 的语法及密码学匹配检查。
-/// 参数说明：`credential` 为未发布的完整客户端材料，不发起网络连接。
+///
+/// 参数说明：
+/// - `credential`：`credential` 为未发布的完整客户端材料。
+///
 /// 返回：材料可构造 mTLS channel 时成功；非法 PEM、私钥或 CA 拒绝候选。
 pub(super) fn validate_grpc_credential(
     credential: &ManagedGrpcCredentialMaterial,
@@ -493,7 +547,10 @@ pub(super) fn validate_grpc_credential(
 
 /// 业务作用：把一个 HTTPS endpoint 与 client mTLS 材料冻结为带 deadline 的惰性复用 channel。
 ///
-/// 参数说明：`endpoint` 是受信发现结果，`timeout` 限制连接建立、已连接请求及完整 health 探测，`credential` 来自 SecretSnapshot。
+/// 参数说明：
+/// - `endpoint`：`endpoint` 是受信发现结果。
+/// - `timeout`：`timeout` 限制连接建立、已连接请求及完整 health 探测。
+/// - `credential`：`credential` 来自 SecretSnapshot。
 ///
 /// 返回：URI 与 TLS 配置可构造时返回 target；明文 endpoint 或证书参数错误拒绝 Ready。
 pub(super) fn build_managed_grpc_target(
@@ -521,7 +578,12 @@ pub(super) fn build_managed_grpc_target(
 }
 
 /// 业务作用：为单实例或平衡 channel 构造同一 HTTPS、mTLS 与 deadline 合同。
-/// 参数说明：`endpoint` 是已授权目标，`timeout` 同时限制连接建立和已连接请求，`credential` 是冻结认证材料。
+///
+/// 参数说明：
+/// - `endpoint`：`endpoint` 是已授权目标。
+/// - `timeout`：`timeout` 同时限制连接建立和已连接请求。
+/// - `credential`：`credential` 是冻结认证材料。
+///
 /// 返回：可供 channel 使用的 Endpoint；明文地址、非法 URI 或 TLS 配置拒绝发布。
 fn build_managed_grpc_endpoint(
     endpoint: &str,
@@ -570,7 +632,9 @@ fn build_managed_grpc_endpoint(
 
 /// 业务作用：在发布 Ready 或切换 route 前通过标准 gRPC health 复验 mTLS channel 与远端服务状态。
 ///
-/// 参数说明：`target` 已冻结 URI、证书与请求 deadline，`phase` 标识首次门禁或运行期 route 切换。
+/// 参数说明：
+/// - `target`：`target` 已冻结 URI、证书与请求 deadline。
+/// - `phase`：`phase` 标识首次门禁或运行期 route 切换。
 ///
 /// 返回：单目标 Serving 或副本集合中至少一个成员 Serving 时成功；未确认成员不参与投递，全部失败时撤下集合。
 pub(super) async fn probe_managed_grpc_target(
@@ -582,8 +646,13 @@ pub(super) async fn probe_managed_grpc_target(
 }
 
 /// 业务作用：在调用原期限内收集 Serving 成员，投递前复验取得健康证据后为实际 RPC 留出预算。
-/// 参数说明：`target` 是受信成员集合，`deadline` 是不可延长的原期限，`phase` 标识运行阶段；
-/// `reserve_delivery_budget` 表示本次探测之后还需完成同一预算内的业务调用。
+///
+/// 参数说明：
+/// - `target`：`target` 是受信成员集合。
+/// - `deadline`：`deadline` 是不可延长的原期限。
+/// - `phase`：`phase` 标识运行阶段。
+/// - `reserve_delivery_budget`：`reserve_delivery_budget` 表示本次探测之后还需完成同一预算内的业务调用。
+///
 /// 返回：仅发布本轮已确认 Serving 的成员；无成员通过时撤下集合并拒绝投递，未完成探测可在下次重试。
 async fn probe_managed_grpc_target_before(
     target: &ManagedGrpcTarget,
@@ -667,7 +736,12 @@ async fn probe_managed_grpc_target_before(
 }
 
 /// 业务作用：通过独立成员连接取得该成员的标准 health 证据，避免平衡抽样替代成员状态。
-/// 参数说明：`channel` 是冻结 mTLS 的单成员入口，`deadline` 是整轮共同期限，`phase` 标识门禁阶段。
+///
+/// 参数说明：
+/// - `channel`：`channel` 是冻结 mTLS 的单成员入口。
+/// - `deadline`：`deadline` 是整轮共同期限。
+/// - `phase`：`phase` 标识门禁阶段。
+///
 /// 返回：完整标准响应为 Serving 时成功；超时、协议错误或非服务态均不能作为可用成员证据。
 async fn probe_managed_grpc_channel(
     channel: &ManagedGrpcChannel,
@@ -701,7 +775,12 @@ async fn probe_managed_grpc_channel(
 }
 
 /// 业务作用：保存同一步骤的合法副本，在逐成员 health 复验后发布复用原连接的轮询分流集合。
-/// 参数说明：`endpoints` 是完整步骤身份筛选并经地址政策验证的 URI 集合，`timeout` 与 `credential` 对全部副本一致。
+///
+/// 参数说明：
+/// - `endpoints`：`endpoints` 是完整步骤身份筛选并经地址政策验证的 URI 集合。
+/// - `timeout`：所有副本共用的调用预算上限，后续请求可按更短期限收紧。
+/// - `credential`：所有副本使用的 mTLS 材料；包含轮换来源时改用按请求刷新成员的目标。
+///
 /// 返回：非空集合返回尚未开放投递的目标；空集合或非法地址拒绝构造，后续探测决定可用成员。
 pub(super) fn build_managed_grpc_targets(
     endpoints: &[String],

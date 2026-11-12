@@ -96,7 +96,9 @@ pub struct RestPolicy {
 }
 impl Default for RestPolicy {
     /// 业务作用：给各连接使用独立有限的 HTTP 调用预算，默认不重试。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：十秒总预算、两秒连接预算和轮询分配策略。
     fn default() -> Self {
         Self {
@@ -112,7 +114,9 @@ impl Default for RestPolicy {
 }
 impl RestPolicy {
     /// 业务作用：在连接准备前拒绝非法调用时长、协议、分配策略和重试次数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：策略有效时成功；不开放任意 HTTP 方法的自动重试。
     pub fn validate(&self) -> Result<()> {
         if self.request_timeout_ms == 0
@@ -140,7 +144,9 @@ pub struct SnapshotPolicy {
 }
 impl Default for SnapshotPolicy {
     /// 业务作用：默认禁止异常后继续使用旧路由。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：十五秒最大证据年龄和零异常宽限。
     fn default() -> Self {
         Self {
@@ -161,7 +167,9 @@ pub struct RetryPolicy {
 }
 impl Default for RetryPolicy {
     /// 业务作用：对不可达连接限制恢复重试频率。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：一秒起步、三十秒封顶的退避。
     fn default() -> Self {
         Self {
@@ -173,7 +181,9 @@ impl Default for RetryPolicy {
 
 impl Default for ConnectionConfig {
     /// 业务作用：默认连接必须准备成功，但没有指定 provider 时不猜测后端。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：有限请求和观察预算的候选配置。
     fn default() -> Self {
         Self {
@@ -258,7 +268,9 @@ pub struct RegistrationConfig {
 
 impl Default for RegistrationConfig {
     /// 业务作用：注册目标省略 qualifier 时使用 primary，默认要求首次注册确认。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：服务与地址待显式配置或宿主解析的注册项；兼容默认连接覆盖不改变此处的 primary。
     fn default() -> Self {
         Self {
@@ -293,7 +305,9 @@ pub struct NacosRegistration {
 }
 impl Default for NacosRegistration {
     /// 业务作用：显式提供 Nacos 临时实例和默认集群属性。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：默认权重为一，不影响其他后端。
     fn default() -> Self {
         Self {
@@ -315,7 +329,9 @@ pub struct ListenerEndpoint {
 
 impl DiscoveryConfig {
     /// 业务作用：校验所有引用与 provider 块，必需注册提升所属连接的启动要求。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：配置可用于独立宿主或 napp；禁用配置不产生后端连接，引用与 provider 拒绝携带字段路径。
     pub fn validate(&self) -> Result<()> {
         self.limits
@@ -393,7 +409,11 @@ impl DiscoveryConfig {
     }
 
     /// 业务作用：构造各身份隔离的 provider 和公共 owner，不启动注册或网络轮询。
-    /// 参数说明：无；配置值应已完成宿主占位符解析。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 配置值应已完成宿主占位符解析。
+    ///
     /// 返回：唯一关闭 owner；只启用已编入的 provider。
     pub async fn build(&self) -> Result<DiscoveryOwner> {
         self.validate()?;
@@ -421,7 +441,11 @@ impl DiscoveryConfig {
     }
 
     /// 业务作用：在全部监听器已绑定后解析一次完整注册集合。
-    /// 参数说明：`listeners` 是实际端点，`eligibility` 是宿主本地资格源；单项时允许省略对应引用。
+    ///
+    /// 参数说明：
+    /// - `listeners`：是实际端点
+    /// - `eligibility`：是宿主本地资格源；单项时允许省略对应引用。
+    ///
     /// 返回：全部可解析的计划；不执行外部注册，不生成业务专用 metadata。
     pub fn resolve(
         &self,
@@ -510,7 +534,9 @@ impl DiscoveryConfig {
 
 impl RegistrationConfig {
     /// 业务作用：将配置中的启动与运行期要求转换成公共注册策略。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：两个必需性维度保持独立。
     pub fn policy(&self) -> RegistrationPolicy {
         RegistrationPolicy {
@@ -525,7 +551,10 @@ impl RegistrationConfig {
 
 impl ConnectionConfig {
     /// 业务作用：在网络准备之前核对宿主引用是否属于该连接的显式服务目录。
-    /// 参数说明：`service` 是本地服务别名，不能替代后端服务名或跨连接查询。
+    ///
+    /// 参数说明：
+    /// - `service`：是本地服务别名，不能替代后端服务名或跨连接查询。
+    ///
     /// 返回：静态、DNS 或已配置 provider 服务表包含该精确别名时为 true。
     pub fn has_service(&self, service: &str) -> bool {
         match self.provider.as_str() {
@@ -554,7 +583,9 @@ impl ConnectionConfig {
     }
 
     /// 业务作用：把公开配置转换为 owner 的冻结时效预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不依赖具体传输默认值的公共策略。
     pub fn policy(&self) -> ConnectionPolicy {
         ConnectionPolicy {
@@ -570,7 +601,9 @@ impl ConnectionConfig {
     }
 
     /// 业务作用：拒绝同时填写多个 provider 块或未编入的运行时能力。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：恰好一个匹配 provider 块通过。
     pub fn validate(&self) -> Result<()> {
         self.policy().validate()?;
@@ -649,7 +682,9 @@ impl ConnectionConfig {
     }
 
     /// 业务作用：构造只属于当前连接的后端，不复用其他账号会话。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：中性 provider；认证文件读取受其 adapter 自身有限预算约束。
     async fn build(&self) -> Result<Arc<dyn ManagedProvider>> {
         self.validate()?;
@@ -706,7 +741,10 @@ impl ConnectionConfig {
 }
 
 /// 业务作用：保存按需编入的后端配置前递归拒绝重复键，防止秘密或作用域字段被覆盖。
-/// 参数说明：`deserializer` 必须来自尚未折叠重复项的原始输入。
+///
+/// 参数说明：
+/// - `deserializer`：必须来自尚未折叠重复项的原始输入。
+///
 /// 返回：完整唯一键值树；重复项错误不包含原始值。
 fn optional_unique_value<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -717,7 +755,10 @@ fn optional_unique_value<'de, D: serde::Deserializer<'de>>(
 struct UniqueValue(serde_json::Value);
 impl<'de> Deserialize<'de> for UniqueValue {
     /// 业务作用：在容纳后端扩展字段时保留原始重复键校验。
-    /// 参数说明：`deserializer` 提供原始序列化事件。
+    ///
+    /// 参数说明：
+    /// - `deserializer`：提供原始序列化事件。
+    ///
     /// 返回：完整 JSON 兼容树；不接受非有限数值和重复字段。
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -726,13 +767,19 @@ impl<'de> Deserialize<'de> for UniqueValue {
         impl<'de> Visitor<'de> for Unique {
             type Value = UniqueValue;
             /// 业务作用：返回不泄露配置内容的输入类型诊断。
-            /// 参数说明：`formatter` 为诊断目标。
+            ///
+            /// 参数说明：
+            /// - `formatter`：为诊断目标。
+            ///
             /// 返回：固定类型描述。
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a configuration value with unique fields")
             }
             /// 业务作用：校验映射每个字段只出现一次。
-            /// 参数说明：`map` 是未折叠输入。
+            ///
+            /// 参数说明：
+            /// - `map`：是未折叠输入。
+            ///
             /// 返回：唯一字段对象，重复输入整体失败。
             fn visit_map<A: MapAccess<'de>>(
                 self,
@@ -747,7 +794,10 @@ impl<'de> Deserialize<'de> for UniqueValue {
                 Ok(UniqueValue(serde_json::Value::Object(values)))
             }
             /// 业务作用：对配置数组中的每个对象继续执行字段唯一性检查。
-            /// 参数说明：`seq` 是输入数组。
+            ///
+            /// 参数说明：
+            /// - `seq`：是输入数组。
+            ///
             /// 返回：完整数组，不截断元素。
             fn visit_seq<A: serde::de::SeqAccess<'de>>(
                 self,
@@ -760,31 +810,46 @@ impl<'de> Deserialize<'de> for UniqueValue {
                 Ok(UniqueValue(serde_json::Value::Array(values)))
             }
             /// 业务作用：保留文本配置的原始内容供后续 provider 校验。
-            /// 参数说明：`value` 是字符串值。
+            ///
+            /// 参数说明：
+            /// - `value`：是字符串值。
+            ///
             /// 返回：拥有内容的 JSON 字符串，不输出诊断日志。
             fn visit_str<E: Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
                 Ok(UniqueValue(value.into()))
             }
             /// 业务作用：保留布尔配置，不转换为字符串。
-            /// 参数说明：`value` 是布尔值。
+            ///
+            /// 参数说明：
+            /// - `value`：是布尔值。
+            ///
             /// 返回：对应 JSON 布尔值。
             fn visit_bool<E: Error>(self, value: bool) -> std::result::Result<Self::Value, E> {
                 Ok(UniqueValue(value.into()))
             }
             /// 业务作用：保留无符号配置数值的范围。
-            /// 参数说明：`value` 是无符号整数。
+            ///
+            /// 参数说明：
+            /// - `value`：是无符号整数。
+            ///
             /// 返回：对应 JSON 数字。
             fn visit_u64<E: Error>(self, value: u64) -> std::result::Result<Self::Value, E> {
                 Ok(UniqueValue(value.into()))
             }
             /// 业务作用：保留有符号配置供后续范围校验。
-            /// 参数说明：`value` 是有符号整数。
+            ///
+            /// 参数说明：
+            /// - `value`：是有符号整数。
+            ///
             /// 返回：对应 JSON 数字。
             fn visit_i64<E: Error>(self, value: i64) -> std::result::Result<Self::Value, E> {
                 Ok(UniqueValue(value.into()))
             }
             /// 业务作用：拒绝不能表达确定权重或预算的非有限数值。
-            /// 参数说明：`value` 是浮点输入。
+            ///
+            /// 参数说明：
+            /// - `value`：是浮点输入。
+            ///
             /// 返回：有限 JSON 数字或配置错误。
             fn visit_f64<E: Error>(self, value: f64) -> std::result::Result<Self::Value, E> {
                 serde_json::Number::from_f64(value)
@@ -792,7 +857,9 @@ impl<'de> Deserialize<'de> for UniqueValue {
                     .ok_or_else(|| E::custom("non-finite discovery value"))
             }
             /// 业务作用：保留显式空值以供类型化字段判断是否允许缺省。
+            ///
             /// 参数说明：无。
+            ///
             /// 返回：JSON 空值。
             fn visit_unit<E: Error>(self) -> std::result::Result<Self::Value, E> {
                 Ok(UniqueValue(serde_json::Value::Null))
@@ -803,7 +870,10 @@ impl<'de> Deserialize<'de> for UniqueValue {
 }
 
 /// 业务作用：在映射落地前拒绝重复名称，避免反序列化覆盖掩盖含混连接和注册。
-/// 参数说明：`deserializer` 提供原始映射事件，不接受预先丢失重复项的输入作为证明。
+///
+/// 参数说明：
+/// - `deserializer`：提供原始映射事件，不接受预先丢失重复项的输入作为证明。
+///
 /// 返回：唯一键映射；错误不输出可能包含秘密的值。
 fn unique_map<'de, D, T>(deserializer: D) -> std::result::Result<BTreeMap<String, T>, D::Error>
 where
@@ -814,13 +884,19 @@ where
     impl<'de, T: Deserialize<'de>> Visitor<'de> for Unique<T> {
         type Value = BTreeMap<String, T>;
         /// 业务作用：报告固定的映射类型要求。
-        /// 参数说明：`formatter` 接收无配置值的类型描述。
+        ///
+        /// 参数说明：
+        /// - `formatter`：接收无配置值的类型描述。
+        ///
         /// 返回：安全的反序列化诊断。
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             formatter.write_str("a map with unique names")
         }
         /// 业务作用：逐项检查名称唯一性后才保存配置。
-        /// 参数说明：`map` 是尚未合并的原始映射。
+        ///
+        /// 参数说明：
+        /// - `map`：是尚未合并的原始映射。
+        ///
         /// 返回：完整唯一键集合或重复键错误。
         fn visit_map<A: MapAccess<'de>>(
             self,

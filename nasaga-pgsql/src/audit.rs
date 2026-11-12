@@ -1,4 +1,4 @@
-//! Saga attempt、状态迁移、控制操作、人工恢复与冲突事实的只读审计查询。
+//! Saga attempt、状态迁移、控制操作、人工恢复与冲突事实查询，以及事务内冲突事实记录。
 
 use nasaga_backend::{
     AttemptConflictFact, SagaAttemptAuditCursor, SagaAttemptAuditRow, SagaAuditEventCursor,
@@ -26,12 +26,14 @@ impl PgSagaStore {
         &self,
         fact: &AttemptConflictFact<'_>,
     ) -> Result<(), SagaStoreError> {
+        // 只有已确定的双方结果才能作为冲突证据；在途状态不能据此升级人工介入。
         if fact.existing_status.is_in_flight() || fact.incoming_status.is_in_flight() {
             return Err(SagaStoreError::new(
                 "attempt conflict requires settled statuses",
             ));
         }
         validate_event_id(fact.incoming_event_id)?;
+        // 冲突事实必须随调用方的实例决策一同提交，禁止在缺少事务时独立落库。
         require_ambient_transaction()?;
         let mut connection = natx_pgsql::mandatory_conn_for(&self.datasource)
             .await
@@ -57,9 +59,12 @@ impl PgSagaStore {
 
     /// 业务作用：按数据库全局序号读取跨类别不可变审计事件，支持运行中持续追加。
     ///
-    /// 参数说明：实例、最后已交付序号与上限共同限定下一页。
+    /// 参数说明：
+    /// - `saga_id`：查询所属的精确 Saga 实例身份。
+    /// - `after`：最后已交付的全局审计序号，下一页不再包含该序号。
+    /// - `limit`：单页条数，必须位于 1..=1000。
     ///
-    /// 返回：严格按 `audit_seq` 递增的事实快照；参数、数据损坏或读取失败返回错误。
+    /// 返回：返回 audit_seq 严格递增且大于游标的本页事实，可能为空；上限、连接、数据库或行解析失败返回错误，游标超出 PostgreSQL BIGINT 可表示范围也会失败。分页不建立跨调用的一致快照。
     pub async fn load_audit_events(
         &self,
         saga_id: &SagaId,
@@ -91,6 +96,13 @@ impl PgSagaStore {
     }
 
     /// 业务作用：按步骤、阶段、attempt 顺序读取实例的 attempt 事实。
+    ///
+    /// 参数说明：
+    /// - `saga_id`：查询所属的精确 Saga 实例身份。
+    /// - `after`：最后已交付的步骤、阶段和 attempt 组合；None 从头读取。
+    /// - `limit`：单页条数，必须位于 1..=1000。
+    ///
+    /// 返回：返回按 step_name、phase、attempt_no 升序且严格位于游标后的本页 attempt，可能为空；上限、连接、查询或行身份解析失败返回错误。该表包含可变 attempt 当前状态，不等同于不可变事件流。
     pub async fn load_attempt_audit(
         &self,
         saga_id: &SagaId,
@@ -144,6 +156,13 @@ impl PgSagaStore {
     }
 
     /// 业务作用：从指定序号后分页读取业务状态迁移审计链。
+    ///
+    /// 参数说明：
+    /// - `saga_id`：查询所属的精确 Saga 实例身份。
+    /// - `after_seq`：最后已交付的业务迁移序号，不包含该序号。
+    /// - `limit`：单页条数，必须位于 1..=1000。
+    ///
+    /// 返回：返回 transition_seq 严格递增且大于游标的本页迁移记录，可能为空；参数、连接、查询或行转换失败返回错误，游标超出 PostgreSQL BIGINT 可表示范围也会失败。
     pub async fn load_transition_audit(
         &self,
         saga_id: &SagaId,
@@ -172,6 +191,13 @@ impl PgSagaStore {
     }
 
     /// 业务作用：从指定 control generation 后分页读取 pause/resume 主体审计。
+    ///
+    /// 参数说明：
+    /// - `saga_id`：查询所属的精确 Saga 实例身份。
+    /// - `after_seq`：最后已交付的控制序号，不包含该序号。
+    /// - `limit`：单页条数，必须位于 1..=1000。
+    ///
+    /// 返回：返回 control_seq 严格递增且大于游标的本页控制记录，可能为空；参数、连接、查询或行转换失败返回错误，游标超出 PostgreSQL BIGINT 可表示范围也会失败。
     pub async fn load_control_audit(
         &self,
         saga_id: &SagaId,
@@ -200,6 +226,13 @@ impl PgSagaStore {
     }
 
     /// 业务作用：读取人工恢复业务动作的 actor、reason 与 operation 幂等证据。
+    ///
+    /// 参数说明：
+    /// - `saga_id`：查询所属的精确 Saga 实例身份。
+    /// - `after`：最后已交付的 occurred_at 文本与 operation_id；None 从头读取。
+    /// - `limit`：单页条数，必须位于 1..=1000。
+    ///
+    /// 返回：按 occurred_at、operation_id 升序返回本页记录；有游标时按格式化时间文本和 operation_id 严格续读。上限、连接、查询或行转换失败时报错，不在此处校验游标时间格式或身份内容。
     pub async fn load_management_audit(
         &self,
         saga_id: &SagaId,
@@ -246,6 +279,13 @@ impl PgSagaStore {
     }
 
     /// 业务作用：读取不可覆盖的互斥结果事实，供人工恢复前比对双方证据。
+    ///
+    /// 参数说明：
+    /// - `saga_id`：查询所属的精确 Saga 实例身份。
+    /// - `after`：最后已交付的 occurred_at 文本与 incoming_event_id；None 从头读取。
+    /// - `limit`：单页条数，必须位于 1..=1000。
+    ///
+    /// 返回：按 occurred_at、incoming_event_id 升序返回本页事实；有游标时按格式化时间文本和事件 ID 严格续读。上限、连接、查询或身份、阶段和状态转换失败时报错，不验证游标时间格式。
     pub async fn load_conflict_audit(
         &self,
         saga_id: &SagaId,
@@ -296,7 +336,8 @@ impl PgSagaStore {
 
 /// 业务作用：把统一事件表的一行收敛为封闭审计类别，并拒绝列组合损坏。
 ///
-/// 参数说明：`row` 是按 `audit_seq` 读取的事件快照。
+/// 参数说明：
+/// - `row`：是按 `audit_seq` 读取的事件快照。
 ///
 /// 返回：类别与必填字段一致时返回类型化事件；未知类别或坏值返回错误。
 fn parse_audit_event(row: &sqlx::postgres::PgRow) -> Result<SagaAuditEventRow, SagaStoreError> {
@@ -322,6 +363,11 @@ fn parse_audit_event(row: &sqlx::postgres::PgRow) -> Result<SagaAuditEventRow, S
 }
 
 /// 业务作用：校验审计查询上限，防止管理请求把全历史一次加载进内存。
+///
+/// 参数说明：
+/// - `limit`：单页条数，必须位于 1..=1000。
+///
+/// 返回：1..=1000 时成功，其它值返回固定错误，不改写上限。
 fn validate_limit(limit: u32) -> Result<(), SagaStoreError> {
     if limit == 0 || limit > 1_000 {
         return Err(SagaStoreError::new("audit limit must be in 1..=1000"));
@@ -330,6 +376,11 @@ fn validate_limit(limit: u32) -> Result<(), SagaStoreError> {
 }
 
 /// 业务作用：校验冲突 event id 适配持久化主键且不含控制字符。
+///
+/// 参数说明：
+/// - `event_id`：待持久化的冲突输入事件身份原文。
+///
+/// 返回：非空、不超 190 UTF-8 字节、与 trim 后相同且无控制字符时成功，否则报错；不改写 ID，也不证明该 ID 已存在。
 fn validate_event_id(event_id: &str) -> Result<(), SagaStoreError> {
     if event_id.is_empty()
         || event_id.len() > 190
@@ -342,6 +393,11 @@ fn validate_event_id(event_id: &str) -> Result<(), SagaStoreError> {
 }
 
 /// 业务作用：解析业务状态迁移审计行。
+///
+/// 参数说明：
+/// - `row`：包含迁移事实列与标准化发生时间的查询行。
+///
+/// 返回：所需列读取与类型转换成功时返回迁移事实；缺列、类型损坏或无符号数越界时返回错误，不校验业务状态名或迁移是否合法。
 fn parse_transition(row: &sqlx::postgres::PgRow) -> Result<SagaTransitionAuditRow, SagaStoreError> {
     Ok(SagaTransitionAuditRow {
         transition_seq: row_u64(row, "transition_seq")?,
@@ -356,6 +412,11 @@ fn parse_transition(row: &sqlx::postgres::PgRow) -> Result<SagaTransitionAuditRo
 }
 
 /// 业务作用：解析控制态主体审计行。
+///
+/// 参数说明：
+/// - `row`：包含控制序号、operation、actor、reason 与时间的查询行。
+///
+/// 返回：所需列读取与类型转换成功时返回控制事实，失败返回错误；不校验 action 语义或重新取得控制权。
 fn parse_control(row: &sqlx::postgres::PgRow) -> Result<SagaControlAuditRow, SagaStoreError> {
     Ok(SagaControlAuditRow {
         control_seq: row_u64(row, "control_seq")?,
@@ -370,6 +431,11 @@ fn parse_control(row: &sqlx::postgres::PgRow) -> Result<SagaControlAuditRow, Sag
 }
 
 /// 业务作用：解析人工恢复动作审计行。
+///
+/// 参数说明：
+/// - `row`：包含人工动作身份、类型、操作者、理由与时间的查询行。
+///
+/// 返回：所需列读取与类型转换成功时返回人工动作事实，失败返回错误；不执行动作、验证 actor 权限或清洗字符串。
 fn parse_management(row: &sqlx::postgres::PgRow) -> Result<SagaManagementAuditRow, SagaStoreError> {
     Ok(SagaManagementAuditRow {
         operation_id: row.try_get("operation_id").map_err(map_database)?,
@@ -382,6 +448,11 @@ fn parse_management(row: &sqlx::postgres::PgRow) -> Result<SagaManagementAuditRo
 }
 
 /// 业务作用：解析互斥 attempt 事实并收敛回封闭身份/状态类型。
+///
+/// 参数说明：
+/// - `row`：包含冲突事件身份、attempt、双方状态、类别与时间的查询行。
+///
+/// 返回：列读取成功且 step、phase、attempt、双方状态能转换为封闭类型时返回事实，否则报错；不在此处再次证明双方为 settled 或真正互斥。
 fn parse_conflict(row: &sqlx::postgres::PgRow) -> Result<SagaConflictFactRow, SagaStoreError> {
     let step: String = row.try_get("step_name").map_err(map_database)?;
     let phase: String = row.try_get("phase").map_err(map_database)?;

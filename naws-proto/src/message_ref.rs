@@ -18,7 +18,7 @@ pub struct MessageRef<'a> {
     pub from_client: Option<&'a str>,
     /// 目标 endpoint/router 列表。
     pub routers: Option<&'a [&'a str]>,
-    /// 目标群组。
+    /// 目标订阅集合标识。
     pub group: Option<&'a str>,
     /// 目标用户 ID 列表。
     pub uids: Option<&'a [&'a str]>,
@@ -33,13 +33,15 @@ pub struct MessageRef<'a> {
 impl MessageRef<'_> {
     /// 业务作用：计算指定模式的精确编码长度。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `mode`: 目标 wire mode。
     ///
     /// # 错误
     ///
     /// 字段超限、长度加法溢出或模式未实现时返回错误。
+    ///
+    /// 返回：编码所需的精确字节数；超限、长度溢出、JSON 编码失败或 FAST_FIXED 模式均返回错误。
     pub fn encoded_len(&self, mode: Mode) -> Result<usize> {
         validate_fields(self)?;
         match mode {
@@ -54,14 +56,12 @@ impl MessageRef<'_> {
 
     /// 业务作用：把当前信封直接编码进调用方提供的最终缓冲区。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `mode`: 目标 wire mode。
     /// - `output`: 调用方持有的可增长或定长缓冲区。
     ///
-    /// # 返回
-    ///
-    /// 本次追加的精确字节数。
+    /// 返回：本次追加的精确字节数。
     ///
     /// # 错误
     ///
@@ -91,9 +91,9 @@ impl MessageRef<'_> {
     ///
     /// 仅在目标协议必须拥有数据时调用；原生二进制直推路径不需要执行该转换。
     ///
-    /// # 返回
+    /// 返回：完整复制借用字段后的拥有型消息。
     ///
-    /// 完整复制借用字段后的拥有型消息。
+    /// 参数说明: 无。
     pub fn to_owned_message(&self) -> Message {
         Message {
             events: own_array(self.events),
@@ -111,22 +111,26 @@ impl MessageRef<'_> {
 
 /// 业务作用：借用字符串数组转为兼容 JSON 路径的拥有型数组。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 可选借用字符串数组。
+///
+/// 返回：None 保持缺失，Some 逐项复制；空数组及空字符串保持原始结构。
 fn own_array(value: Option<&[&str]>) -> Option<Vec<Option<String>>> {
     value.map(|items| items.iter().map(|item| Some((*item).to_owned())).collect())
 }
 
 /// 业务作用：校验单字段和数组上限，避免写入期发生不可控放大。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`: 待编码信封。
 ///
 /// # 错误
 ///
 /// 任一字符串、payload 或数组元素数超过协议上限时返回错误。
+///
+/// 返回：所有字段在协议上限内时通过；任一超限返回 LengthExceeds，不写入输出。
 fn validate_fields(message: &MessageRef<'_>) -> Result<()> {
     for value in [message.from_uid, message.from_client, message.group]
         .into_iter()
@@ -162,9 +166,11 @@ fn validate_fields(message: &MessageRef<'_>) -> Result<()> {
 
 /// 业务作用：计算 BITPACK_TLV 长度。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`: 已校验信封。
+///
+/// 返回：包含两字节位图和所有存在字段的总长度；累计溢出时返回 LengthOverflow。
 fn bitpack_len(message: &MessageRef<'_>) -> Result<usize> {
     let mut total = 2_usize;
     for values in [
@@ -192,9 +198,11 @@ fn bitpack_len(message: &MessageRef<'_>) -> Result<usize> {
 
 /// 业务作用：计算 VARINT_TLV 长度。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`: 已校验信封。
+///
+/// 返回：包含字段头与存在字段值的总长度；累计溢出时返回 LengthOverflow。
 fn varint_len(message: &MessageRef<'_>) -> Result<usize> {
     let mut total = 0_usize;
     for (tag, values) in [
@@ -228,10 +236,12 @@ fn varint_len(message: &MessageRef<'_>) -> Result<usize> {
 
 /// 业务作用：编码 BITPACK_TLV。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`: 已校验信封。
 /// - `output`: 容量已检查的输出。
+///
+/// 返回：向已检查容量的缓冲区追加位图及 schema 顺序的字段值。
 fn encode_bitpack<B: BufMut>(message: &MessageRef<'_>, output: &mut B) {
     let mut bitmap = 1_u16 << 8;
     for (bit, present) in [
@@ -282,10 +292,12 @@ fn encode_bitpack<B: BufMut>(message: &MessageRef<'_>, output: &mut B) {
 
 /// 业务作用：编码 VARINT_TLV。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`: 已校验信封。
 /// - `output`: 容量已检查的输出。
+///
+/// 返回：向已检查容量的缓冲区追加各存在字段的 tag、类型和值。
 fn encode_varint<B: BufMut>(message: &MessageRef<'_>, output: &mut B) {
     if let Some(value) = message.events {
         put_key(output, 10, WT_LEN);
@@ -325,10 +337,12 @@ fn encode_varint<B: BufMut>(message: &MessageRef<'_>, output: &mut B) {
 
 /// 业务作用：写字符串数组的 LENGTH_DELIMITED 值。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `output`: 输出缓冲区。
 /// - `values`: 非空与空字符串都按现有 wire 规则写入。
+///
+/// 返回：追加外层总长度、元素数和逐项 UTF-8 长度及内容；调用前须核验字段与输出容量。
 fn put_array<B: BufMut>(output: &mut B, values: &[&str]) {
     let inner = values
         .iter()
@@ -345,31 +359,37 @@ fn put_array<B: BufMut>(output: &mut B, values: &[&str]) {
 
 /// 业务作用：写字段 key。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `output`: 输出缓冲区。
-/// - `tag`: schema tag。
-/// - `wire_type`: wire type。
+/// - `tag`: schema 字段编号。
+/// - `wire_type`: 字段在线路中的类型编号。
+///
+/// 返回：追加字段编号和类型组成的 varint 头；调用前须保证编号、类型及容量有效。
 fn put_key<B: BufMut>(output: &mut B, tag: u64, wire_type: u64) {
     put_varint(output, (tag << 3) | wire_type);
 }
 
 /// 业务作用：把原始 payload 直接写入最终调用方缓冲区。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `output`: 最终编码缓冲区。
 /// - `payload`: 借用原始 payload。
+///
+/// 返回：向最终输出追加长度和原始载荷，不创建中间载荷副本。
 fn put_payload<B: BufMut>(output: &mut B, payload: &[u8]) {
     put_len_delimited(output, payload);
 }
 
 /// 业务作用：写 LENGTH_DELIMITED 值。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `output`: 输出缓冲区。
 /// - `value`: 原始值。
+///
+/// 返回：先追加长度前缀再追加原始值；调用前须保证输出容量。
 fn put_len_delimited<B: BufMut>(output: &mut B, value: &[u8]) {
     put_varint(output, value.len() as u64);
     output.put_slice(value);
@@ -377,10 +397,12 @@ fn put_len_delimited<B: BufMut>(output: &mut B, value: &[u8]) {
 
 /// 业务作用：写无符号 varint。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `output`: 输出缓冲区。
 /// - `value`: 待编码值。
+///
+/// 返回：追加一至十个 varint 字节；调用前须保证输出容量。
 fn put_varint<B: BufMut>(output: &mut B, mut value: u64) {
     while value & !0x7f != 0 {
         output.put_u8(((value & 0x7f) | 0x80) as u8);
@@ -391,19 +413,23 @@ fn put_varint<B: BufMut>(output: &mut B, mut value: u64) {
 
 /// 业务作用：计算字段 key 长度。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `tag`: schema tag。
-/// - `wire_type`: wire type。
+/// - `tag`: schema 字段编号。
+/// - `wire_type`: 字段在线路中的类型编号。
+///
+/// 返回：组合字段头实际占用的一至十字节长度。
 fn field_key_len(tag: u64, wire_type: u64) -> usize {
     unsigned_varint_len((tag << 3) | wire_type)
 }
 
 /// 业务作用：计算字符串数组的完整 LENGTH_DELIMITED 长度。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `values`: 借用字符串数组。
+///
+/// 返回：包含外层长度、元素数及逐项值的字节数；累计溢出时返回 LengthOverflow。
 fn array_value_len(values: &[&str]) -> Result<usize> {
     let mut inner = unsigned_varint_len(values.len() as u64);
     for value in values {
@@ -415,18 +441,22 @@ fn array_value_len(values: &[&str]) -> Result<usize> {
 
 /// 业务作用：计算 LENGTH_DELIMITED 值长度。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value_len`: 原值字节数。
+///
+/// 返回：原始字节数与长度前缀之和；平台长度溢出时返回 LengthOverflow。
 fn length_delimited_len(value_len: usize) -> Result<usize> {
     checked_add(unsigned_varint_len(value_len as u64), value_len)
 }
 
 /// 业务作用：计算无符号 varint 字节数。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 待编码数值。
+///
+/// 返回：最短无符号 varint 的字节数，范围为一至十。
 fn unsigned_varint_len(mut value: u64) -> usize {
     let mut len = 1;
     while value >= 0x80 {
@@ -438,7 +468,7 @@ fn unsigned_varint_len(mut value: u64) -> usize {
 
 /// 业务作用：执行 checked 长度加法。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `left`: 已累计长度。
 /// - `right`: 待增加长度。
@@ -446,6 +476,8 @@ fn unsigned_varint_len(mut value: u64) -> usize {
 /// # 错误
 ///
 /// `usize` 溢出时返回长度错误。
+///
+/// 返回：两个长度的和；超过 usize 上限时返回 LengthOverflow，不发生回绕。
 fn checked_add(left: usize, right: usize) -> Result<usize> {
     left.checked_add(right).ok_or(CodecError::LengthOverflow)
 }

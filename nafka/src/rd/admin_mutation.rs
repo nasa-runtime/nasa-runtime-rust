@@ -25,7 +25,10 @@ struct Request {
 
 impl Drop for Request {
     /// 业务作用：在确认、拒绝或等待结束后归还请求与响应内存，不销毁共享 Admin 客户端。
-    /// 参数说明：无。返回：逐项销毁已构造对象；销毁结果队列不撤销已交给 broker 的修改。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：逐项销毁已构造对象；销毁结果队列不撤销已交给 broker 的修改。
     fn drop(&mut self) {
         // 响应资源借用 event 内存；全部读取结束后先释放 event，再释放请求对象和队列。
         unsafe {
@@ -46,7 +49,13 @@ impl Drop for Request {
 }
 
 /// 业务作用：读取目标 topic 的原生逐资源配置结果，保留资源级授权拒绝。
-/// 参数说明：client 为持有到查询结束的 Admin；topic 为资源名；timeout 为总等待预算；request_timeout 为请求预算。
+///
+/// 参数说明：
+/// - `client`：client 为持有到查询结束的 Admin。
+/// - `topic`：topic 为资源名。
+/// - `timeout`：timeout 为总等待预算。
+/// - `request_timeout`：request_timeout 为请求预算。
+///
 /// 返回：仅资源身份、错误码和配置项全部有效时返回配置；拒绝、空结果或超时不能作为可用的保留策略证据。
 pub(crate) fn describe_topic_configs(
     client: &AdminClient<DefaultClientContext>,
@@ -172,7 +181,11 @@ pub(crate) fn describe_topic_configs(
 }
 
 /// 业务作用：把只读配置查询的原生错误转换为稳定分类，不输出 broker 自由文本。
-/// 参数说明：code 为请求或资源的错误码。返回：NoError 成功；权限拒绝单独报告，其他查询失败保留固定码。
+///
+/// 参数说明：
+/// - `code`：code 为请求或资源的错误码。
+///
+/// 返回：NoError 成功；权限拒绝单独报告，其他查询失败保留固定码。
 fn query_code(code: native::rd_kafka_resp_err_t) -> Result<()> {
     let code: RDKafkaErrorCode = code.into();
     if code == RDKafkaErrorCode::NoError {
@@ -185,7 +198,14 @@ fn query_code(code: native::rd_kafka_resp_err_t) -> Result<()> {
 }
 
 /// 业务作用：增量设置或恢复目标 topic 的指定配置，并以明确的逐资源成功响应作为完成条件。
-/// 参数说明：client 为共享 Admin，topic 为目标，changes 为设置值或恢复默认的变更，timeout 为总等待预算，request_timeout 为原生请求预算。
+///
+/// 参数说明：
+/// - `client`：client 为共享 Admin。
+/// - `topic`：topic 为目标。
+/// - `changes`：changes 为设置值或恢复默认的变更。
+/// - `timeout`：timeout 为总等待预算。
+/// - `request_timeout`：request_timeout 为原生请求预算。
+///
 /// 返回：目标资源确认才成功；无权限、缺失/错配结果及超时均拒绝，不退回整组替换配置。
 pub(crate) fn set_topic_configs(
     client: &AdminClient<DefaultClientContext>,
@@ -321,7 +341,11 @@ pub(crate) fn set_topic_configs(
 }
 
 /// 业务作用：将原生确认码转换为不含配置正文或 broker 自由文本的公共失败。
-/// 参数说明：code 为请求或资源的原生错误码。返回：仅 NoError 成功；协议能力缺失单独报告，其他拒绝保留固定码。
+///
+/// 参数说明：
+/// - `code`：code 为请求或资源的原生错误码。
+///
+/// 返回：仅 NoError 成功；协议能力缺失单独报告，其他拒绝保留固定码。
 fn check(code: native::rd_kafka_resp_err_t) -> Result<()> {
     let code: RDKafkaErrorCode = code.into();
     match code {

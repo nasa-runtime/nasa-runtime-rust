@@ -26,9 +26,9 @@ pub struct CryptoCpuConfig {
 impl Default for CryptoCpuConfig {
     /// 业务作用：建立适合普通服务进程的保守默认配置。
     ///
-    /// # 返回
+    /// 返回：返回 8 个并发、64 个排队项和短超时配置。
     ///
-    /// 返回 8 个并发、64 个排队项和短超时配置。
+    /// 参数说明: 无。
     fn default() -> Self {
         Self {
             max_concurrency: 8,
@@ -50,13 +50,11 @@ pub struct CryptoCpuExecutor {
 impl std::fmt::Debug for CryptoCpuExecutor {
     /// 业务作用：输出容量和剩余 permit，不输出任务输入或结果。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CryptoCpuExecutor")
@@ -70,13 +68,11 @@ impl std::fmt::Debug for CryptoCpuExecutor {
 impl CryptoCpuExecutor {
     /// 业务作用：建立有界阻塞执行器。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `config`: 启动期验证的并发、队列与超时配置。
     ///
-    /// # 返回
-    ///
-    /// 配置合法时返回执行器；零容量或零超时会拒绝启动。
+    /// 返回：配置合法时返回执行器；零容量或零超时会拒绝启动。
     pub fn new(config: CryptoCpuConfig) -> Result<Self, MappingBuildError> {
         if config.max_concurrency == 0
             || config.queue_capacity == 0
@@ -110,13 +106,11 @@ impl CryptoCpuExecutor {
     /// - `T`: 任务成功返回且可跨线程移动的非借用结果。
     /// - `F`: 拥有所有敏感输入的同步闭包；闭包必须先由调用方限制输入大小。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `operation`: 不访问请求借用的同步密码操作，内部错误需已收敛为 [`CryptoError`]。
     ///
-    /// # 返回
-    ///
-    /// 正常完成返回结果；排队、执行超时或 join 故障均 fail closed。执行超时不会强制终止已经
+    /// 返回：正常完成返回结果；排队、执行超时或 join 故障均 fail closed。执行超时不会强制终止已经
     /// 启动的 blocking 闭包，因此运行 permit 由闭包持有到真正结束，避免取消造成无界孤儿任务。
     pub async fn execute<T, F>(&self, operation: F) -> Result<T, CryptoError>
     where

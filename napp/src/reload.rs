@@ -15,11 +15,14 @@ use crate::{ApplicationResult, ComponentId};
 )]
 pub(crate) trait ConfigApplier: Send + Sync {
     /// 业务作用：声明本准备器负责的配置目标。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：用于匹配状态表的组件身份。
     fn component(&self) -> ComponentId;
 
     /// 业务作用：在发布锁外的阻塞线程池完成所有可失败的材料准备。
+    ///
     /// 参数说明：
     /// - `candidate`：`candidate` 为已经完成结构校验的原始候选。
     ///

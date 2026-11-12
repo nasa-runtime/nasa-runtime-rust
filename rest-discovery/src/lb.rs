@@ -14,12 +14,13 @@ use nadisc::Instance;
 
 /// 负载均衡策略:给定服务名 + 已过滤实例,返回选中的下标(空→`None`)。
 pub trait LoadBalancer: Send + Sync {
-    /// 业务作用：从实例列表中选择目标下标；用于把一次请求路由到具体实例。
+    /// 业务作用：为一次逻辑请求从候选列表中选择目标位置。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `service`：用于隔离选址状态的逻辑服务名。
+    /// - `instances`：调用方已筛为流量候选且保持本次顺序的实例引用列表。
     ///
-    /// - `service`: 当前请求的服务名，用于维护按服务隔离的负载均衡状态。
-    /// - `instances`: 已过滤为可承载流量的实例列表。
+    /// 返回：有可用选择时返回本次列表内的下标，否则 None；实现负责维持自身算法状态，列表内容及生命周期由调用方管理。
     fn pick(&self, service: &str, instances: &[&Instance]) -> Option<usize>;
 }
 
@@ -31,18 +32,24 @@ pub struct RoundRobinLoadBalancer {
 }
 
 impl RoundRobinLoadBalancer {
-    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造按服务独立计数的轮询选址器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回无已登记计数器的选址器，首次服务请求时才分配状态。
     pub fn new() -> Self {
         Self {
             counters: DashMap::new(),
         }
     }
 
-    /// 业务作用：递增并返回轮询下标；用于在同一服务的实例间均匀分配请求。
+    /// 业务作用：推进服务轮询计数并映射到当前候选数量。
     ///
-    /// # 参数
-    /// - `service`: 服务名,用于服务发现或注册中心查询。
-    /// - `count`: Redis 命令、分页或批处理使用的数量上限。
+    /// 参数说明：
+    /// - `service`：提供独立轮询序列的服务名。
+    /// - `count`：调用方必须保证非零的候选数量。
+    ///
+    /// 返回：返回递增前计数对 count 的余数，首个计数使用随机哈希种子；零 count 不符合前置条件，会 panic。
     fn next_index(&self, service: &str, count: u64) -> u64 {
         let entry = self
             .counters
@@ -53,11 +60,13 @@ impl RoundRobinLoadBalancer {
 }
 
 impl LoadBalancer for RoundRobinLoadBalancer {
-    /// 业务作用：从实例列表中选择目标下标；用于把一次请求路由到具体实例。
+    /// 业务作用：从当前非空候选列表按服务轮询选择实例。
     ///
-    /// # 参数
-    /// - `service`: 服务名,用于服务发现或注册中心查询。
-    /// - `instances`: 负载均衡候选实例列表。
+    /// 参数说明：
+    /// - `service`：用于隔离选址状态的逻辑服务名。
+    /// - `instances`：调用方已筛为流量候选且保持本次顺序的实例引用列表。
+    ///
+    /// 返回：空列表返回 None，否则返回列表内的轮询下标；并发调用以原子计数推进。
     fn pick(&self, service: &str, instances: &[&Instance]) -> Option<usize> {
         if instances.is_empty() {
             return None;
@@ -77,7 +86,11 @@ pub struct WeightedRoundRobinLoadBalancer {
 }
 
 impl WeightedRoundRobinLoadBalancer {
-    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造按服务保存平滑权重状态的选址器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回尚无服务权重状态的选址器，不预分配实例表。
     pub fn new() -> Self {
         Self {
             state: DashMap::new(),
@@ -85,20 +98,24 @@ impl WeightedRoundRobinLoadBalancer {
     }
 }
 
-/// 业务作用：生成实例稳定标识；用于按地址维持负载均衡状态。
+/// 业务作用：按实例地址与端口生成权重状态索引键。
 ///
-/// # 参数
-/// - `inst`: 服务发现返回的实例信息。
+/// 参数说明：
+/// - `inst`：需要关联历史权重的候选实例。
+///
+/// 返回：返回地址、冒号及端口的文本拼接；不包含集群或 metadata，同地址端口共享该身份。
 fn instance_key(inst: &Instance) -> String {
     format!("{}:{}", inst.ip, inst.port)
 }
 
 impl LoadBalancer for WeightedRoundRobinLoadBalancer {
-    /// 业务作用：从实例列表中选择目标下标；用于把一次请求路由到具体实例。
+    /// 业务作用：按服务维护平滑加权轮询累积值并选择本次最大者。
     ///
-    /// # 参数
-    /// - `service`: 服务名,用于服务发现或注册中心查询。
-    /// - `instances`: 负载均衡候选实例列表。
+    /// 参数说明：
+    /// - `service`：用于隔离选址状态的逻辑服务名。
+    /// - `instances`：调用方已筛为流量候选且保持本次顺序的实例引用列表。
+    ///
+    /// 返回：空列表返回 None；非空时按权重更新状态、从选中项扣除总权重并移除旧地址状态，返回所选下标。调用方应保证权重有限且为正，函数只对负权重取零，不独立验证全部实例。
     fn pick(&self, service: &str, instances: &[&Instance]) -> Option<usize> {
         if instances.is_empty() {
             return None;
@@ -134,10 +151,12 @@ impl LoadBalancer for WeightedRoundRobinLoadBalancer {
     }
 }
 
-/// 业务作用：每服务计数器的随机起种:进程内随机 keys 的 `RandomState` 对 service 名哈希一次。
+/// 业务作用：为服务轮询序列生成进程随机哈希起点。
 ///
-/// # 参数
-/// - `service`: 服务名,用于服务发现或注册中心查询。
+/// 参数说明：
+/// - `service`：需要打散首次选址位置的服务名。
+///
+/// 返回：返回本次 RandomState 对服务名计算的 u64，不保证跨调用或重启稳定，也不作为持久身份。
 fn random_seed(service: &str) -> u64 {
     RandomState::new().hash_one(service)
 }

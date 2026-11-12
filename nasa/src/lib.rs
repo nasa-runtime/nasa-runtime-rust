@@ -144,12 +144,15 @@
 // 命名原则:根模块只表达业务能力;不在根平铺 Server/Command/init 等符号
 // (各模块的同名符号会撞车);不提供全量 prelude。
 //
+// ```rust
 //   use nasa::hystrix::{hystrix, Command};
 //   use nasa::cache::{cached, CacheLayer};
 //   use nasa::tx::{self, transactional};
 //   use nasa::scheduling::{Async, EnableScheduling, scheduled};
 //   use nasa::web::{mvc_router, get_mapping, post_mapping, put_mapping, delete_mapping, patch_mapping};
-//   use nasa::ws::{Endpoint, Server};   use nasa::ws::proto::{Message, Mode};
+//   use nasa::ws::{Endpoint, Server};
+//   use nasa::ws::proto::{Message, Mode};
+// ```
 //
 // 过程宏经 macro-support 自动发现本 crate(含 Cargo 重命名),
 // 完整属性路径 #[nasa::hystrix::hystrix] / #[nasa::web::get_mapping("/x")] 同样可用。
@@ -608,9 +611,11 @@ pub mod kafka {
 /// (PollCoordinator)。子能力经 feature 透传:`redis-search`(RediSearch/
 /// RedisJSON 封装)、`redis-derive`(`#[derive(RedisDocument)]`,蕴含 search)。
 ///
-///   use nasa::redis::{RedisClient, RedisConfig, CompatibilityProfile};
+/// ```ignore
+/// use nasa::redis::{RedisClient, RedisConfig, CompatibilityProfile};
 ///   use nasa::redis::{DistributedLock, PipelineSession, PreparedPartition};
-///   use nasa::redis::{SearchActuator, JsonArrayOps, RedisDocument};  // redis-search/-derive
+/// use nasa::redis::{SearchActuator, JsonArrayOps, RedisDocument}; // 需要对应搜索与派生特性。
+/// ```
 #[cfg(feature = "redis")]
 pub mod redis {
     pub use redis_impl::*;
@@ -647,10 +652,12 @@ pub mod date {
 /// 文本 formatter + 独立 `error.log` + 按天/按大小滚动(`maxFileSize`/`.%i`)
 /// + `maxHistory`/`totalSizeCap`/`cleanHistoryOnStart` 保留清理 + 运行期级别热切(配合 nacos)。
 ///
-///   use nasa::log;
+/// ```no_run
+/// use nasa::log;
 ///   log::init_with_default("info");                       // 仅控制台
 ///   log::set_level("info,my_app=debug");                  // 热切级别
-///   let _g = log::enable_file_logging(Some("/usr/local/logs/my-app")); // 接 info.log + error.log
+/// let _g = log::enable_file_logging(Some("/usr/local/logs/my-app")); // 接 info.log 与 error.log。
+/// ```
 #[cfg(feature = "log")]
 pub mod log {
     pub use log_impl::*;
@@ -672,7 +679,7 @@ pub mod base {
 /// 失败不返回部分结果；文件替换与外部重载仍由调用方负责。
 /// `nasa = { features = ["yml"] }` → `use nasa::yml::{YmlLoader, YmlOverlay};`
 /// `nasa = { features = ["yml-watch"] }` → `use nasa::yml::watch::YmlWatcher;`
-/// 本地主配置 `zcf/application.yml` + profile + overlay(含 Nacos 多配置)+ 环境变量 + `${}` 占位符 → 强类型 `T`。
+/// 本地主配置（非空 `APP_CONFIG_FILE`，缺省为 `zcf/application.yml`）+ profile + overlay(含 Nacos 多配置)+ 环境变量 + `${}` 占位符 → 强类型 `T`。
 ///
 ///   let cfg: AppConfig = nasa::yml::YmlLoader::standard().load()?;                       // 纯本地
 ///   let cfg: AppConfig = nasa::yml::YmlLoader::standard().load_with_overlays(&ovs)?;     // 叠加 Nacos 多配置

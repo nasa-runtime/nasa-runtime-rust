@@ -8,7 +8,9 @@ macro_rules! wire_enum {
     ($(#[$emeta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident => $wire:literal),+ $(,)? }) => {
         $(#[$emeta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub enum $name { $($(#[$vmeta])* $variant),+ }
+        pub enum $name {
+            $($(#[$vmeta])* $variant),+
+        }
 
         impl $name {
             /// 业务作用：返回该值的线协议名称；进入 definitionDigest、Lua ARGV 与 Redis 字段，不可改动。
@@ -17,7 +19,9 @@ macro_rules! wire_enum {
             ///
             /// 返回：固定大写下划线名称。
             pub fn wire_name(self) -> &'static str {
-                match self { $(Self::$variant => $wire),+ }
+                match self {
+                    $(Self::$variant => $wire),+
+                }
             }
 
             /// 业务作用：从线协议名称解析枚举；未知名称 fail-closed，不静默降级。
@@ -27,7 +31,10 @@ macro_rules! wire_enum {
             ///
             /// 返回：已知名称返回对应值；未知返回 `None`。
             pub fn parse(text: &str) -> Option<Self> {
-                Some(match text { $($wire => Self::$variant,)+ _ => return None })
+                Some(match text {
+                    $($wire => Self::$variant,)+
+                    _ => return None
+                })
             }
         }
     };
@@ -126,11 +133,11 @@ wire_enum! {
 }
 
 wire_enum! {
-    /// 触发类型；`FANOUT_ONLY` 只作为 Fanout 根，不进入普通调度扫描。
+    /// 触发类型；`FANOUT_ONLY` 仅声明目标 Worker 能力，不进入普通调度扫描。
     JobTrigger {
         /// 参与普通任务调度的根触发。
         Scheduled => "SCHEDULED",
-        /// 仅作为 Fanout 根使用，不进入普通调度扫描。
+        /// 仅由 Fanout 分片触发的目标 Worker，不作为普通根调度。
         FanoutOnly => "FANOUT_ONLY",
     }
 }
@@ -146,7 +153,7 @@ wire_enum! {
         FixedDelay => "FIXED_DELAY",
         /// 只接受显式手工触发。
         Manual => "MANUAL",
-        /// 仅作为 Fanout 根，不创建普通周期触发。
+        /// 仅作为 Fanout 目标 Worker，不创建普通周期触发。
         FanoutOnly => "FANOUT_ONLY",
     }
 }
@@ -202,7 +209,8 @@ wire_enum! {
 impl<'de> serde::Deserialize<'de> for JobSerialOverflowPolicy {
     /// 业务作用：从配置的线协议名反序列化串行溢出策略，未知值不会落到默认策略。
     ///
-    /// 参数说明：`deserializer` 提供待解析的线协议字符串。
+    /// 参数说明：
+    /// - `deserializer`：提供策略字符串的配置反序列化器，大小写必须匹配固定线名。
     ///
     /// 返回：已知名称返回对应策略；未知名称或输入类型错误时返回反序列化错误。
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
@@ -218,7 +226,8 @@ impl<'de> serde::Deserialize<'de> for JobSerialOverflowPolicy {
 impl serde::Serialize for JobSerialOverflowPolicy {
     /// 业务作用：把串行溢出策略写成持久配置使用的线协议名称。
     ///
-    /// 参数说明：`serializer` 为目标配置序列化器。
+    /// 参数说明：
+    /// - `serializer`：接收固定线名字符串的配置序列化器。
     ///
     /// 返回：序列化成功返回目标值；底层写出失败返回序列化错误。
     fn serialize<S>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error>
@@ -252,7 +261,8 @@ impl JobPubSubMode {
 impl<'de> serde::Deserialize<'de> for JobPubSubMode {
     /// 业务作用：从配置的线协议名反序列化 Pub/Sub 模式，避免节点静默形成混合通知拓扑。
     ///
-    /// 参数说明：`deserializer` 提供待解析的线协议字符串。
+    /// 参数说明：
+    /// - `deserializer`：提供固定 Pub/Sub 线名字符串的配置反序列化器。
     ///
     /// 返回：已知名称返回对应模式；未知名称或输入类型错误时返回反序列化错误。
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
@@ -268,7 +278,8 @@ impl<'de> serde::Deserialize<'de> for JobPubSubMode {
 impl serde::Serialize for JobPubSubMode {
     /// 业务作用：把 Pub/Sub 模式写成持久配置使用的线协议名称。
     ///
-    /// 参数说明：`serializer` 为目标配置序列化器。
+    /// 参数说明：
+    /// - `serializer`：接收广播或分片模式固定线名的配置序列化器。
     ///
     /// 返回：序列化成功返回目标值；底层写出失败返回序列化错误。
     fn serialize<S>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error>

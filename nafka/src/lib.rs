@@ -41,6 +41,8 @@ mod admin;
 mod broadcast;
 mod checkpoint;
 mod close_report;
+mod committed_read;
+pub use committed_read::{CommittedPage, CommittedRead};
 mod config;
 mod consumer;
 mod control;
@@ -140,6 +142,9 @@ pub use transfer::{
 pub use types::{
     AssignmentHandle, Delivery, KafkaHeader, KafkaHeaders, KafkaPartitionLag, StartOffset, Tp,
 };
+mod raw_payload;
+pub use raw_payload::RawPayload;
+
 pub use wire::{
     dead_letter_headers, mode_from_wire_name, mode_wire_name, DecodePayload, EncodePayload,
     NullablePayload, PayloadCodec, Proto, ProtoMode, DEFAULT_EVENT, HEADER_DELIVERY_ATTEMPT,
@@ -243,24 +248,36 @@ pub(crate) struct KafkaProxyInner {
 impl KafkaProxyInner {
     /// 业务作用：发出一个稳定 counter，调用点不得传入高基数或敏感字段。
     ///
-    /// 参数说明：name 为固定名，delta 为非负增量，labels 为受控身份。
+    /// 参数说明：
+    /// - `name`：固定名。
+    /// - `delta`：非负增量。
+    /// - `labels`：受控身份。
+    ///
     /// 返回：仅尝试有界入队，指标失败不能改变 ACK、DLT 或提交结局。
     pub(crate) fn counter(&self, name: &'static str, delta: u64, labels: MetricLabels<'_>) {
         self.emit(|| self.metrics.counter(name, delta, labels), name);
     }
 
     /// 业务作用：发出一个稳定 gauge，调用点不得传入高基数或敏感字段。
-    /// 参数说明：name 为固定名，value 为状态，labels 为受控身份。返回：非等待地入队或丢弃。
+    ///
+    /// 参数说明：
+    /// - `name`：固定名。
+    /// - `value`：状态。
+    /// - `labels`：受控身份。
+    ///
+    /// 返回：非等待地入队或丢弃。
     pub(crate) fn gauge(&self, name: &'static str, value: i64, labels: MetricLabels<'_>) {
         self.emit(|| self.metrics.gauge(name, value, labels), name);
     }
 
     /// 业务作用：隔离指标准入本身的异常，用户后端由出口线程独立隔离。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `emit`: 有界队列准入。
     /// - `name`: 出问题时用于定位的指标名（框架固定常量，非高基数）。
+    ///
+    /// 返回：调用准入闭包；发生 unwind 时只记录固定诊断，不向业务流程传播该 panic，应用 panic hook 仍遵循宿主设置。
     fn emit(&self, emit: impl FnOnce(), name: &'static str) {
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(emit)).is_err() {
             tracing::error!(metric = name, "指标准入异常，已隔离并忽略本次上报");
@@ -268,6 +285,10 @@ impl KafkaProxyInner {
     }
 
     /// 业务作用：读取当前生命周期。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：当前原子状态对应的生命周期；未识别的字节按 Stopped 处理以拒绝新工作，读取不保证后续状态不变。
     pub(crate) fn lifecycle(&self) -> Lifecycle {
         match self.lifecycle.load(Ordering::Acquire) {
             0 => Lifecycle::Created,
@@ -279,10 +300,12 @@ impl KafkaProxyInner {
 
     /// 业务作用：尝试从预期状态切换到新状态。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `from`: 调用方要求的当前状态。
     /// - `to`: 成功后写入的目标状态。
+    ///
+    /// 返回：原子比较并写入成功时返回 Ok；状态已变化时返回实际状态诊断，不覆盖其它调用者的转换。
     ///
     /// # 错误
     ///
@@ -300,6 +323,10 @@ impl KafkaProxyInner {
     }
 
     /// 业务作用：判断是否仍允许外部发布入口取得资格。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：Created 或 Running 时通过本次检查，关闭中或已停止时返回生命周期错误；不预留 lane 额度，实际准入仍须由 lane 复验。
     ///
     /// # 错误
     ///
@@ -319,6 +346,10 @@ impl Drop for KafkaProxyInner {
     ///
     /// 正常 shutdown 会提前取走租约；这里覆盖调用方漏掉显式 shutdown 的 best-effort
     /// 路径，释放时机仍晚于所有 owner 持有的内部 `Arc<KafkaProxyInner>`。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：取走并释放仍持有的静态收集激活租约；租约已被显式关闭取走时不重复释放，不承担交付排空。
     fn drop(&mut self) {
         let lease = self
             .collected_lease
@@ -333,9 +364,11 @@ impl Drop for KafkaProxyInner {
 
 /// 业务作用：将生命周期字节转换为稳定诊断文本。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 原子状态中的整数值。
+///
+/// 返回：四个已定义生命周期的固定名称，其它值返回 Unknown；仅供诊断，不据此授予操作权限。
 fn lifecycle_name(value: u8) -> &'static str {
     match value {
         0 => "Created",
@@ -356,6 +389,10 @@ pub struct KafkaProxy {
 
 impl Clone for KafkaProxy {
     /// 业务作用：克隆业务句柄并单独计入 Drop 收尾判定。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：共享同一运行时的新业务句柄，并增加外部持有者计数；不创建连接，也不重开已关闭运行时。
     fn clone(&self) -> Self {
         self.inner.external_handles.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -366,6 +403,10 @@ impl Clone for KafkaProxy {
 
 impl Drop for KafkaProxy {
     /// 业务作用：最后一个业务句柄离开时发送非阻塞 Stop；不在 Drop 内等待或 flush。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：非最后持有者只减少计数；最后持有者请求任务停止、关闭外部发布准入并尝试通知各组，不承诺资源已经退出或消息已交付。
     fn drop(&mut self) {
         if self.inner.external_handles.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
@@ -395,6 +436,7 @@ impl Drop for KafkaProxy {
             return;
         }
 
+        // 先封闭外部发布准入再通知 owner，停止过程中产生的内部交付仍由原责任持有者完成。
         if let Some(lanes) = self.inner.producer_lanes.get() {
             for lane in lanes.values() {
                 lane.begin_draining();
@@ -414,7 +456,10 @@ impl Drop for KafkaProxy {
 
 impl std::fmt::Debug for KafkaProxy {
     /// 业务作用：仅输出逻辑客户端名与当前生命周期，避免连接信息进入诊断文本。
-    /// 参数说明：f 为调用方的格式化缓冲区。
+    ///
+    /// 参数说明：
+    /// - `f`：调用方的格式化缓冲区。
+    ///
     /// 返回：格式化结果，不输出 broker 地址、连接配置或凭据。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KafkaProxy")
@@ -426,15 +471,23 @@ impl std::fmt::Debug for KafkaProxy {
 
 impl KafkaProxy {
     /// 业务作用：校验并冻结源配置，创建各 lane 的原生 producer 与有界运行资源。
-    /// 参数说明：config 为完整组件配置，成功后由该源固定持有。
+    ///
+    /// 参数说明：
+    /// - `config`：完整组件配置，成功后由该源固定持有。
+    ///
     /// 返回：可登记消费者或发布消息的源；配置、运行时或资源构造失败时返回错误。
+    ///
     /// 原生后台线程可开始连接 broker，但此处不等待 broker 就绪，也不隐式启动消费者。
     pub fn connect(config: KafkaConfig) -> Result<Self> {
         Self::connect_inner(config, None, MetricsOptions::default(), None)
     }
 
     /// 业务作用：构造源及各 lane 的原生资源，并安装独立有界线程调用的指标后端。
-    /// 参数说明：config 为冻结源配置；metrics 为应用提供的后端，不直接在交付或消费线程执行。
+    ///
+    /// 参数说明：
+    /// - `config`：冻结源配置。
+    /// - `metrics`：应用提供的后端，不直接在交付或消费线程执行。
+    ///
     /// 返回：尚未启动消费者的源；配置、运行时或资源构造失败时返回错误，成功不证明 broker 已就绪。
     pub fn connect_with_metrics(
         config: KafkaConfig,
@@ -444,7 +497,12 @@ impl KafkaProxy {
     }
 
     /// 业务作用：为源安装具有明确队列和事件字节预算的指标后端。
-    /// 参数说明：config 为冻结业务配置，metrics 为用户后端，options 为独立导出预算。
+    ///
+    /// 参数说明：
+    /// - `config`：冻结业务配置。
+    /// - `metrics`：用户后端。
+    /// - `options`：独立导出预算。
+    ///
     /// 返回：完成本地构造但尚未消费的源；非法配置、无异步运行时或线程创建失败时拒绝。
     pub fn connect_with_metrics_options(
         config: KafkaConfig,
@@ -455,7 +513,12 @@ impl KafkaProxy {
     }
 
     /// 业务作用：校验配置并注入有界异步指标与只写 span 记录器。
-    /// 参数说明：config 为冻结业务配置，metrics 为指标后端，span_recorder 为应用持有的只写追踪入口。
+    ///
+    /// 参数说明：
+    /// - `config`：冻结业务配置。
+    /// - `metrics`：指标后端。
+    /// - `span_recorder`：应用持有的只写追踪入口。
+    ///
     /// 返回：已创建原生 producer 的源；配置或资源构造失败时返回错误。后台可开始连接，但不等待 broker 就绪，指标后端不占用 owner 或交付线程。
     pub fn connect_with_observability(
         config: KafkaConfig,
@@ -471,7 +534,13 @@ impl KafkaProxy {
     }
 
     /// 业务作用：统一构造受管业务资源与可选有界观测出口。
-    /// 参数说明：config 为冻结配置，metrics 为可选后端，options 为导出额度，span_recorder 为只写追踪入口。
+    ///
+    /// 参数说明：
+    /// - `config`：冻结配置。
+    /// - `metrics`：可选后端。
+    /// - `options`：导出额度。
+    /// - `span_recorder`：只写追踪入口。
+    ///
     /// 返回：全部本地资源构造完成的代理；任一构造失败时不开放业务路由。
     fn connect_inner(
         config: KafkaConfig,
@@ -550,23 +619,33 @@ impl KafkaProxy {
             dlt_queue_bytes = inner.config.behavior.dlt_queue_max_bytes,
             "Kafka 配置合同已冻结；零次重试表示无限重试，受管 Admin 默认为只读"
         );
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+        })
     }
 
     /// 业务作用：在后端阻塞或失败时直接观察指标出口责任。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：本源排队、活动、导出、丢弃与失败计数；关闭后仍可查询，不经过用户回调。
     pub fn metrics_export_stats(&self) -> MetricsExportStats {
         self.inner.metrics.stats()
     }
 
     /// 业务作用：返回冻结配置。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：当前运行时持有的只读配置引用，不重新加载或查询 broker；配置可能含连接凭据，调用方不得直接写入日志。
     pub fn config(&self) -> &KafkaConfig {
         &self.inner.config
     }
 
     /// 业务作用：区分实际资源已全部退出与仅收到宿主停机请求。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：仅完整 shutdown 成功后为真；超时、取消或仍有资源责任时为假。
     pub fn is_closed(&self) -> bool {
         self.inner.lifecycle() == Lifecycle::Stopped
@@ -575,23 +654,39 @@ impl KafkaProxy {
     /// 业务作用：创建一次性消费者注册 builder。
     ///
     /// 调用本方法不会发现静态消费者，也不会创建线程；这些动作由 builder 显式控制。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：持有当前运行时业务句柄的新注册 builder；构造不代表注册成功，启动时仍需校验生命周期及注册合同。
     pub fn consumers(&self) -> ConsumerRegistryBuilder {
         ConsumerRegistryBuilder::new(self.clone())
     }
 
     /// 业务作用：返回延迟构造的管理端句柄。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：绑定当前运行时的管理门面；实际操作才取得原生客户端并校验准入，取得门面不证明管理权限或 broker 可达。
     pub fn admin(&self) -> KafkaAdmin {
         KafkaAdmin::new(self.clone())
     }
 
     /// 业务作用：分别查询构建支持、冻结启用项和实际组就绪，不把配置成功当作认证成功。
-    /// 参数说明：无。返回：无网络请求且不含凭据的独立快照；普通组为空时不宣称Ready。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无网络请求且不含凭据的独立快照；普通组为空时不宣称Ready。
     pub fn capabilities(&self) -> Result<KafkaCapabilities> {
         KafkaCapabilities::snapshot(self)
     }
 
     /// 业务作用：等待已启动的消费组满足当前 broker 就绪要求。
-    /// 参数说明：group 为最终组名；requirement 为分配要求；deadline 为绝对等待期限。
+    ///
+    /// 参数说明：
+    /// - `group`：最终组名。
+    /// - `requirement`：分配要求。
+    /// - `deadline`：绝对等待期限。
+    ///
     /// 返回：满足要求的当次分配快照；组不存在、要求非法、保护或停止时失败。超时携带原要求与健康状态，成功不保证后续仍持有分区。
     pub async fn await_group_ready(
         &self,
@@ -606,7 +701,11 @@ impl KafkaProxy {
     }
 
     /// 业务作用：观察指定 group 当前的接流量条件，无需等待或发起 broker 请求。
-    /// 参数说明：group 为已启动组，requirement 为有效分配条件。
+    ///
+    /// 参数说明：
+    /// - `group`：已启动组。
+    /// - `requirement`：有效分配条件。
+    ///
     /// 返回：包含源、要求、稳定原因和同次健康的诊断；非法要求或未知组拒绝。
     pub async fn group_readiness(
         &self,
@@ -622,7 +721,11 @@ impl KafkaProxy {
     }
 
     /// 业务作用：在一个总期限内复验全部 group，不锁存已经失效的早先成功。
-    /// 参数说明：groups 为非空且不重复的组和要求，deadline 为所有组共享的绝对时刻。
+    ///
+    /// 参数说明：
+    /// - `groups`：非空且不重复的组和要求。
+    /// - `deadline`：所有组共享的绝对时刻。
+    ///
     /// 返回：同一轮观测全部满足时返回排序快照；组不满足共同输入边界时为 Config，终止态立即失败，超时包含所有未满足项的要求和健康。
     pub async fn await_groups_ready(
         &self,
@@ -729,7 +832,9 @@ impl KafkaProxy {
     }
 
     /// 业务作用：同步封闭消费登记并通知全部已接纳任务永久停止，保留收尾依赖。
-    /// 参数说明：无。
+    ///
+    /// 参数说明: 无。
+    ///
     /// 返回：发布停止意图，不等待退出、不释放租约或原文；调用 stop_consumers_until 或 shutdown_until 取得实际退出结论。
     pub fn request_consumer_stop(&self) {
         self.inner
@@ -766,13 +871,11 @@ impl KafkaProxy {
     /// 该入口是容器生命周期协议，不是运行期暂停按钮。尚未进入最终关闭时，成功后保持 `Running`，
     /// 已取得的 lane 可用于收尾；若已进入最终关闭则不重新开放发布。consumer registry 永久封口，不能再次启动。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `deadline`: 框架提供的绝对截止时刻；消费槽、有限任务、事务和旧分配 DLT 共用，不逐任务重置。
     ///
-    /// # 返回
-    ///
-    /// 所有消费槽、有限任务、事务与旧分配 DLT 已退出，group 表及组状态指标已清理、静态收集租约已释放时返回 `Ok(())`；累计观测不会清零。
+    /// 返回：所有消费槽、有限任务、事务与旧分配 DLT 已退出，group 表及组状态指标已清理、静态收集租约已释放时返回 `Ok(())`；累计观测不会清零。
     ///
     /// # 错误
     ///
@@ -839,14 +942,12 @@ impl KafkaProxy {
     /// 若 [`Self::stop_consumers_until`] 已成功，本方法把空 group 表视为正常两段停机路径，
     /// 继续排空 lane 并关闭管理与观测资源；不会重复释放静态收集租约。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `deadline`: 框架提供的绝对截止时刻；获取生命周期门、停止 group 和排空 lane
     ///   及有限任务、事务、DLT、管理与观测责任共同消费这一份预算。
     ///
-    /// # 返回
-    ///
-    /// 所有受管资源关闭且总状态进入 `Stopped` 时返回 `Ok(())`；重复调用同样返回成功。
+    /// 返回：所有受管资源关闭且总状态进入 `Stopped` 时返回 `Ok(())`；重复调用同样返回成功。
     ///
     /// # 错误
     ///
@@ -996,11 +1097,9 @@ impl KafkaProxy {
     /// Application 受管模式应调用 [`Self::shutdown_until`] 并传入全局绝对 deadline，
     /// 避免每个清理 action 重新获得一份完整预算。
     ///
-    /// 参数说明：无。
+    /// 参数说明: 无。
     ///
-    /// # 返回
-    ///
-    /// 全部受管资源进入 `Stopped` 时返回 `Ok(())`；已关闭运行时重复调用也返回成功。
+    /// 返回：全部受管资源进入 `Stopped` 时返回 `Ok(())`；已关闭运行时重复调用也返回成功。
     ///
     /// # 错误
     ///
@@ -1013,9 +1112,9 @@ impl KafkaProxy {
 
     /// 业务作用：返回冻结后的 producer lane 表。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// `connect_with_metrics` 完成本地构造时一次性发布的稳定有序 lane 表。
+    /// 返回：`connect_with_metrics` 完成本地构造时一次性发布的稳定有序 lane 表。
     fn producer_lanes(&self) -> &std::collections::BTreeMap<String, ProducerLane> {
         self.inner
             .producer_lanes
@@ -1025,9 +1124,9 @@ impl KafkaProxy {
 
     /// 业务作用：快照当前受管 group，供持有生命周期门的停机路径并发等待。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 按 resolved group id 排序的句柄副本；句柄只延长 owner 观察期，不转移所有权。
+    /// 返回：按 resolved group id 排序的句柄副本；句柄只延长 owner 观察期，不转移所有权。
     fn managed_groups(&self) -> Vec<(String, Arc<consumer::supervisor::GroupHandle>)> {
         self.inner
             .groups
@@ -1040,9 +1139,9 @@ impl KafkaProxy {
 
     /// 业务作用：在全部 owner 已确认退出后清理 consumer 侧可见状态。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// 本方法无返回值；group 表、注册规模指标和 collected lease 在同一生命周期门下
+    /// 返回：本方法无返回值；group 表、注册规模指标和 collected lease 在同一生命周期门下
     /// 依次归零，重复调用不会二次释放租约。
     fn finish_consumer_stop(&self) {
         {
@@ -1076,14 +1175,12 @@ impl KafkaProxy {
 
     /// 业务作用：构造生命周期门等待失败时的脱敏未完成资源快照。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `include_lanes`: final shutdown 传 `true` 以报告全部 lane；consumer-only drain
     ///   传 `false`，因为该阶段按合同不排空 producer。
     ///
-    /// # 返回
-    ///
-    /// 只包含稳定 group/lane 或回放任务名称的超时类别，不包含 broker 或凭据。
+    /// 返回：只包含稳定 group/lane 或回放任务名称的超时类别，不包含 broker 或凭据。
     fn shutdown_timeout_snapshot(&self, include_lanes: bool) -> NafkaError {
         let groups = self
             .inner
@@ -1096,7 +1193,10 @@ impl KafkaProxy {
         let mut tasks = self.inner.replays.pending_names();
         tasks.extend(self.inner.transfers.pending_names());
         if !tasks.is_empty() {
-            return NafkaError::ReplayShutdownTimeout { tasks, groups };
+            return NafkaError::ReplayShutdownTimeout {
+                tasks,
+                groups,
+            };
         }
         let producer_lanes = if include_lanes {
             self.producer_lanes().keys().cloned().collect()
@@ -1112,14 +1212,12 @@ impl KafkaProxy {
 
 /// 业务作用：在共享绝对截止时刻前并发停止一组 owner。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `groups`: 按 resolved group id 排序的受管句柄快照，由持有生命周期门的调用方提供。
 /// - `deadline`: 所有 owner 共享的绝对截止时刻，不能为单个 group 重置。
 ///
-/// # 返回
-///
-/// 返回未能确认退出的 group 名，按输入顺序稳定排列；空列表表示全部停止成功。
+/// 返回：未能确认退出的 group 名，按输入顺序稳定排列；空列表表示全部停止成功。
 async fn stop_managed_groups(
     groups: &[(String, Arc<consumer::supervisor::GroupHandle>)],
     deadline: Instant,

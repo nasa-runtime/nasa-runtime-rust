@@ -65,16 +65,22 @@ pub enum SagaStreamAuth {
 impl std::fmt::Debug for SagaStreamAuth {
     /// 业务作用：输出不含密钥字节的认证模式摘要。
     ///
-    /// 参数说明：`formatter` 接收脱敏后的认证模式与稳定 key id，不接收密钥材料。
+    /// 参数说明：
+    /// - `formatter`：接收脱敏后的认证模式与稳定 key id，不接收密钥材料。
     ///
     /// 返回：摘要写入成功时返回成功；格式化目标拒绝写入时透传格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Hmac { key_id, .. } => formatter
+            Self::Hmac {
+                key_id,
+                ..
+            } => formatter
                 .debug_struct("Hmac")
                 .field("key_id", key_id)
                 .finish_non_exhaustive(),
-            Self::HmacKeyring { keys } => formatter
+            Self::HmacKeyring {
+                keys,
+            } => formatter
                 .debug_struct("HmacKeyring")
                 .field("key_ids", &keys.keys().collect::<Vec<_>>())
                 .finish_non_exhaustive(),
@@ -93,30 +99,31 @@ pub struct SagaStreamVerificationKey {
 impl SagaStreamVerificationKey {
     /// 业务作用：冻结一条可用于验证消息来源的生产者密钥。
     ///
-    /// 参数说明：`producer` 是逻辑服务身份，`key` 是不进入配置快照和日志的 HMAC 密钥。
+    /// 参数说明：
+    /// - `producer`：是逻辑服务身份
+    /// - `key`：是不进入配置快照和日志的 HMAC 密钥。
     ///
     /// 返回：密钥非空时返回不可变绑定；空密钥返回错误。
     pub fn new(producer: ServiceIdentity, key: Vec<u8>) -> anyhow::Result<Self> {
         anyhow::ensure!(!key.is_empty(), "saga stream verification key is empty");
-        Ok(Self { producer, key })
+        Ok(Self {
+            producer,
+            key,
+        })
     }
 }
 
-/// 业务作用：构造覆盖 stream、事件身份、类型、完整 payload 与 trace 上下文的
-/// canonical HMAC——字段以长度前缀拼接消除边界歧义。签名与验签共用本函数,保证
-/// 两侧口径一致。
-///
-/// `traceparent` 会被消费边界读取并持久化为实例因果上下文,必须纳入签名:否则持有
-/// stream 写权限但没有 HMAC key 的主体可以复制合法 entry、替换 trace 字段重放,伪造
-/// 因果链与遥测归属。缺失与空值经显式存在标志区分,不产生拼接歧义。
+/// 业务作用：构造覆盖 stream、事件身份、类型、完整 payload 与 trace 上下文的 canonical HMAC——字段以长度前缀拼接消除边界歧义。签名与验签共用本函数,保证 两侧口径一致。 `traceparent` 会被消费边界读取并持久化为实例因果上下文,必须纳入签名:否则持有 stream 写权限但没有 HMAC key 的主体可以复制合法 entry、替换 trace 字段重放,伪造 因果链与遥测归属。缺失与空值经显式存在标志区分,不产生拼接歧义。
 ///
 /// 参数说明：
-/// - `key`: HMAC 密钥。
-/// - `stream`: 目标 stream 名（签名绑定通道，防跨 stream 重放）。
-/// - `event_id`/`event_type`/`payload`: 消息身份与载荷。
-/// - `traceparent`: 随消息传播的因果上下文;`None` 表示未携带。
+/// - `key`：签名与验签双方共享的 HMAC 密钥。
+/// - `stream`：需要绑定的精确目标 stream 名，防止跨 stream 复制。
+/// - `event_id`：需要绑定的输入事件身份原文。
+/// - `event_type`：需要绑定的事件类型原文。
+/// - `payload`：需要整体纳入签名的原始载荷字节。
+/// - `traceparent`：可选因果上下文字节，None 与空值被单独区分。
 ///
-/// 返回：已 update 完毕、可 finalize 或 verify_slice 的 MAC。
+/// 返回：返回已写入长度定界字段的 HMAC 状态，供 finalize 或 verify_slice；不检查密钥强度、消息语义或防止同 stream 内重复投递。
 fn entry_mac(
     key: &[u8],
     stream: &str,
@@ -144,9 +151,15 @@ fn entry_mac(
 
 /// 业务作用：为发布端生成 entry 的十六进制 canonical 签名。
 ///
-/// 参数说明：同 [`entry_mac`]。
+/// 参数说明：
+/// - `key`：签名与验签双方共享的 HMAC 密钥。
+/// - `stream`：需要绑定的精确目标 stream 名，防止跨 stream 复制。
+/// - `event_id`：需要绑定的输入事件身份原文。
+/// - `event_type`：需要绑定的事件类型原文。
+/// - `payload`：需要整体纳入签名的原始载荷字节。
+/// - `traceparent`：可选因果上下文字节，None 与空值被单独区分。
 ///
-/// 返回：十六进制签名文本。
+/// 返回：返回 canonical HMAC-SHA256 的小写十六进制文本，不发布消息或取得 stream 写权限。
 fn sign_entry(
     key: &[u8],
     stream: &str,
@@ -243,7 +256,11 @@ impl OutboxPublisher for SagaRedisStreamPublisher {
         if let Some(traceparent) = &event.traceparent {
             fields.push((FIELD_TRACEPARENT, traceparent.clone().into_bytes()));
         }
-        if let SagaStreamAuth::Hmac { key_id, key } = &self.auth {
+        if let SagaStreamAuth::Hmac {
+            key_id,
+            key,
+        } = &self.auth
+        {
             fields.push((FIELD_KEY_ID, key_id.clone().into_bytes()));
             fields.push((
                 FIELD_SIGNATURE,
@@ -321,19 +338,15 @@ pub fn publisher_duplicate_hints_total() -> u64 {
     PUBLISHER_DUPLICATE_HINTS.load(Ordering::Relaxed)
 }
 
-/// 业务作用：读取单个 (stream, group) 的积压概要——pending 数与最老 pending entry 的
-/// 年龄,供受管观测面按冻结标签导出。
-///
-/// 年龄按最老 pending entry id 的毫秒段与调用方时钟差计算;PEL 为空时无年龄。回包
-/// 形态异常按错误上抛,调用方据此把观测轮记为失败而不是导出假数据。
+/// 业务作用：读取消费组待确认数量及最老条目的创建年龄，供受管观测面使用。
 ///
 /// 参数说明：
-/// - `client`: Redis 客户端。
-/// - `stream`: 源 stream。
-/// - `group`: consumer group。
-/// - `now_ms`: 当前 epoch 毫秒。
+/// - `client`：执行 XPENDING 的共享 Redis 客户端。
+/// - `stream`：待观察的源 Stream 键。
+/// - `group`：待观察的消费者组名称。
+/// - `now_ms`：调用方当前 Unix 毫秒时刻，负值按零处理。
 ///
-/// 返回：`(pending 数, 最老 pending 年龄毫秒)`;Redis 往返失败或回包异常返回错误。
+/// 返回：成功返回非负 pending 数与可选年龄；负计数按零处理，最老 ID 缺失、类型或格式不符时年龄为 None。年龄按条目 ID 毫秒段计算并饱和减法，不是 PEL idle；非数组、空数组、非整数计数或往返失败返回错误，不验证全部概要字段。
 pub async fn stream_group_backlog(
     client: &RedisClient,
     stream: &str,
@@ -519,7 +532,10 @@ fn parse_entries(value: &redis::Value) -> Vec<StreamEntry> {
                 fields.insert(name, value);
             }
         }
-        entries.push(StreamEntry { entry_id, fields });
+        entries.push(StreamEntry {
+            entry_id,
+            fields,
+        });
     }
     entries
 }
@@ -782,14 +798,19 @@ impl SagaStreamEntry {
     /// 返回：来源可信时返回 keyring 绑定的生产者；单 key/ACL 模式返回空；签名异常返回稳定原因。
     fn verify_origin(&self) -> Result<Option<ServiceIdentity>, &'static str> {
         let (key, producer) = match &self.config.auth {
-            SagaStreamAuth::Hmac { key_id, key } => {
+            SagaStreamAuth::Hmac {
+                key_id,
+                key,
+            } => {
                 let presented_key = self.field_text(FIELD_KEY_ID);
                 if presented_key.as_deref() != Some(key_id.as_str()) {
                     return Err("saga_stream_signature_key_unknown");
                 }
                 (key.as_slice(), None)
             }
-            SagaStreamAuth::HmacKeyring { keys } => {
+            SagaStreamAuth::HmacKeyring {
+                keys,
+            } => {
                 let presented_key = self
                     .field_text(FIELD_KEY_ID)
                     .ok_or("saga_stream_signature_key_unknown")?;
@@ -994,11 +1015,14 @@ impl<H: SagaCommandHandler> SagaRedisStreamCommandConsumer<H> {
     /// 业务作用：构造 command stream 消费者并冻结 route 合同。
     ///
     /// 参数说明：
-    /// - `handler`: 命令处理实现（宏生成 Service 的 [`crate::ParticipantCommandHandler`]）。
-    /// - `config`: 消费配置（producer 字段=该 stream 唯一可信 Orchestrator）。
-    /// - `workflow`/`version`/`digest`/`step`: 本 stream 唯一目标步骤合同。
+    /// - `handler`：执行参与方事务与命令裁决的共享处理器。
+    /// - `config`：冻结的 stream、group、来源认证和消费策略。
+    /// - `workflow`：该 stream 绑定的工作流身份。
+    /// - `version`：目标工作流定义版本。
+    /// - `digest`：目标完整定义的 canonical 摘要文本。
+    /// - `step`：该 stream 唯一绑定的参与步骤。
     ///
-    /// 返回：配置与摘要合同满足时返回消费者。
+    /// 返回：配置通过 validate 且 digest 为 64 字节小写十六进制时返回冻结消费者，否则报错；不连接 Redis、不取得消费所有权，也不证明 digest 与实际定义匹配。
     pub fn new(
         handler: Arc<H>,
         config: SagaStreamConsumerConfig,
@@ -1031,9 +1055,14 @@ impl<H: SagaCommandHandler> SagaRedisStreamCommandConsumer<H> {
 
     /// 业务作用：为只持有本地步骤 capability 的受管参与方构造版本级 command 消费者。
     ///
-    /// 参数说明：`handler/config` 冻结事务与来源认证，`workflow/version/step` 定位参与方公开能力。
+    /// 参数说明：
+    /// - `handler`：已绑定本地步骤能力的参与方处理器。
+    /// - `config`：冻结的来源认证与 stream 消费策略。
+    /// - `workflow`：允许处理的工作流身份。
+    /// - `version`：允许处理的工作流定义版本。
+    /// - `step`：允许处理的本地参与步骤。
     ///
-    /// 返回：配置合法时返回消费者；运行时仍由 `ParticipantRuntime` 复验生产者、workflow 与版本信任。
+    /// 返回：配置通过 validate 时返回摘要留空的 capability 消费者，否则报错；本构造不校验完整定义摘要，运行时继续复验来源与版本信任，不连接 Redis。
     pub fn for_managed_capability(
         handler: Arc<H>,
         config: SagaStreamConsumerConfig,
@@ -1255,10 +1284,10 @@ impl<H: SagaCommandHandler> SagaStreamPoller for SagaRedisStreamCommandConsumer<
     /// 业务作用：委托 command 消费者的单轮裁决;命令裁决不依赖调用方时刻。
     ///
     /// 参数说明：
-    /// - `client`: Redis 客户端。
-    /// - `now_ms`: 未使用(统一对象安全签名)。
+    /// - `client`：执行消费与确认命令的 Redis 客户端。
+    /// - `_now_ms`：对象安全接口传入的时刻，此 command 实现不参与裁决。
     ///
-    /// 返回：本轮报告。
+    /// 返回：原样返回 command 单轮处理报告或错误；可能完成认领、事务裁决与 ACK 等底层副作用，不使用外部时刻参数。
     async fn poll_once(
         &self,
         client: &RedisClient,

@@ -38,7 +38,10 @@ pub(crate) struct Material {
 }
 
 /// 业务作用：读取有限普通文件，拒绝设备、管道及超过上限的认证材料。
-/// 参数说明：`path` 是明确的认证来源，内容只用于连接，不能写入诊断。
+///
+/// 参数说明：
+/// - `path`：是明确的认证来源，内容只用于连接，不能写入诊断。
+///
 /// 返回：不超过一 MiB 的完整字节或脱敏错误。
 pub(crate) async fn read_file(path: &Path) -> Result<Vec<u8>> {
     let mut options = tokio::fs::OpenOptions::new();
@@ -84,7 +87,10 @@ pub(crate) async fn read_file(path: &Path) -> Result<Vec<u8>> {
 }
 
 /// 业务作用：只从用户指定的认证模式取得集群地址及证书，不搜索其他 kubeconfig。
-/// 参数说明：`auth` 是冻结的来源，集群内模式使用 Kubernetes 标准挂载。
+///
+/// 参数说明：
+/// - `auth`：是冻结的来源，集群内模式使用 Kubernetes 标准挂载。
+///
 /// 返回：尚未创建网络连接的认证材料；来源、解析预算或认证约束不满足时拒绝加载。
 pub(crate) async fn load(auth: &Authentication) -> Result<Material> {
     match auth {
@@ -107,7 +113,10 @@ pub(crate) async fn load(auth: &Authentication) -> Result<Material> {
                 credential: Credential::TokenFile(root.join("token")),
             })
         }
-        Authentication::Kubeconfig { path, context } => {
+        Authentication::Kubeconfig {
+            path,
+            context,
+        } => {
             let bytes = read_file(path).await?;
             // 认证字段不能因重复键或隐式合并改变含义；别名展开也必须受结构和文本预算约束。
             // 不启用文件包含及属性展开，解析错误统一脱敏，避免认证正文进入诊断。
@@ -185,7 +194,12 @@ pub(crate) async fn load(auth: &Authentication) -> Result<Material> {
 }
 
 /// 业务作用：拒绝 kubeconfig 同名条目，避免选择错误的集群或身份。
-/// 参数说明：`value` 是完整配置，`list` 是条目集合，`name` 为显式引用。
+///
+/// 参数说明：
+/// - `value`：是完整配置
+/// - `list`：是条目集合
+/// - `name`：为显式引用。
+///
 /// 返回：唯一匹配条目；缺失或重复拒绝。
 fn named<'a>(value: &'a Value, list: &str, name: &str) -> Result<&'a Value> {
     let items = value[list]
@@ -210,7 +224,11 @@ fn named<'a>(value: &'a Value, list: &str, name: &str) -> Result<&'a Value> {
 }
 
 /// 业务作用：读取必须明确配置的认证字段，错误不回显内容。
-/// 参数说明：`value` 是选中条目，`name` 为公开配置键。
+///
+/// 参数说明：
+/// - `value`：是选中条目
+/// - `name`：为公开配置键。
+///
 /// 返回：非空字符串或配置错误。
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
     value[name]
@@ -225,7 +243,12 @@ fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 }
 
 /// 业务作用：按 kubeconfig 所在目录解析文件或内联证书，拒绝含混来源。
-/// 参数说明：`value` 是集群/身份条目，`name` 是文件键，`root` 是配置父目录。
+///
+/// 参数说明：
+/// - `value`：是集群/身份条目
+/// - `name`：是文件键
+/// - `root`：是配置父目录。
+///
 /// 返回：有界证书字节，不执行外部命令。
 async fn material(value: &Value, name: &str, root: &Path) -> Result<Vec<u8>> {
     let data_key = format!("{name}-data");

@@ -284,17 +284,23 @@ static REDIS_JOB_METRIC_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 38] = [
     &JOB_SUPERVISOR_GENERATION,
 ];
 
+/// 每来源预留普通指标、调度结果、六类监督任务结果与代次的固定样本上界。
 const REDIS_JOB_METRIC_SERIES_PER_SOURCE: usize = 35 + 7 + (6 * 5) + 6;
+/// 任务指标在统一观测目录内可申请的样本预算。
 const REDIS_JOB_METRIC_SERIES_BUDGET: usize = 10_000;
 
 enum PlanState {
+    /// 尚未由 Prepare 取走；空槽允许首次登记，有值时拒绝覆盖。
     Open(Option<RedisJobPlan>),
+    /// 计划已被取走或确认没有动态声明，后续失败也不重新开放。
     Taken,
 }
 
 /// UserHook 与 RedisJob 组件共享的一次性计划槽；计划取走后不能重新开放。
 pub(crate) struct RedisJobRuntimeState {
+    /// 保护登记与取走唯一性的计划槽位。
     plan: Mutex<PlanState>,
+    /// Ready 阶段一次性发布的业务门面，不拥有运行时关闭权。
     handle: OnceLock<nadis::job::JobRuntimeHandle>,
 }
 
@@ -313,7 +319,8 @@ impl RedisJobRuntimeState {
 
     /// 业务作用：在 UserHook 把拥有式 Job 计划一次性交给生命周期组件。
     ///
-    /// 参数说明：`plan` 为尚未接触 Redis 的核心计划。
+    /// 参数说明：
+    /// - `plan`：`plan` 为尚未接触 Redis 的核心计划。
     ///
     /// 返回：首次登记成功；重复登记或 Prepare 已封口时返回阶段错误。
     pub(crate) fn configure(&self, plan: RedisJobPlan) -> ApplicationResult<()> {
@@ -347,6 +354,7 @@ impl RedisJobRuntimeState {
             .plan
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 取走与封口在同一锁内完成，Prepare 失败后不能再装配另一份动态计划。
         match std::mem::replace(&mut *state, PlanState::Taken) {
             PlanState::Open(plan) => Ok(plan),
             PlanState::Taken => Err(job_error(
@@ -358,7 +366,8 @@ impl RedisJobRuntimeState {
 
     /// 业务作用：在后台运行时已交给停机栈后一次性发布无停机权的业务门面。
     ///
-    /// 参数说明：`handle` 包含冻结 source 的控制与查询投影。
+    /// 参数说明：
+    /// - `handle`：`handle` 包含冻结 source 的控制与查询投影。
     ///
     /// 返回：首次发布成功；重复发布表示生命周期装配不一致并拒绝 Ready。
     fn publish_handle(&self, handle: nadis::job::JobRuntimeHandle) -> ApplicationResult<()> {
@@ -370,11 +379,12 @@ impl RedisJobRuntimeState {
         })
     }
 
-    /// 业务作用：读取 Ready 后发布的 RedisJob 业务门面，不转移后台任务或停机所有权。
+    /// 业务作用：读取 Ready 阶段发布的 RedisJob 业务门面，不转移后台任务或停机所有权。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：已发布时返回克隆；Prepare 和 Ready 完成前返回 `None`。
+    /// 返回：发布后取得克隆，尚未发布时为 None；该槽位不检查 Application 当前状态，
+    /// 取得句柄不表示整轮 Ready 已完成，也不保证后续调用仍被运行时接纳。
     pub(crate) fn handle(&self) -> Option<nadis::job::JobRuntimeHandle> {
         self.handle.get().cloned()
     }
@@ -386,19 +396,26 @@ pub type ErasedRedisJobFactory =
 
 /// 业务二进制内由 `#[redis_job]` 生成的静态任务描述。
 pub struct RedisJobDescriptor {
+    /// 构造静态定义和处理器的函数，可使用应用容器完成注入。
     factory: ErasedRedisJobFactory,
+    /// 生成代码提供的声明位置，仅用于冲突定位。
     source: &'static str,
 }
 
 impl RedisJobDescriptor {
     /// 业务作用：供过程宏以常量表达式建立静态 RedisJob 描述。
     ///
-    /// 参数说明：`factory` 构造定义和 Handler，`source` 只用于重复声明定位。
+    /// 参数说明：
+    /// - `factory`：`factory` 构造定义和 Handler。
+    /// - `source`：`source` 只用于重复声明定位。
     ///
     /// 返回：可放入 linkme 分布式切片的不可变描述。
     #[doc(hidden)]
     pub const fn __new(factory: ErasedRedisJobFactory, source: &'static str) -> Self {
-        Self { factory, source }
+        Self {
+            factory,
+            source,
+        }
     }
 }
 
@@ -408,7 +425,9 @@ pub static COLLECTED_REDIS_JOBS: [RedisJobDescriptor];
 
 /// 业务作用：构造并合并全部静态任务与可选动态计划，使两条声明路径共用唯一性和冻结门禁。
 ///
-/// 参数说明：`application` 为宏 Handler 可选注入的容器，`dynamic` 为 UserHook 可选提交的计划。
+/// 参数说明：
+/// - `application`：`application` 为宏 Handler 可选注入的容器。
+/// - `dynamic`：`dynamic` 为 UserHook 可选提交的计划。
 ///
 /// 返回：至少存在一项声明时返回统一计划；构造失败、组内重名或空计划时拒绝 Prepare。
 fn collect_plan(
@@ -470,10 +489,15 @@ fn collect_plan(
 
 /// 受管 RedisJob 生命周期；Prepare 完成外部门禁，Ready 才启动后台任务。
 pub(crate) struct RedisJobComponent {
+    /// 通过来源绑定、布局和能力校验后待启动的运行时。
     prepared: Option<PreparedJobRuntime>,
+    /// 所有任务来源共同影响的关键就绪贡献。
     contributor: Option<ReadinessContributor>,
+    /// Start 时冻结名称的逐来源关键贡献，未被任务使用的来源初始为 Ready。
     source_contributors: BTreeMap<String, ReadinessContributor>,
+    /// 指标出口共享的本地查询目录，核心启动完成后发布。
     metric_queries: Arc<Mutex<Vec<JobQuery>>>,
+    /// 待交给 Runner 的聚合健康循环，取出后组件不再保留 future。
     critical_task: Option<ApplicationFuture<'static>>,
 }
 
@@ -496,18 +520,27 @@ impl RedisJobComponent {
 
 impl ApplicationComponent for RedisJobComponent {
     /// 业务作用：返回独立 RedisJob 组件身份。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：ComponentId::RedisJob，用于生命周期错误归类和资源所有权登记，与底层 Redis 来源身份分开。
     fn id(&self) -> ComponentId {
         ComponentId::RedisJob
     }
 
-    /// 业务作用：声明 Redis transport 必须先于 Job 准备与停机后释放。
+    /// 业务作用：要求 Redis 来源先于任务运行时完成生命周期装配，使任务停机责任先于来源释放。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：只含 Redis 组件的固定依赖目录；不在此选择具体来源或探测远端能力。
     fn dependencies(&self) -> &'static [ComponentId] {
         &[ComponentId::Redis]
     }
 
     /// 业务作用：预登记 RedisJob readiness 名称，运行期不动态增长观测基数。
     ///
-    /// 参数说明：`context` 提供共享 Application。
+    /// 参数说明：
+    /// - `context`：`context` 提供共享 Application。
     ///
     /// 返回：贡献项登记成功时完成。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
@@ -544,7 +577,8 @@ impl ApplicationComponent for RedisJobComponent {
 
     /// 业务作用：消费冻结计划，精确绑定其引用的受管 Redis source，并完成能力、布局和定义门禁。
     ///
-    /// 参数说明：`context` 提供最终配置、Redis 资源和共享启动预算。
+    /// 参数说明：
+    /// - `context`：`context` 提供最终配置、Redis 资源和共享启动预算。
     ///
     /// 返回：全部 source 准备成功后保存 Prepared 类型；任一失败时不开放后台领取。
     fn prepare<'a>(&'a mut self, context: &'a mut PrepareContext<'_>) -> ApplicationFuture<'a> {
@@ -626,9 +660,12 @@ impl ApplicationComponent for RedisJobComponent {
 
     /// 业务作用：在全部 initializer 成功后启动全部 source，并立即建立反向停机所有权。
     ///
-    /// 参数说明：`context` 提供 active stack 与共享 Application。
+    /// 参数说明：
+    /// - `context`：`context` 提供 active stack 与共享 Application。
     ///
-    /// 返回：全部 source Active 后发布 Ready；部分启动失败由核心运行时逆序收口并返回错误。
+    /// 返回：核心启动成功后将运行时交给停机 owner，依次发布指标查询、业务门面、监督任务和初始就绪观测。
+    /// 任一步失败都会拒绝本组件 Ready；已登记的停机动作仍承担启动任务或运行时的收口责任。
+    /// 这些发布不是一个原子操作，组件成功也不代表 Application 的整体接流阶段已经完成。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let prepared = self.prepared.take().ok_or_else(|| {
@@ -671,6 +708,7 @@ impl ApplicationComponent for RedisJobComponent {
                     ));
                 }
                 Err(error) => {
+                    // 启动任务已经终止，不能把该槽位当成仍持有可接管的 Running 资源。
                     *state = RedisJobLifecycle::Empty;
                     return Err(job_error_source(
                         ApplicationPhase::Ready,
@@ -823,7 +861,8 @@ async fn run_job_health_monitor(
 
 /// 业务作用：按冻结 source 数量计算 RedisJob 指标的最坏公开 series 数。
 ///
-/// 参数说明：`source_count` 来自已通过计划唯一性校验的 canonical qualifier 集合。
+/// 参数说明：
+/// - `source_count`：`source_count` 来自已通过计划唯一性校验的 canonical qualifier 集合。
 ///
 /// 返回：乘法无溢出且未超过 RedisJob 子预算时返回精确上界；否则拒绝 Prepare。
 fn redis_job_worst_case_metric_series(source_count: usize) -> ApplicationResult<usize> {
@@ -846,6 +885,7 @@ fn redis_job_worst_case_metric_series(source_count: usize) -> ApplicationResult<
 
 /// 受管 RedisJob 指标桥；查询句柄只在 Ready 开放运行时一次发布。
 struct RedisJobMetricsSource {
+    /// 逐来源本地指标查询句柄，不在采集时发 Redis 命令。
     queries: Arc<Mutex<Vec<JobQuery>>>,
 }
 
@@ -925,7 +965,8 @@ impl nametrics_core::LegacyMetricsSource for RedisJobMetricsSource {
 
     /// 业务作用：保留兼容 trait 入口，文本与非文本出口统一使用结构化快照。
     ///
-    /// 参数说明：`_output` 是未由本源直接写入的兼容缓冲区。
+    /// 参数说明：
+    /// - `_output`：`_output` 是未由本源直接写入的兼容缓冲区。
     ///
     /// 返回：无；统一 hub 负责渲染 `snapshot()`。
     fn render_prometheus(&self, _output: &mut String) {}
@@ -933,7 +974,10 @@ impl nametrics_core::LegacyMetricsSource for RedisJobMetricsSource {
 
 /// 业务作用：按 descriptor 类型把有符号本地值转换为合法结构化样本。
 ///
-/// 参数说明：`descriptor` 决定 family 与值类型，`labels` 来自冻结低基数域，`value` 来自单 source 快照。
+/// 参数说明：
+/// - `descriptor`：`descriptor` 决定 family 与值类型。
+/// - `labels`：`labels` 来自冻结低基数域。
+/// - `value`：`value` 来自单 source 快照。
 ///
 /// 返回：counter 对防御性负值按零处理，gauge 保留有符号值。
 fn job_metric_sample(
@@ -959,27 +1003,38 @@ fn job_metric_sample(
 
 /// RedisJob Ready 启动与运行所有权的共享状态；停机动作在启动完成前即持有它。
 enum RedisJobLifecycle {
+    /// 已调度的启动任务，取消 Ready 等待后仍由停机 owner 接管。
     Starting(tokio::task::JoinHandle<nadis::Result<RunningJobRuntime>>),
+    /// 成功启动且尚未移交核心关闭的运行时。
     Running(RunningJobRuntime),
+    /// 尚无可接管运行时或所有权已取走；不单独证明外部资源清理完成。
     Empty,
 }
 
 /// 业务作用：持有 RedisJob 启动任务或运行时的唯一停机权，保证两种阶段都能完成受管收口。
 struct RedisJobShutdown {
+    /// 在 Ready 与停机之间串行转移启动任务或运行时所有权的状态。
     lifecycle: Arc<tokio::sync::Mutex<RedisJobLifecycle>>,
 }
 
 impl ShutdownAction for RedisJobShutdown {
     /// 业务作用：返回稳定的 Job 停机动作名。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：固定名称 redis-job-runtime，归类聚合停机结果，不附带来源名或任务业务内容。
     fn label(&self) -> &'static str {
         "redis-job-runtime"
     }
 
-    /// 业务作用：用全局剩余预算同时关闭全部 source 准入并完成反向收口。
+    /// 业务作用：在宿主剩余预算内接管未完成的启动任务或运行时，并委托核心关闭全部来源。
     ///
-    /// 参数说明：`context` 提供不可延长的共享停机截止。
+    /// 参数说明：
+    /// - `context`：提供共享停机剩余预算，锁等待、启动等待与运行时关闭共用该子预算。
     ///
-    /// 返回：全部 source 收口时成功；任一失败保留核心错误链。
+    /// 返回：没有剩余运行时或核心完成关闭时成功；取锁超时、启动失败、任务异常或关闭失败返回组件错误。
+    /// 启动等待超时会请求 abort 并清空槽位，但不在此 join 已中止任务；错误不能解释为外部登记已经清理。
+    /// 停机准入关闭由核心在取得 Running 状态后执行，构造 future 本身不关闭业务入口。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let budget = context.child_budget(Duration::MAX);
@@ -1058,7 +1113,8 @@ impl ShutdownAction for RedisJobShutdown {
 
 /// 业务作用：从最终 `redis.job` 配置段读取根级默认与逐 source 覆盖。
 ///
-/// 参数说明：`application` 提供不可变最终配置快照。
+/// 参数说明：
+/// - `application`：`application` 提供不可变最终配置快照。
 ///
 /// 返回：反序列化后的 JobConfig；配置段缺失或非法时拒绝 Prepare。
 fn read_job_config(application: &Application) -> ApplicationResult<JobConfig> {
@@ -1085,7 +1141,9 @@ fn read_job_config(application: &Application) -> ApplicationResult<JobConfig> {
 
 /// 业务作用：在建立 Redis 连接和执行 UserHook 前校验 `redis.job` 根配置及全部逐 source 覆盖。
 ///
-/// 参数说明：`tree` 为尚未发布副作用的最终候选配置树，`phase` 为当前校验阶段。
+/// 参数说明：
+/// - `tree`：`tree` 为尚未发布副作用的最终候选配置树。
+/// - `phase`：`phase` 为当前校验阶段。
 ///
 /// 返回：根配置、稳定实例身份和每个稀疏覆盖均合法时成功；缺段、未知字段、禁用之外的类型错误或安全门禁失败时拒绝整帧。
 pub(crate) fn validate_redis_job_section(
@@ -1133,20 +1191,26 @@ pub(crate) fn validate_redis_job_section(
     Ok(())
 }
 
-/// 业务作用：构造不含业务输入和 endpoint 的 RedisJob 生命周期错误。
+/// 业务作用：把任务装配或运行失败归属于 RedisJob 组件及对应生命周期阶段。
 ///
-/// 参数说明：`phase` 为失败阶段，`message` 为不携带敏感配置的诊断信息。
+/// 参数说明：
+/// - `phase`：观察到失败的生命周期阶段。
+/// - `message`：调用方准备的诊断摘要，须避免凭据和业务载荷。
 ///
-/// 返回：归因到 RedisJob 组件的生命周期错误。
+/// 返回：保留传入摘要的组件错误；不在此过滤文本、执行重试或改变任务状态。
 fn job_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::RedisJob, phase, message)
 }
 
 /// 业务作用：构造保留底层错误链的 RedisJob 生命周期错误，统一归因到独立组件。
 ///
-/// 参数说明：`phase` 为失败阶段，`message` 为稳定诊断信息，`source` 为底层错误链。
+/// 参数说明：
+/// - `phase`：`phase` 为失败阶段。
+/// - `message`：`message` 为稳定诊断信息。
+/// - `source`：`source` 为底层错误链。
 ///
-/// 返回：归因到 RedisJob 组件且保留底层原因的生命周期错误。
+/// 返回：归因到 RedisJob 组件且原样保留底层原因的生命周期错误；此处不自动脱敏，
+/// 调用方及最终输出通道分别负责诊断材料边界与输出处理。
 fn job_error_source(
     phase: ApplicationPhase,
     message: impl Into<String>,

@@ -23,9 +23,11 @@ pub(crate) struct FileIo {
 
 impl FileIo {
     /// 业务作用：记录指定连接主文件和稳定 WAL 的真实 I/O 失败，避免 backup_finish 把源错误记在目标句柄后丢失归属。
+    ///
     /// 参数说明：
     /// - `database`：由维护流程独占且保持打开的连接；本作用域不允许关闭连接。
     /// - `include_wal`：只读源连接可记录保持打开的 WAL；可写目标不接管可能关闭的 journal。
+    ///
     /// 返回：退出前恢复全部方法表的守卫；无法取得主文件时拒绝开始复制。
     pub(crate) fn install(database: *mut ffi::sqlite3, include_wal: bool) -> anyhow::Result<Self> {
         let mut scope = Self {
@@ -103,7 +105,9 @@ impl FileIo {
     }
 
     /// 业务作用：取得当前复制期间直接由被跟踪文件返回的第一项失败证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：原生扩展码；成功、正常短读或锁竞争不记作存储失败。
     pub(crate) fn error_code(&self) -> Option<i32> {
         match self.failure.load(Ordering::Acquire) {
@@ -115,7 +119,9 @@ impl FileIo {
 
 impl Drop for FileIo {
     /// 业务作用：在 handle 解锁或连接关闭之前还原原生方法表，防止回调引用已释放的归属记录。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有原生文件恢复其原有 VFS 行为。
     fn drop(&mut self) {
         for (file, original, _) in &self.files {

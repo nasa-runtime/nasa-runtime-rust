@@ -119,7 +119,14 @@ static READY: MetricDescriptor = MetricDescriptor {
     label_names: &["registration"],
     histogram_bounds: &[],
 };
-static STATE: MetricDescriptor = MetricDescriptor { name: "napp_discovery_registration_state", help: "Planned=0，Registering=1，OutcomeUnknown=2，PendingHealth=3，Active=4，Suspended=5，Withdrawing=6，Residual=7，Removed=8。", unit: "", kind: MetricKind::Gauge, label_names: &["registration"], histogram_bounds: &[] };
+static STATE: MetricDescriptor = MetricDescriptor {
+    name: "napp_discovery_registration_state",
+    help: "Planned=0，Registering=1，OutcomeUnknown=2，PendingHealth=3，Active=4，Suspended=5，Withdrawing=6，Residual=7，Removed=8。",
+    unit: "",
+    kind: MetricKind::Gauge,
+    label_names: &["registration"],
+    histogram_bounds: &[],
+};
 static REGAGE: MetricDescriptor = MetricDescriptor {
     name: "napp_discovery_registration_observation_milliseconds",
     help: "注册最近成功证据的年龄，无证据为负一。",
@@ -158,13 +165,17 @@ static DESCRIPTORS: [&MetricDescriptor; 17] = [
 
 impl LegacyMetricsSource for DiscoveryMetrics {
     /// 业务作用：向唯一指标目录声明固定发现指标，不使用动态服务名作为标签。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：完整静态指标合同。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         &DESCRIPTORS
     }
     /// 业务作用：导出同一 owner 的只读快照，抓取不发起后端请求。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：配置名约束的有限样本；owner 释放后不再输出旧就绪状态。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         let Some(state) = self.0.snapshot() else {
@@ -264,7 +275,10 @@ impl LegacyMetricsSource for DiscoveryMetrics {
         Some(samples)
     }
     /// 业务作用：保持结构化出口唯一，Prometheus 文本由统一指标目录渲染。
-    /// 参数说明：`_output` 是兼容 trait 的文本缓冲区。
+    ///
+    /// 参数说明：
+    /// - `_output`：`_output` 是兼容 trait 的文本缓冲区。
+    ///
     /// 返回：本源总是提供结构化样本，不追加另一份文本。
     fn render_prometheus(&self, _output: &mut String) {}
 }

@@ -28,7 +28,9 @@ impl MonotonicInstant {
     ///
     /// 返回: 保存指定偏移的单调时刻；调用方负责确保后续只与同一时钟族比较。
     pub const fn from_since_base(since_base: Duration) -> Self {
-        Self { since_base }
+        Self {
+            since_base,
+        }
     }
 
     /// 业务作用: 返回相对时钟基准的偏移。
@@ -57,9 +59,9 @@ impl MonotonicInstant {
     ///
     /// 返回: 加法未溢出时返回新时刻，否则返回 `None`。
     pub fn checked_add(self, delta: Duration) -> Option<MonotonicInstant> {
-        self.since_base
-            .checked_add(delta)
-            .map(|since_base| Self { since_base })
+        self.since_base.checked_add(delta).map(|since_base| Self {
+            since_base,
+        })
     }
 
     /// 业务作用: 在本时刻上加一段时长构造 deadline;溢出饱和到最大值。

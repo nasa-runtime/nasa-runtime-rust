@@ -61,38 +61,53 @@ pub struct ManagedWsClient {
 }
 impl ManagedWsClient {
     /// 业务作用：向已认证并激活的连接提交有界业务消息。
-    /// 参数说明：`message` 为原协议消息，业务继续负责远端确认与幂等。
+    ///
+    /// 参数说明：
+    /// - `message`：`message` 为原协议消息。
+    ///
     /// 返回：true 仅表示本地入队；未激活、关闭、超限或队列满时为 false。
     pub fn send_message(&self, message: &naws::proto::Message) -> bool {
         !self.closed.load(Ordering::Acquire) && self.client.send_message(message)
     }
     /// 业务作用：发送当前 endpoint 的业务事件。
-    /// 参数说明：`event` 为协议事件名；`payload` 为原始消息正文。
+    ///
+    /// 参数说明：
+    /// - `event`：`event` 为协议事件名。
+    /// - `payload`：`payload` 为原始消息正文。
+    ///
     /// 返回：本地入队是否成功，不代表远端执行或送达。
     pub fn send(&self, event: &str, payload: &[u8]) -> bool {
         !self.closed.load(Ordering::Acquire) && self.client.send(event, payload)
     }
     /// 业务作用：读取最近认证连接的本地状态，不触发探测或重连。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：准入未关闭且当前连接存在时为 true。
     pub fn is_connected(&self) -> bool {
         !self.closed.load(Ordering::Acquire) && self.client.is_connected()
     }
     /// 业务作用：读取连接子任务的实际存活数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：supervisor、writer、heartbeat 的当前数量。
     pub fn active_tasks(&self) -> usize {
         self.client.active_tasks()
     }
     /// 业务作用：观察已隔离的业务回调异常次数，便于定位本地处理失败。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前客户端累计的回调 panic 次数，不含消息正文。
     pub fn callback_failures(&self) -> usize {
         self.client.callback_failures()
     }
 
     /// 业务作用：读取连接、认证、心跳及失败的独立本地证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不包含地址、会话或凭据的客户端快照。
     pub fn observation(&self) -> naws::client::ClientObservation {
         self.client.observation()
@@ -100,7 +115,9 @@ impl ManagedWsClient {
 }
 impl WsClients {
     /// 业务作用：保留固定关键目录的健康句柄，供取得所有领域保护后检查新鲜度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：准备阶段封存的关键证据集合，不包含可选依赖。
     pub(crate) fn critical_health(&self) -> Vec<ReadinessContributor> {
         self.entries
@@ -112,7 +129,10 @@ impl WsClients {
             .collect()
     }
     /// 业务作用：持有关键连接的本地状态保护直到唯一 Ready 发布，防止使用准备阶段旧证据。
-    /// 参数说明：`publish` 只推进宿主状态和公共许可，不执行业务或阻塞操作。
+    ///
+    /// 参数说明：
+    /// - `publish`：`publish` 只推进宿主状态和公共许可。
+    ///
     /// 返回：任一关键连接失效或证据过期时拒绝启动，否则返回发布结果。
     pub(crate) fn publish_ready(
         &self,
@@ -146,7 +166,11 @@ impl WsClients {
     }
 
     /// 业务作用：按固定目录顺序嵌套连接保护，使较早复验的连接在最终发布前不能失效。
-    /// 参数说明：`entries` 为最多 64 个已封存条目；`publish` 为后续领域和状态发布。
+    ///
+    /// 参数说明：
+    /// - `entries`：`entries` 为最多 64 个已封存条目。
+    /// - `publish`：`publish` 为后续领域和状态发布。
+    ///
     /// 返回：已失去认证的关键连接阻止后续执行；可选连接只贡献降级状态。
     fn guard_entries(
         entries: &[Entry],
@@ -199,7 +223,12 @@ impl WsClients {
         }
     }
     /// 业务作用：冻结前登记有界业务事件目录，不创建任何连接。
-    /// 参数说明：`name` 是命名客户端；`event` 是协议事件名；`handler` 必须同步非阻塞。
+    ///
+    /// 参数说明：
+    /// - `name`：`name` 是命名客户端。
+    /// - `event`：`event` 是协议事件名。
+    /// - `handler`：`handler` 必须同步非阻塞。
+    ///
     /// 返回：唯一合法登记成功，重复、超量或封口后拒绝。
     pub(crate) fn register(
         &self,
@@ -223,7 +252,10 @@ impl WsClients {
         Ok(())
     }
     /// 业务作用：从启动快照创建固定材料的出站客户端，支持无入站服务的 Service 与 Batch。
-    /// 参数说明：`context` 提供材料、命名资源和清理栈。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 提供材料、命名资源和清理栈。
+    ///
     /// 返回：全部启用计划完成首连认证后成功；准备失败由已登记 owner 关闭。
     pub(crate) async fn prepare(
         self: &Arc<Self>,
@@ -393,7 +425,10 @@ impl WsClients {
         Ok(Some(Box::pin(async move { owner.monitor(app).await })))
     }
     /// 业务作用：统一 Ready 后持续根据认证连接与任务状态更新健康。
-    /// 参数说明：`app` 提供状态订阅，不参与业务消息处理。
+    ///
+    /// 参数说明：
+    /// - `app`：`app` 提供状态订阅。
+    ///
     /// 返回：宿主停止时正常结束，关键 owner 意外退出时报告失败。
     async fn monitor(self: Arc<Self>, app: Application) -> ApplicationResult<()> {
         let mut states = app.subscribe_state();
@@ -435,11 +470,17 @@ impl WsClients {
                 }
                 _ => return Ok(()),
             }
-            tokio::select! {biased;_=states.changed()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            tokio::select! {
+                biased;
+                _ = states.changed() => {},
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+            }
         }
     }
     /// 业务作用：同时关闭所有客户端发送与重连准入，旧句柄不能复活。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已发关闭请求，实际退出由连接 owner 继续等待。
     fn close(&self) {
         let entries = self.entries.lock().expect("outbound clients");
@@ -453,7 +494,9 @@ impl WsClients {
         }
     }
     /// 业务作用：并发等待全部客户端的 supervisor、writer、heartbeat 退出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有运行门禁释放且任务计数归零后成功。
     async fn drain(&self) {
         let clients: Vec<_> = self
@@ -466,7 +509,9 @@ impl WsClients {
         futures_util::future::join_all(clients.iter().map(naws::Client::wait_closed)).await;
     }
     /// 业务作用：读取固定命名目录下的连接和子任务观测。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：命名连接状态与活动子任务数，不包含地址、session 或 token。
     pub(crate) fn observations(&self) -> Vec<(String, bool, usize)> {
         self.entries
@@ -486,13 +531,18 @@ impl WsClients {
 struct WsClientsShutdown(Arc<WsClients>);
 impl ShutdownAction for WsClientsShutdown {
     /// 业务作用：标识出站客户端聚合关闭动作。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定动作名。
     fn label(&self) -> &'static str {
         "ws-clients"
     }
     /// 业务作用：先关闭全部客户端，再用剩余预算取得真实退出证明。
-    /// 参数说明：`context` 为宿主截止时间。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 为宿主截止时间。
+    ///
     /// 返回：正常收口成功，超时明确报告任务未全部退出。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         self.0.close();
@@ -512,20 +562,28 @@ impl ShutdownAction for WsClientsShutdown {
 }
 impl Drop for WsClientsShutdown {
     /// 业务作用：启动回滚或取消关闭等待时收回全部出站准入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：独立连接 owner 继续等待全部子任务退出。
     fn drop(&mut self) {
         self.0.close();
     }
 }
 /// 业务作用：限制命名客户端和事件目录身份。
-/// 参数说明：`name` 为固定配置或协议名称。
+///
+/// 参数说明：
+/// - `name`：`name` 为固定配置或协议名称。
+///
 /// 返回：非空且无首尾空白的有界名称有效。
 fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 128 && name.trim() == name
 }
 /// 业务作用：提供不泄露认证材料的固定装配错误。
-/// 参数说明：`message` 为静态原因。
+///
+/// 参数说明：
+/// - `message`：`message` 为静态原因。
+///
 /// 返回：标准宿主准备错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Application, ApplicationPhase::Prepare, message)

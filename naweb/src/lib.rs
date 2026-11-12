@@ -95,9 +95,9 @@ pub trait ApiSchema {
 
 /// 业务作用：把一个 DTO 类型投影成可放入静态路由表的描述符。
 ///
-/// # 参数
+/// 参数说明: 无。
 ///
-/// 本函数没有运行时参数；类型参数必须实现 [`ApiSchema`]。
+/// 返回：返回 T 的静态名称与 JSON schema 描述符，不解析或验证 schema 文本。
 pub fn api_schema<T: ApiSchema>() -> ApiSchemaDescriptor {
     ApiSchemaDescriptor {
         name: T::NAME,
@@ -129,6 +129,10 @@ pub trait ApiParameters {
 }
 
 /// 业务作用：把参数集类型投影成可放入静态路由表的工厂返回值。
+///
+/// 参数说明: 无。
+///
+/// 返回：返回 T 声明的静态参数描述符切片，不复制、不检查重名或必填组合。
 pub fn api_parameters<T: ApiParameters>() -> &'static [ApiParameterDescriptor] {
     T::PARAMETERS
 }
@@ -156,6 +160,10 @@ pub trait ApiResponses {
 }
 
 /// 业务作用：把响应集类型投影成静态路由表可保存的描述符切片。
+///
+/// 参数说明: 无。
+///
+/// 返回：返回 T 声明的静态响应描述符切片，不检查状态码重复或 schema 合法性。
 pub fn api_responses<T: ApiResponses>() -> &'static [ApiResponseDescriptor] {
     T::RESPONSES
 }

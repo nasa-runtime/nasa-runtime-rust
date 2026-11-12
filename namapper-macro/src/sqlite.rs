@@ -5,10 +5,12 @@ use syn::Type;
 use super::{MapperBackend, MethodPlan, ParamInfo, ParsedSqlTemplate, SqlNode};
 
 /// 业务作用：用 SQLite 引号语义隔离 SQL 文本，再复用共享动态节点和参数规划。
+///
 /// 参数说明：
 /// - `sql`：业务 SQL 模板。
 /// - `params`：原始方法参数。
 /// - `span`：诊断位置。
+///
 /// 返回：注释和字面量不产生绑定，BLOB 参数保持单值绑定的计划。
 pub(super) fn parse_template(
     sql: &str,
@@ -35,8 +37,10 @@ pub(super) fn parse_template(
 }
 
 /// 业务作用：区分二进制值与 IN 列表，防止 Vec<u8> 被当成多个 SQL 参数。
+///
 /// 参数说明：
 /// - `ty`：参数声明类型。
+///
 /// 返回：字节数组、slice 和 Vec 时为真。
 fn is_blob(ty: &Type) -> bool {
     match ty {
@@ -49,8 +53,10 @@ fn is_blob(ty: &Type) -> bool {
 }
 
 /// 业务作用：把定长字节数组转成 SQLx SQLite 支持的 BLOB 类型，保留重复绑定与流的所有权。
+///
 /// 参数说明：
 /// - `params`：业务声明的原始参数类型。
+///
 /// 返回：只作用于 SQLite 字节数组参数的局部绑定，其它参数保持原类型。
 pub(super) fn array_bindings(params: &[ParamInfo]) -> TokenStream {
     let bindings = params.iter().filter_map(|param| {
@@ -72,9 +78,11 @@ pub(super) fn array_bindings(params: &[ParamInfo]) -> TokenStream {
 }
 
 /// 业务作用：保留 SQLite 文本字节，按原生词法跳过引号和注释并拒绝手写绑定占位符。
+///
 /// 参数说明：
 /// - `sql`：未解析的模板。
 /// - `span`：错误定位。
+///
 /// 返回：没有 SQL 引号干扰的模板和可无损还原的字面量表。
 fn mask(sql: &str, span: Span) -> syn::Result<(String, Vec<(String, String)>)> {
     let mut prefix = "__nasa_sqlite_literal_".to_owned();
@@ -173,9 +181,11 @@ fn mask(sql: &str, span: Span) -> syn::Result<(String, Vec<(String, String)>)> {
 }
 
 /// 业务作用：在 SQL 结构解析完成后还原 SQLite 字面量，避免反斜线和内部空格被改写。
+///
 /// 参数说明：
 /// - `text`：已完成绑定解析的文本。
 /// - `literals`：本次模板的唯一标记表。
+///
 /// 返回：文本原地恢复，不再次扫描绑定标记。
 fn restore(text: &mut String, literals: &[(String, String)]) {
     for (marker, original) in literals {
@@ -184,9 +194,11 @@ fn restore(text: &mut String, literals: &[(String, String)]) {
 }
 
 /// 业务作用：递归恢复动态节点中的 SQL 字面量，保持条件分支内的同一词法合同。
+///
 /// 参数说明：
 /// - `nodes`：动态 SQL AST。
 /// - `literals`：模板字面量表。
+///
 /// 返回：所有静态 SQL 片段原地恢复。
 fn restore_nodes(nodes: &mut [SqlNode], literals: &[(String, String)]) {
     for node in nodes {
@@ -219,9 +231,11 @@ fn restore_nodes(nodes: &mut [SqlNode], literals: &[(String, String)]) {
 }
 
 /// 业务作用：按后端生成 SQLx 执行入口，SQLite 不向宏暴露底层可变连接。
+///
 /// 参数说明：
 /// - `plan`：方法固定的后端。
 /// - `write`：本方法是否声明写入或 RETURNING 合同。
+///
 /// 返回：具有对应权限的 executor 表达式。
 pub(super) fn executor_tokens(plan: &MethodPlan, write: bool) -> TokenStream {
     if plan.backend == MapperBackend::Sqlite {

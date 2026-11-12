@@ -29,7 +29,9 @@ const COMMAND_COMPLETED: u8 = 3;
 struct CommandCancellation(Arc<AtomicU8>);
 impl Drop for CommandCancellation {
     /// 业务作用：调用 future 被取消时阻止排队命令迟到生效。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只允许 Queued 到 Cancelled；Executing 不被强行中断或标为未执行。
     fn drop(&mut self) {
         let _ = self.0.compare_exchange(
@@ -59,6 +61,10 @@ pub(crate) struct StartupGate {
 
 impl StartupGate {
     /// 业务作用：创建尚未放行的启动门。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：处于 Pending 的独立门，owner 可完成本地构造但不能开始业务消费。
     pub(crate) fn new() -> Self {
         Self {
             state: AtomicU8::new(STARTUP_PENDING),
@@ -66,7 +72,12 @@ impl StartupGate {
     }
 
     /// 业务作用：全部 owner 已登记后统一放行。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅 Pending 转为 Open；已取消或已开放时无变化，调用方必须在此之前完成组表与租约登记。
     pub(crate) fn open(&self) {
+        // 已取消的启动批次不能被迟到的成功路径重新放行。
         let _ = self.state.compare_exchange(
             STARTUP_PENDING,
             STARTUP_OPEN,
@@ -76,6 +87,10 @@ impl StartupGate {
     }
 
     /// 业务作用：启动批次失败时阻止所有尚未运行的 owner 继续。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅 Pending 转为 Aborted；已经开放时无变化，运行中停止必须通过 owner 停止流程完成。
     pub(crate) fn abort(&self) {
         let _ = self.state.compare_exchange(
             STARTUP_PENDING,
@@ -86,11 +101,19 @@ impl StartupGate {
     }
 
     /// 业务作用：启动门是否已经放行。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：读取到 Open 时为 true；只证明本地启动已放行，不代表 broker 分配或业务就绪。
     pub(crate) fn is_open(&self) -> bool {
         self.state.load(Ordering::Acquire) == STARTUP_OPEN
     }
 
     /// 业务作用：启动门是否已经取消。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：读取到 Aborted 时为 true；不等待 owner 退出，也不表示已开放门可以通过 abort 关闭。
     pub(crate) fn is_aborted(&self) -> bool {
         self.state.load(Ordering::Acquire) == STARTUP_ABORTED
     }
@@ -251,7 +274,12 @@ pub(crate) struct OwnerHandle {
 
 impl OwnerHandle {
     /// 业务作用：启动受共同准入门约束的消费槽 owner，先构造原生客户端，再等待路由登记放行。
-    /// 参数说明：runtime 为槽配置与共享源资源；plan 为冻结路由；startup_gate 为全部槽共用的启动门。
+    ///
+    /// 参数说明：
+    /// - `runtime`：runtime 为槽配置与共享源资源。
+    /// - `plan`：plan 为冻结路由。
+    /// - `startup_gate`：startup_gate 为全部槽共用的启动门。
+    ///
     /// 返回：owner 句柄和本地构造结果接收端；线程创建失败直接返回错误，原生构造结果通过接收端交付，均不代表 broker 已分配分区。
     pub(crate) fn start(
         runtime: Arc<super::group::OwnerRuntime>,
@@ -320,13 +348,8 @@ impl OwnerHandle {
                     )
                 }));
                 if let Err(payload) = outcome {
-                    let detail = if let Some(value) = payload.downcast_ref::<&str>() {
-                        (*value).to_owned()
-                    } else if let Some(value) = payload.downcast_ref::<String>() {
-                        value.clone()
-                    } else {
-                        "非字符串 panic payload".into()
-                    };
+                    // owner 可能在处理业务内容时展开栈，公开健康快照只保留固定失败说明。
+                    let detail = crate::consumer::erased::panic_message(payload);
                     let mut snapshot = health_for_thread
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -364,7 +387,9 @@ impl OwnerHandle {
     /// 读侧合并:owner 状态机没写过 `last_error` 时,用 librdkafka 后台 callback 捕获的
     /// broker 级错误(ALL_BROKERS_DOWN/认证/SSL)兜底填充——join 迟迟不成时快照能给出真实根因,
     /// 且绝不覆盖状态机已写入的更具体主因。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已停止准入的实例始终撤销 Ready，实际退出前保留 Stopping 与活动责任。
     pub(crate) fn health(&self) -> GroupHealth {
         let mut snapshot = self
@@ -392,13 +417,15 @@ impl OwnerHandle {
 
     /// 业务作用：提交一条有界命令并按 fencing 状态等待结果。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `kind`: 具体 owner 命令。
     ///
     /// # 错误
     ///
     /// 队列满、owner 退出、确定未执行、结果未知或命令本身失败时返回错误。
+    ///
+    /// 返回：配置控制预算内收到的实际回复；超时根据排队认领状态区分未执行与结果未知，不自动重试。
     pub(crate) async fn command(&self, kind: OwnerCommandKind) -> Result<CommandReply> {
         self.command_for(kind, self.control_timeout).await
     }
@@ -407,6 +434,10 @@ impl OwnerHandle {
     ///
     /// 本方法只尝试把 fenced Stop 放入有界邮箱，不等待执行结果；队列已满时返回 false，
     /// 由调用方记录告警。显式关闭仍必须走 [`Self::stop_until`]。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已停止或 Stop 成功入队时为 true；队列满或断开时为 false，成功入队不代表停止命令已认领或线程已退出。
     pub(crate) fn request_stop_best_effort(&self) -> bool {
         if self.stopped.load(Ordering::Acquire) {
             return true;
@@ -427,7 +458,9 @@ impl OwnerHandle {
     }
 
     /// 业务作用：发布源所有者的永久停止意图，不让已耗尽的等待预算阻止撤销消费权威。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：立即封闭派发与确认，并尝试唤醒 owner；实际退出仍由 stop_until 等待，邮箱满不解除停止门。
     pub(crate) fn request_permanent_stop(&self) {
         // 整源退出已经授权且不可撤回，不沿用普通可取消控制命令的 queued 裁决。
@@ -437,7 +470,9 @@ impl OwnerHandle {
     }
 
     /// 业务作用：区分 owner 真正退出、存活输入和停止时未确认释放，不依赖健康表清零。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：纯数值快照；线程未结束即使 stopped 已发布也继续报告活动资源。
     pub(crate) fn close_report(&self) -> crate::CloseConsumers {
         let health = self.health();
@@ -464,7 +499,7 @@ impl OwnerHandle {
 
     /// 业务作用：在调用方给定的等待预算内提交一条 fenced 命令。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `kind`: 具体 owner 命令。
     /// - `timeout`: 本次等待预算。
@@ -472,6 +507,8 @@ impl OwnerHandle {
     /// # 错误
     ///
     /// 队列满、owner 退出、确定未执行、结果未知或命令本身失败时返回错误。
+    ///
+    /// 返回：冻结当前可见 Ready 代次后等待命令结果；没有可见代次时携带 None，由 owner 最终准入检查裁决，不授予新分配权。
     async fn command_for(&self, kind: OwnerCommandKind, timeout: Duration) -> Result<CommandReply> {
         let epoch = if super::group::partition_targets(&kind).is_some() {
             self.health().ready_assignment_epoch
@@ -482,7 +519,12 @@ impl OwnerHandle {
     }
 
     /// 业务作用：提交携带调用方冻结代次的命令，防止跨目标等待隐式取得新分配权威。
-    /// 参数说明：kind 为命令；timeout 为剩余总预算；expected_epoch 为派发时必须复验的代次。
+    ///
+    /// 参数说明：
+    /// - `kind`：kind 为命令。
+    /// - `timeout`：timeout 为剩余总预算。
+    /// - `expected_epoch`：expected_epoch 为派发时必须复验的代次。
+    ///
     /// 返回：owner 终态或确定未执行/结果未知；调用 future 取消时撤销尚未开始的命令。
     pub(crate) async fn command_at(
         &self,
@@ -545,13 +587,15 @@ impl OwnerHandle {
 
     /// 业务作用：在全局 deadline 前停止并 join owner 线程。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `deadline`: shutdown 共享的绝对截止时刻。
     ///
     /// # 错误
     ///
     /// 命令或线程退出超过截止时刻时返回关闭超时。
+    ///
+    /// 返回：观察到停止标记且本次取得的 join 等待未超时时成功；预算耗尽返回 ShutdownTimeout，不将未知 Stop 结果当成已停止证据。
     pub(crate) async fn stop_until(&self, deadline: Instant) -> Result<()> {
         if !self.stopped.load(Ordering::Acquire) {
             loop {
@@ -622,7 +666,10 @@ impl OwnerHandle {
     }
 
     /// 业务作用：取得排队命令的执行权，并为已受理 Stop 发布实际责任的停止意图。
-    /// 参数说明：command 为 owner 取出的待执行命令。
+    ///
+    /// 参数说明：
+    /// - `command`：command 为 owner 取出的待执行命令。
+    ///
     /// 返回：queued 成功转为 executing 时为 true；已取消命令返回 false，未受理的 Stop 不改变后台交付准入。
     pub(crate) fn begin_command(command: &OwnerCommand) -> bool {
         let accepted = command
@@ -643,10 +690,12 @@ impl OwnerHandle {
 
     /// 业务作用：owner 完成命令并发送结果。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `command`: 已进入 executing 的命令。
     /// - `result`: 执行结果。
+    ///
+    /// 返回：先尝试发送结果再发布 Completed；等待方已离开时仍发布完成状态，不回滚已经产生的原生副作用。
     pub(crate) fn finish_command(command: OwnerCommand, result: Result<CommandReply>) {
         let state = Arc::clone(&command.state);
         let _ = command.reply.send(result);
@@ -656,7 +705,11 @@ impl OwnerHandle {
     }
 
     /// 业务作用：对尚未产生所请求副作用的命令交付明确拒绝证据。
-    /// 参数说明：command 为已认领但未执行的命令；reason 为固定本地诊断。
+    ///
+    /// 参数说明：
+    /// - `command`：command 为已认领但未执行的命令。
+    /// - `reason`：reason 为固定本地诊断。
+    ///
     /// 返回：调用方取得 ControlNotApplied，不能用于掩盖已开始的原生操作失败。
     pub(crate) fn reject_command(command: OwnerCommand, reason: &'static str) {
         tracing::debug!(command_id = command.id, reason, "控制命令未执行");
@@ -667,11 +720,13 @@ impl OwnerHandle {
 
 /// 业务作用：更新健康快照中的状态和可选错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `health`: owner 共享健康状态。
 /// - `state`: 新 group 状态。
-/// - `error`: 已脱敏的可选错误文本。
+/// - `error`：调用方已处理内容边界的可选错误文本，None 清除旧错误；此函数不执行脱敏。
+///
+/// 返回：同一写锁内更新状态与错误说明；Ready 代次、暂停原因及实际资源由调用流程另行维护，不能只靠状态值证明失权或退出。
 pub(crate) fn update_state(
     health: &Arc<RwLock<GroupHealth>>,
     state: GroupState,
@@ -686,9 +741,13 @@ pub(crate) fn update_state(
 
 /// 业务作用：oneshot 关闭时按 fenced command 状态区分确定未执行与结果未知。
 ///
+/// 参数说明：
 /// - `id`: 稳定命令编号。
 /// - `state`: 与 owner 共享的单状态 CAS。
+///
+/// 返回：排队命令成功取消或已取消时为 ControlNotApplied；已执行、已完成但回复丢失或其它不确定状态均为 ControlOutcomeUnknown。
 fn classify_closed_command(id: u64, state: &AtomicU8) -> NafkaError {
+    // 只从 Queued 原子撤销才具有未执行证据，已认领的命令不能因回执断开被判定无副作用。
     if state
         .compare_exchange(
             COMMAND_QUEUED,

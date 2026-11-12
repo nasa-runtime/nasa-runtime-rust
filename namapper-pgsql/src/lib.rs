@@ -37,7 +37,7 @@ pub struct MapperStream<T> {
 impl<T> MapperStream<T> {
     /// 业务作用: 包装拥有 PgPool 生命周期的 SQLx 行流，允许调用方逐行消费而不借用外部连接。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `stream`: 宏生成的 PostgreSQL owned stream。
     ///
     /// 返回: 可由业务异步迭代的 Mapper stream。
@@ -52,7 +52,11 @@ impl<T> MapperStream<T> {
     }
 
     /// 业务作用：将 PostgreSQL 行流绑定独立状态机，区分数据库读取和消费者间隔。
-    /// 参数说明：`stream` 为拥有型行流，`observation` 为构造时建立的守卫。
+    ///
+    /// 参数说明：
+    /// - `stream`：为拥有型行流
+    /// - `observation`：为构造时建立的守卫。
+    ///
     /// 返回：终止时只记一次事实的受观测结果流。
     pub fn observed<S>(stream: S, observation: observability::MapperStreamGuard) -> Self
     where
@@ -78,7 +82,10 @@ impl<T> futures_core::Stream for MapperStream<T> {
     type Item = Result<T, sqlx::Error>;
 
     /// 业务作用：按底层取行边界采集 PostgreSQL 活跃耗时、首行与终态，排除消费者停顿。
-    /// 参数说明：`context` 为异步运行时唤醒上下文。
+    ///
+    /// 参数说明：
+    /// - `context`：为异步运行时唤醒上下文。
+    ///
     /// 返回：保留内部流的轮询结果，在错误被擦除前完成分类且不重复计量。
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -114,7 +121,7 @@ pub struct EnumOrdinal<E: MapperEnum>(
 impl<E: MapperEnum> EnumOrdinal<E> {
     /// 业务作用: 创建按稳定整数序号持久化的 enum 包装。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: 业务 enum 值。
     ///
     /// 返回: 可参与 PostgreSQL 与 cache 编解码的包装值。
@@ -144,7 +151,7 @@ impl<E: MapperEnum> EnumOrdinal<E> {
 impl<E: MapperEnum> From<E> for EnumOrdinal<E> {
     /// 业务作用: 从业务 enum 直接构造 PostgreSQL ordinal 包装。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: 业务 enum。
     ///
     /// 返回: ordinal 包装值。
@@ -169,7 +176,7 @@ impl<E: MapperEnum> Deref for EnumOrdinal<E> {
 impl<E: MapperEnum> serde::Serialize for EnumOrdinal<E> {
     /// 业务作用: 把 enum ordinal 序列化为 cache JSON 整数。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `serializer`: serde 目标序列化器。
     ///
     /// 返回: 序列化器结果。
@@ -184,7 +191,7 @@ impl<E: MapperEnum> serde::Serialize for EnumOrdinal<E> {
 impl<'de, E: MapperEnum> serde::Deserialize<'de> for EnumOrdinal<E> {
     /// 业务作用: 从 cache JSON 整数还原业务 enum ordinal。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `deserializer`: serde 来源反序列化器。
     ///
     /// 返回: 已知 ordinal 对应包装值；未知序号返回 serde 错误。
@@ -214,7 +221,7 @@ impl<E: MapperEnum> sqlx::Type<sqlx::Postgres> for EnumOrdinal<E> {
 
     /// 业务作用: 判断 PostgreSQL 列是否可按 `i32` ordinal 解码。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `ty`: 服务端返回的列类型信息。
     ///
     /// 返回: SQLx `i32` 解码兼容时为 `true`。
@@ -226,7 +233,7 @@ impl<E: MapperEnum> sqlx::Type<sqlx::Postgres> for EnumOrdinal<E> {
 impl<'query, E: MapperEnum> sqlx::Encode<'query, sqlx::Postgres> for EnumOrdinal<E> {
     /// 业务作用: 按值把 enum ordinal 写入 PostgreSQL 参数缓冲区。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `buffer`: SQLx PostgreSQL 参数缓冲区。
     ///
     /// 返回: SQLx null 状态或编码错误。
@@ -242,7 +249,7 @@ impl<'query, E: MapperEnum> sqlx::Encode<'query, sqlx::Postgres> for EnumOrdinal
 
     /// 业务作用: 按引用把 enum ordinal 写入 PostgreSQL 参数缓冲区。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `buffer`: SQLx PostgreSQL 参数缓冲区。
     ///
     /// 返回: SQLx null 状态或编码错误。
@@ -258,7 +265,7 @@ impl<'query, E: MapperEnum> sqlx::Encode<'query, sqlx::Postgres> for EnumOrdinal
 impl<'row, E: MapperEnum> sqlx::Decode<'row, sqlx::Postgres> for EnumOrdinal<E> {
     /// 业务作用: 从 PostgreSQL 整数字段解码 enum ordinal。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: SQLx PostgreSQL 原始列值。
     ///
     /// 返回: 已知 ordinal 对应 enum；未知值返回解码错误。
@@ -296,7 +303,7 @@ pub fn current_datasource() -> Option<natx_pgsql::DatasourceRef> {
 
 /// 业务作用: 获取指定 PostgreSQL datasource 的连接池 clone，供无事务流式读取拥有其生命周期。
 ///
-/// # 参数
+/// 参数说明：
 /// - `datasource`: Mapper trait 声明的静态 datasource。
 ///
 /// 返回: registry 中对应 PgPool；名称或生命周期不可用时返回错误。
@@ -334,7 +341,7 @@ pub async fn mandatory_conn() -> anyhow::Result<natx_pgsql::PgConn> {
 
 /// 业务作用: 获取必须属于当前 PostgreSQL ambient transaction 的命名 datasource 连接。
 ///
-/// # 参数
+/// 参数说明：
 /// - `datasource`: Mapper 声明的静态 datasource。
 ///
 /// 返回: 同源事务连接；缺失事务或 datasource 不一致时拒绝。
@@ -363,7 +370,7 @@ pub async fn never_conn_for(datasource: &'static str) -> anyhow::Result<natx_pgs
 
 /// 业务作用: 在无事务时立即清理 Mapper cache，在事务内延迟到 PostgreSQL COMMIT 被明确确认后清理。
 ///
-/// # 参数
+/// 参数说明：
 /// - `cache`: 当前 Mapper client 的可选 L2 cache。
 /// - `keys`: 已包含 driver/datasource 身份的缓存 namespace。
 ///

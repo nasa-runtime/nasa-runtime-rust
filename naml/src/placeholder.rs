@@ -2,7 +2,10 @@
 //! 新应用需要原始文本与目标类型绑定时使用 `strict` 模块。
 
 /// 业务作用：事务式解析完整树，保持配置值、原样环境、规范化环境及默认值的命中顺序。
-/// 参数说明：`tree` 为候选配置；成功后整体替换，失败保留原树。
+///
+/// 参数说明：
+/// - `tree`：为候选配置；成功后整体替换，失败保留原树。
+///
 /// 返回：嵌套默认值与标量引用全部完成；未命中、循环或超限返回安全错误。
 pub fn resolve_placeholders(tree: &mut serde_json::Value) -> anyhow::Result<()> {
     resolve_with_environment(
@@ -13,7 +16,10 @@ pub fn resolve_placeholders(tree: &mut serde_json::Value) -> anyhow::Result<()> 
 }
 
 /// 业务作用：解析加载期表达式并保留合法但未命中的引用，供调用方后续解释。
-/// 参数说明：`tree` 为候选树。
+///
+/// 参数说明：
+/// - `tree`：为候选树。
+///
 /// 返回：完整成功才替换输入；非法语法与循环仍被拒绝。
 pub fn resolve_placeholders_preserving_unresolved(
     tree: &mut serde_json::Value,
@@ -26,7 +32,12 @@ pub fn resolve_placeholders_preserving_unresolved(
 }
 
 /// 业务作用：让兼容加载器的覆盖层和表达式共享一次环境观察。
-/// 参数说明：`tree` 为候选；`preserve` 控制合法未命中保留；`environment` 是固定快照。
+///
+/// 参数说明：
+/// - `tree`：为候选
+/// - `preserve`：控制合法未命中保留
+/// - `environment`：是固定快照。
+///
 /// 返回：完整候选或安全错误，不读取真实环境。
 pub(crate) fn resolve_with_environment(
     tree: &mut serde_json::Value,
@@ -41,14 +52,12 @@ pub(crate) fn resolve_with_environment(
     Ok(())
 }
 
-/// 业务作用：env / default 字符串来源的标量类型化
-/// 引号包裹 → 字符串(去引号,`"8080"` 保持字符串);未加引号的整数/浮点 → number;
-/// `true`/`false` → bool;**其它一律原样字符串**——`/fore-rest` 这类含 `/`、`-` 的值
-/// 属于「其它」,必须原样输出,`/` 不是路径语义、`-` 不是分隔语义。
-/// (树命中不走此函数:原始 Value 类型直接保真,。)
+/// 业务作用：env / default 字符串来源的标量类型化 引号包裹 → 字符串(去引号,`"8080"` 保持字符串);未加引号的整数/浮点 → number; `true`/`false` → bool;**其它一律原样字符串**——`/fore-rest` 这类含 `/`、`-` 的值 属于「其它」,必须原样输出,`/` 不是路径语义、`-` 不是分隔语义。 (树命中不走此函数:原始 Value 类型直接保真,。)
 ///
-/// # 参数
-/// - `raw`: 待解析的原始字符串、字节或配置值。
+/// 参数说明：
+/// - `raw`：待解析的原始字符串、字节或配置值。
+///
+/// 返回：匹配首尾单/双引号时去一层引号而不解析转义；否则识别可往返 i64、简单有限 f64 与精确 true/false，其余保留原串，不 trim。浮点转换可能发生精度舍入。
 pub(crate) fn parse_scalar(raw: &str) -> serde_json::Value {
     // 显式引号 = 用户强制字符串语义(即使内容像数字);同时也是保留首尾空格的手段。
     if raw.len() >= 2 {
@@ -84,8 +93,10 @@ pub(crate) fn parse_scalar(raw: &str) -> serde_json::Value {
 
 /// 业务作用：`-?digits.digits` 简单浮点判定(恰好一个 `.`,两侧都有数字)。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：要解析的输入字符串。
+///
+/// 返回：符合可选一个负号、非空 ASCII 数字段、单个点及非空数字小数段时 true，否则 false；不验证数值可表示范围。
 fn is_simple_float(s: &str) -> bool {
     let s = s.strip_prefix('-').unwrap_or(s);
     let mut parts = s.splitn(2, '.');

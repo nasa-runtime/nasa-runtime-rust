@@ -14,10 +14,12 @@ pub struct NacosConfigClient {
 }
 
 impl std::fmt::Debug for NacosConfigClient {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示配置客户端的默认分组摘要。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收摘要的格式化器。
+    ///
+    /// 返回：输出摘要或传播格式化写出错误，不展开连接内部状态。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("NacosConfigClient");
         #[cfg(feature = "nacos")]
@@ -26,11 +28,13 @@ impl std::fmt::Debug for NacosConfigClient {
     }
 }
 
-/// 业务作用：配置侧参数校验(data_id/group 非空)。
+/// 业务作用：在远端配置操作前拒绝空白标识与分组及首尾空白。
 ///
-/// # 参数
-/// - `data_id`: 业务标识,用于定位具体对象或记录。
-/// - `group`: 消费组、服务分组或任务分组名称。
+/// 参数说明：
+/// - `data_id`：Nacos 配置文档标识。
+/// - `group`：配置所在分组，不能为空且不得有首尾空白。
+///
+/// 返回：两个标识均合法时成功，否则返回错误，不发起请求。
 #[cfg(feature = "nacos")]
 fn validate_cfg(data_id: &str, group: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!data_id.trim().is_empty(), "nacos: data_id 不能为空");
@@ -41,10 +45,12 @@ fn validate_cfg(data_id: &str, group: &str) -> anyhow::Result<()> {
 }
 
 impl NacosConfigClient {
-    /// 业务作用：连接配置中心(只建 ConfigService,含 HTTP 鉴权)。feature 关 → `Err`;开 → 校验参数后连接。
+    /// 业务作用：建立只用于配置读写和监听的 Nacos ConfigService。
     ///
-    /// # 参数
-    /// - `props`: Nacos 连接参数,提供服务端地址、命名空间、默认分组和鉴权信息。
+    /// 参数说明：
+    /// - `props`：服务端、命名空间、默认分组和鉴权配置。
+    ///
+    /// 返回：配置校验和 SDK 构建成功时返回客户端；配置非法、构建失败或 nacos 特性关闭时返回错误。
     pub async fn connect(props: &NacosProps) -> anyhow::Result<NacosConfigClient> {
         #[cfg(not(feature = "nacos"))]
         {
@@ -68,11 +74,13 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：拉一次配置原文(yaml/properties/json 由内容本身决定,本 crate 不解析)。app 拿到后自己 parse+merge+apply。feature 关 → `Err`。
+    /// 业务作用：读取指定分组的一份配置原文。
     ///
-    /// # 参数
-    /// - `data_id`: Nacos 配置 dataId。
-    /// - `group`: Nacos 配置 group,不能为空。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
+    ///
+    /// 返回：成功时返回配置原文，不解析内容；输入非法、配置缺失、SDK 调用失败或 nacos 特性关闭时返回错误。
     pub async fn fetch(&self, data_id: &str, group: &str) -> anyhow::Result<String> {
         #[cfg(not(feature = "nacos"))]
         {
@@ -86,10 +94,12 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：同 [`fetch`](Self::fetch),但用 client 默认 group(连接时 `NacosProps::group`),省得每次传。
+    /// 业务作用：使用连接时的默认分组读取配置原文。
     ///
-    /// # 参数
-    /// - `data_id`: Nacos 配置 dataId。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    ///
+    /// 返回：成功时返回配置原文，不解析内容；输入非法、配置缺失、SDK 调用失败或 nacos 特性关闭时返回错误。
     pub async fn fetch_default_group(&self, data_id: &str) -> anyhow::Result<String> {
         #[cfg(not(feature = "nacos"))]
         {
@@ -103,18 +113,13 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：拉一次配置,同时返回【原文 + 服务端 md5】。
+    /// 业务作用：读取配置原文与服务端摘要，为后续 CAS 提供比较基线。
     ///
-    /// 相比 [`fetch`](Self::fetch) 多返回 Nacos 服务端计算的 md5:CAS 写入([`publish_cas`](Self::publish_cas))
-    /// 需要拿【当前远端内容的 md5】作为 compare-and-set 基线,直接复用服务端 md5 可避免调用方本地重算 md5 与
-    /// 服务端算法不一致导致 CAS 永远失配。feature 关 → `Err`。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
     ///
-    /// # 参数
-    /// - `data_id`: Nacos 配置 dataId。
-    /// - `group`: Nacos 配置 group,不能为空。
-    ///
-    /// # 返回
-    /// `(内容原文, 服务端 md5)`。
+    /// 返回：成功时返回正文与服务端 md5；输入非法、配置缺失、SDK 调用失败或特性关闭时返回错误。
     pub async fn fetch_with_md5(
         &self,
         data_id: &str,
@@ -137,11 +142,13 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：拉取配置及服务端 md5，并把明确的配置未初始化协议事实与依赖故障分离。
+    /// 业务作用：区分明确的远端配置缺失与其它依赖故障。
     ///
-    /// 参数说明：`data_id`/`group` 唯一定位 Nacos 配置。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
     ///
-    /// 返回：配置存在时返回正文与 md5，不存在返回 `Ok(None)`；鉴权、网络和其它服务端错误上抛。
+    /// 返回：存在时返回正文和 md5，ConfigNotFound、响应码 300 或精确文本分类命中时返回 None；其它错误和特性关闭返回失败，不把鉴权或网络错误视作缺失。
     pub async fn fetch_optional_with_md5(
         &self,
         data_id: &str,
@@ -178,15 +185,15 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：首次发布尚不存在的配置，避免普通创建入口覆盖已经建立的远端事实。
+    /// 业务作用：预读配置并在未见已有文档时执行普通发布，减少覆盖已存在配置的机会。
     ///
-    /// 发布前先读取一次，已存在时返回 `Ok(false)`，避免常规调用覆盖现有配置。并发首发最终以
-    /// Nacos 服务端返回值为准；调用方应在失败后重新读取并比较内容。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
+    /// - `content`：非空配置正文，不解析格式。
+    /// - `content_type`：非空的 Nacos 内容类型。
     ///
-    /// 参数说明：`data_id`/`group` 唯一定位配置；`content` 是非空正文；`content_type` 是非空文件类型。
-    ///
-    /// 返回：远端原先不存在且发布成功时返回 true；已存在或并发首发失配时返回 false；输入、鉴权、
-    /// 网络或其它服务端错误返回失败。
+    /// 返回：预读发现已有配置时返回 false；否则原样返回 SDK 普通发布结果。预读与发布不原子，true 不证明本调用独占首发；输入、读取、发布或特性错误返回失败，失败不证明远端未写入。
     pub async fn publish_initial(
         &self,
         data_id: &str,
@@ -232,11 +239,13 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：删除已退役的 Nacos 配置，使配置生命周期收口时不再向订阅方暴露过期内容。
+    /// 业务作用：向 Nacos 请求删除指定配置。
     ///
-    /// 参数说明：`data_id`/`group` 唯一定位需要退役的配置。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
     ///
-    /// 返回：服务端确认删除时返回 true，目标不存在时返回 false；输入、鉴权、网络或其它服务端错误返回失败。
+    /// 返回：原样返回 SDK 删除的布尔确认；参数非法、调用失败或特性关闭时返回错误，不保证已交给订阅方的旧内容被撤回。
     pub async fn remove(&self, data_id: &str, group: &str) -> anyhow::Result<bool> {
         #[cfg(not(feature = "nacos"))]
         {
@@ -253,15 +262,15 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：以 YAML content type 执行兼容 CAS 发布，仅当远端当前 md5 等于 `cas_md5` 时写入。
+    /// 业务作用：以服务端 md5 比较作为并发配置更新门禁。
     ///
-    /// 用于「并发编辑安全」场景:调用方先 [`fetch_with_md5`](Self::fetch_with_md5) 拿到基线 md5,写入时带上它;
-    /// 若在读-改-写窗口内有人抢先改了该 dataId,服务端 md5 已变,本次写被服务端拒绝(返回 `Ok(false)`),
-    /// 调用方据此让前端 rebase 后重试,避免相互覆盖。feature 关 → `Err`。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
+    /// - `content`：待发布的非空配置原文。
+    /// - `cas_md5`：之前读取的非空服务端 md5，原样提交作为比较条件。
     ///
-    /// 参数说明：`data_id`/`group` 定位配置；`content` 是非空 YAML 原文；`cas_md5` 是读取时远端 md5。
-    ///
-    /// 返回：CAS 命中返回 true；并发失配返回 false；输入、网络或其它服务端错误返回失败。
+    /// 返回：以yaml 类型执行 CAS；SDK 成功时返回其布尔结果，明确的 ConfigQueryConflict 或匹配的 CAS 失配文本返回 false。其它错误及特性关闭返回失败；失败不证明远端未写入。
     pub async fn publish_cas(
         &self,
         data_id: &str,
@@ -273,12 +282,16 @@ impl NacosConfigClient {
             .await
     }
 
-    /// 业务作用：以调用方声明的 Nacos content type 执行 CAS，避免 JSON 等文档在更新后被错误标为 YAML。
+    /// 业务作用：以服务端 md5 比较作为并发配置更新门禁。
     ///
-    /// 参数说明：`data_id`/`group` 定位配置；`content` 是非空原文；`content_type` 是非空 Nacos
-    /// 文件类型；`cas_md5` 是读取时远端 md5。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
+    /// - `content`：待发布的非空配置原文。
+    /// - `content_type`：非空的 Nacos 内容类型。
+    /// - `cas_md5`：之前读取的非空服务端 md5，原样提交作为比较条件。
     ///
-    /// 返回：CAS 命中返回 true；明确的 md5 并发失配返回 false；输入、网络或其它服务端错误返回失败。
+    /// 返回：以指定类型执行 CAS；SDK 成功时返回其布尔结果，明确的 ConfigQueryConflict 或匹配的 CAS 失配文本返回 false。其它错误及特性关闭返回失败；失败不证明远端未写入。
     pub async fn publish_cas_typed(
         &self,
         data_id: &str,
@@ -333,14 +346,14 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：注册配置变更监听:每次推送把【新原文】交给 `on_change`(回调内 parse+merge+apply 由 app 决定)。
-    /// 返回 [`WatchGuard`];drop 只做 best-effort 注销监听,也可显式 `guard.close().await`。回调是 trait 要求的【同步】方法,
-    /// 内部别做阻塞 IO(纯 CPU 的 parse/merge 直接做;要异步就 `tokio::spawn` 或改用 [`watch_channel`](Self::watch_channel))。feature 关 → `Err`。
+    /// 业务作用：为指定配置注册原文变更回调。
     ///
-    /// # 参数
-    /// - `data_id`: 要监听的 Nacos 配置 dataId。
-    /// - `group`: 要监听的 Nacos 配置 group。
-    /// - `on_change`: 配置变更回调,收到的是新配置原文。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
+    /// - `on_change`：接收新配置原文的同步回调，应避免阻塞 SDK 通知。
+    ///
+    /// 返回：成功时返回必须持有的监听句柄；参数非法、SDK 添加监听失败或特性关闭时返回错误。回调同步执行，接收原文；Drop 只尽力投递注销，显式 close 可等待结果。
     pub async fn watch<F>(
         &self,
         data_id: &str,
@@ -383,11 +396,13 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：同 [`watch`](Self::watch),但用 client 默认 group。
+    /// 业务作用：使用默认分组注册配置原文变更回调。
     ///
-    /// # 参数
-    /// - `data_id`: 要监听的 Nacos 配置 dataId。
-    /// - `on_change`: 配置变更回调,收到的是新配置原文。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `on_change`：接收新配置原文的同步回调。
+    ///
+    /// 返回：成功时返回必须持有的监听句柄；参数非法、SDK 添加监听失败或特性关闭时返回错误。回调同步执行，接收原文；Drop 只尽力投递注销，显式 close 可等待结果。
     pub async fn watch_default_group<F>(
         &self,
         data_id: &str,
@@ -408,14 +423,13 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：channel 变体:返回 [`WatchGuard`] + `watch::Receiver<String>`,便于 app 用 `select!` 统一处理。
-    /// **顺序:先注册 listener,再 fetch 播种初值**——避免"fetch 后、注册前"窗口里的变更丢失。
-    /// 用 `pushed` 原子标记防竞态:listener 注册后、fetch 返回前若已推过更新,则不再用(可能更旧的)fetch 初值覆盖回去。
-    /// fetch 失败时显式 `close` 监听,不留残余。guard 与 rx 都要持有。feature 关 → `Err`。
+    /// 业务作用：先建立配置监听，再尝试用单次拉取结果播种 watch 通道。
     ///
-    /// # 参数
-    /// - `data_id`: 要监听的 Nacos 配置 dataId。
-    /// - `group`: 要监听的 Nacos 配置 group。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    /// - `group`：配置所在分组，不能为空且不得有首尾空白。
+    ///
+    /// 返回：成功时返回句柄与原文接收端；初始拉取失败则尝试关闭监听并返回原错误。原子标志只决定是否尝试播种，不把标志修改与发送合并为原子操作，因此不保证并发推送与初值的发送顺序；特性关闭时失败。
     pub async fn watch_channel(
         &self,
         data_id: &str,
@@ -459,35 +473,37 @@ impl NacosConfigClient {
     }
 }
 
-/// 业务作用：识别 SDK 丢失强类型 variant 后仍保留在 ErrResult 文本中的 Nacos 配置缺失协议码。
+/// 业务作用：识别 SDK 错误文本中明确的配置缺失响应。
 ///
-/// 参数说明：`message` 是 nacos-sdk 生成的错误正文，不包含调用方输入以外的本地状态。
+/// 参数说明：
+/// - `message`：待分类的 SDK 错误文本。
 ///
-/// 返回：同时出现 `error_code=300` 与配置不存在语义时返回 true；其它服务端/鉴权/网络错误一律 false。
+/// 返回：同时包含 error_code=300 及两种既定缺失短语之一时返回 true；其它文本返回 false，大小写敏感。
 #[cfg(feature = "nacos")]
 fn is_config_not_found_result(message: &str) -> bool {
     message.contains("error_code=300")
         && (message.contains("config data not exist") || message.contains("config not found"))
 }
 
-/// 业务作用：识别 SDK 未保留 ConfigQueryConflict variant 时的 Nacos CAS 失配响应。
+/// 业务作用：识别 SDK 文本中明确的 CAS 发布摘要失配。
 ///
-/// 参数说明：`message` 是 Nacos 服务端错误正文。
+/// 参数说明：
+/// - `message`：待分类的远端错误文本。
 ///
-/// 返回：只对明确的 CAS publish/md5 changed 语义返回 true；普通 publish 500 继续作为远端错误上抛。
+/// 返回：同时包含 `Cas publish fail` 和 `md5 may have changed` 时返回 true，其它文本返回 false。
 #[cfg(feature = "nacos")]
 fn is_config_cas_conflict_result(message: &str) -> bool {
     message.contains("Cas publish fail") && message.contains("md5 may have changed")
 }
 
-/// 业务作用：`watch_channel` 初值播种:**仅当 listener 还没推过更新时**才用 fetch 初值播种。
-/// 否则 listener 注册后、fetch 返回前到达的 push(较新值)会被较旧的 fetch 初值覆盖回去。
-/// 用 `swap` 原子地"检查并占位":返回 `false`(此前没 push)才发 initial。
+/// 业务作用：用原子标志决定是否尝试发送单配置初值，避免覆盖已经观察到的推送。
 ///
-/// # 参数
-/// - `pushed`: 监听器收到的配置推送内容。
-/// - `tx`: 后台任务发送消息的通道或事务句柄。
-/// - `initial`: 是否为 watch 建立后的初始快照。
+/// 参数说明：
+/// - `pushed`：监听推送与初值共用的占位标志。
+/// - `tx`：配置原文 watch 通道发送端。
+/// - `initial`：本次初始拉取的配置原文。
+///
+/// 返回：标志原为 false 时置为 true 并尝试发送，否则跳过；忽略接收端关闭错误。占位与发送分离，不保证并发推送不会在初值之前发送。
 #[cfg(feature = "nacos")]
 fn seed_initial_config(
     pushed: &std::sync::atomic::AtomicBool,
@@ -518,9 +534,11 @@ pub struct WatchGuard {
 }
 
 impl WatchGuard {
-    /// 业务作用：显式注销监听(优雅路径:可 await 等结果)。**成功后**才标记不再 Drop 注销;失败则保留 Drop 兜底。
-    /// ⚠️ 担心卡住:用 `tokio::time::timeout(d, guard.close())` 包裹,超时由 Drop best-effort 接力(非阻塞)。
+    /// 业务作用：消费单配置监听句柄并等待 SDK 移除监听器。
     ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：SDK 确认后解除 Drop 责任；失败或取消等待时仍保留尽力注销机会，运行时关闭后不保证完成。特性关闭的空句柄直接成功。
     #[allow(unused_mut)]
     pub async fn close(mut self) -> anyhow::Result<()> {
         #[cfg(feature = "nacos")]
@@ -539,6 +557,7 @@ impl WatchGuard {
                         self.group
                     )
                 })?;
+            // 只有 SDK 确认移除监听后才解除兜底责任；失败和取消仍由 Drop 尽力接手。
             self.armed = false;
         }
         Ok(())
@@ -547,7 +566,11 @@ impl WatchGuard {
 
 #[cfg(feature = "nacos")]
 impl Drop for WatchGuard {
-    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：为尚未解除监听责任的配置句柄尽力投递注销任务。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：未持有责任时直接返回；否则向保存的运行时投递并立即返回，失败只记录警告，不等待完成。
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -568,10 +591,12 @@ impl Drop for WatchGuard {
 
 #[cfg(feature = "nacos")]
 impl std::fmt::Debug for WatchGuard {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示配置标识、分组和待关闭状态。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收摘要的格式化器。
+    ///
+    /// 返回：输出摘要或传播格式化错误，不输出配置正文和 SDK 连接内部状态。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WatchGuard")
             .field("data_id", &self.data_id)
@@ -583,10 +608,12 @@ impl std::fmt::Debug for WatchGuard {
 
 #[cfg(not(feature = "nacos"))]
 impl std::fmt::Debug for WatchGuard {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示空监听句柄类型。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收摘要的格式化器。
+    ///
+    /// 返回：输出摘要或传播格式化错误，不输出配置正文和 SDK 连接内部状态。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WatchGuard").finish_non_exhaustive()
     }
@@ -600,10 +627,12 @@ struct CbListener<F: Fn(String) + Send + Sync + 'static>(F);
 impl<F: Fn(String) + Send + Sync + 'static> nacos_sdk::api::config::ConfigChangeListener
     for CbListener<F>
 {
-    /// 业务作用：接收配置变更通知并推进 watch 通道；用于触发订阅方刷新配置。
+    /// 业务作用：将 SDK 配置变更的原文同步交给业务回调。
     ///
-    /// # 参数
-    /// - `resp`: Nacos SDK 返回的原始响应。
+    /// 参数说明：
+    /// - `resp`：带配置标识、分组、md5 和正文的 SDK 响应。
+    ///
+    /// 返回：记录变更标识后同步调用回调；不解析正文、不创建异步任务，回调展开向上传播。
     fn notify(&self, resp: nacos_sdk::api::config::ConfigResponse) {
         tracing::info!(data_id = %resp.data_id(), group = %resp.group(), md5 = %resp.md5(), "nacos config changed, invoking on_change");
         (self.0)(resp.content().to_string());
@@ -611,9 +640,9 @@ impl<F: Fn(String) + Send + Sync + 'static> nacos_sdk::api::config::ConfigChange
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// 多配置门面:一次拉取/监听一组配置,顺序即覆盖顺序。
+// 多配置门面按声明顺序读取和监听配置，具体合并由上层执行。
 //   · fetch_many          按序拉取(optional 缺失跳过、required 缺失报错、保序)。
-//   · watch_many_channel  任一变更 → 全量重拉 → 整体发新 bundle(避免混合新旧快照)。
+//   · watch_many_channel 在变更后全量重拉并整体发送，不对跨文档读取提供原子快照。
 // 仍恪守边界:**只吐裸文本 bundle,绝不认识业务 AppConfig**;merge/apply 由 app(经 nasa::yml)做。
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -635,10 +664,12 @@ pub struct ConfigRef {
 }
 
 impl ConfigRef {
-    /// 业务作用：必需引用(缺失即 fail-fast),默认分组。
+    /// 业务作用：创建要求存在的配置引用。
     ///
-    /// # 参数
-    /// - `data_id`: Nacos 配置 dataId。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    ///
+    /// 返回：返回使用客户端默认分组、未指定内容格式的引用；不校验标识，也不读取配置。
     pub fn required(data_id: impl Into<String>) -> Self {
         Self {
             data_id: data_id.into(),
@@ -648,10 +679,12 @@ impl ConfigRef {
         }
     }
 
-    /// 业务作用：可选引用(缺失 warn+skip),默认分组。
+    /// 业务作用：创建允许缺失的配置引用。
     ///
-    /// # 参数
-    /// - `data_id`: Nacos 配置 dataId。
+    /// 参数说明：
+    /// - `data_id`：Nacos 配置文档标识。
+    ///
+    /// 返回：返回使用客户端默认分组、未指定内容格式的引用；不校验标识，也不读取配置。
     pub fn optional(data_id: impl Into<String>) -> Self {
         Self {
             data_id: data_id.into(),
@@ -661,19 +694,23 @@ impl ConfigRef {
         }
     }
 
-    /// 业务作用：指定分组(覆盖默认分组)。
+    /// 业务作用：为配置引用设置显式分组。
     ///
-    /// # 参数
-    /// - `group`: Nacos 配置 group。
+    /// 参数说明：
+    /// - `group`：拉取时使用的分组；空白值在分组解析时回退默认分组。
+    ///
+    /// 返回：返回更新后的引用，不发起请求，也不规范非空分组的首尾空白。
     pub fn with_group(mut self, group: impl Into<String>) -> Self {
         self.group = Some(group.into());
         self
     }
 
-    /// 业务作用：指定内容格式 `file_extension`(门面层按解析优先级填入)。
+    /// 业务作用：随配置引用携带下游解析使用的内容格式。
     ///
-    /// # 参数
-    /// - `ext`: 内容格式扩展名,如 `yaml` 或 `json`。
+    /// 参数说明：
+    /// - `ext`：内容扩展名标识，如 yaml 或 json。
+    ///
+    /// 返回：返回更新后的引用；本层不校验或解释格式，不转换正文。
     pub fn with_file_extension(mut self, ext: impl Into<String>) -> Self {
         self.file_extension = Some(ext.into());
         self
@@ -697,12 +734,13 @@ pub struct ConfigBundle {
     pub documents: Vec<ConfigDocument>,
 }
 
-/// 业务作用：分组回退:`Some(非空)` 用它,否则(`None`/空白)回退默认分组。
-/// 仅真实后端(`fetch_many`/watch)使用;作为无 feature 依赖被编译时不参与,避免 dead_code。
+/// 业务作用：为批量配置引用解析最终查询分组。
 ///
-/// # 参数
-/// - `group`: 消费组、服务分组或任务分组名称。
-/// - `default_group`: 未显式指定 group 时使用的默认分组。
+/// 参数说明：
+/// - `group`：可选的显式配置分组。
+/// - `default_group`：未指定或仅空白时使用的默认分组。
+///
+/// 返回：非空白显式值原样复制，否则复制默认分组；不去除非空值的首尾空白。
 #[cfg(feature = "nacos")]
 fn resolved_group(group: &Option<String>, default_group: &str) -> String {
     match group {
@@ -711,19 +749,14 @@ fn resolved_group(group: &Option<String>, default_group: &str) -> String {
     }
 }
 
-/// 业务作用：纯编排:按 `refs` 顺序调用 `fetch_one` 拉取,组装成保序的 [`ConfigBundle`]。
+/// 业务作用：按声明顺序串行拉取文档，并保留最终分组与格式元数据。
 ///
-/// - `optional=true` 只在服务端明确返回配置不存在时跳过；鉴权、网络和协议错误仍失败。
-/// - `optional=false` 缺失或拉取失败都返回 `Err`，启动/重拉 fail-fast。
+/// 参数说明：
+/// - `default_group`：引用未明确指定分组时使用的默认值。
+/// - `refs`：按下游覆盖顺序排列的配置引用。
+/// - `fetch_one`：以标识、分组和 optional 标记取正文的异步操作；负责将必需文档缺失转换为错误。
 ///
-/// 抽成【与 nacos-sdk 无关】的泛型函数,供真实 `fetch_many`/watch 复用，并保持拉取顺序、
-/// optional 跳过、required 报错与分组回退的编排边界集中一致。
-/// 仅真实后端使用;作为无 feature 依赖被编译时不参与,避免 dead_code。
-///
-/// # 参数
-/// - `default_group`: 未显式指定 group 时使用的默认分组。
-/// - `refs`: 需要拉取或监听的配置引用列表。
-/// - `fetch_one`: 拉取单个配置文档的异步函数。
+/// 返回：返回按顺序收集的文档；取数返回 None 时跳过，不在本函数复验 optional。任一次取数失败即返回带标识上下文的错误；串行拉取不构成跨文档原子快照。
 #[cfg(feature = "nacos")]
 async fn collect_bundle<F, Fut>(
     default_group: &str,
@@ -756,14 +789,20 @@ where
             Err(e) => return Err(e.context(format!("nacos: 配置 {} 拉取失败", r.data_id))),
         }
     }
-    Ok(ConfigBundle { documents })
+    Ok(ConfigBundle {
+        documents,
+    })
 }
 
-/// 业务作用：按引用的 required/optional 语义拉取单份配置，并只把服务端明确的 not-found 转成缺省。
+/// 业务作用：按引用的缺失策略读取单个配置文档。
 ///
-/// 参数说明：`service` 是 Nacos 配置服务；`data_id`/`group` 定位文档；`optional` 决定缺失是否允许。
+/// 参数说明：
+/// - `service`：实际执行查询的 Nacos 配置服务。
+/// - `data_id`：Nacos 配置文档标识。
+/// - `group`：配置所在分组，不能为空且不得有首尾空白。
+/// - `optional`：是否允许明确的文档缺失。
 ///
-/// 返回：文档存在时返回正文；可选文档不存在时返回 `None`；必需文档缺失或依赖故障返回错误。
+/// 返回：存在时返回正文；optional 为 true 且缺失分类命中时返回 None，必需文档缺失及其它错误均失败。
 #[cfg(feature = "nacos")]
 async fn get_bundle_document(
     service: &nacos_sdk::api::config::ConfigService,
@@ -793,12 +832,14 @@ async fn get_bundle_document(
     }
 }
 
-/// 业务作用：拉单份配置原文(fetch / fetch_many 共用的最小单元:校验 + get_config + 结构化日志)。
+/// 业务作用：校验文档身份后读取并记录配置元信息。
 ///
-/// # 参数
-/// - `service`: 服务名,用于服务发现或注册中心查询。
-/// - `data_id`: 业务标识,用于定位具体对象或记录。
-/// - `group`: 消费组、服务分组或任务分组名称。
+/// 参数说明：
+/// - `service`：实际执行查询的 Nacos 配置服务。
+/// - `data_id`：Nacos 配置文档标识。
+/// - `group`：配置所在分组，不能为空且不得有首尾空白。
+///
+/// 返回：成功返回原文并记录标识、类型与 md5，不记录正文；参数非法或 SDK 查询失败时返回错误。
 #[cfg(feature = "nacos")]
 async fn get_one(
     service: &nacos_sdk::api::config::ConfigService,
@@ -822,13 +863,21 @@ async fn get_one(
 /// best-effort 关闭句柄的抽象；真实后端使用 [`WatchGuard`]，调用方无需感知底层句柄类型。
 #[cfg(feature = "nacos")]
 trait GuardClose: Send + 'static {
-    /// 业务作用：关闭 close best effort 流程；用于释放资源并停止后台任务。
+    /// 业务作用：约定消费监听句柄并等待尽力关闭的异步操作。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回可发送的 future；完成表示关闭尝试已结束，不提供成功确认。
     fn close_best_effort(self) -> impl std::future::Future<Output = ()> + Send;
 }
 
 #[cfg(feature = "nacos")]
 impl GuardClose for WatchGuard {
-    /// 业务作用：关闭 close best effort 流程；用于释放资源并停止后台任务。
+    /// 业务作用：等待具体配置监听器关闭并记录关闭失败。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：完成关闭尝试；错误只记录警告，不向调用方返回，具体句柄仍可在 Drop 时尽力注销。
     async fn close_best_effort(self) {
         if let Err(e) = self.close().await {
             tracing::warn!(error = %e, "nacos: watch_many close guard best-effort 失败");
@@ -836,10 +885,12 @@ impl GuardClose for WatchGuard {
     }
 }
 
-/// 业务作用：逐个 close 全部 guard(注册/初始 reload 失败时清理)。
+/// 业务作用：在监听建立失败或初始拉取失败后逐个等待已建句柄关闭。
 ///
-/// # 参数
-/// - `guards`: 已注册监听器的生命周期守卫集合。
+/// 参数说明：
+/// - `guards`：需要消费并关闭的已建监听句柄。
+///
+/// 返回：依次完成关闭尝试，不汇总错误、不设置超时；某次关闭挂起会延迟后续关闭。
 #[cfg(feature = "nacos")]
 async fn close_all<G: GuardClose>(guards: Vec<G>) {
     for g in guards {
@@ -847,18 +898,15 @@ async fn close_all<G: GuardClose>(guards: Vec<G>) {
     }
 }
 
-/// 业务作用：启动**单后台 reload worker**,并等【初始 reload】发布成功(oneshot ack)后才返回。
+/// 业务作用：用单个后台任务串行完成首次及后续整组配置拉取，避免并行拉取乱序发布。
 ///
-/// - 所有 reload(初始 + 后续 notify)都由这【一个】 worker 串行执行 `fetch`——天然防并发 fetch 乱序覆盖。
-/// - 初始 reload 走的是与后续变更【相同】的 worker 路径(不再函数体内同步播种)。
-/// - 初始 fetch 失败 → ack `Err` → 本函数 abort worker、close 全部 guard,返回原始错误(**初始未成功发布前不返回成功**)。
-/// - guard drop / 全部 receiver drop 后 worker 自然退出。
+/// 参数说明：
+/// - `guards`：已登记的监听句柄，初始化成功时交回调用方。
+/// - `notify`：合并变更通知并触发重拉的通知器。
+/// - `tx`：整组配置的 watch 发送端。
+/// - `fetch`：每次返回完整配置集合的异步拉取操作。
 ///
-/// # 参数
-/// - `guards`: 已注册监听器的生命周期守卫集合。
-/// - `notify`: 触发 reload worker 重新拉取 bundle 的通知器。
-/// - `tx`: 后台任务发送消息的通道或事务句柄。
-/// - `fetch`: 本次发现或 HTTP 取数操作的结果。
+/// 返回：首轮 fetch 成功且收到确认时返回原句柄和任务；确认不证明通道仍有接收端，首次发送错误被忽略。初始化失败或无确认时请求中止任务并逐个关闭句柄；后续失败保留旧值。仅在唤醒并发送时发现接收端关闭，空闲时不主动退出。
 #[cfg(feature = "nacos")]
 async fn spawn_reload_worker<G, F, Fut>(
     guards: Vec<G>,
@@ -900,7 +948,7 @@ where
         }
     });
 
-    // 初始 reload 成功发布前不返回成功;失败 → abort worker + close 全部 guard,返回原始错误。
+    // 必须取得首次拉取确认才交付句柄；失败先请求停止任务并关闭监听，避免交付未初始化的资源。
     match ack_rx.await {
         Ok(Ok(())) => Ok((guards, task)),
         Ok(Err(e)) => {
@@ -917,14 +965,12 @@ where
 }
 
 impl NacosConfigClient {
-    /// 业务作用：按 `refs` 顺序拉一组配置，返回保序的 [`ConfigBundle`]，用于对照声明顺序执行覆盖。
+    /// 业务作用：按引用顺序读取配置集合，交由上层依次合并。
     ///
-    /// **import 顺序 = 覆盖顺序**:靠前的先加载、被靠后的同名 key 覆盖
-    /// (如 `tidb.yml`、`afj-redis.yml` 先于 `${app}.yml`,应用专属配置能覆盖共享配置)。
-    /// `ConfigRef.group = None` 回退 client 默认分组。feature 关 → `Err`。
+    /// 参数说明：
+    /// - `refs`：有序配置引用，允许为空。
     ///
-    /// # 参数
-    /// - `refs`: 按声明顺序排列的配置引用列表。
+    /// 返回：成功返回完整收集结果；可选缺失被跳过，必需缺失或依赖故障返回错误。特性关闭时失败；多文档读取不保证同一时刻快照。
     pub async fn fetch_many(&self, refs: &[ConfigRef]) -> anyhow::Result<ConfigBundle> {
         #[cfg(not(feature = "nacos"))]
         {
@@ -940,22 +986,12 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：channel 变体：监听一组配置，任一变更就**全量重拉**后整体发送新的 [`ConfigBundle`]。
+    /// 业务作用：先注册全部监听，再用单个任务串行拉取并整体发布配置集合。
     ///
-    /// 为什么全量重拉而非只换单个文档:多份配置互相覆盖,只替换变更的那份会让 receiver 看到
-    /// 混合的新旧快照;全量重拉保证每次下游拿到的都是【同一时刻、按声明顺序】组装的 bundle。
+    /// 参数说明：
+    /// - `refs`：非空的有序配置引用；顺序决定下游合并优先级。
     ///
-    /// 顺序
-    ///   1. 建 watch channel + reload 信号(`Notify`)。
-    ///   2. **先注册全部 listener**(`register_all`),listener 只投 reload 信号;第 N 个失败 close 前面的。
-    ///   3. 启动**单后台 reload worker**(`spawn_reload_worker`):初始 reload 与后续变更走【同一 worker】串行,
-    ///      不再函数体内同步播种(避免初始 fetch 与后续变更走两条路径导致的短暂旧快照)。
-    ///   4. **初始 reload 成功发布前不返回**(oneshot ack);初始失败 close 全部 guard、abort worker,返回原始错误。
-    ///
-    /// 返回的 [`MultiWatchGuard`] 与 `rx` 都要持有:guard drop → 注销全部 listener + 中止后台任务。feature 关 → `Err`。
-    ///
-    /// # 参数
-    /// - `refs`: 要监听的一组配置引用;顺序同时决定最终 bundle 的覆盖顺序。
+    /// 返回：首次拉取成功后返回句柄与接收端；注册或初始化失败时尝试关闭已建监听。后续任一取数失败保留旧集合；整体发送避免局部替换，但不保证跨文档同一时刻，特性关闭时失败。
     pub async fn watch_many_channel(
         &self,
         refs: Vec<ConfigRef>,
@@ -980,12 +1016,7 @@ impl NacosConfigClient {
 
             let default_group = self.group.clone();
 
-            // 步骤 2:注册全部 listener(只投 reload 信号);第 N 个失败 close 前面的、返回 Err。
-            //
-            // 这里刻意写成显式循环而不是 `register_all(async |i| ...)`:async 闭包捕获 `&refs`/`&self`
-            // 时,编译器要求其 future 对**任意**生命周期 Send,而调用方(应用运行时的组件 trait object)
-            // 恰好需要 `for<'a> Send`——两者相遇就是 "implementation of Send is not general enough"。
-            // 显式循环让每次 await 的 future 只需对具体生命周期成立,语义与回滚行为完全不变。
+            // 逐个建立监听以明确每次借用的生命周期；后续建立失败时，先关闭已经持有的监听再返回。
             let mut guards = Vec::with_capacity(refs.len());
             for r in &refs {
                 let group = resolved_group(&r.group, &default_group);
@@ -1023,7 +1054,13 @@ impl NacosConfigClient {
             };
             let (guards, task) = spawn_reload_worker(guards, notify, tx, fetch).await?;
 
-            Ok((MultiWatchGuard { guards, task }, rx))
+            Ok((
+                MultiWatchGuard {
+                    guards,
+                    task,
+                },
+                rx,
+            ))
         }
     }
 }
@@ -1039,12 +1076,16 @@ pub struct MultiWatchGuard {
 }
 
 impl MultiWatchGuard {
-    /// 业务作用：显式注销全部子 listener + 中止后台重拉任务(优雅路径:可 await 等各子 guard 注销结果)。
+    /// 业务作用：请求中止多配置重拉任务，并依次等待各子监听关闭。
     ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：子监听关闭失败仅记录警告，方法仍成功；不等待重拉任务退出，也无关闭超时，不能作为所有远端监听均已移除的确认。
     #[allow(unused_mut)]
     pub async fn close(mut self) -> anyhow::Result<()> {
         #[cfg(feature = "nacos")]
         {
+            // 先请求停止发布再关闭监听；abort 不等待在途任务退出。
             self.task.abort();
             for g in std::mem::take(&mut self.guards) {
                 if let Err(e) = g.close().await {
@@ -1058,7 +1099,11 @@ impl MultiWatchGuard {
 
 #[cfg(feature = "nacos")]
 impl Drop for MultiWatchGuard {
-    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：在多配置句柄释放时请求中止重拉任务，子句柄各自承担尽力注销。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：发出中止请求后立即返回；不等待后台任务或远端注销完成。
     fn drop(&mut self) {
         // 中止后台任务;子 WatchGuard 由各自的 Drop best-effort 注销 listener。
         self.task.abort();
@@ -1066,10 +1111,12 @@ impl Drop for MultiWatchGuard {
 }
 
 impl std::fmt::Debug for MultiWatchGuard {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示多配置监听句柄及启用特性时的子监听数量。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收摘要的格式化器。
+    ///
+    /// 返回：输出摘要或传播格式化错误，不输出配置正文和 SDK 连接内部状态。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("MultiWatchGuard");
         #[cfg(feature = "nacos")]

@@ -22,8 +22,11 @@ use tokio::sync::oneshot;
 
 /// owner 的本地恢复状态、共享组输入与执行池以及源资源；业务发布使用源的原有 producer。
 pub(crate) struct OwnerRuntime {
+    /// 所属源的共享资源，所有槽复用同一发布与关闭责任。
     inner: Arc<KafkaProxyInner>,
+    /// 为当前槽派生原生身份后的冻结配置，不改变源级容量上限。
     pub(crate) config: KafkaConfig,
+    /// 健康采样及原生身份使用的稳定槽序号。
     pub(crate) slot: usize,
     /// owner 已认领或源所有者已发布的永久停止意图；跨会话保留，不能被健康刷新或自动重建撤销。
     pub(crate) stop_requested: Arc<AtomicBool>,
@@ -33,12 +36,15 @@ pub(crate) struct OwnerRuntime {
     pub(crate) records: Arc<super::capacity::RecordLedger>,
     /// 分配范围与失败记录元数据由全部槽共享，不按并发数切分或放大。
     pub(crate) metadata: Arc<super::metadata_capacity::MetadataCapacity>,
+    /// 全组各槽的最近采样，未采样槽保持 None 并阻止聚合 Ready。
     gauges: Arc<Mutex<Vec<Option<GroupHealth>>>>,
 }
 impl std::ops::Deref for OwnerRuntime {
     type Target = KafkaProxyInner;
     /// 业务作用：复用源的发布、遥测和关闭资源，不为消费槽创建独立源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：源资源借用；消费输入和执行额度由全组共享凭证裁决。
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -46,7 +52,16 @@ impl std::ops::Deref for OwnerRuntime {
 }
 impl OwnerRuntime {
     /// 业务作用：将每槽身份与恢复范围绑定到共享输入、执行池，防止增加 owner 时放大实际责任上限。
-    /// 参数说明：inner 为源；slot/count 为稳定槽序号和组内数量，gauges 为同组采样槽，handlers 为组共享执行入口，capacity/metadata 为全组输入与元数据池。
+    ///
+    /// 参数说明：
+    /// - `inner`：inner 为源。
+    /// - `slot`：组内稳定槽序号，用于原生身份后缀和健康采样位置。
+    /// - `count`：组内 owner 总数；大于一时必须派生互不冲突的客户端及静态成员身份。
+    /// - `gauges`：gauges 为同组采样槽。
+    /// - `handlers`：handlers 为组共享执行入口。
+    /// - `capacity`：全组共享输入额度，各槽账本不得按并发数放大容量。
+    /// - `metadata`：全组共享分配与失败记录元数据额度。
+    ///
     /// 返回：有效的槽配置；原生身份配置不合法时在创建线程前拒绝。
     fn new(
         inner: Arc<KafkaProxyInner>,
@@ -90,7 +105,11 @@ impl OwnerRuntime {
         }))
     }
     /// 业务作用：把各槽最近采样合成组指标，防止多个 owner 相互覆盖同一 gauge。
-    /// 参数说明：group 为最终组名；snapshot 为本槽已脱离健康锁的观测。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为最终组名。
+    /// - `snapshot`：snapshot 为本槽已脱离健康锁的观测。
+    ///
     /// 返回：发布组累计数量和全槽 Ready；指标仅供观测，不构成分区租约。
     pub(crate) fn publish_health(&self, group: &str, mut snapshot: GroupHealth) {
         (snapshot.retained_records, snapshot.retained_bytes) = self.records.usage();
@@ -177,13 +196,18 @@ pub(crate) struct GroupHandle {
 }
 impl GroupHandle {
     /// 业务作用：提供冻结路由三元组数量，owner并发不会放大注册规模。
-    /// 参数说明：无。返回：该组实际登记的路由数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：该组实际登记的路由数。
     pub(crate) fn route_count(&self) -> usize {
         self.route_count
     }
 
     /// 业务作用：合并组内实际 owner 关闭责任，不持有或复制业务原文。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有槽的数值汇总；停止后的未核实交回不会被健康归零覆盖。
     pub(crate) fn close_report(&self) -> crate::CloseConsumers {
         let mut report = crate::CloseConsumers::default();
@@ -193,7 +217,10 @@ impl GroupHandle {
         report
     }
     /// 业务作用：冻结全部目标归属，并在共同预算内逐目标保留执行证据。
-    /// 参数说明：actions 为已验证的显式分区意图。
+    ///
+    /// 参数说明：
+    /// - `actions`：actions 为已验证的显式分区意图。
+    ///
     /// 返回：每个目标都有结局；缺少唯一归属时整批不派发，未知结果后停止派发后继。
     pub(crate) async fn control_partitions(
         &self,
@@ -263,7 +290,12 @@ impl GroupHandle {
     }
 
     /// 业务作用：在共同启动门后构造全部槽，只有全部本地构造成功才允许上层开放消费。
-    /// 参数说明：runtime 为源；plan 为冻结路由；startup_gate 为本批次共同准入门。
+    ///
+    /// 参数说明：
+    /// - `runtime`：runtime 为源。
+    /// - `plan`：plan 为冻结路由。
+    /// - `startup_gate`：startup_gate 为本批次共同准入门。
+    ///
     /// 返回：组句柄与汇总构造结果；失败时关闭门并等待本次已创建槽退出。
     pub(crate) async fn start(
         runtime: Arc<KafkaProxyInner>,
@@ -363,14 +395,18 @@ impl GroupHandle {
     }
 
     /// 业务作用：按稳定槽顺序返回独立健康观测，空 assignment 槽仍保留诊断。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：下标即槽号的快照；快照不是跨槽原子租约。
     pub(crate) fn slots_health(&self) -> Vec<GroupHealth> {
         self.owners.iter().map(|owner| owner.health()).collect()
     }
 
     /// 业务作用：聚合组内状态与资源计数，允许已 join 的空闲槽满足组级 Ready。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：任一槽失权或观测到重复归属时撤销 Ready；不同槽的计数相加。
     pub(crate) fn health(&self) -> GroupHealth {
         let slots = self.slots_health();
@@ -448,7 +484,10 @@ impl GroupHandle {
     }
 
     /// 业务作用：按当前归属拆分分区控制，广播组控制并在每个 owner 内复验入队代次。
-    /// 参数说明：kind 为调用方完整操作意图。
+    ///
+    /// 参数说明：
+    /// - `kind`：kind 为调用方完整操作意图。
+    ///
     /// 返回：全部槽成功才成功；多槽操作部分失败统一报告结果未知，不声称跨 consumer 原子。
     pub(crate) async fn command(&self, kind: OwnerCommandKind) -> Result<CommandReply> {
         let _control = tokio::time::timeout(self.control_timeout, self.controls.lock())
@@ -509,7 +548,9 @@ impl GroupHandle {
             }
         }
         Ok(match kind {
-            OwnerCommandKind::Position { .. } => CommandReply::Positions(positions),
+            OwnerCommandKind::Position {
+                ..
+            } => CommandReply::Positions(positions),
             OwnerCommandKind::Assignment => {
                 CommandReply::Assignment(assignment.into_iter().collect())
             }
@@ -518,7 +559,10 @@ impl GroupHandle {
     }
 
     /// 业务作用：在共同 deadline 内同时停止所有槽，单槽超时不阻止其它槽收口。
-    /// 参数说明：deadline 为整个关闭流程的绝对期限。
+    ///
+    /// 参数说明：
+    /// - `deadline`：deadline 为整个关闭流程的绝对期限。
+    ///
     /// 返回：全部实际退出才成功；任一未退出仍保留本组句柄。
     pub(crate) async fn stop_until(&self, deadline: Instant) -> Result<()> {
         let results =
@@ -527,7 +571,9 @@ impl GroupHandle {
         results.into_iter().collect::<Result<Vec<_>>>().map(|_| ())
     }
     /// 业务作用：释放外层运行句柄时向每槽发送非阻塞停止通知。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部槽接受通知时为 true；正式关闭仍须等待 stop_until。
     pub(crate) fn request_stop_best_effort(&self) -> bool {
         self.owners
@@ -537,7 +583,9 @@ impl GroupHandle {
     }
 
     /// 业务作用：向全部槽同步发布源退出的永久停止意图，避免单槽等待阻止其它槽失权。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只撤销准入并通知，不清除责任或等待线程退出。
     pub(crate) fn request_permanent_stop(&self) {
         for owner in &self.owners {
@@ -547,7 +595,10 @@ impl GroupHandle {
 }
 
 /// 业务作用：定义聚合状态的保护优先级，避免健康槽掩盖已停止或失败的成员。
-/// 参数说明：state 为单槽状态。
+///
+/// 参数说明：
+/// - `state`：state 为单槽状态。
+///
 /// 返回：优先级数值，越大越优先对外呈现。
 fn state_rank(state: GroupState) -> u8 {
     match state {
@@ -566,30 +617,57 @@ fn state_rank(state: GroupState) -> u8 {
     }
 }
 /// 业务作用：提取需要按 assignment 路由的命令范围。
-/// 参数说明：kind 为完整命令。
+///
+/// 参数说明：
+/// - `kind`：kind 为完整命令。
+///
 /// 返回：Some 空集合表示所有当前分区，None 表示非分区命令。
 pub(crate) fn partition_targets(kind: &OwnerCommandKind) -> Option<Vec<Tp>> {
     match kind {
-        OwnerCommandKind::Seek { offsets } => Some(offsets.keys().cloned().collect()),
-        OwnerCommandKind::SeekTimestamp { times } => Some(times.keys().cloned().collect()),
-        OwnerCommandKind::SeekBeginning { tps }
-        | OwnerCommandKind::SeekEnd { tps }
-        | OwnerCommandKind::SeekCommitted { tps }
-        | OwnerCommandKind::Pause { tps }
-        | OwnerCommandKind::Resume { tps }
-        | OwnerCommandKind::Position { tps } => Some(tps.clone()),
+        OwnerCommandKind::Seek {
+            offsets,
+        } => Some(offsets.keys().cloned().collect()),
+        OwnerCommandKind::SeekTimestamp {
+            times,
+        } => Some(times.keys().cloned().collect()),
+        OwnerCommandKind::SeekBeginning {
+            tps,
+        }
+        | OwnerCommandKind::SeekEnd {
+            tps,
+        }
+        | OwnerCommandKind::SeekCommitted {
+            tps,
+        }
+        | OwnerCommandKind::Pause {
+            tps,
+        }
+        | OwnerCommandKind::Resume {
+            tps,
+        }
+        | OwnerCommandKind::Position {
+            tps,
+        } => Some(tps.clone()),
         _ => None,
     }
 }
 /// 业务作用：生成单槽负责的子命令，保持原操作与所有目标值。
-/// 参数说明：kind 为完整操作；targets 为本槽分区，空时保持广播语义。
+///
+/// 参数说明：
+/// - `kind`：kind 为完整操作。
+/// - `targets`：targets 为本槽分区。
+///
+/// 共同约束：空时保持广播语义。
+///
 /// 返回：不持有其它槽分区的独立命令。
 fn select_targets(kind: &OwnerCommandKind, targets: Vec<Tp>) -> OwnerCommandKind {
     if targets.is_empty() {
         return kind.clone();
     }
     match kind {
-        OwnerCommandKind::Seek { offsets } => OwnerCommandKind::Seek {
+        OwnerCommandKind::Seek {
+            offsets,
+        } => OwnerCommandKind::Seek {
             offsets: targets
                 .into_iter()
                 .map(|tp| {
@@ -598,7 +676,9 @@ fn select_targets(kind: &OwnerCommandKind, targets: Vec<Tp>) -> OwnerCommandKind
                 })
                 .collect(),
         },
-        OwnerCommandKind::SeekTimestamp { times } => OwnerCommandKind::SeekTimestamp {
+        OwnerCommandKind::SeekTimestamp {
+            times,
+        } => OwnerCommandKind::SeekTimestamp {
             times: targets
                 .into_iter()
                 .map(|tp| {
@@ -607,12 +687,36 @@ fn select_targets(kind: &OwnerCommandKind, targets: Vec<Tp>) -> OwnerCommandKind
                 })
                 .collect(),
         },
-        OwnerCommandKind::SeekBeginning { .. } => OwnerCommandKind::SeekBeginning { tps: targets },
-        OwnerCommandKind::SeekEnd { .. } => OwnerCommandKind::SeekEnd { tps: targets },
-        OwnerCommandKind::SeekCommitted { .. } => OwnerCommandKind::SeekCommitted { tps: targets },
-        OwnerCommandKind::Pause { .. } => OwnerCommandKind::Pause { tps: targets },
-        OwnerCommandKind::Resume { .. } => OwnerCommandKind::Resume { tps: targets },
-        OwnerCommandKind::Position { .. } => OwnerCommandKind::Position { tps: targets },
+        OwnerCommandKind::SeekBeginning {
+            ..
+        } => OwnerCommandKind::SeekBeginning {
+            tps: targets,
+        },
+        OwnerCommandKind::SeekEnd {
+            ..
+        } => OwnerCommandKind::SeekEnd {
+            tps: targets,
+        },
+        OwnerCommandKind::SeekCommitted {
+            ..
+        } => OwnerCommandKind::SeekCommitted {
+            tps: targets,
+        },
+        OwnerCommandKind::Pause {
+            ..
+        } => OwnerCommandKind::Pause {
+            tps: targets,
+        },
+        OwnerCommandKind::Resume {
+            ..
+        } => OwnerCommandKind::Resume {
+            tps: targets,
+        },
+        OwnerCommandKind::Position {
+            ..
+        } => OwnerCommandKind::Position {
+            tps: targets,
+        },
         _ => kind.clone(),
     }
 }

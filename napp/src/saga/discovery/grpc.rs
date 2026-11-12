@@ -24,7 +24,12 @@ struct Entry {
 
 impl ManagedSagaGrpc {
     /// 业务作用：保存受信解析器和凭据来源，尚未取得发现证据时不建立连接。
-    /// 参数说明：`discovery` 提供完整实例合同，`timeout` 为总预算，`credential` 提供 mTLS 身份。
+    ///
+    /// 参数说明：
+    /// - `discovery`：`discovery` 提供完整实例合同。
+    /// - `timeout`：`timeout` 为总预算。
+    /// - `credential`：`credential` 提供 mTLS 身份。
+    ///
     /// 返回：共享有限池的 Saga 调用器。
     pub(in crate::saga) fn new(
         discovery: Arc<ManagedSagaDiscovery>,
@@ -40,7 +45,9 @@ impl ManagedSagaGrpc {
     }
 
     /// 业务作用：读取完整凭据快照，使证书轮换和信任窗口变化撤销旧连接的新调用权。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同代共享 Arc；旧在途请求只保留原始预算。
     fn credential(&self) -> Arc<ManagedGrpcCredentialMaterial> {
         self.credential
@@ -50,7 +57,11 @@ impl ManagedSagaGrpc {
     }
 
     /// 业务作用：用同一预算完成发现、有界并发 health 和单目标业务提交，最后在 HTTP/2 层复验注册事实。
-    /// 参数说明：`request` 是已认证业务请求，`deadline` 从外层调用入口计时。
+    ///
+    /// 参数说明：
+    /// - `request`：`request` 是已认证业务请求。
+    /// - `deadline`：`deadline` 从外层调用入口计时。
+    ///
     /// 返回：完整受管响应流；发现、凭据或健康资格变化均拒绝新提交。
     pub(in crate::saga) async fn call(
         &self,
@@ -65,7 +76,11 @@ impl ManagedSagaGrpc {
     }
 
     /// 业务作用：在原期限内选择同代候选，有限池只保存仍受当前身份政策认可的连接。
-    /// 参数说明：`request` 为待发 RPC，`budget` 约束锁等待、health、握手和正文。
+    ///
+    /// 参数说明：
+    /// - `request`：`request` 为待发 RPC。
+    /// - `budget`：`budget` 约束锁等待、health、握手和正文。
+    ///
     /// 返回：受管响应；已提交操作失败保持结果不确定。
     async fn call_before(
         &self,
@@ -132,7 +147,12 @@ impl ManagedSagaGrpc {
     }
 
     /// 业务作用：复验同一候选的协议与身份，取得绑定当前凭据的有限连接池入口。
-    /// 参数说明：`selected` 是严格发现候选，`current_routes` 撤除旧成员，`credential` 是本次调用的完整凭据快照。
+    ///
+    /// 参数说明：
+    /// - `selected`：`selected` 是严格发现候选。
+    /// - `current_routes`：`current_routes` 撤除旧成员。
+    /// - `credential`：`credential` 是本次调用的完整凭据快照。
+    ///
     /// 返回：可执行 health 的受管入口；地址漂移或身份不一致时拒绝。
     async fn service_for(
         &self,

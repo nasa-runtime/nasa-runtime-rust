@@ -24,7 +24,7 @@ description = "Multi-source Kafka event runtime with ordered consumption, atomic
 # tracing 是 rdkafka 的 optional 依赖生成的隐式 feature；
 # 开启后 rust-rdkafka 自身事件走 tracing 而非 log，结构化字段仍由自定义 ClientContext 补充。
 rdkafka = { version = "0.39", default-features = false, features = ["tokio", "libz-static", "tracing"] }
-tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "1"

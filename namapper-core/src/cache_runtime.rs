@@ -62,7 +62,7 @@ impl Drop for SingleFlightLockCleanup<'_> {
 impl SingleFlightMapperL2Cache {
     /// 业务作用: 包装已有二级缓存，在数据库加载路径增加进程内同 key 合并。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `inner`: 真实执行缓存读写的 L2 cache。
     ///
     /// 返回: 共享底层缓存的新 single-flight 包装器。
@@ -85,26 +85,26 @@ impl SingleFlightMapperL2Cache {
 
 #[crate::async_trait]
 impl MapperL2Cache for SingleFlightMapperL2Cache {
-    /// 业务作用: 透传单条缓存读取。
+    /// 业务作用：透传单条缓存读取。
     ///
-    /// # 参数
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 单条查询缓存字段。
+    /// 参数说明：
+    /// - `key`：Mapper 查询缓存的命名空间。
+    /// - `hash_key`：该命名空间内单条查询的缓存字段。
     ///
-    /// 返回: 底层缓存的命中值、未命中状态或读取错误。
+    /// 返回：原样返回底层缓存的命中值、None 或错误，不进入加载互斥。
     async fn get(&self, key: &str, hash_key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         self.inner.get(key, hash_key).await
     }
 
-    /// 业务作用: 透传单条缓存写入。
+    /// 业务作用：透传单条缓存写入。
     ///
-    /// # 参数
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 单条查询缓存字段。
-    /// - `value`: 已编码的查询结果。
-    /// - `ttl_ms`: 可选毫秒级 TTL。
+    /// 参数说明：
+    /// - `key`：Mapper 查询缓存的命名空间。
+    /// - `hash_key`：该命名空间内单条查询的缓存字段。
+    /// - `value`：已编码的查询结果字节。
+    /// - `ttl_ms`：底层缓存解释的可选过期毫秒数。
     ///
-    /// 返回: 底层缓存确认写入时成功，否则返回实现错误。
+    /// 返回：原样返回底层缓存写入结果；失败不证明缓存未写入，本包装器不额外提供原子性。
     async fn put(
         &self,
         key: &str,
@@ -115,20 +115,20 @@ impl MapperL2Cache for SingleFlightMapperL2Cache {
         self.inner.put(key, hash_key, value, ttl_ms).await
     }
 
-    /// 业务作用: 透传单条缓存删除。
+    /// 业务作用：透传单条缓存删除。
     ///
-    /// # 参数
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 需要删除的查询字段。
+    /// 参数说明：
+    /// - `key`：Mapper 查询缓存的命名空间。
+    /// - `hash_key`：该命名空间内单条查询的缓存字段。
     ///
-    /// 返回: 底层缓存确认删除时成功。
+    /// 返回：原样返回底层删除结果，缺失项的语义由底层实现决定。
     async fn evict(&self, key: &str, hash_key: &str) -> anyhow::Result<()> {
         self.inner.evict(key, hash_key).await
     }
 
     /// 业务作用: 透传整个 Mapper namespace 清理。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 需要整体失效的 Mapper cache namespace。
     ///
     /// 返回: 底层缓存确认清理时成功。
@@ -136,15 +136,15 @@ impl MapperL2Cache for SingleFlightMapperL2Cache {
         self.inner.clear_key(key).await
     }
 
-    /// 业务作用: 合并同进程内相同 key 的并发 cache miss，避免重复查询数据库。
+    /// 业务作用：合并同进程内相同 key 的并发 cache miss，避免重复查询数据库。
     ///
-    /// # 参数
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 单条查询缓存字段。
-    /// - `ttl_ms`: loader 结果写回时采用的 TTL。
-    /// - `loader`: 只有当前进程首个 miss 调用会执行的数据库加载回调。
+    /// 参数说明：
+    /// - `key`：Mapper 查询缓存的命名空间。
+    /// - `hash_key`：该命名空间内单条查询的缓存字段。
+    /// - `ttl_ms`：加载结果写回使用的可选过期毫秒数。
+    /// - `loader`：取得进程内锁并复验仍未命中后执行的单次异步加载操作。
     ///
-    /// 返回: 命中或加载结果及来源；缓存和 loader 错误原样返回。
+    /// 返回：返回命中或加载结果及来源；同一锁键等待后再次读缓存，仍未命中才调用 loader 并写回。缓存、锁表或加载失败时返回错误；失败或取消后其它等待者仍可能重新加载。锁键以 NUL 拼接，调用方应避免分隔歧义。
     async fn get_or_load(
         &self,
         key: &str,
@@ -209,7 +209,7 @@ pub struct VersionedMapperCacheCodec {
 impl VersionedMapperCacheCodec {
     /// 业务作用: 创建写入稳定版本头的 cache value codec。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `codec_name`: 当前 codec 的稳定名称。
     /// - `codec`: 负责编解码 payload 的主 codec。
     ///
@@ -228,7 +228,7 @@ impl VersionedMapperCacheCodec {
 
     /// 业务作用: 注册一个具名历史 codec，用于平滑读取旧缓存。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `codec_name`: 历史缓存头中的 codec 名称。
     /// - `codec`: 能够解码该历史 payload 的 codec。
     ///
@@ -243,11 +243,11 @@ impl VersionedMapperCacheCodec {
         Ok(self)
     }
 
-    /// 业务作用: 关闭无版本头 JSON value 的兼容读取。
+    /// 业务作用：关闭无版本头 JSON value 的兼容读取。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回: 仅接受已知版本头的 codec 组合。
+    /// 返回：返回关闭无头 JSON 回退的组合；无协议头数据仍交给主 codec 解码，不等于只接受已知协议头。
     pub fn without_legacy_json_fallback(mut self) -> Self {
         self.read_legacy_json = false;
         self
@@ -257,7 +257,7 @@ impl VersionedMapperCacheCodec {
 impl MapperCacheCodec for VersionedMapperCacheCodec {
     /// 业务作用: 给主 codec payload 写入稳定版本头。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: 待编码的查询结果 JSON value。
     ///
     /// 返回: 带版本头的缓存 bytes 或主 codec 错误。
@@ -275,7 +275,7 @@ impl MapperCacheCodec for VersionedMapperCacheCodec {
 
     /// 业务作用: 按缓存版本头选择当前 codec、历史 codec 或无版本头 JSON 路径。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: L2 cache 返回的原始 value。
     ///
     /// 返回: 解码后的 JSON value；未知版本、未知 codec 或 payload 非法时返回错误。
@@ -307,12 +307,12 @@ impl MapperCacheCodec for VersionedMapperCacheCodec {
         }
     }
 
-    /// 业务作用: 判断旧格式 value 是否需要按当前 codec 回写。
+    /// 业务作用：判断旧格式 value 是否需要按当前 codec 回写。
     ///
-    /// # 参数
-    /// - `bytes`: 已成功解码的缓存 value。
+    /// 参数说明：
+    /// - `bytes`：调用方准备判断是否迁移的缓存字节，通常应先成功解码。
     ///
-    /// 返回: 命中历史格式且当前 codec 可生成新格式时为 `true`。
+    /// 返回：已知协议头且名称为有效 UTF-8、不同于当前名称时返回 true，不检查历史 codec 是否登记或载荷是否可解码；无协议头时仅在开启 JSON 回退且未带协议 magic 时返回 true。
     fn should_rewrite_value(&self, bytes: &[u8]) -> bool {
         if bytes.starts_with(MAPPER_CODEC_V1_PREFIX) {
             let rest = &bytes[MAPPER_CODEC_V1_PREFIX.len()..];
@@ -338,7 +338,7 @@ pub struct FallbackMapperCacheCodec {
 impl FallbackMapperCacheCodec {
     /// 业务作用: 创建以指定 codec 为当前写入格式的 fallback 组合。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `primary`: 当前写入和首选读取使用的 codec。
     ///
     /// 返回: 尚未注册历史格式的 codec 组合。
@@ -351,7 +351,7 @@ impl FallbackMapperCacheCodec {
 
     /// 业务作用: 追加一个历史读取 codec。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `fallback`: 主 codec 读取失败后尝试的 codec。
     ///
     /// 返回: 更新后的 codec 组合。
@@ -362,7 +362,7 @@ impl FallbackMapperCacheCodec {
 
     /// 业务作用: 按尝试顺序批量追加历史读取 codec。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `fallbacks`: 历史 codec 集合。
     ///
     /// 返回: 更新后的 codec 组合。
@@ -378,7 +378,7 @@ impl FallbackMapperCacheCodec {
 impl MapperCacheCodec for FallbackMapperCacheCodec {
     /// 业务作用: 始终使用 primary codec 编码新缓存值。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `value`: 待编码的查询结果 JSON value。
     ///
     /// 返回: primary codec 产生的 bytes 或编码错误。
@@ -388,7 +388,7 @@ impl MapperCacheCodec for FallbackMapperCacheCodec {
 
     /// 业务作用: 先用 primary 解码，失败后按顺序尝试历史 codec。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: L2 cache 返回的原始 value。
     ///
     /// 返回: 首个成功解码的 JSON value；全部失败时返回聚合错误。
@@ -409,7 +409,7 @@ impl MapperCacheCodec for FallbackMapperCacheCodec {
 
     /// 业务作用: 判断当前 value 是否只能由历史 codec 读取并需要回写。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: 已成功解码的缓存 value。
     ///
     /// 返回: primary 失败且任一 fallback 成功时为 `true`。
@@ -424,7 +424,7 @@ impl MapperCacheCodec for FallbackMapperCacheCodec {
 
 /// 业务作用: 校验 codec 名称能安全写入版本头。
 ///
-/// # 参数
+/// 参数说明：
 /// - `codec_name`: 业务传入的稳定名称。
 ///
 /// 返回: 合法名称原样返回；空值或包含分隔符的名称返回错误。
@@ -449,7 +449,7 @@ const MAX_MAPPER_RUNTIME_MILLIS: u64 = 365 * 24 * 60 * 60 * 1_000;
 
 /// 业务作用: 把非 fallible builder 输入收敛到 Tokio 与 Redis 接受的毫秒范围。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 业务传入的毫秒值。
 ///
 /// 返回: 位于 1 毫秒至 365 天范围内的值。
@@ -460,7 +460,7 @@ fn bounded_mapper_millis(value: u64) -> u64 {
 
 /// 业务作用: 在写入 Redis 前校验 TTL，避免非法过期参数留下永久缓存字段。
 ///
-/// # 参数
+/// 参数说明：
 /// - `ttl_ms`: 待应用的毫秒级 TTL。
 ///
 /// 返回: 有效范围内成功，否则返回参数错误。
@@ -488,12 +488,14 @@ where
 {
     /// 业务作用: 创建 Redis Hash 版 Mapper 二级缓存。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `redis`: 已由独立调用方或宿主管理的 Redis 异步连接，不创建第二套连接池。
     ///
     /// 返回: 可共享使用的 Redis L2 cache。
     pub fn new(redis: C) -> Self {
-        Self { redis }
+        Self {
+            redis,
+        }
     }
 
     /// 业务作用: 启动期确认 Redis 支持 Hash field 级 TTL。
@@ -512,28 +514,28 @@ impl<C> MapperL2Cache for RedisMapperL2Cache<C>
 where
     C: redis::aio::ConnectionLike + Clone + Send + Sync + 'static,
 {
-    /// 业务作用: 从 Redis Hash 读取单条 Mapper 查询缓存。
+    /// 业务作用：从 Redis Hash 读取单条 Mapper 查询缓存。
     ///
-    /// # 参数
-    /// - `key`: Redis Hash key。
-    /// - `hash_key`: Redis Hash field。
+    /// 参数说明：
+    /// - `key`：承载 Mapper 命名空间的 Redis Hash 键。
+    /// - `hash_key`：对应单条查询缓存的 Redis Hash 字段。
     ///
-    /// 返回: 命中 bytes、未命中 `None` 或 Redis 错误。
+    /// 返回：命中时返回字节，缺失时返回 None；Redis 调用失败返回错误。
     async fn get(&self, key: &str, hash_key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         use redis::AsyncCommands;
         let mut conn = self.redis.clone();
         Ok(conn.hget(key, hash_key).await?)
     }
 
-    /// 业务作用: 写入 Redis Hash field 并应用可选 TTL。
+    /// 业务作用：写入 Redis Hash field 并应用可选 TTL。
     ///
-    /// # 参数
-    /// - `key`: Redis Hash key。
-    /// - `hash_key`: Redis Hash field。
-    /// - `value`: 已编码的查询结果。
-    /// - `ttl_ms`: 可选毫秒级 TTL。
+    /// 参数说明：
+    /// - `key`：承载 Mapper 命名空间的 Redis Hash 键。
+    /// - `hash_key`：对应单条查询缓存的 Redis Hash 字段。
+    /// - `value`：待写入的已编码查询结果。
+    /// - `ttl_ms`：可选过期时间，指定时须在 1 毫秒至 365 天内。
     ///
-    /// 返回: value 与过期策略均确认后成功；参数或 Redis 操作失败时返回错误。
+    /// 返回：未指定 TTL 时执行 HSET；指定时校验范围后由脚本写值并尝试字段过期，命令不支持则尝试整键过期。过期失败会尝试删除字段并报错；失败不证明不存在远端副作用。
     async fn put(
         &self,
         key: &str,
@@ -561,13 +563,13 @@ where
         Ok(())
     }
 
-    /// 业务作用: 删除 Redis Hash 中的单条查询缓存字段。
+    /// 业务作用：删除 Redis Hash 中的单条查询缓存字段。
     ///
-    /// # 参数
-    /// - `key`: Redis Hash key。
-    /// - `hash_key`: 需要删除的 Hash field。
+    /// 参数说明：
+    /// - `key`：承载 Mapper 命名空间的 Redis Hash 键。
+    /// - `hash_key`：对应单条查询缓存的 Redis Hash 字段。
     ///
-    /// 返回: Redis 确认执行删除时成功。
+    /// 返回：Redis 确认 HDEL 时成功，目标缺失也可成功；调用失败返回错误，不证明字段仍存在。
     async fn evict(&self, key: &str, hash_key: &str) -> anyhow::Result<()> {
         use redis::AsyncCommands;
         let mut conn = self.redis.clone();
@@ -577,7 +579,7 @@ where
 
     /// 业务作用: 删除整个 Redis Hash，使 Mapper namespace 全量失效。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 需要删除的 Redis Hash key。
     ///
     /// 返回: Redis 确认执行删除时成功。
@@ -591,7 +593,7 @@ where
 
 /// 业务作用: 启动期探测 Redis Cluster 是否支持 Hash field 级 TTL。
 ///
-/// # 参数
+/// 参数说明：
 /// - `redis`: 用于执行隔离探测的 Redis Cluster 异步连接。
 ///
 /// 返回: field TTL 生效且没有设置 key TTL 时成功；能力不完整或清理失败时返回错误。
@@ -685,7 +687,7 @@ pub struct RedisDistributedSingleFlightMapperL2Cache {
 impl RedisDistributedSingleFlightMapperL2Cache {
     /// 业务作用: 用 Redis 短锁给已有 L2 cache 增加跨进程 miss 合并。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `inner`: 真实执行缓存读写的 L2 cache。
     /// - `redis`: 用于锁操作的 Redis Cluster 连接。
     ///
@@ -705,7 +707,7 @@ impl RedisDistributedSingleFlightMapperL2Cache {
 
     /// 业务作用: 设置持锁进程失联后的自动释放时间。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `lock_ttl_ms`: Redis 锁的毫秒级 TTL。
     ///
     /// 返回: 将数值收敛到有效范围后的包装器。
@@ -716,7 +718,7 @@ impl RedisDistributedSingleFlightMapperL2Cache {
 
     /// 业务作用: 设置等待者单轮轮询的最长时间，超时后重新竞争锁。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `wait_timeout_ms`: 单轮等待的毫秒上限。
     ///
     /// 返回: 将数值收敛到有效范围后的包装器。
@@ -727,7 +729,7 @@ impl RedisDistributedSingleFlightMapperL2Cache {
 
     /// 业务作用: 设置等待者读取底层 cache 的轮询间隔。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `poll_interval_ms`: 轮询间隔毫秒值。
     ///
     /// 返回: 将数值收敛到有效范围后的包装器。
@@ -749,26 +751,26 @@ impl RedisDistributedSingleFlightMapperL2Cache {
 #[cfg(feature = "redis-cache")]
 #[crate::async_trait]
 impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
-    /// 业务作用: 透传单条缓存读取。
+    /// 业务作用：透传单条缓存读取。
     ///
-    /// # 参数
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 单条查询缓存字段。
+    /// 参数说明：
+    /// - `key`：Mapper 查询缓存的命名空间。
+    /// - `hash_key`：该命名空间内单条查询的缓存字段。
     ///
-    /// 返回: 底层缓存的命中值、未命中状态或读取错误。
+    /// 返回：原样返回底层缓存的命中值、None 或错误，不进入加载互斥。
     async fn get(&self, key: &str, hash_key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         self.inner.get(key, hash_key).await
     }
 
-    /// 业务作用: 透传单条缓存写入。
+    /// 业务作用：透传单条缓存写入。
     ///
-    /// # 参数
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 单条查询缓存字段。
-    /// - `value`: 已编码的查询结果。
-    /// - `ttl_ms`: 可选毫秒级 TTL。
+    /// 参数说明：
+    /// - `key`：Mapper 查询缓存的命名空间。
+    /// - `hash_key`：该命名空间内单条查询的缓存字段。
+    /// - `value`：已编码的查询结果字节。
+    /// - `ttl_ms`：底层缓存解释的可选过期毫秒数。
     ///
-    /// 返回: 底层缓存确认写入时成功。
+    /// 返回：原样返回底层缓存写入结果；失败不证明缓存未写入，本包装器不额外提供原子性。
     async fn put(
         &self,
         key: &str,
@@ -779,20 +781,20 @@ impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
         self.inner.put(key, hash_key, value, ttl_ms).await
     }
 
-    /// 业务作用: 透传单条缓存删除。
+    /// 业务作用：透传单条缓存删除。
     ///
-    /// # 参数
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 需要删除的查询字段。
+    /// 参数说明：
+    /// - `key`：Mapper 查询缓存的命名空间。
+    /// - `hash_key`：该命名空间内单条查询的缓存字段。
     ///
-    /// 返回: 底层缓存确认删除时成功。
+    /// 返回：原样返回底层删除结果，缺失项的语义由底层实现决定。
     async fn evict(&self, key: &str, hash_key: &str) -> anyhow::Result<()> {
         self.inner.evict(key, hash_key).await
     }
 
     /// 业务作用: 透传整个 Mapper namespace 清理。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 需要整体失效的 Mapper cache namespace。
     ///
     /// 返回: 底层缓存确认清理时成功。
@@ -800,15 +802,15 @@ impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
         self.inner.clear_key(key).await
     }
 
-    /// 业务作用: 用 Redis 短锁合并跨进程相同 key 的并发 cache miss。
+    /// 业务作用：用 Redis 短锁合并跨进程相同 key 的并发 cache miss。
     ///
-    /// # 参数
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 单条查询缓存字段。
-    /// - `ttl_ms`: loader 结果写回时采用的 TTL。
-    /// - `loader`: 只有获得 Redis 锁的调用会执行的数据库加载回调。
+    /// 参数说明：
+    /// - `key`：Mapper 查询缓存的命名空间。
+    /// - `hash_key`：该命名空间内单条查询的缓存字段。
+    /// - `ttl_ms`：加载成功后交给底层缓存的可选 TTL。
+    /// - `loader`：取得 Redis 短锁且复验缓存仍缺失后调用的单次异步加载操作。
     ///
-    /// 返回: 命中或加载结果及来源；缓存、锁和 loader 错误原样返回。
+    /// 返回：返回缓存命中或加载结果及来源；未获锁者按轮次等待并重新竞争，没有全局等待截止。获得短锁后不续租，也不在写回前复验租约，加载超过 TTL 时可能出现并发加载；释放失败仅记录警告，不替换加载结果。
     async fn get_or_load(
         &self,
         key: &str,
@@ -871,13 +873,13 @@ impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
     }
 }
 
-/// 业务作用: 从 Mapper namespace 与查询字段派生分布式 single-flight 锁 key。
+/// 业务作用：从 Mapper namespace 与查询字段派生分布式 single-flight 锁 key。
 ///
-/// # 参数
-/// - `key`: Mapper cache namespace。
-/// - `hash_key`: 单条查询缓存字段。
+/// 参数说明：
+/// - `key`：Mapper 查询缓存的命名空间。
+/// - `hash_key`：该命名空间内单条查询的缓存字段。
 ///
-/// 返回: 不暴露原始参数的稳定摘要 key。
+/// 返回：返回对命名空间、NUL 分隔符和字段拼接结果计算的稳定 SHA-256 锁键，不暴露原文；输入含 NUL 时拼接可能歧义，不保证一一对应。
 #[cfg(feature = "redis-cache")]
 fn distributed_single_flight_lock_key(key: &str, hash_key: &str) -> String {
     let mut raw = String::with_capacity(key.len() + hash_key.len() + 1);
@@ -907,7 +909,7 @@ fn distributed_single_flight_token() -> String {
 
 /// 业务作用: 原子尝试获取带自动过期的 Redis single-flight 锁。
 ///
-/// # 参数
+/// 参数说明：
 /// - `conn`: 当前操作使用的 Redis Cluster 连接。
 /// - `lock_key`: 摘要后的锁 key。
 /// - `token`: 当前调用的持有者 token。
@@ -934,7 +936,7 @@ async fn redis_try_acquire_single_flight(
 
 /// 业务作用: 仅在 token 仍属于当前调用时原子释放 Redis single-flight 锁。
 ///
-/// # 参数
+/// 参数说明：
 /// - `conn`: 当前操作使用的 Redis Cluster 连接。
 /// - `lock_key`: 当前调用竞争的锁 key。
 /// - `token`: 当前调用写入的持有者 token。
@@ -964,7 +966,7 @@ return 0
 
 /// 业务作用: 计算稳定 SHA-256 十六进制摘要，用于避免锁 key 泄露完整 SQL 参数。
 ///
-/// # 参数
+/// 参数说明：
 /// - `bytes`: namespace 与查询字段组合后的原始 bytes。
 ///
 /// 返回: 小写十六进制 SHA-256 摘要。

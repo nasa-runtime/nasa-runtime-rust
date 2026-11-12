@@ -14,7 +14,10 @@ pub struct DltOrigin {
 
 impl DltOrigin {
     /// 业务作用：拒绝无界、空或含NUL的来源身份。
-    /// 参数说明：无。返回：两个字段均为1至1024个UTF-8字节时通过；非法身份为InvalidConfiguration。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：两个字段均为1至1024个UTF-8字节时通过；非法身份为InvalidConfiguration。
     pub fn validate(&self) -> Result<()> {
         for value in [&self.source_id, &self.cluster_id] {
             if value.is_empty() || value.len() > 1024 || value.contains('\0') {
@@ -25,7 +28,11 @@ impl DltOrigin {
     }
 
     /// 业务作用：重写来源自报的源和集群字段，同时保留其他有序业务头。
-    /// 参数说明：headers为已构造的完整死信头。返回：唯一规范来源字段的新集合；非法身份拒绝，不认证传入身份。
+    ///
+    /// 参数说明：
+    /// - `headers`：headers为已构造的完整死信头。
+    ///
+    /// 返回：唯一规范来源字段的新集合；非法身份拒绝，不认证传入身份。
     pub fn attach(&self, headers: &KafkaHeaders) -> Result<KafkaHeaders> {
         self.validate()?;
         let mut values = headers
@@ -47,7 +54,11 @@ impl DltOrigin {
     }
 
     /// 业务作用：读取可选来源扩展，拒绝半份身份和重复别名。
-    /// 参数说明：headers为完整记录头。返回：历史记录为None；完整扩展返回身份，歧义或越界为HeaderInvalid。
+    ///
+    /// 参数说明：
+    /// - `headers`：headers为完整记录头。
+    ///
+    /// 返回：历史记录为None；完整扩展返回身份，歧义或越界为HeaderInvalid。
     pub fn read(headers: &KafkaHeaders) -> Result<Option<Self>> {
         let mut fields = std::collections::BTreeMap::new();
         let mut size = 0usize;
@@ -100,7 +111,11 @@ impl DltOrigin {
 }
 
 /// 业务作用：按共同ASCII规则识别必须重写的来源字段。
-/// 参数说明：name为头名。返回：规范名称及ASCII别名均为true。
+///
+/// 参数说明：
+/// - `name`：name为头名。
+///
+/// 返回：规范名称及ASCII别名均为true。
 pub(crate) fn is_header(name: &str) -> bool {
     name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_SOURCE)
         || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_CLUSTER)

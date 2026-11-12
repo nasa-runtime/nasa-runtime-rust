@@ -93,8 +93,8 @@ pub(crate) async fn run(inner: Arc<RunnerInner>) {
         };
         let wake = inner.observer_wake();
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            _ = wake.notified() => {}
+            _ = tokio::time::sleep(interval) => {},
+            _ = wake.notified() => {},
         }
     }
 }

@@ -59,10 +59,10 @@ impl std::error::Error for SagaTransactionError {}
 /// 业务作用：在指定 datasource 上执行 Saga 原子步骤，并保留 COMMIT 不确定与回滚失败分类。
 ///
 /// 参数说明：
-/// - `datasource`: Saga store、Inbox 与 Outbox 共同绑定的数据源身份。
-/// - `body`: 在同源 ambient transaction 内执行并返回领域结果的 Future。
+/// - `backend`：包含同源 store、Inbox、Outbox 及事务执行器的完整后端。
+/// - `body`：在后端事务上下文内执行并返回领域值的 future。
 ///
-/// 返回：数据库确认提交后返回领域值；跨源、回滚、提交不确定或基础设施失败返回封闭分类。
+/// 返回：原样返回 backend 事务执行器成功值，失败映射为封闭 Saga 事务分类；提交不确定不能视为回滚完成。本适配不自行比较 Inbox/Outbox 数据源，依赖已装配 backend 的同源合同。
 pub(crate) async fn run_for<B, T, F>(backend: &B, body: F) -> anyhow::Result<T>
 where
     B: SagaBackend,
@@ -78,7 +78,10 @@ where
 
 /// 业务作用：在事务体开始、每次恢复轮询及交还提交裁决前复验执行资格，等待期间失权则回滚全部事务事实。
 ///
-/// 参数说明：`backend` 固定事务域，`authorize` 同步验证本次操作的冻结资格，`body` 只能产生同事务数据库写入。
+/// 参数说明：
+/// - `backend`：固定事务域
+/// - `authorize`：同步验证本次操作的冻结资格
+/// - `body`：只能产生同事务数据库写入。
 ///
 /// 返回：资格持续有效且提交确认后返回领域值；失权使事务体返回错误并走正常回滚。
 /// 已在有效资格下发出的 COMMIT 仍按数据库收据裁决，不因确认回包较晚而宣称回滚。

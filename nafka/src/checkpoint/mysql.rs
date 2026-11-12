@@ -42,7 +42,15 @@ struct Config {
 
 impl MySqlCheckpointStore {
     /// 业务作用：冻结单主连接与资源边界，阻止旧 lease 重连后复用权限。
-    /// 参数说明：url 为 mysql:// URL，仅接受 ssl-mode、ssl-ca、ssl-cert、ssl-key 查询项；TLS 默认 VERIFY_IDENTITY，明文须显式 DISABLED；namespace 为隔离名；timeout 为 100ms 至 60s 的单次预算；capacity 为 1 至 1024 个实际会话额度。
+    ///
+    /// 参数说明：
+    /// - `url`：url 为 mysql:// URL。
+    /// - `namespace`：namespace 为隔离名。
+    /// - `timeout`：timeout 为 100ms 至 60s 的单次预算。
+    /// - `capacity`：capacity 为 1 至 1024 个实际会话额度。
+    ///
+    /// 共同约束：仅接受 ssl-mode、ssl-ca、ssl-cert、ssl-key 查询项；TLS 默认 VERIFY_IDENTITY；明文须显式 DISABLED
+    ///
     /// 返回：未建连的存储；非法端点、未知参数、重复参数及不安全 TLS 降级模式拒绝。
     pub fn new(url: &str, namespace: &str, timeout: Duration, capacity: usize) -> Result<Self> {
         validate_task(namespace)?;
@@ -99,14 +107,20 @@ impl MySqlCheckpointStore {
     }
 
     /// 业务作用：显式建立固定 InnoDB 表并核对持久化合同，普通任务不隐式运行 DDL。
-    /// 参数说明：无。返回：表结构和持久设置匹配才成功；DDL 响应未知时可再次显式调用确认。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：表结构和持久设置匹配才成功；DDL 响应未知时可再次显式调用确认。
     pub fn initialize(&self) -> Result<()> {
         let (mut session, _) = self.start(Start::Initialize)?;
         session.close()
     }
 
     /// 业务作用：为建连与实际会话占用同一额度，线程退出以前不归还责任。
-    /// 参数说明：operation 为初始化、读取或独占 claim。
+    ///
+    /// 参数说明：
+    /// - `operation`：operation 为初始化、读取或独占 claim。
+    ///
     /// 返回：启动结果和唯一会话句柄；无容量立即拒绝，调用超时不撤销可能已经持久化的写入。
     fn start(&self, operation: Start) -> Result<(Session, Option<ReplayCheckpoint>)> {
         self.active
@@ -167,7 +181,11 @@ impl MySqlCheckpointStore {
 
 impl CheckpointStore for MySqlCheckpointStore {
     /// 业务作用：只读取得完整共享进度，不授予锁或业务推进权。
-    /// 参数说明：task_id 为精确任务名。返回：可信快照或不存在；损坏、超限和读取失败拒绝。
+    ///
+    /// 参数说明：
+    /// - `task_id`：task_id 为精确任务名。
+    ///
+    /// 返回：可信快照或不存在；损坏、超限和读取失败拒绝。
     fn load(&self, task_id: &str) -> Result<Option<ReplayCheckpoint>> {
         validate_task(task_id)?;
         let (mut session, snapshot) = self.start(Start::Load(task_id.to_owned()))?;
@@ -176,7 +194,10 @@ impl CheckpointStore for MySqlCheckpointStore {
     }
 
     /// 业务作用：以独占 SQL 会话持久化新的任务代次，完成以后才交付 lease。
-    /// 参数说明：initial 为所有权、序号和进度均处于初始位置的冻结声明。
+    ///
+    /// 参数说明：
+    /// - `initial`：initial 为所有权、序号和进度均处于初始位置的冻结声明。
+    ///
     /// 返回：完整持久化的唯一责任；已有所有者、合同改变或证据不足时拒绝。
     fn claim(&self, initial: &ReplayCheckpoint) -> Result<Box<dyn CheckpointLease>> {
         initial.validate()?;
@@ -219,7 +240,10 @@ struct ExitGuard {
 
 impl Drop for ExitGuard {
     /// 业务作用：在实际线程资源退出后归还容量并唤醒关闭等待者。
-    /// 参数说明：无。返回：只发布资源退出，不推断未知 SQL 是否曾经提交。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只发布资源退出，不推断未知 SQL 是否曾经提交。
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::AcqRel);
         *self
@@ -240,7 +264,10 @@ struct Session {
 
 impl Session {
     /// 业务作用：串行请求一次复验或条件写入，等待超时后永久断开旧入口。
-    /// 参数说明：next 为待推进快照，空值表示只复验。
+    ///
+    /// 参数说明：
+    /// - `next`：next 为待推进快照。
+    ///
     /// 返回：服务端确认的快照；写入等待未知不会被当作未执行。
     fn request(&mut self, next: Option<ReplayCheckpoint>) -> Result<ReplayCheckpoint> {
         let error = if next.is_some() {
@@ -272,7 +299,10 @@ impl Session {
     }
 
     /// 业务作用：禁止新命令并等待持锁连接真正退出，重复关闭可以继续等待原责任。
-    /// 参数说明：无。返回：线程及本地 SQL 资源均退出才成功；超时保留独立退出证据。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：线程及本地 SQL 资源均退出才成功；超时保留独立退出证据。
     fn close(&mut self) -> Result<()> {
         self.sender.take();
         let state = self
@@ -303,13 +333,19 @@ struct Lease {
 
 impl CheckpointLease for Lease {
     /// 业务作用：提供最后确认的历史进度，不访问 SQL 或重新授予权限。
-    /// 参数说明：无。返回：独立不可变事实副本。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：独立不可变事实副本。
     fn checkpoint(&self) -> ReplayCheckpoint {
         self.current.clone()
     }
 
     /// 业务作用：在新业务派发前验证当前会话、锁所有者及完整持久快照。
-    /// 参数说明：无。返回：全部证据成立才成功，任何存储失败永久保护旧 lease。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：全部证据成立才成功，任何存储失败永久保护旧 lease。
     fn verify(&mut self) -> Result<()> {
         if self.closed {
             return Err(Error::Closed);
@@ -331,7 +367,11 @@ impl CheckpointLease for Lease {
     }
 
     /// 业务作用：目标确认之后以完整证据条件推进，写入确认前不发布内存进度。
-    /// 参数说明：expected_revision 为预期序号，positions 为完整且不回退的进度。
+    ///
+    /// 参数说明：
+    /// - `expected_revision`：expected_revision 为预期序号。
+    /// - `positions`：positions 为完整且不回退的进度。
+    ///
     /// 返回：真实确认的新快照；未知结果关闭旧权限，输入拒绝不写库。
     fn advance(
         &mut self,
@@ -379,7 +419,10 @@ impl CheckpointLease for Lease {
     }
 
     /// 业务作用：先永久关闭业务推进，再等待专用会话退出并归还命名锁。
-    /// 参数说明：无。返回：实际本地退出后成功；服务端失联会话仍由服务端超时或运维结束。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：实际本地退出后成功；服务端失联会话仍由服务端超时或运维结束。
     fn close(&mut self) -> Result<()> {
         self.closed = true;
         self.session.close()
@@ -387,7 +430,15 @@ impl CheckpointLease for Lease {
 }
 
 /// 业务作用：在独立有界线程上持有唯一物理 SQL 连接，避免同步 API 嵌套调用 Tokio 运行时。
-/// 参数说明：runtime 为线程私有运行时，config 为冻结配置，start 为首个操作，commands 为串行入口，ready 为启动回复，deadline 为首次截止点。
+///
+/// 参数说明：
+/// - `runtime`：runtime 为线程私有运行时。
+/// - `config`：config 为冻结配置。
+/// - `start`：start 为首个操作。
+/// - `commands`：commands 为串行入口。
+/// - `ready`：ready 为启动回复。
+/// - `deadline`：deadline 为首次截止点。
+///
 /// 返回：所有命令与真实本地连接退出后结束，命令超时不会触发自动重连。
 fn worker(
     runtime: &tokio::runtime::Runtime,
@@ -492,7 +543,11 @@ fn worker(
 }
 
 /// 业务作用：拒绝只读节点、非 MySQL 服务与不足的持久化设置。
-/// 参数说明：connection 为专用会话，config 为冻结数据库。
+///
+/// 参数说明：
+/// - `connection`：connection 为专用会话。
+/// - `config`：config 为冻结数据库。
+///
 /// 返回：单主自动提交及日志持久合同成立才允许任务读写。
 async fn validate_server(connection: &mut MySqlConnection, config: &Config) -> Result<()> {
     let row = sqlx::query("SELECT DATABASE() AS db, VERSION() AS version, CAST(@@global.read_only AS SIGNED) AS ro, CAST(@@global.super_read_only AS SIGNED) AS sro, CAST(@@global.innodb_flush_log_at_trx_commit AS SIGNED) AS flush_log, CAST(@@global.log_bin AS SIGNED) AS log_bin, CAST(@@global.sync_binlog AS SIGNED) AS sync_binlog, @@session.binlog_format AS binlog_format, CAST(@@session.autocommit AS SIGNED) AS autocommit")
@@ -526,7 +581,11 @@ async fn validate_server(connection: &mut MySqlConnection, config: &Config) -> R
 }
 
 /// 业务作用：拒绝改变完整 CAS 行为的表结构、索引、触发器或存储引擎。
-/// 参数说明：connection 为专用会话，config 为固定数据库。
+///
+/// 参数说明：
+/// - `connection`：connection 为专用会话。
+/// - `config`：config 为固定数据库。
+///
 /// 返回：与共同固定表合同逐项匹配时成功，缺表或变更明确拒绝。
 async fn validate_schema(connection: &mut MySqlConnection, config: &Config) -> Result<()> {
     let engines: Vec<(Option<String>,)> = sqlx::query_as(
@@ -578,7 +637,12 @@ async fn validate_schema(connection: &mut MySqlConnection, config: &Config) -> R
 }
 
 /// 业务作用：限定返回正文大小并核对行元数据，避免损坏行参与恢复。
-/// 参数说明：connection 为专用会话，config 为隔离配置，task 为精确任务 ID。
+///
+/// 参数说明：
+/// - `connection`：connection 为专用会话。
+/// - `config`：config 为隔离配置。
+/// - `task`：task 为精确任务 ID。
+///
 /// 返回：通过完整性验证的快照或不存在，非法元数据及正文拒绝。
 async fn read(
     connection: &mut MySqlConnection,
@@ -611,7 +675,12 @@ async fn read(
 }
 
 /// 业务作用：取得即时命名锁并持久化新代次，旧进度与合同不能在接管时被覆盖。
-/// 参数说明：connection 为专用物理会话，config 为隔离配置，initial 为已验证初始合同。
+///
+/// 参数说明：
+/// - `connection`：connection 为专用物理会话。
+/// - `config`：config 为隔离配置。
+/// - `initial`：initial 为已验证初始合同。
+///
 /// 返回：新代次持久化成立的快照，竞争不等待，任何写入未知拒绝发布权限。
 async fn claim(
     connection: &mut MySqlConnection,
@@ -666,8 +735,15 @@ async fn claim(
 }
 
 /// 业务作用：验证当前会话身份、命名锁与完整持久证据，历史快照不能代替当前权限。
-/// 参数说明：connection/config 为专用端点，lock/connection_id 为原权威，current 为最后确认进度。
-/// 返回：全部证据仍成立才成功；查询失败或改变均阻止下一次业务副作用。
+///
+/// 参数说明：
+/// - `connection`：取得命名锁时的专用物理会话，所有复验查询必须使用此连接。
+/// - `config`：冻结的数据库与命名空间，用于复验服务端持久化设置并定位进度行。
+/// - `lock`：当前任务的命名锁名称，服务端仍须将其归属于原会话。
+/// - `connection_id`：取得命名锁时记录的服务端连接编号，不能以重连后的编号替代。
+/// - `current`：调用方最后确认的完整进度，必须与数据库中的任务正文及代次一致。
+///
+/// 返回：设置、会话、锁归属和进度全部匹配时成功；身份或进度改变返回 Fenced，查询及设置错误原样传播。
 async fn verify(
     connection: &mut MySqlConnection,
     config: &Config,
@@ -683,9 +759,11 @@ async fn verify(
     .fetch_one(&mut *connection)
     .await
     .map_err(|_| Error::Io)?;
+    // 连接存活不等于仍拥有推进权；重连或锁转移后不得凭历史进度继续副作用。
     if actual != connection_id || owner != Some(connection_id) {
         return Err(Error::Fenced);
     }
+    // 锁身份一致仍需核对完整持久证据，不能接受被外部改写的进度。
     if read(connection, config, &current.task_id).await?.as_ref() != Some(current) {
         return Err(Error::Fenced);
     }
@@ -693,8 +771,16 @@ async fn verify(
 }
 
 /// 业务作用：在同一 SQL 中约束会话权限及完整旧正文，只修改一个精确任务。
-/// 参数说明：connection/config 为存储会话，lock/connection_id 为原权威，previous 为预期快照或首次空值，next 为下一快照。
-/// 返回：恰好一行确认后成功，零行失权，执行响应不确定为 OutcomeUnknown。
+///
+/// 参数说明：
+/// - `connection`：持有任务命名锁的物理会话，条件写入不允许切换到其它连接。
+/// - `config`：存储初始化时冻结的隔离配置，其中命名空间限定本次写入的任务范围。
+/// - `lock`：写入语句内核对归属的命名锁名称，必须由当前物理会话持有。
+/// - `connection_id`：取得权限时确认的服务端会话编号，用于拒绝重连后复用旧权限。
+/// - `previous`：更新时必须逐字节匹配的旧进度；为空时仅尝试首次插入，不覆盖已有任务。
+/// - `next`：由调用方验证并计算的下一进度，其代次、修订号和完整正文一同持久化。
+///
+/// 返回：服务端确认恰好影响一行才成功；编码失败直接拒绝，影响行数不符返回 Fenced，SQL 执行错误返回 OutcomeUnknown。
 async fn persist(
     connection: &mut MySqlConnection,
     config: &Config,
@@ -704,6 +790,7 @@ async fn persist(
     next: &ReplayCheckpoint,
 ) -> Result<()> {
     let bytes = wire::encode(next)?;
+    // 权限和旧正文必须与写入在同一语句内检查，避免复验与实际落盘之间失权后继续覆盖。
     let result = if let Some(previous) = previous {
         sqlx::query("UPDATE nasa_kafka_checkpoint SET generation=?,revision=?,body=? WHERE namespace=? AND task_id=? AND generation=? AND revision=? AND body=? AND CONNECTION_ID()=? AND IS_USED_LOCK(?)=CONNECTION_ID()")
             .bind(next.generation as i64).bind(next.revision as i64).bind(bytes)
@@ -715,6 +802,7 @@ async fn persist(
             .bind(config.namespace.as_bytes()).bind(next.task_id.as_bytes()).bind(next.generation as i64)
             .bind(next.revision as i64).bind(bytes).bind(connection_id).bind(lock).execute(connection).await
     }.map_err(|_| Error::OutcomeUnknown)?;
+    // 没有唯一行的确认就不能发布新进度；调用方须停止沿用这份会话权限。
     if result.rows_affected() != 1 {
         return Err(Error::Fenced);
     }
@@ -722,7 +810,11 @@ async fn persist(
 }
 
 /// 业务作用：为数据库、表、命名空间及任务产生双端一致且无歧义的锁身份。
-/// 参数说明：config 为冻结数据库与隔离名，task 为已验证任务 ID。
+///
+/// 参数说明：
+/// - `config`：config 为冻结数据库与隔离名。
+/// - `task`：task 为已验证任务 ID。
+///
 /// 返回：64 字符 SHA-256 小写摘要，不在诊断中暴露业务名称。
 fn lock_name(config: &Config, task: &str) -> String {
     let mut bytes = b"NSKMYL01".to_vec();

@@ -41,7 +41,8 @@ impl SagaStoreError {
 
     /// 业务作用：构造连接尚未取得的失败，供独立写安全选择重试。
     ///
-    /// 参数说明：`reason` 是不含连接信息的稳定摘要。
+    /// 参数说明：
+    /// - `reason`：是不含连接信息的稳定摘要。
     ///
     /// 返回：带连接阶段分类的脱敏错误。
     fn connection_unavailable(reason: impl Into<String>) -> Self {
@@ -53,7 +54,8 @@ impl SagaStoreError {
 
     /// 业务作用：构造数据库操作失败，保留 ambient 与 autocommit 的不同裁决空间。
     ///
-    /// 参数说明：`reason` 是不含 SQL 与参数的稳定摘要。
+    /// 参数说明：
+    /// - `reason`：是不含 SQL 与参数的稳定摘要。
     ///
     /// 返回：带数据库操作阶段分类的脱敏错误。
     fn database_operation(reason: impl Into<String>) -> Self {
@@ -65,7 +67,8 @@ impl SagaStoreError {
 
     /// 业务作用：构造唯一业务身份与既有事实冲突的确定性错误。
     ///
-    /// 参数说明：`reason` 是不含业务身份值的稳定摘要。
+    /// 参数说明：
+    /// - `reason`：是不含业务身份值的稳定摘要。
     ///
     /// 返回：可由 backend adapter 精确映射为 `Conflict` 的错误。
     pub(crate) fn conflict(reason: impl Into<String>) -> Self {

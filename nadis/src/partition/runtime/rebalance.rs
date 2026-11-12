@@ -2,8 +2,12 @@ use super::*;
 use std::time::Duration;
 
 /// 业务作用：周期执行分区再平衡，并在单轮失败后等待下一轮重试。
-/// 参数说明：`rt` 为物理分区组的运行状态。
-/// 返回：后台停止时退出；失败轮次不改变已持有来源的提交责任。
+///
+/// 参数说明：
+/// - `rt`: 持有已验证再平衡周期、后台停止信号和分区组状态的运行时。
+///
+/// 返回：后台停止时退出；每轮等待再平衡动作结束，失败后延迟至下一周期继续尝试。
+/// 已发布的持有事件与排干责任仍由协调器收口，不因轮次报错而回滚。
 pub(super) async fn rebalance_loop(rt: Arc<GroupRuntime>) {
     let period = Duration::from_millis(rt.cfg.rebalance_ms);
     let mut tick = tokio::time::interval(period);
@@ -23,8 +27,12 @@ pub(super) async fn rebalance_loop(rt: Arc<GroupRuntime>) {
 }
 
 /// 业务作用：刷新组心跳并按存活节点分配份额，取得来源或提交幂等的保留目标。
-/// 参数说明：`rt` 为周期或 wake 触发再平衡的物理分区组。
-/// 返回：Redis 失败时上抛；锁释放由 coordinator 在来源排干后完成。
+///
+/// 参数说明：
+/// - `rt`: 周期或 wake 触发的物理分区组，提供节点身份、心跳布局、来源锁和协调器通道。
+///
+/// 返回：已有轮次执行时直接成功；否则刷新心跳、估算份额并串行尝试取得缺少的来源锁。
+/// Redis 失败立即返回错误，已经发布的事件不撤销；超额时只提交保留目标，实际解锁由协调器在排干后执行。
 pub(super) async fn rebalance_once(rt: &Arc<GroupRuntime>) -> Result<()> {
     // 周期与 wake 共用单轮互斥，合并并发触发，避免同时发布相互竞争的持有决策。
     let _guard = match rt.rebalance_lock.try_lock() {
@@ -43,7 +51,7 @@ pub(super) async fn rebalance_once(rt: &Arc<GroupRuntime>) -> Result<()> {
     };
     let expire_at = now_ms + (3 * rt.cfg.rebalance_ms) as f64;
 
-    // ① 心跳 + ② 清过期 + alive
+    // 先延长本节点存活证据再清理过期节点；份额只是争抢目标，实际独占性仍由各来源锁判定。
     rt.client
         .z_add(&nodes_key, expire_at, rt.node_id.as_str())
         .await?;
@@ -52,12 +60,12 @@ pub(super) async fn rebalance_once(rt: &Arc<GroupRuntime>) -> Result<()> {
         .await?;
     let alive = rt.client.z_card(&nodes_key).await?.max(1);
 
-    // ③ fair(ceil 除法)
-    let fair = rt.count.div_ceil(alive as u32).max(1);
+    // 节点数保持完整宽度，避免截断为零或更小除数；商至多为分区数，最少保留一次争抢机会。
+    let fair = u64::from(rt.count).div_ceil(alive).max(1) as u32;
     let owned: Vec<u32> = rt.claimed.read().expect("claimed").clone();
 
     if (owned.len() as u32) < fair {
-        // ④ 欠额抢占:从 0..count 顺扫未持有的分区(锁互斥天然防双持)
+        // 只有取得分区锁后才能交给协调器建立来源；退出时停止争抢，已交接责任按原有排干顺序收口。
         let mut acquired = 0u32;
         let need = fair - owned.len() as u32;
         for p in 0..rt.count {
@@ -69,7 +77,13 @@ pub(super) async fn rebalance_once(rt: &Arc<GroupRuntime>) -> Result<()> {
             }
             if let Some(guard) = rt.lock.try_lock(&rt.layout.lock_business_key(p)).await? {
                 acquired += 1;
-                let _ = rt.event_tx.send(Event::ClaimAcquired { p, guard }).await;
+                let _ = rt
+                    .event_tx
+                    .send(Event::ClaimAcquired {
+                        p,
+                        guard,
+                    })
+                    .await;
             }
         }
     } else if (owned.len() as u32) > fair {

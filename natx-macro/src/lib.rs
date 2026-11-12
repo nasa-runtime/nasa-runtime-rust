@@ -11,9 +11,11 @@ use syn::parse::Parser;
 use syn::{parse_macro_input, ItemFn, LitStr};
 
 /// 业务作用：为 MySQL async 业务函数生成同源环境事务编排。
+///
 /// 参数说明：
 /// - `attr`：空参数、datasource 名称或 never 传播声明。
 /// - `item`：返回值兼容 anyhow::Result 的 async 函数。
+///
 /// 返回：保留签名并包装函数体；非法参数或函数形式产生编译错误。
 ///
 /// 根调用由运行时开始并收口事务，嵌套调用加入当前同源事务；业务错误交由运行时裁决回滚。
@@ -48,9 +50,11 @@ pub fn transactional_pgsql(attr: TokenStream, item: TokenStream) -> TokenStream 
 }
 
 /// 业务作用：让 SQLite 业务函数进入同源本地事务，并显式选择外层锁策略。
+///
 /// 参数说明：
 /// - `attr`：datasource、mode 或 never 传播声明。
 /// - `item`：被包装的 async 函数。
+///
 /// 返回：保持签名的事务展开；非法模式、重复参数和互斥声明产生编译错误。
 #[proc_macro_attribute]
 pub fn transactional_sqlite(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -193,7 +197,7 @@ enum TransactionalMode {
 /// `datasource = "..."` 表示显式命名 datasource，`never` 表示拒绝 ambient 事务且不开启事务。
 /// 其它参数一律编译期报错；`never` 与 datasource 互斥(既拒绝事务又指定事务源自相矛盾)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `attr`: 属性括号内的 token stream。
 ///
 /// 返回：解析出的编排模式；非法语法返回编译错误。
@@ -248,7 +252,7 @@ fn parse_transactional_attr(
 
 /// 业务作用：校验 datasource 字面量是否能安全传给运行时。
 ///
-/// # 参数
+/// 参数说明：
 /// - `lit`: 属性中解析出的 datasource 字符串字面量。
 ///
 /// 返回：名称非空且无首尾空白时返回原字面量，否则返回编译错误。

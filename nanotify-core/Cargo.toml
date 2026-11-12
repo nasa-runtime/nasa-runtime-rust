@@ -15,4 +15,4 @@ categories = ["asynchronous"]
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 nametrics-core = { version = "2.0.0" }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1.54.1", features = ["sync"] }

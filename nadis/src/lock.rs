@@ -60,7 +60,11 @@ end
 return 0
 "#;
 
-/// 业务作用：进程级实例标识。
+/// 业务作用：惰性生成进程级身份，作为 holder 前缀以隔离不同进程的锁所有权。
+///
+/// 参数说明：无。
+///
+/// 返回：本进程共享的 UUID 小写紧凑文本，不随线程或任务改变。
 fn instance_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
@@ -79,37 +83,49 @@ pub enum HoldStatus {
     Unknown,
 }
 
-/// 分布式锁工厂。
-/// Clone 廉价(Arc + String + u64),供 `lock()` 超时路径 spawn 可取消安全的获取任务(R-P1i)。
+/// 分布式锁工厂，克隆后共享客户端并保留同一前缀和租约配置。
 #[derive(Clone)]
 pub struct DistributedLock {
+    /// 与业务命令共享的 Redis 客户端。
     client: Arc<RedisClient>,
+    /// 加在业务锁名前的稳定键前缀，已含此前缀的输入不重复添加。
     prefix: String,
+    /// 服务端租约毫秒数，构造客户端时已限制有效范围。
     lease_ms: u64,
 }
 
-/// 保存内部共享状态；用于在多个调用路径之间复用数据。
+/// 同一服务端 holder 的本地重入许可和续租责任。
 struct GuardInner {
+    /// 续租、持有查询和释放共用的客户端。
     client: Arc<RedisClient>,
     /// 完整锁 key(含 prefix)。
     lock_key: String,
+    /// 进程身份与递增序号组成的本次抢锁标识。
     holder: String,
+    /// 服务端续租窗口，也是看门狗周期的依据。
     lease_ms: u64,
     /// 本地重入深度(服务端计数恒 1; 本地重入模型)。
     depth: AtomicU32,
     /// 是否已发起服务端释放(防重复 UNLOCK)。
     released: AtomicBool,
+    /// 停止本 holder 看门狗的不可逆信号。
     cancel: CancellationToken,
+    /// 发布确定失权或看门狗异常退出的通知；没有通知不能证明当前持锁。
     lost_tx: watch::Sender<bool>,
 }
 
 impl GuardInner {
-    /// 业务作用：尝试服务端 UNLOCK，并在请求结束后无条件停止看门狗。
+    /// 业务作用：尝试服务端 UNLOCK，并在请求结束或等待被取消时停止看门狗。
     /// 先尝试解锁使持有期间续租持续有效；guard 已被消费，随后必须取消续租，避免无人持有的
     /// 孤立看门狗长期占锁。RENEW 仅更新仍存在的 holder，不会复活已删除的锁。
+    ///
     /// 参数说明：无。
-    /// 返回：确定释放时成功；请求失败时返回 ExecutionUnknown，残留锁由租约过期回收。
+    ///
+    /// 返回：确定释放时成功；请求失败时返回 ExecutionUnknown。取消等待不证明远端释放，
+    /// 已提交的续租仍可能完成，残留锁在最后一次服务端续租的租期结束后回收。
     async fn server_unlock(self: &Arc<Self>) -> Result<()> {
+        // 最后一份许可已消费，必须在首次等待前接管取消责任；Future 被丢弃也不能遗留持续续租的任务。
+        let _stop_on_exit = self.cancel.clone().drop_guard();
         let r: std::result::Result<Option<i64>, redis::RedisError> = redis::Script::new(UNLOCK_LUA)
             .key(&self.lock_key)
             .arg(self.lease_ms)
@@ -120,18 +136,16 @@ impl GuardInner {
         match r {
             Ok(Some(_)) => {
                 let channel = format!("{}:pub", self.lock_key);
-                //pub 丢失不再静默吞——失败时等锁者只能靠 PTTL 兜底迟醒(放大等锁延迟),
-                // 留 warn 便于排障(非正确性问题)。
+                // 锁释放已确定；通知失败只影响唤醒延迟，等待者仍需按 PTTL 再次争锁。
                 if let Err(e) = self.client.conn().publish::<_, _, i64>(&channel, "").await {
                     tracing::warn!(key = %self.lock_key, err = %e, "解锁后 pub 唤醒失败(等锁者将靠 PTTL 兜底迟醒)");
                 }
                 Ok(())
             }
             Ok(None) => Err(NasaRedisError::LockNotHeld(self.lock_key.clone())),
-            //UNLOCK 命令出错——释放结果不确定(可能已删/可能没删)。**看门狗已停**
-            // (上方无条件 cancel),锁不再续租,将于 ≤lease 后自然过期;调用方勿误以为仍持有/仍在续租。
+            // 释放结局未知时仍结束续租责任；不能把通信失败当作持锁证明，也不能撤销已提交的续租。
             Err(e) => Err(NasaRedisError::ExecutionUnknown(format!(
-                "UNLOCK 失败,锁释放结果不确定;看门狗已停、锁将于 ≤lease 后过期(不再续租): {e}"
+                "UNLOCK 失败,锁释放结果不确定;已请求停止看门狗,残留锁依赖最后一次服务端续租的租期回收: {e}"
             ))),
         }
     }
@@ -142,14 +156,17 @@ impl GuardInner {
 /// inner 使用 Option，使 unlock 与 Drop 可以通过 take 移交 Arc，保证每份引用只释放一次。
 /// 解锁不会遗留持有续租状态的额外引用，守卫销毁仍遵循租约与显式解锁的边界。
 pub struct LockGuard {
+    /// 当前重入许可持有的共享状态；消费时取走，避免 Drop 重复释放许可。
     inner: Option<Arc<GuardInner>>,
 }
 
 impl DistributedLock {
     /// 业务作用：创建分布式锁组件,读取客户端里的锁前缀和 lease 配置。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `client`: Redis 客户端共享句柄。
+    ///
+    /// 返回：绑定该客户端前缀和租约的锁工厂，此时不争锁或启动看门狗。
     pub fn new(client: Arc<RedisClient>) -> Self {
         let prefix = client.config().lock.prefix.clone();
         let lease_ms = client.config().lock.lease_ms;
@@ -160,13 +177,12 @@ impl DistributedLock {
         }
     }
 
-    /// 业务作用：业务 key → 完整锁 key。**幂等**:若 `key` 已以
-    /// `self.prefix`(`DISTRIBUTED-LOCK:` 等,distinctive)开头,原样返回不再叠前缀——这样误把
-    /// `guard.lock_key()`(已含前缀的完整 key)传给 `holds_status`/`lock`/`try_lock` 不再双前缀
-    /// 恒判 Lost / 抢错锁,所有锁 API 对"已含前缀的 key"行为一致。业务 key 不会以锁前缀开头,故无误伤。
+    /// 业务作用：统一业务锁名和完整锁键的寻址规则，避免对已有前缀的键重复添加前缀。
     ///
-    /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 参数说明：
+    /// - `key`：业务锁名或完整锁键，以配置前缀开头时始终按完整键解释。
+    ///
+    /// 返回：保留已有前缀，或拼接一次前缀；业务命名必须避免把需要额外前缀的名称与完整键混用。
     fn full_key(&self, key: &str) -> String {
         if !self.prefix.is_empty() && key.starts_with(&self.prefix) {
             key.to_string()
@@ -177,7 +193,9 @@ impl DistributedLock {
 
     /// 业务作用：生成一次抢锁使用的唯一 holder token。
     ///
-    /// holder 由进程实例标识和本进程递增序号组成,用于 Lua 续租/释放时确认“锁仍由自己持有”。
+    /// 参数说明：无。
+    ///
+    /// 返回：进程实例标识与递增序号组成的 holder，用于续租和释放时匹配所有权；序号回绕前同进程不重复。
     fn new_holder() -> String {
         format!(
             "{}:{}",
@@ -186,20 +204,24 @@ impl DistributedLock {
         )
     }
 
-    /// 业务作用：非阻塞抢锁。Ok(Some(guard)) = 成功(看门狗已启动);Ok(None) = 他人持有。
+    /// 业务作用：进行一次异步抢锁，争用时直接返回而不进入等待循环。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 业务锁 key;可传未加前缀的业务 key 或已完整加前缀的锁 key。
+    ///
+    /// 返回：取得锁时返回已启动看门狗的守卫，争用时返回 None；通信或脚本失败返回错误，未确认结果不能视为持锁。
     pub async fn try_lock(&self, key: &str) -> Result<Option<LockGuard>> {
         self.try_lock_inner(self.full_key(key), Self::new_holder())
             .await
     }
 
-    // Attempts to acquire the lock with the prepared holder token.
+    /// 业务作用：用已选定的完整键和 holder 执行一次服务端抢占，只有明确成功才建立本地许可。
     ///
-    /// # 参数
-    /// 业务作用：- `lock_key`: 业务 key 或 Redis key,用于定位数据。
-    /// - `holder`: 当前分布式锁持有者 token。
+    /// 参数说明：
+    /// - `lock_key`：已包含锁前缀的完整 Redis 键。
+    /// - `holder`：本轮唯一的抢锁身份，同一等待轮的确定失败后重试可以复用。
+    ///
+    /// 返回：脚本确认成功时建立守卫；返回剩余租期时表示争用，通信或脚本错误直接透传。
     async fn try_lock_inner(&self, lock_key: String, holder: String) -> Result<Option<LockGuard>> {
         let r: Option<i64> = redis::Script::new(LOCK_LUA)
             .key(&lock_key)
@@ -213,11 +235,13 @@ impl DistributedLock {
         }
     }
 
-    // Builds a guard and starts lease maintenance.
+    /// 业务作用：为已确认取得的服务端 holder 建立首份本地许可，并启动续租和确定失权通知。
     ///
-    /// # 参数
-    /// 业务作用：- `lock_key`: 业务 key 或 Redis key,用于定位数据。
-    /// - `holder`: 当前分布式锁持有者 token。
+    /// 参数说明：
+    /// - `lock_key`：已成功持有的完整 Redis 锁键。
+    /// - `holder`：服务端已确认的持有者身份，所有续租和释放都必须匹配它。
+    ///
+    /// 返回：拥有一份许可的守卫；看门狗异步续租，通信未知不等于持锁证明，业务副作用仍需 fencing。
     fn spawn_guard(&self, lock_key: String, holder: String) -> LockGuard {
         let (lost_tx, _) = watch::channel(false);
         let inner = Arc::new(GuardInner {
@@ -232,24 +256,21 @@ impl DistributedLock {
         });
         let wd = Arc::clone(&inner);
         tokio::spawn(async move {
-            //**task 退出(含 panic/挂死被 drop)兜底发 lost**——否则续租链
-            // 静默死亡时 `lost()` 永远 false、业务以为仍持有 → 与新 owner 双持有破坏互斥。
-            // 干净退出(显式 unlock 触发 cancel)时 disarm 不误发 lost。
-            //
-            //3(panic 策略):本守卫靠 Drop 兜底,**在 `panic=unwind`(Rust/本仓默认)
-            // 下,task panic 会展开栈、Drop 照常执行 → lost 正常发出**(unwind 期正是 Drop 触发时机)。
-            // 仅在 `panic=abort` 下 Drop 不跑——但那时**整个进程已 abort**,持锁的业务进程一并消失,
-            // 不存在"本地仍以为持锁却与新 owner 双持有"的场景,锁由 lease 过期兜底清理(moot-but-safe,
-            // 非"比静默更糟")。若部署改 `panic=abort`,应同时确保锁的 lease 足够短以快速回收;此假设
-            // 若部署改 `panic=abort`,需用足够短的 lease 限制异常退出后的锁残留时间。
-            /// watchdog 任务退出时的 lost 兜底发送器。
-            ///
-            /// 第二个字段为是否 armed；干净释放锁时会解除 armed,异常退出或 panic 展开时会通知业务锁已丢失。
-            struct LostOnExit(watch::Sender<bool>, bool);
+            // 续租任务异常退出时必须通知本地业务失权；正常释放解除通知，进程直接退出则由服务端租约回收。
+            /// 看门狗任务退出时的本地失权通知责任。
+            struct LostOnExit(
+                /// 当前 holder 的失权通知通道。
+                watch::Sender<bool>,
+                /// 是否仍需在退出时通知；显式释放或已有通知时解除。
+                bool,
+            );
             impl Drop for LostOnExit {
                 /// 业务作用：在 watchdog 异常退出时发布锁丢失信号。
                 ///
-                /// 如果守卫仍处于 armed 状态,说明不是正常 unlock/cancel 路径,必须让业务侧看到 `lost()`。
+                /// 参数说明：无。
+                ///
+                /// 返回：仍处于 armed 状态时发布本地失权通知，避免业务继续依赖已结束的续租维护；
+                /// 正常解除后不重复通知，不发 Redis 命令，也不证明远端锁已释放。
                 fn drop(&mut self) {
                     if self.1 {
                         let _ = self.0.send(true);
@@ -281,8 +302,7 @@ impl DistributedLock {
                         match r {
                             Ok(Ok(1)) => {} // 续期成功
                             Ok(Ok(_)) => {
-                                // **服务端明确返 0**:锁已不归本 holder(过期被抢/被删)→ 真 Lost(definitive)。
-                                // 这是**唯一**判 lost 的依据。
+                                // 服务端明确不再匹配 holder，立即通知本地业务失权并停止继续续租。
                                 let _ = wd.lost_tx.send(true);
                                 lost_guard.1 = false;
                                 tracing::warn!(key = %wd.lock_key, "看门狗:服务端确认锁已丢失,停止续期");
@@ -298,17 +318,19 @@ impl DistributedLock {
                 }
             }
         });
-        LockGuard { inner: Some(inner) }
+        LockGuard {
+            inner: Some(inner),
+        }
     }
 
-    /// 业务作用：阻塞式加锁。TOCTOU 防御:订阅就绪后立即再抢,再 select!(通知, PTTL 兜底)。
+    /// 业务作用：异步等待锁可用，订阅确认后再次争锁，并以剩余租期补偿丢失的解锁通知。
     ///
-    ///`timeout` 是**绝对 deadline**,覆盖整个获取过程——try_lock(SET NX)、
-    /// `get_async_pubsub`、`subscribe`、`PTTL` 和等待均受同一期限约束，连接重试不能重新开始计时。
-    ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 业务锁 key;可传未加前缀的业务 key 或已完整加前缀的锁 key。
-    /// - `timeout`: 获取锁的绝对超时;`None` 表示一直等待直到拿到锁或出错。
+    /// - `timeout`：从调用开始计算的获取预算；None 表示持续等待直到成功或出错。
+    ///
+    /// 返回：成功返回守卫；超时或 Redis 操作失败返回错误。到期后可额外等待一次获取收敛窗口，
+    /// 若迟到取得锁还会尝试有限时解锁，未确认的远端状态最终依赖租约回收。
     pub async fn lock(&self, key: &str, timeout: Option<Duration>) -> Result<LockGuard> {
         let lock_key = self.full_key(key);
         match timeout {
@@ -321,20 +343,13 @@ impl DistributedLock {
                 let d = tokio::time::Instant::now().checked_add(t).ok_or_else(|| {
                     NasaRedisError::Config("lock timeout 无法表示为 Tokio deadline".into())
                 })?;
-                //不再 `timeout_at(d, lock_inner)` 直接在 deadline
-                // 处 drop 在途 LOCK——那会把"服务端已加锁但本地 future 被取消"留成幽灵锁(无 guard
-                // 可释放,只能等 lease 过期)。改为 **spawn** 获取任务(可取消安全)+ 内层自感知 deadline。
-                // **返回时机(修正)**:
-                //   · 争用未果(常态):内层 lock_inner 在 napping/重试间到点自返 LockTimeout → 在 **~t** 返回;
-                //   · 某次 redis await 真挂死(连接抖动):内层卡在 await 无法自返 → 外层 timeout_at 命中后给
-                //     一小段 grace 让**那一次在途 LOCK** 收敛:若拿到 guard 则持有它干净 `unlock()`(绝无幽灵)
-                //     后返回 LockTimeout；grace 内仍未收敛才 abort，独立 holder 的残留锁由租约过期回收。
-                // 即上界为 **deadline + grace**(grace 仅覆盖挂死那一次 LOCK 的 1-RTT 收敛,非每次都吃满)。
+                // 独立任务保留在途获取的结果接收责任；到期后仍给一次收敛窗口，迟到取得的锁需要尝试释放。
                 let this = self.clone();
                 let lk = lock_key.clone();
-                // 把 deadline 传入内层——争用场景内层到点自返 LockTimeout(在 ~t),外层 timeout_at+grace
-                // 此后只在"某次 redis await 真挂死"时兜底(grace 让在途 LOCK 1-RTT 收敛,防幽灵)。
-                let mut task = tokio::spawn(async move { this.lock_inner(&lk, Some(d)).await });
+                let mut task = tokio::spawn(async move {
+                    // 循环内部也检查同一截止，争用等待不会为每次重试重新分配预算。
+                    this.lock_inner(&lk, Some(d)).await
+                });
                 match tokio::time::timeout_at(d, &mut task).await {
                     Ok(joined) => match joined {
                         Ok(r) => r, // 任务在 deadline 内完成(成功/错误原样返回)
@@ -343,12 +358,10 @@ impl DistributedLock {
                         ))),
                     },
                     Err(_) => {
-                        // deadline 到:给 grace 让在途 LOCK 收敛,避免幽灵锁(lease/10,夹 [50,500]ms)
+                        // 到期后为在途获取保留有限收敛时间；仍未知时停止等待，残留状态依赖服务端租约。
                         let grace = Duration::from_millis((self.lease_ms / 10).clamp(50, 500));
                         match tokio::time::timeout(grace, &mut task).await {
-                            // grace 内拿到锁:持有 guard,干净 unlock 后守 deadline 契约报超时。
-                            //unlock 套小 timeout(不让释放再挂死突破 deadline 契约)+
-                            // 失败打 warn(不静默吞 ExecutionUnknown——释放不确定也要留痕,锁由 lease 兜底)。
+                            // 迟到取得的锁不能交给已超时调用方，另给一次有限窗口尝试释放并保留失败日志。
                             Ok(Ok(Ok(g))) => {
                                 let lk = lock_key.clone();
                                 match tokio::time::timeout(grace, g.unlock()).await {
@@ -366,7 +379,7 @@ impl DistributedLock {
                             Ok(Ok(Err(_))) | Ok(Err(_)) => {
                                 Err(NasaRedisError::LockTimeout(lock_key))
                             }
-                            // grace 也耗尽(连接挂死):abort,残留幽灵 ≤lease 自愈
+                            // 获取仍未返回时请求中止；不能据此宣称远端尚未执行或锁已释放。
                             Err(_) => {
                                 task.abort();
                                 Err(NasaRedisError::LockTimeout(lock_key))
@@ -379,30 +392,25 @@ impl DistributedLock {
         }
     }
 
-    /// 业务作用：加锁重试循环。`deadline`:`Some` 时争用场景内层**自感知 deadline**(napping/重试**之间**到点即返
-    /// `LockTimeout`,使 `lock(k, Some(t))` 在 ~t 返回——不再被外层 grace 走满);`None` 时无限阻塞。
-    /// **关键(防幽灵)**:deadline 只在 try_lock await **之间**检查、并把 nap 夹到剩余预算,**绝不取消在途
-    /// 的一次 LOCK(SET NX)** → 不会留幽灵锁。真正卡在某次 redis await(连接挂死)时由 `lock` 外层
-    /// `timeout_at + grace + abort` 兜底(grace 让那一次在途 LOCK 1-RTT 收敛后干净释放)。
+    /// 业务作用：按抢锁、确认订阅、再次抢锁和等待通知的顺序重试，避免订阅建立期间丢失释放事件。
     ///
-    /// # 参数
-    /// - `lock_key`: 业务 key 或 Redis key,用于定位数据。
-    /// - `deadline`: 关闭或等待的绝对截止时间。
+    /// 参数说明：
+    /// - `lock_key`：已经包含前缀的完整锁键。
+    /// - `deadline`：可选的单调截止，循环开始和等待间隔据此限制继续争锁。
+    ///
+    /// 返回：确认抢锁成功时返回守卫，循环发现到期则返回 LockTimeout，Redis 失败透传；
+    /// 本函数不取消在途单次 Redis 请求，外层负责获取任务的期限与清理。
     async fn lock_inner(
         &self,
         lock_key: &str,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<LockGuard> {
         loop {
-            // 争用未果时内层到点自返——只在 try_lock **之间**检查(不打断在途 LOCK,无幽灵)。
+            // 在发起下一轮抢占前检查截止，不能因重试重新延长调用方预算。
             if deadline.is_some_and(|dl| tokio::time::Instant::now() >= dl) {
                 return Err(NasaRedisError::LockTimeout(lock_key.to_string()));
             }
-            //**每轮等待用全新 holder**——等锁循环本不该"重入"。若上一轮 try_lock
-            // 实际在服务端加了锁但本地状态丢失(timeout 取消/响应丢失,ExecutionUnknown),复用同
-            // holder 会让本轮 LOCK_LUA 命中 `hexists==1` 误判为**重入** hincrby 到 2,而 Rust 是全新
-            // guard(depth=1)→ 服务端计数 2 / 本地 1 永久错位,锁到 lease 才释放。全新 holder 下:
-            // 本轮 SET 失败(锁被旧 holder 持有)→ 正常等待,旧 holder 锁自然过期后再抢,无错位。
+            // 每轮使用新 holder，避免把上轮不确定的远端获取解释为服务端重入而造成许可计数不一致。
             let holder = Self::new_holder();
             if let Some(g) = self
                 .try_lock_inner(lock_key.to_string(), holder.clone())
@@ -410,11 +418,11 @@ impl DistributedLock {
             {
                 return Ok(g);
             }
-            // 独立 Pub/Sub 连接订阅解锁通道(pub")
+            // 独立订阅连接只接收释放唤醒，不阻塞普通命令连接。
             let channel = format!("{lock_key}:pub");
             let mut pubsub = self.client.raw_client().get_async_pubsub().await?;
             pubsub.subscribe(&channel).await?;
-            // ★ TOCTOU:订阅确认就绪后立即再抢(pub 可能发生在订阅完成前)
+            // 释放可能发生在订阅确认前，确认后再次争锁以免丢失唯一唤醒。
             if let Some(g) = self
                 .try_lock_inner(lock_key.to_string(), holder.clone())
                 .await?
@@ -428,10 +436,7 @@ impl DistributedLock {
                 .pttl(lock_key)
                 .await
                 .unwrap_or(self.lease_ms as i64);
-            //区分 PTTL 负值语义,不再把 -1/-2 一律 clamp 成 20ms 高频空转:
-            //   -2 = 锁已不存在(刚被释放/过期)→ 短 nap 立即重抢;
-            //   -1 = 锁存在但无 TTL(异常态:非本库所设/SET 漏 PX)→ 退避一个 lease 周期,避免空转;
-            //   >=0 = 实际剩余 TTL → clamp 到 [20, lease]。
+            // 键已不存在时短暂等待后重试；无 TTL 属于异常锁状态，以租约周期退避避免高频空转。
             let nap = Duration::from_millis(match pttl {
                 -2 => 20,
                 -1 => self.lease_ms,
@@ -453,12 +458,15 @@ impl DistributedLock {
         }
     }
 
-    /// 业务作用：模板:加锁 → 执行 → 显式解锁(推荐入口)。
+    /// 业务作用：取得锁后执行异步业务，再显式释放最后一份许可，向调用方传播释放失败。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 要保护的业务锁 key。
-    /// - `timeout`: 获取锁的绝对超时;`None` 表示一直等待。
+    /// - `timeout`：只约束获取阶段的等待预算，None 表示持续等待。
     /// - `f`: 拿到锁后执行的异步业务逻辑。
+    ///
+    /// 返回：业务完成且解锁成功后返回其输出；获取或解锁失败返回错误。业务 panic 或外部取消依赖守卫析构，
+    /// 本入口不因租约失效自动中断业务，外部副作用仍需 fencing。
     pub async fn with_lock<F, Fut, T>(
         &self,
         key: &str,
@@ -479,9 +487,11 @@ impl DistributedLock {
     /// `full_key` 保持幂等；即使误传已含前缀的 `guard.lock_key()`，也不会因双前缀而恒判
     /// Lost;持有自己锁的便捷查询仍推荐 `guard.still_held()`(零前缀风险)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 要检查的业务锁 key 或完整锁 key。
     /// - `holder`: 持锁方 token,通常来自 [`LockGuard::holder`]。
+    ///
+    /// 返回：查询时 holder 匹配为 Held，不匹配为 Lost，通信或脚本错误为 Unknown；快照不能代替后续写入的 fencing。
     pub async fn holds_status(&self, key: &str, holder: &str) -> HoldStatus {
         let r: std::result::Result<i64, redis::RedisError> = redis::Script::new(HOLDS_LUA)
             .key(self.full_key(key))
@@ -498,7 +508,9 @@ impl DistributedLock {
 
 impl LockGuard {
     /// 业务作用：缺少任务退出证明时只停止续租，禁止析构路径提前主动解锁。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：消费守卫但不发送 UNLOCK，服务端租约按自身期限结束。
     pub(crate) fn abandon(mut self) {
         if let Some(inner) = self.inner.take() {
@@ -507,8 +519,11 @@ impl LockGuard {
         }
     }
 
-    /// 业务作用：取内部共享态。`inner` 只在 `unlock`/`Drop` 消费 self 时被 `take()`,而那两处消费后不再访问
-    /// self,故常规方法调用期间恒为 `Some`;`expect` 是不可达的编程错误兜底。
+    /// 业务作用：借用尚未消费许可的共享 holder 状态，供守卫查询和重入复用同一所有权身份。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：共享状态引用；许可已被内部消费却仍访问时触发不变量断言。
     #[inline]
     fn arc(&self) -> &Arc<GuardInner> {
         self.inner
@@ -517,19 +532,28 @@ impl LockGuard {
     }
 
     /// 业务作用：返回当前锁持有者 token，供续租和解锁脚本复验所有权。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用本次抢锁身份；该标识本身不证明租约仍然有效。
     pub fn holder(&self) -> &str {
         &self.arc().holder
     }
 
     /// 业务作用：返回当前 guard 保护的 Redis key。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：借用已包含配置前缀的完整锁键，不查询持有状态。
     pub fn lock_key(&self) -> &str {
         &self.arc().lock_key
     }
 
-    /// 业务作用：本 guard 当前是否仍由本持有者持有(消除双前缀 footgun)。
-    /// **直接用本 guard 的完整 lock_key + holder**,不经 `DistributedLock::holds_status`(后者对
-    /// 传入 key 再做一次 `full_key` → 若误传 `guard.lock_key()`(已含前缀)会双前缀恒判 Lost)。
-    /// 业务"我还持有这把锁吗"应优先用本方法,而非 `holds_status(guard.lock_key(), ...)`。
+    /// 业务作用：用守卫自带的完整键和 holder 查询当前持有状态，避免调用方提供不匹配的身份组合。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：查询时匹配为 Held，不匹配为 Lost，查询失败为 Unknown；结果只是观测，不能保证后续副作用仍排他。
     pub async fn still_held(&self) -> HoldStatus {
         let r: std::result::Result<i64, redis::RedisError> = redis::Script::new(HOLDS_LUA)
             .key(&self.arc().lock_key) // 已是完整 key,不再 full_key
@@ -543,14 +567,20 @@ impl LockGuard {
         }
     }
 
-    /// 业务作用：锁丢失通知(看门狗 RENEW 明确返 0 → true)。
+    /// 业务作用：订阅当前 holder 的本地失权信号，供业务在确定失锁或续租任务异常退出时停止工作。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：独立 watch 接收端；true 表示已经通知失权，false 不证明远端仍持锁，正常释放不保证发送 true。
     pub fn lost(&self) -> watch::Receiver<bool> {
         self.arc().lost_tx.subscribe()
     }
 
-    /// 业务作用：显式重入:共享同一 GuardInner,本地深度 +1,**不发服务端 LOCK**。
-    /// ⚠ 契约:不得对**已最终释放**的 guard 重入(否则 fetch_add 产生幽灵 guard,其后续 unlock 返
-    /// LockNotHeld)。debug 构建断言捕获此误用(release 构建不付出运行时开销)。
+    /// 业务作用：为同一 holder 增加本地重入许可，不额外发送服务端抢锁或延长租约。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：共享内部状态的新守卫，所有许可结束后才允许远端释放；不得对已停止释放责任的守卫重入。
     pub fn reenter(&self) -> LockGuard {
         debug_assert!(
             !self.arc().released.load(Ordering::Acquire),
@@ -562,8 +592,12 @@ impl LockGuard {
         }
     }
 
-    /// 业务作用：显式解锁(正确性入口)。仍有其他重入 permit → Err(StillReentered)(本 permit 已消费,
-    /// 服务端锁未动);最后一个 permit → 停看门狗 + 服务端 UNLOCK + pub 唤醒等锁者。
+    /// 业务作用：消费当前重入许可，只有最后一份许可才提交服务端释放并尝试通知等待者。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：仍有其它许可时返回 StillReentered 且本许可已消费；最后一份释放成功时完成。
+    /// 远端已不匹配或释放结局未知返回对应错误，不能据此恢复已消费的许可。
     pub async fn unlock(mut self) -> Result<()> {
         // 把 Arc move 出(self.inner 置 None):本方法负责这一份 permit 的 depth 递减,
         // 随后 self 走 Drop 时因 inner 为 None 不再重复递减，`inner` 在函数结束时释放这一份引用。
@@ -585,8 +619,11 @@ impl LockGuard {
 }
 
 impl Drop for LockGuard {
-    /// 业务作用：best-effort:最后一个 permit 被 Drop(未显式 unlock)→ 取消看门狗 + spawn UNLOCK。
-    /// 不承诺确定释放(runtime 关闭时 spawn 可能不执行),兜底 = lease 过期。
+    /// 业务作用：销毁本地许可，最后一份未显式释放的许可停止续租并尽力安排远端解锁。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：同步消费许可；可用运行时存在时安排异步解锁，否则依赖租约到期，不保证析构时远端锁已经释放。
     fn drop(&mut self) {
         // unlock 已 take 过则 inner 为 None(depth 由 unlock 递减完毕),此处不再重复递减。
         let Some(inner) = self.inner.take() else {

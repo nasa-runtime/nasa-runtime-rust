@@ -39,6 +39,10 @@ struct RedisClientBackend {
 #[async_trait::async_trait]
 impl cacheable::cache::CacheBackend for RedisClientBackend {
     /// 业务作用：经受管客户端执行只读 `PING` 健康探针。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：Redis 探针成功时为 Ok，连接或命令错误向上传播；不读取缓存值，也不证明广播订阅健康。
     async fn health_check(&self) -> anyhow::Result<()> {
         self.client.ping().await?;
         Ok(())
@@ -46,18 +50,22 @@ impl cacheable::cache::CacheBackend for RedisClientBackend {
 
     /// 业务作用：经受管客户端读一个 key(GET)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 完整缓存 key。
+    ///
+    /// 返回：存在时返回原始字符串，缺失时为 None，Redis 或字符串解码错误向上传播；不反序列化业务对象或执行回源。
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
         Ok(self.client.get::<String>(key).await?)
     }
 
     /// 业务作用：经受管客户端以毫秒 TTL 写一个 key(PSETEX)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 完整缓存 key。
     /// - `value`: 已序列化的 JSON 载荷。
     /// - `ttl_ms`: 过期毫秒数。
+    ///
+    /// 返回：Redis 写入成功时为 Ok，连接、命令或过期参数错误向上传播；不解析载荷，不同步失效其它实例的 L1。
     async fn set(&self, key: &str, value: &str, ttl_ms: u64) -> anyhow::Result<()> {
         self.client
             .set_ttl(key, value, std::time::Duration::from_millis(ttl_ms))
@@ -67,8 +75,10 @@ impl cacheable::cache::CacheBackend for RedisClientBackend {
 
     /// 业务作用：经受管客户端删一个 key(DEL)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `key`: 完整缓存 key。
+    ///
+    /// 返回：DEL 成功时为 Ok，目标已不存在也视为成功；Redis 错误传播给调用方，不在此广播 L1 失效。
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         self.client.del(&[key]).await?;
         Ok(())
@@ -88,8 +98,12 @@ const CACHE_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(15
 
 impl Application {
     /// 业务作用：为显式持久失效记录提供标准受管策略入口，保持调用方事务上下文。
-    /// 参数说明：`sink` 只负责记录领域意图，不应自行启动消费循环；其依赖使用受管资源。
-    /// 返回：缓存已声明且启用、策略唯一时登记 owner；冲突或登记失败立即撤销本次安装。
+    ///
+    /// 参数说明：
+    /// - `sink`：在调用方事务内记录失效意图的业务策略；实际缓存失效与投递由该策略的后续流程承担。
+    ///
+    /// 返回：UserHook 仍开放、缓存已声明且启用、策略唯一时安装并托管 owner；配置或冲突错误不替换已有策略。
+    /// 安装后若资源登记失败，由 Drop 关闭本次入口；成功登记不表示任何失效记录已执行。
     pub fn configure_cache_invalidation_sink(
         &self,
         sink: Arc<dyn cacheable::DurableInvalidationSink>,
@@ -117,12 +131,17 @@ impl Application {
     }
 }
 
+/// 将持久失效策略的关闭与在途等待纳入宿主资源生命周期。
+/// 字段 `0` 持有本组件独占的策略 owner，释放时关闭该代记录入口。
 struct DurableSinkResource(cacheable::DurableInvalidationOwner);
 
 impl crate::ManagedResource for DurableSinkResource {
     /// 业务作用：撤销持久意图准入并等待在途记录释放事务依赖。
-    /// 参数说明：`context` 为宿主统一停机期限。
-    /// 返回：记录全部结束时成功；超时报告未完成，入口保持关闭。
+    ///
+    /// 参数说明：
+    /// - `context`：携带宿主共享截止点，用于限制等待在途持久记录释放策略的时间。
+    ///
+    /// 返回：关闭新记录准入并等到所有在途调用释放后成功；超时返回 Stopping 错误，入口保持关闭，不回滚已记录的意图。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             tokio::time::timeout_at(context.deadline().into(), self.0.shutdown())
@@ -142,6 +161,7 @@ impl crate::ManagedResource for DurableSinkResource {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct CacheConfigRoot {
+    /// 可选缓存配置段；声明组件却缺少该段时拒绝启动。
     cache: Option<CacheConfig>,
 }
 
@@ -196,23 +216,32 @@ struct InvalidationConfig {
 }
 
 /// 业务作用：正常缓存值 TTL 缺省。
+///
+/// 参数说明：无。
+///
+/// 返回：300 秒的基础存活时间，供未配置该字段时构造缓存层；不改变已存在的 Redis key。
 fn default_cache_ttl_secs() -> u64 {
     DEFAULT_CACHE_TTL_SECS
 }
 
 /// 业务作用：空哨兵 TTL 缺省。
+///
+/// 参数说明：无。
+///
+/// 返回：30 秒的空结果存活时间，用于短期抑制重复回源，不代表正常缓存值的 TTL。
 fn default_null_ttl_secs() -> u64 {
     DEFAULT_NULL_TTL_SECS
 }
 
 impl CacheConfig {
-    /// 业务作用：无副作用校验:`two_level` 必须给 L2 连接串;启用广播必须给广播连接串。
+    /// 业务作用：在缓存装配前检查具名资源语法、两级缓存唯一连接来源、TTL 与广播来源约束。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `phase`:本次校验所属生命周期阶段,用于错误归因。
     ///
-    /// 返回：两级缓存、广播连接来源与 TTL 合同均成立时成功；歧义或越界配置在网络 I/O 前失败。
+    /// 返回：适用于当前模式的约束满足时成功，否则带指定阶段的配置错误；禁用和本地模式仍检查引用语法及广播来源，
+    /// 但不检查两级 TTL，不解析 URL、不确认具名 Redis 已发布，也不执行 scene 审计。
     fn validate(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
         let has_ref = self
             .redis_ref
@@ -302,6 +331,7 @@ fn validate_redis_reference(
 
 /// 缓存组件:Start 建两级缓存管道并装入进程级 runtime,停机排空失效广播。
 pub(crate) struct CacheComponent {
+    /// Start 成功后保存的最终模式与连接配置，不在健康探针中重新读取。
     config: Option<CacheConfig>,
     /// Ready 后交由 Runner 监督的后端健康 monitor。
     critical_task: Option<ApplicationFuture<'static>>,
@@ -310,9 +340,9 @@ pub(crate) struct CacheComponent {
 impl CacheComponent {
     /// 业务作用：创建尚未读取配置的缓存组件。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数;L2 连接与失效广播在 Start 阶段按最终配置创建。
+    /// 返回：没有配置快照和监督任务的组件，不连接 Redis 或发布缓存运行时；实际模式在 Start 确定。
     pub(crate) fn new() -> Self {
         Self {
             config: None,
@@ -324,6 +354,14 @@ impl CacheComponent {
 /// 业务作用：周期探测当前 generation 的 L2 后端并刷新非关键 readiness。
 ///
 /// Cache miss 可以回源，因此运行期后端失败只降级而不摘流；启动期无法建立后端仍然 fail closed。
+///
+/// 参数说明：
+/// - `application`：提供应用状态变更通知，启动未完成时等待，停机或失败时终止探测。
+/// - `handle`：进程级只读缓存入口，每次探针固定当时的后端 Arc；不持有某一代运行时的所有权或停机权限。
+/// - `contributor`：不影响整体就绪准入的缓存观测槽位，记录健康、降级和停止状态。
+///
+/// 返回：观察到停机或失败时标记 NotReady 并正常结束；Ready 期间每轮探针至多等待五秒，失败仅记录 Degraded，
+/// 轮次间等待同样可被应用状态变更打断，不在此重连 Redis 或修订缓存配置。
 async fn run_cache_monitor(
     application: Application,
     handle: cacheable::CacheHandle,
@@ -373,24 +411,25 @@ async fn run_cache_monitor(
 impl ApplicationComponent for CacheComponent {
     /// 业务作用：返回缓存组件稳定身份。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数;Runner 用它归类缓存相关错误。
+    /// 返回：固定的 ComponentId::Cache，供生命周期排序与错误归类，不反映缓存是否已启用或健康。
     fn id(&self) -> ComponentId {
         ComponentId::Cache
     }
 
-    /// 业务作用：读取配置,`two_level` 时建 L2 + 失效广播、装入进程级 runtime,并压入 Stopping 停机 action。
+    /// 业务作用：按配置审计 scene 并装配禁用、本地或两级缓存，将启用模式的所有权交给停机动作。
     ///
     /// 管道在 Start 建立(而非 Ready):Batch 不执行 Ready,但 Start 与停机都执行,故两种模式都能建立
     /// 并在退出前停机。装入进程级 `CacheRuntime` 早于流量入口 Ready,`#[cached]` 首次命中即可用 L2。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`:提供最终配置与 active stack 的 Start 上下文。
     ///
-    /// 返回：禁用模式无副作用完成；两级缓存的 L2、广播与健康监督全部受管后成功，任一启动门禁
-    /// 失败时不发布半完成运行时。
+    /// 返回：配置和 scene 审计通过后，禁用模式不建缓存资源，本地模式托管刷新任务，两级模式安装运行时并登记非关键健康观测。
+    /// 失败返回 Start 错误；两级运行时先安装再登记观测，登记失败时由局部 guard 撤销其所属代，不能据此保证它从未短暂可见。
+    /// 健康任务在此仅保存，实际启动由 Runner 后续接管。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let config = read_cache_config(context.application())?;
@@ -430,6 +469,7 @@ impl ApplicationComponent for CacheComponent {
                         error,
                     )
                 })?;
+            // 运行时此时已经安装；登记失败须由局部 guard 撤销本代，避免遗留失去宿主的全局入口。
             let contributor = context.application().register_readiness(
                 ComponentId::Cache,
                 Arc::<str>::from("cache:l2"),
@@ -450,7 +490,9 @@ impl ApplicationComponent for CacheComponent {
                 cacheable::cache_handle(),
                 contributor,
             )));
-            context.activate(Box::new(CacheShutdown { guard: Some(guard) }));
+            context.activate(Box::new(CacheShutdown {
+                guard: Some(guard),
+            }));
             tracing::info!(
                 "cache component installed two-level runtime (broadcast={})",
                 config.invalidation.enabled
@@ -461,6 +503,10 @@ impl ApplicationComponent for CacheComponent {
     }
 
     /// 业务作用：取出缓存后端健康 monitor，交给 Runner 在 Ready 后监督。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：两级缓存已装配时首次移交命名任务；禁用、本地模式、尚未装配或已移交时为 None，不在此执行探针。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.critical_task
             .take()
@@ -474,7 +520,8 @@ impl ApplicationComponent for CacheComponent {
 /// - `application`: 提供具名 Redis 资源的应用容器。
 /// - `config`: 已完成无副作用校验的缓存配置。
 ///
-/// 返回：缓存与可选广播均就绪时返回拥有式句柄；具名资源缺失或广播建连失败时返回启动错误。
+/// 返回：L2 和可选广播装配完成、运行时已安装时返回拥有式句柄；具名资源缺失、feature 不足、建连或所有权冲突时失败。
+/// 广播复用受管发布客户端仍会派生专用订阅连接；返回值不证明未来广播送达或 L2 持续健康。
 async fn build_cache_runtime(
     application: &Application,
     config: &CacheConfig,
@@ -501,8 +548,8 @@ async fn build_cache_runtime(
             {
                 let _ = application;
                 anyhow::bail!(
-                "cache.invalidation.redis_ref=`{reference}` requires the `redis` feature/component"
-            );
+                    "cache.invalidation.redis_ref=`{reference}` requires the `redis` feature/component"
+                );
             }
         }
     }
@@ -516,22 +563,26 @@ async fn build_cache_runtime(
     cacheable::CacheRuntimeGuard::start(layer, broadcast_url).await
 }
 
-/// 停机 action:排空并停止失效广播(发布 drainer + 订阅循环),join 后退出。
-///
-/// 等待上限由 Runner 对每个 action 施加的全局剩余停机预算 timeout 约束。
+/// 本地缓存停机动作，负责关闭刷新准入并按宿主期限等待任务退出。
+/// 字段 `0` 持有仅本地模式的任务 owner，不持有 Redis 广播资源。
 struct LocalCacheShutdown(cacheable::LocalCacheRuntimeGuard);
 
 impl ShutdownAction for LocalCacheShutdown {
     /// 业务作用：标识纯本地缓存任务清理。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定动作名称。
     fn label(&self) -> &'static str {
         "local-cache"
     }
 
     /// 业务作用：撤销刷新准入并等待全部本地任务退出。
-    /// 参数说明：`context` 为宿主共享期限。
-    /// 返回：实际退出时成功；超时保留关闭态。
+    ///
+    /// 参数说明：
+    /// - `context`：携带统一停机截止点，本地任务等待不能另起完整超时预算。
+    ///
+    /// 返回：通知取消并等到任务实际退出时成功；到达截止点返回 Stopping 错误，准入保持关闭，不把取消通知视为退出证明。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             tokio::time::timeout_at(context.deadline().into(), self.0.shutdown())
@@ -547,25 +598,30 @@ impl ShutdownAction for LocalCacheShutdown {
     }
 }
 
+/// 两级缓存停机动作；异步等待受 Runner 的剩余停机预算限制。
 struct CacheShutdown {
+    /// 尚未移交停机流程的运行时 owner，取出后不能再次关闭同一实例。
     guard: Option<cacheable::CacheRuntimeGuard>,
 }
 
 impl ShutdownAction for CacheShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数;名称不含连接串或配置值。
+    /// 返回：固定的 cache-runtime 标签，用于停机记录，不含连接地址、凭据或缓存内容。
     fn label(&self) -> &'static str {
         "cache-runtime"
     }
 
-    /// 业务作用：排空并停止失效广播;只能停一次(消费 guard)。
+    /// 业务作用：消费本组件的运行时所有权，先结束本地刷新，再尽力排空广播并停止后台任务。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `_context`:共享停机预算;等待上限由 Runner 的整体 timeout 约束。
+    ///
+    /// 返回：首次调用在 guard 停机完成后成功，后续调用直接成功；不报告各条广播是否送达。
+    /// 等待被外层取消时，guard 的 Drop 撤销本代运行时并中止剩余任务，不能保证已经排空。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             if let Some(guard) = self.guard.take() {
@@ -579,14 +635,15 @@ impl ShutdownAction for CacheShutdown {
 /// 业务作用：按 `cache` 配置构造 L2 `CacheLayer`:`redis_ref` 复用受管连接,否则自建集群连接。
 ///
 /// 复用路径经 [`RedisClientBackend`] 把受管 `RedisClient` 适配成 `CacheBackend`,不新开集群连接;受管实例
-/// 未声明/未就绪(`redis -> cache` 序保证 redis 先发布)时给清晰错误。自建路径保持 v1 的 `connect_cluster`。
+/// 未声明或未就绪时返回错误；自有来源经 `connect_cluster` 建立独立 Redis Cluster 连接。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`:Start 上下文的应用句柄,复用路径据此借出受管 Redis 客户端。
 /// - `config`:已校验的 `two_level` 缓存配置。
 ///
-/// 返回：受管或自有 L2 建立成功时返回缓存层；资源缺失或连接失败时返回脱敏组件错误。
+/// 返回：取得具名客户端或建立自有连接后返回带两类 TTL 的缓存层，不安装全局运行时或广播。
+/// 具名资源缺失、redis feature 未启用或自有连接失败时返回组件错误，底层原因保留在 source 中等待统一脱敏。
 async fn build_cache_layer(
     application: &Application,
     config: &CacheConfig,
@@ -606,8 +663,9 @@ async fn build_cache_layer(
                         error,
                     )
                 })?;
-            let backend: Arc<dyn cacheable::cache::CacheBackend> =
-                Arc::new(RedisClientBackend { client });
+            let backend: Arc<dyn cacheable::cache::CacheBackend> = Arc::new(RedisClientBackend {
+                client,
+            });
             tracing::info!(
                 "cache L2 reuses managed redis instance `{reference}` (no dedicated connection)"
             );
@@ -647,9 +705,12 @@ async fn build_cache_layer(
 
 /// 业务作用：从最终配置读取 `cache` 段;缺失该段却声明了组件时报明确错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`:提供当前不可变配置快照的共享上下文。
+///
+/// 返回：从一次配置快照解析的 CacheConfig；缺少 cache 段、未知字段或字段类型错误时返回 Start 错误，
+/// 不执行连接来源、TTL 或 scene 校验，也不建立连接。
 fn read_cache_config(application: &Application) -> ApplicationResult<CacheConfig> {
     let snapshot = application.config();
     let root: CacheConfigRoot =
@@ -670,10 +731,13 @@ fn read_cache_config(application: &Application) -> ApplicationResult<CacheConfig
 
 /// 业务作用：在不建立任何连接的前提下校验候选配置树中的 `cache` 段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`:合并、插值完成但尚未发布的候选配置树。
 /// - `phase`:本次无副作用校验所属的生命周期阶段。
+///
+/// 返回：段不存在时成功；存在时须可解析且满足 CacheConfig 的模式、来源和预算约束，失败带指定阶段。
+/// 不验证远端连通性、具名资源存在性或 scene 一致性，不发布候选配置。
 pub(crate) fn validate_cache_section(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
@@ -688,21 +752,25 @@ pub(crate) fn validate_cache_section(
 
 /// 业务作用：创建缓存组件的稳定生命周期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`:故障被观察到的生命周期阶段。
 /// - `message`:不含缓存 key、value 或连接串的稳定摘要。
+///
+/// 返回：归属于 Cache 与指定阶段、没有底层 source 的 ApplicationError；保留传入摘要，不自动脱敏或输出日志。
 fn cache_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Cache, phase, message)
 }
 
 /// 业务作用：创建带底层错误链的缓存组件错误(输出前统一脱敏)。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`:故障被观察到的生命周期阶段。
 /// - `message`:不含敏感内容的稳定摘要。
 /// - `source`:只供诊断的底层错误。
+///
+/// 返回：带 Cache 身份、阶段与底层原因的 ApplicationError；不在此裁剪错误链，对外呈现仍须经过统一脱敏边界。
 fn cache_error_src(
     phase: ApplicationPhase,
     message: impl Into<String>,

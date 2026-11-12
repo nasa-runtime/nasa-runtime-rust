@@ -28,4 +28,4 @@ serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 tracing = "0.1"
 # 仅用 tokio::fs 做本地 file: import 的异步读取,避免在 async 装配/热刷新路径上阻塞 runtime worker。
-tokio = { version = "1", features = ["fs"] }
+tokio = { version = "1.54.1", features = ["fs"] }

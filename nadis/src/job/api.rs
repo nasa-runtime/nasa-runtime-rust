@@ -103,15 +103,15 @@ impl JobSourceHealthReason {
 /// 单个 Redis source 的运行健康快照；原因只描述封闭基础设施类别。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobSourceHealthSnapshot {
-    /// canonical source id。
+    /// 已规范化的 Redis 数据源身份，隔离不同来源的健康事实。
     pub qualifier: String,
     /// 是否仍接受新通知与领取。
     pub accepting: bool,
-    /// 关键后台循环是否仍保持运行。
+    /// 是否尚未记录终态失败；可恢复降级或正常排空期间仍可为真。
     pub healthy: bool,
     /// 聚合状态，区分预算内恢复、权威失效与正常 drain。
     pub state: JobSourceHealthState,
-    /// 当前聚合原因；完全健康或正常 drain 时为空。
+    /// 当前聚合原因，优先终态原因，其次为未恢复循环原因；没有这些事实时为空。
     pub reason: Option<JobSourceHealthReason>,
     /// 兼容文本投影；内容来自 `reason` 的封闭名称。
     pub failure_reason: Option<String>,
@@ -119,18 +119,26 @@ pub struct JobSourceHealthSnapshot {
 
 /// 运行时内部共享的 source 健康状态。
 pub(crate) struct SourceHealth {
+    /// 固定的数据源身份，进入健康快照和控制日志。
     qualifier: String,
+    /// 当前是否允许新的领取、通知及控制动作。
     accepting: AtomicBool,
+    /// 是否已开始关闭准入并排空已有执行。
     draining: AtomicBool,
+    /// 首个不可恢复原因，一旦写入不因局部恢复而清除。
     terminal_reason: Mutex<Option<JobSourceHealthReason>>,
+    /// 各类循环尚未恢复的数量和最近失败原因。
     degraded_loops: Mutex<BTreeMap<JobSupervisorLoop, (JobSourceHealthReason, u32)>>,
+    /// 同一运行实例共享的固定维度指标容器。
     metrics: Arc<JobMetrics>,
 }
 
 impl SourceHealth {
     /// 业务作用：为一个已冻结 source 建立初始健康状态。
     ///
-    /// 参数说明：`qualifier` 为 canonical source id。
+    /// 参数说明：
+    /// - `qualifier`：已规范化的数据源身份，用于隔离健康事实和日志。
+    /// - `metrics`：同一数据源运行实例共享的监督指标容器。
     ///
     /// 返回：初始接受准入且无关键失败的状态。
     pub(crate) fn new(qualifier: impl Into<String>, metrics: Arc<JobMetrics>) -> Self {
@@ -146,7 +154,10 @@ impl SourceHealth {
 
     /// 业务作用：记录可恢复循环的一次失败并推进监督代次，source 在预算内保持可服务但标记 Degraded。
     ///
-    /// 参数说明：`loop_name` 为封闭循环身份，`reason` 为稳定失败类别。
+    /// 参数说明：
+    /// - `loop_name`：需要恢复的后台循环类别，使用固定枚举控制指标维度。
+    /// - `reason`：本次失败的封闭原因，不携带底层自由文本。
+    /// - `first_failure`：该次故障首次登记时为真，后续恢复尝试不重复增加待恢复数量。
     ///
     /// 返回：下一次将启动的单调 generation。
     pub(crate) fn restart_scheduled(
@@ -177,9 +188,10 @@ impl SourceHealth {
 
     /// 业务作用：标记一个可恢复循环的新代次已经成功推进，并仅清除该循环的降级事实。
     ///
-    /// 参数说明：`loop_name` 为封闭循环身份。
+    /// 参数说明：
+    /// - `loop_name`：已恢复推进的后台循环类别，仅减少该类别的一份未恢复责任。
     ///
-    /// 返回：无；其它循环或 terminal 失败不被覆盖。
+    /// 返回：更新本地降级计数、恢复指标及日志；同类别仍有其它故障时保留降级，不清除终态原因。
     pub(crate) fn recovered(&self, loop_name: JobSupervisorLoop) {
         let mut degraded = self
             .degraded_loops
@@ -202,10 +214,12 @@ impl SourceHealth {
 
     /// 业务作用：在可恢复循环耗尽预算时关闭 source 准入并保留终态原因。
     ///
-    /// 参数说明：`loop_name` 为耗尽预算的循环。
+    /// 参数说明：
+    /// - `loop_name`：已经耗尽恢复预算的后台循环类别。
     ///
     /// 返回：无；其它 source 不受影响。
     pub(crate) fn budget_exhausted(&self, loop_name: JobSupervisorLoop) {
+        // 先关闭新工作准入，再发布失败原因和指标，避免状态传播期间继续领取任务。
         self.accepting.store(false, Ordering::Release);
         self.metrics.budget_exhausted(loop_name);
         let mut terminal = self
@@ -223,10 +237,13 @@ impl SourceHealth {
 
     /// 业务作用：记录 attempt 或 executor 权威循环失效，立即关闭当前 source 的新工作准入。
     ///
-    /// 参数说明：`loop_name` 为失效循环，`error` 仅用于归入封闭原因。
+    /// 参数说明：
+    /// - `loop_name`：失去执行权威的后台循环类别。
+    /// - `error`：用于归入封闭原因的内部错误，其自由文本不会写入健康快照。
     ///
     /// 返回：无；首个 terminal 原因稳定保留。
     pub(crate) fn authority_lost(&self, loop_name: JobSupervisorLoop, error: &NasaRedisError) {
+        // 执行权威失效后立即拒绝新增工作，终态原因只保留首次失效事实。
         self.accepting.store(false, Ordering::Release);
         self.metrics.authority_lost(loop_name);
         let reason = classify_error(error);
@@ -249,6 +266,7 @@ impl SourceHealth {
     ///
     /// 返回：无返回值；既有失败原因保持不变。
     pub(crate) fn stop_accepting(&self) {
+        // 先阻止新工作再标记排空，避免读者把正在关闭的实例当成仍可接纳任务。
         self.accepting.store(false, Ordering::Release);
         self.draining.store(true, Ordering::Release);
     }
@@ -262,11 +280,11 @@ impl SourceHealth {
         self.metrics.clone()
     }
 
-    /// 业务作用：生成一致的逐 source 健康快照。
+    /// 业务作用：汇总当前数据源的终态、降级与准入事实，供控制门禁和健康展示读取。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：当前准入、关键循环状态与首个失败原因。
+    /// 返回：优先展示终态，其次排空和降级状态；各同步字段分别读取，不承诺整个快照来自同一原子时点。
     pub(crate) fn snapshot(&self) -> JobSourceHealthSnapshot {
         let terminal = *self
             .terminal_reason
@@ -299,7 +317,8 @@ impl SourceHealth {
 
 /// 业务作用：识别 Redis 通用 `ERR` 中可在既有执行器租约内等待的容量背压。
 ///
-/// 参数说明：`error` 为 Redis 返回的服务端错误。
+/// 参数说明：
+/// - `error`：Redis 返回的服务端错误，须同时符合通用错误类别和精确容量原因。
 ///
 /// 返回：仅连接容量已满返回真；其它自由文本仍按协议或脚本合同失败处理。
 fn redis_response_error_is_transient(error: &redis::RedisError) -> bool {
@@ -315,7 +334,8 @@ fn redis_response_error_is_transient(error: &redis::RedisError) -> bool {
 
 /// 业务作用：识别 Redis 未归一化扩展码中的认证与 ACL 拒绝，避免把凭据错误误当成链路抖动重试。
 ///
-/// 参数说明：`error` 为 Redis 客户端返回的错误。
+/// 参数说明：
+/// - `error`：Redis 客户端返回的错误，仅使用其服务端错误码识别权限拒绝。
 ///
 /// 返回：错误码为 `NOAUTH`、`WRONGPASS` 或 `NOPERM` 时返回真。
 fn redis_error_is_access_denied(error: &redis::RedisError) -> bool {
@@ -329,7 +349,8 @@ fn redis_error_is_access_denied(error: &redis::RedisError) -> bool {
 
 /// 业务作用：把内部错误归入健康快照允许公开的封闭类别。
 ///
-/// 参数说明：`error` 为 source 循环返回的错误，不会把其自由文本写入快照。
+/// 参数说明：
+/// - `error`：数据源循环返回的内部错误，其自由文本不进入健康快照。
 ///
 /// 返回：稳定、低基数的健康原因。
 pub(crate) fn classify_error(error: &NasaRedisError) -> JobSourceHealthReason {
@@ -375,7 +396,9 @@ pub(crate) fn classify_error(error: &NasaRedisError) -> JobSourceHealthReason {
             // 新增客户端错误类别默认封闭为协议问题，只有上面逐项确认的链路/路由错误允许租约内重试。
             _ => JobSourceHealthReason::ProtocolContract,
         },
-        NasaRedisError::ConnectProbe { .. } => JobSourceHealthReason::RedisTransport,
+        NasaRedisError::ConnectProbe {
+            ..
+        } => JobSourceHealthReason::RedisTransport,
         NasaRedisError::JobProtocol(_) => JobSourceHealthReason::ProtocolContract,
         NasaRedisError::ExecutionUnknown(_) => JobSourceHealthReason::ExecutionUnknown,
         NasaRedisError::JobExecutionStopped(_) => JobSourceHealthReason::ExecutionAuthority,
@@ -400,16 +423,22 @@ pub(crate) fn classify_error(error: &NasaRedisError) -> JobSourceHealthReason {
 
 /// 受管控制面持有的本地定义引用与待撤销能力；不拥有运行时停机权。
 pub(crate) struct ManagedJobControlState {
+    /// 当前执行器的能力登记，负责撤销已无本地定义引用的 Worker。
     registry: Arc<ExecutorRegistry>,
+    /// 本地任务名到可选 Fanout Worker 的引用关系。
     definitions: Mutex<BTreeMap<String, Option<String>>>,
+    /// 引用已归零但远端撤销尚未确认的 Worker 集合。
     pending_withdrawals: Mutex<std::collections::BTreeSet<String>>,
+    /// 按任务与修订号保留的首次删除结局，使后续能力撤销可独立重试。
     completed_deletions: Mutex<BTreeMap<(String, i64), DeleteOutcome>>,
 }
 
 impl ManagedJobControlState {
     /// 业务作用：冻结当前 source 的本地任务到 Worker 引用表，使删除最后一个定义时能撤销对应能力。
     ///
-    /// 参数说明：`registry` 属于同一 source generation，`definitions` 为任务名到可选 Fanout Worker 的映射。
+    /// 参数说明：
+    /// - `registry`：属于当前数据源运行实例的执行器能力登记。
+    /// - `definitions`：本地任务名到可选 Fanout Worker 的映射，用于计算能力引用是否归零。
     ///
     /// 返回：可由多个控制句柄共享、按 Worker 引用归零撤销能力的状态。
     pub(crate) fn new(
@@ -426,7 +455,8 @@ impl ManagedJobControlState {
 
     /// 业务作用：确认控制动作只删除当前 generation 实际登记的本地定义，避免任意节点撤销无 Handler 的定义。
     ///
-    /// 参数说明：`job_name` 为待删除任务名。
+    /// 参数说明：
+    /// - `job_name`：待删除的本地任务名，必须属于当前运行实例已登记的定义。
     ///
     /// 返回：本地定义存在时为真；已删除或从未登记时为假。
     fn contains_definition(&self, job_name: &str) -> bool {
@@ -438,7 +468,9 @@ impl ManagedJobControlState {
 
     /// 业务作用：读取当前 generation 已提交的定义删除结局，使能力撤销失败后的业务重试保持幂等。
     ///
-    /// 参数说明：`job_name` 与 `revision` 必须和此前已写入 tombstone 的控制请求完全一致。
+    /// 参数说明：
+    /// - `job_name`：已经提交删除标记的任务名，不能复用其它任务的结果。
+    /// - `revision`：该次删除的定义修订号，须与首次持久提交一致。
     ///
     /// 返回：本地已确认 tombstone 时返回首次权威结局；尚未提交删除时返回 `None`。
     fn completed_deletion(&self, job_name: &str, revision: i64) -> Option<DeleteOutcome> {
@@ -451,10 +483,14 @@ impl ManagedJobControlState {
 
     /// 业务作用：在持久删除成功后移除本地定义引用，并把引用归零的 Worker 放入能力撤销队列。
     ///
-    /// 参数说明：`job_name`/`revision` 已由 Redis tombstone 确认删除，`outcome` 为首次权威删除结局。
+    /// 参数说明：
+    /// - `job_name`：已由 Redis 删除标记确认删除的任务名。
+    /// - `revision`：该次删除已提交的定义修订号。
+    /// - `outcome`：首次权威删除结局，用于能力撤销失败后的相同请求重试。
     ///
     /// 返回：无；删除结局保留到 source generation 结束，共享 Worker 仍有其它本地定义时保留能力。
     fn definition_deleted(&self, job_name: &str, revision: i64, outcome: DeleteOutcome) {
+        // 先保存已经持久提交的结局，后续能力撤销失败不能把同一次删除解释为未发生。
         self.completed_deletions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -465,12 +501,14 @@ impl ManagedJobControlState {
                 .definitions
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // 重复完成或没有 Fanout 引用时无需撤销能力，已保存的删除结局仍可用于重试。
             let Some(worker) = definitions.remove(job_name) else {
                 return;
             };
             let Some(worker) = worker else {
                 return;
             };
+            // 共享 Worker 仍有其它本地定义引用时，撤销能力会误伤这些定义的定向派发。
             if definitions
                 .values()
                 .any(|other| other.as_ref() == Some(&worker))
@@ -512,18 +550,24 @@ impl ManagedJobControlState {
 /// 一个已绑定 source 的结构化控制入口；网络鉴权仍由业务边界负责。
 #[derive(Clone)]
 pub struct JobControl {
+    /// 普通执行及定义治理的持久仓库。
     repository: JobRepository,
+    /// 同一数据源的定向分发仓库，承接已移交批次的控制。
     fanout: FanoutRepository,
+    /// 受管场景的准入门禁，独立构造时不绑定运行时健康。
     health: Option<Arc<SourceHealth>>,
+    /// 本地定义和执行器能力的引用状态，独立构造时为空。
     managed: Option<Arc<ManagedJobControlState>>,
 }
 
 impl JobControl {
     /// 业务作用：把普通 Run 控制仓库与同 source Fanout 仓库组合为唯一业务控制入口。
     ///
-    /// 参数说明：两个仓库必须绑定同一 qualifier、namespace 与配置。
+    /// 参数说明：
+    /// - `repository`：普通执行和定义治理仓库，其数据源、命名空间和配置须与 Fanout 仓库一致。
+    /// - `fanout`：同一持久边界中的 Fanout 仓库，由调用方保证与普通仓库对应。
     ///
-    /// 返回：可执行结构化控制动作的门面。
+    /// 返回：不绑定运行时准入门禁的独立控制门面；构造时不探测网络或验证两个仓库的身份一致性。
     pub fn new(repository: JobRepository, fanout: FanoutRepository) -> Self {
         Self {
             repository,
@@ -535,7 +579,11 @@ impl JobControl {
 
     /// 业务作用：建立绑定 source 生命周期准入的控制门面，使已克隆句柄在 drain 后也不能提交新动作。
     ///
-    /// 参数说明：仓库、Fanout 仓库、`health` 与 `managed` 必须属于同一 source generation；后者维护定义能力引用。
+    /// 参数说明：
+    /// - `repository`：当前数据源运行实例的普通执行与定义仓库。
+    /// - `fanout`：同一数据源运行实例的 Fanout 仓库。
+    /// - `health`：当前实例的准入门禁，关闭后已克隆的控制句柄也必须拒绝新动作。
+    /// - `managed`：同一实例的本地定义和 Worker 能力引用状态。
     ///
     /// 返回：每次控制调用都会复验当前准入状态的门面。
     pub(crate) fn new_with_health(
@@ -575,9 +623,12 @@ impl JobControl {
 
     /// 业务作用：以 requestId 幂等触发一个手工 Run。
     ///
-    /// 参数说明：`definition` 为冻结定义，`request_id` 为业务幂等标识，`payload` 为显式编码载荷。
+    /// 参数说明：
+    /// - `definition`：已冻结的目标任务定义，决定手工执行的合同与分片。
+    /// - `request_id`：同一次业务触发稳定复用的幂等标识。
+    /// - `payload`：与定义编码合同匹配的显式载荷。
     ///
-    /// 返回：首次创建、采用、定义缺失或状态拒绝的封闭结局。
+    /// 返回：首次创建、采用已有执行、定义缺失或状态拒绝的封闭结局；准入、传输或协议失败返回错误。
     pub async fn trigger(
         &self,
         definition: &JobDefinition,
@@ -592,9 +643,13 @@ impl JobControl {
         // wire 与共享 Lua 受跨语言逐字节对齐约束，trace 上下文不进 payload 或 Run hash；
         // 在两端协议共同扩展前，只用派生后的 run_id 关联环境链路，业务 request_id 原文不进入日志。
         let run_id = match &outcome {
-            ManualFireOutcome::Fired { run_id, .. } | ManualFireOutcome::Adopted { run_id } => {
-                Some(run_id.as_str())
+            ManualFireOutcome::Fired {
+                run_id,
+                ..
             }
+            | ManualFireOutcome::Adopted {
+                run_id,
+            } => Some(run_id.as_str()),
             ManualFireOutcome::NotFound | ManualFireOutcome::StateMismatch => None,
         };
         if let (Some(context), Some(run_id)) = (natelemetry::ambient(), run_id) {
@@ -610,7 +665,8 @@ impl JobControl {
 
     /// 业务作用：暂停一个定义的新自动触发，不撤销已有执行权。
     ///
-    /// 参数说明：`job_name` 为目标任务名。
+    /// 参数说明：
+    /// - `job_name`：当前数据源中需要停止新自动触发的任务名。
     ///
     /// 返回：动作生效、定义缺失或状态拒绝的封闭结局。
     pub async fn pause(&self, job_name: &str) -> Result<DefinitionControlOutcome> {
@@ -620,7 +676,9 @@ impl JobControl {
 
     /// 业务作用：从调用方计算的下一逻辑时刻恢复一个定义。
     ///
-    /// 参数说明：`job_name` 为任务名，`next_fire_at` 为权威毫秒时刻，零表示无自动时刻。
+    /// 参数说明：
+    /// - `job_name`：当前数据源中需要恢复自动调度的任务名。
+    /// - `next_fire_at`：调用方给出的下一逻辑触发时间戳，单位毫秒；零表示没有自动触发时刻。
     ///
     /// 返回：动作生效、定义缺失或状态拒绝的封闭结局。
     pub async fn resume(
@@ -634,7 +692,8 @@ impl JobControl {
 
     /// 业务作用：最终一致地关闭当前 source 全部调度分片的普通 Run 新执行权门禁，不影响其它 Redis source。
     ///
-    /// 参数说明：`actor` 为进入持久审计字段的操作来源，按名称合同规范化。
+    /// 参数说明：
+    /// - `actor`：写入持久审计字段的操作来源，须满足名称规范。
     ///
     /// 返回：全部分片发布 `PAUSED` 后成功；中途失败返回错误，已发布分片保持关闭，调用方可用同一 API 幂等续作。
     pub async fn pause_namespace(&self, actor: &str) -> Result<()> {
@@ -644,7 +703,8 @@ impl JobControl {
 
     /// 业务作用：最终一致地重新开放当前 source 全部调度分片的普通 Run 新执行权门禁，不影响其它 Redis source。
     ///
-    /// 参数说明：`actor` 为进入持久审计字段的操作来源，按名称合同规范化。
+    /// 参数说明：
+    /// - `actor`：写入持久审计字段的操作来源，须满足名称规范。
     ///
     /// 返回：全部分片发布 `ENABLED` 后成功；中途失败返回错误，调用方可重试以收敛部分发布状态。
     pub async fn resume_namespace(&self, actor: &str) -> Result<()> {
@@ -692,7 +752,9 @@ impl JobControl {
 
     /// 业务作用：先完成控制参数校验，再逐分片传播命名空间门禁，避免非法参数造成部分状态变更。
     ///
-    /// 参数说明：`state` 仅由暂停/恢复入口传入，`actor` 为规范化前的操作来源。
+    /// 参数说明：
+    /// - `state`：暂停或恢复入口选择的目标命名空间状态。
+    /// - `actor`：尚未规范化的操作来源，校验成功后才允许逐分片发布。
     ///
     /// 返回：全部分片接受状态时成功；传输失败保留已完成分片供幂等重试，脚本拒绝已知状态时按协议不一致返回。
     async fn set_namespace_state(&self, state: JobDefinitionState, actor: &str) -> Result<()> {
@@ -728,7 +790,9 @@ impl JobControl {
 
     /// 业务作用：请求取消普通 Run，并在它已移交 Fanout 时同步把批次根切入协作式取消流程。
     ///
-    /// 参数说明：`definition` 与 `run_id` 精确定位当前 source 的 Run。
+    /// 参数说明：
+    /// - `definition`：目标执行所属的冻结定义，用于定位当前数据源和调度合同。
+    /// - `run_id`：待取消的普通执行标识，已经移交 Fanout 时同时请求取消其批次。
     ///
     /// 返回：普通 Run 的封闭取消结局；Fanout 首批取消提交失败时返回错误并由持久看门狗继续处理。
     pub async fn request_cancel(
@@ -751,9 +815,11 @@ impl JobControl {
 
     /// 业务作用：以单调修订号删除定义并留下 tombstone。
     ///
-    /// 参数说明：`job_name` 为任务名，`revision` 不得低于当前持久修订号。
+    /// 参数说明：
+    /// - `job_name`：需要删除的任务名，受管场景还要求存在当前实例的本地定义引用。
+    /// - `revision`：本次删除的单调定义修订号，不得低于当前持久修订号。
     ///
-    /// 返回：删除、缺失或陈旧修订号的封闭结局。
+    /// 返回：删除、缺失或陈旧修订号的封闭结局；能力撤销失败时返回错误但删除标记可能已经生效，可用原修订号重试。
     pub async fn delete_definition(&self, job_name: &str, revision: i64) -> Result<DeleteOutcome> {
         self.ensure_accepting()?;
         if let Some(managed) = &self.managed {
@@ -782,7 +848,9 @@ impl JobControl {
 
     /// 业务作用：显式选择定义摘要解除 CONFLICT，并恢复到给定下一触发时刻。
     ///
-    /// 参数说明：`definition` 为管理者选定定义，`next_fire_at` 为恢复后的逻辑时刻。
+    /// 参数说明：
+    /// - `definition`：管理者明确选定的冻结定义，用于确认解除冲突时接受的摘要。
+    /// - `next_fire_at`：恢复后的下一逻辑触发时间戳，单位毫秒。
     ///
     /// 返回：动作生效、缺失、状态不符或摘要陈旧的封闭结局。
     pub async fn resolve_conflict(
@@ -800,16 +868,24 @@ impl JobControl {
 /// 一个已绑定 source 的只读查询入口；所有定位字段都由调用方显式提供。
 #[derive(Clone)]
 pub struct JobQuery {
+    /// 普通定义和执行记录的读取来源。
     repository: JobRepository,
+    /// 批次根及定向分片的读取来源。
     fanout: FanoutRepository,
+    /// 当前数据源运行实例的本地准入和健康状态。
     health: Arc<SourceHealth>,
+    /// 当前数据源运行实例的本地指标事实。
     metrics: Arc<JobMetrics>,
 }
 
 impl JobQuery {
     /// 业务作用：组合普通 Run、Fanout 与 source 健康视图。
     ///
-    /// 参数说明：所有依赖必须属于同一 source generation。
+    /// 参数说明：
+    /// - `repository`：当前数据源运行实例的普通定义和执行仓库。
+    /// - `fanout`：同一实例的 Fanout 批次及分片仓库。
+    /// - `health`：同一实例的准入和监督健康事实。
+    /// - `metrics`：同一实例的本地指标容器，查询时不触发 Redis 请求。
     ///
     /// 返回：不执行跨 source 猜测的查询门面。
     pub(crate) fn new(
@@ -828,7 +904,8 @@ impl JobQuery {
 
     /// 业务作用：读取定义的持久核心事实。
     ///
-    /// 参数说明：`job_name` 为当前 source 的任务名。
+    /// 参数说明：
+    /// - `job_name`：当前数据源中需要读取持久定义的任务名。
     ///
     /// 返回：定义存在时返回投影，不存在返回 `None`。
     pub async fn definition(&self, job_name: &str) -> Result<Option<JobDefinitionRecord>> {
@@ -837,7 +914,9 @@ impl JobQuery {
 
     /// 业务作用：读取一个普通 Run 的只读投影。
     ///
-    /// 参数说明：`job_name` 决定分片，`run_id` 定位记录。
+    /// 参数说明：
+    /// - `job_name`：决定持久记录所在调度分片的任务名。
+    /// - `run_id`：该任务下需要读取的普通执行标识。
     ///
     /// 返回：Run 存在时返回投影，不存在返回 `None`。
     pub async fn run(&self, job_name: &str, run_id: &str) -> Result<Option<JobRun>> {
@@ -846,7 +925,8 @@ impl JobQuery {
 
     /// 业务作用：读取 Fanout 根的权威投影。
     ///
-    /// 参数说明：`fanout_id` 为批次标识。
+    /// 参数说明：
+    /// - `fanout_id`：当前数据源中需要读取的 Fanout 批次标识。
     ///
     /// 返回：根存在时返回投影，不存在返回 `None`。
     pub async fn fanout_root(&self, fanout_id: &str) -> Result<Option<FanoutRoot>> {
@@ -855,7 +935,9 @@ impl JobQuery {
 
     /// 业务作用：读取 Fanout shard 的合同、assignment 与执行状态。
     ///
-    /// 参数说明：`fanout_id` 与 `seq` 精确定位 shard。
+    /// 参数说明：
+    /// - `fanout_id`：目标分片所属的 Fanout 批次标识。
+    /// - `seq`：该批次中需要读取的定向分片序号。
     ///
     /// 返回：shard 存在时返回投影，不存在返回 `None`。
     pub async fn fanout_shard(&self, fanout_id: &str, seq: i64) -> Result<Option<FanoutShard>> {

@@ -11,10 +11,17 @@ use serde::Serialize;
 /// JSON 值包装:写 = serde_json 序列化为 bytes;读 = 从 bytes 反序列化。
 /// 用法:`client.set("k", Json(&user)).await?` / `let u: Json<User> = client.get(..)`。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Json<T>(pub T);
+pub struct Json<T>(
+    /// 显式选择 JSON 编码的业务值；类型由调用方确定，不由输入中的类型标签决定。
+    pub T,
+);
 
 impl<T> Json<T> {
     /// 业务作用：取出包装值并把所有权交还调用方。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：内部业务值，不进行 JSON 编解码或值克隆。
     pub fn into_inner(self) -> T {
         self.0
     }
@@ -22,7 +29,9 @@ impl<T> Json<T> {
 
 impl<T: Serialize> Json<T> {
     /// 业务作用：在 Redis 参数编码前显式序列化，使调用方能够处理序列化错误。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：JSON 字节；不支持的 map key 或自定义 Serialize 失败时返回错误。
     /// 成功后可把字节交给 `client.set(k, Json(&value).to_bytes()?)`。
     ///
@@ -35,7 +44,10 @@ impl<T: Serialize> Json<T> {
 
 impl<T: Serialize> ToRedisArgs for Json<T> {
     /// 业务作用：把包装值编码为单个 Redis JSON 参数。
-    /// 参数说明：`out` 为 Redis 命令参数写入器。
+    ///
+    /// 参数说明：
+    /// - `out`：接收单个 JSON 字节参数的 Redis 命令参数写入器。
+    ///
     /// 返回：成功时追加 JSON 字节；trait 没有错误通道，序列化失败时 panic。
     fn write_redis_args<W: ?Sized + RedisWrite>(&self, out: &mut W) {
         // 参数编码不能返回错误，也不能丢弃数据后继续提交命令；需处理失败的调用方应先用 to_bytes。
@@ -47,7 +59,10 @@ impl<T: Serialize> ToRedisArgs for Json<T> {
 
 impl<T: DeserializeOwned> FromRedisValue for Json<T> {
     /// 业务作用：将 Redis 返回的字节按目标业务类型解码为 JSON 值。
-    /// 参数说明：`v` 为 Redis 命令返回值。
+    ///
+    /// 参数说明：
+    /// - `v`：Redis 命令返回值，须先能转换为原始字节，再按调用方指定的目标类型解码。
+    ///
     /// 返回：可按 T 解码时成功；无法取出字节、JSON 无效或类型不匹配时返回 ParsingError。
     fn from_redis_value(v: Value) -> Result<Self, ParsingError> {
         // 第一步:把 Redis 返回值按原始 bytes 取出(GET/HGET 等返回 BulkString)

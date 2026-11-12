@@ -34,14 +34,19 @@ struct RestOwner(Arc<RemoteRuntime>);
 
 impl ShutdownAction for RestOwner {
     /// 业务作用：标识命名 REST 运行态清理。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定能力名称。
     fn label(&self) -> &'static str {
         "rest-client"
     }
 
     /// 业务作用：撤销本代全局入口并等待客户端任务和在途调用退出。
-    /// 参数说明：`context` 为宿主共享截止点。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 为宿主共享截止点。
+    ///
     /// 返回：获得实际退出证明才成功；旧句柄不能再接纳工作。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         RestDiscovery::shutdown_if_current(&self.0);
@@ -58,7 +63,9 @@ impl ShutdownAction for RestOwner {
 
 impl Drop for RestOwner {
     /// 业务作用：启动失败或外层取消时同步收回出站准入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仅撤销本代全局入口，不影响新应用。
     fn drop(&mut self) {
         RestDiscovery::shutdown_if_current(&self.0);
@@ -67,7 +74,10 @@ impl Drop for RestOwner {
 }
 
 /// 业务作用：在 initializer 前装配显式命名的 REST 计划，不注册本实例。
-/// 参数说明：`context` 提供资源表与清理责任。
+///
+/// 参数说明：
+/// - `context`：`context` 提供资源表与清理责任。
+///
 /// 返回：所有启用计划已经构造；无效 provider、错误引用或重复全局 owner 时拒绝启动。
 pub(crate) async fn prepare(context: &mut PrepareContext<'_>) -> ApplicationResult<()> {
     let app = context.application().clone();
@@ -202,7 +212,10 @@ pub(crate) async fn prepare(context: &mut PrepareContext<'_>) -> ApplicationResu
 
 impl Application {
     /// 业务作用：取得当前应用的命名受管 REST 客户端。
-    /// 参数说明：`name` 为 rest_clients 中的名称。
+    ///
+    /// 参数说明：
+    /// - `name`：`name` 为 rest_clients 中的名称。
+    ///
     /// 返回：共享客户端；生命周期结束后保留的旧句柄拒绝新调用。
     pub async fn rest_client(&self, name: &str) -> ApplicationResult<Arc<RestDiscoveryClient>> {
         Ok(self
@@ -213,7 +226,10 @@ impl Application {
 }
 
 /// 业务作用：归类出站运行态装配与关闭失败，不暴露地址和凭据。
-/// 参数说明：`message` 为稳定原因。
+///
+/// 参数说明：
+/// - `message`：`message` 为稳定原因。
+///
 /// 返回：宿主能力错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Application, ApplicationPhase::Prepare, message)

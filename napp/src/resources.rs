@@ -18,7 +18,9 @@ use crate::{
     ShutdownContext,
 };
 
+/// 由析构隔离守卫持有的擦除类型资源值。
 type ErasedResource = ResourceCleanup<Box<dyn Any + Send + Sync>>;
+/// 在资源独占锁与当前清理期限下创建受管清理 future 的类型化适配函数。
 type ErasedShutdown =
     for<'a> fn(&'a mut ErasedResource, &'a ShutdownContext) -> ApplicationFuture<'a>;
 
@@ -43,31 +45,39 @@ pub enum ResourcePhase {
     Sealed,
     /// 拒绝新的资源借用，正在清理或等待受管任务归还依赖保留权。
     Closing,
-    /// 资源清理已经完成。
+    /// 容器已释放条目所有权并拒绝新借用；已有借用可能尚未归还，不能据此证明最终析构完成。
     Closed,
 }
 
 /// 区分框架组件资源和 UserHook 手工登记业务资源的所有者。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResourceOwner {
+    /// 由组件阶段装配，跟随该组件的清理步骤释放。
     Component(ComponentId),
+    /// 由指定 initializer 装配，身份固定后决定对应的清理步骤。
     Initializer(Arc<str>),
+    /// 由业务直接登记，在业务资源清理步骤统一撤销。
     Business,
 }
 
 /// 由 Rust TypeId 和可选 qualifier 组成的唯一资源 key。
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ResourceKey {
+    /// Rust 具体类型身份，不把所有者或清理方式计入键。
     type_id: TypeId,
+    /// 规范化的可选名称，None 表示该类型的无名实例。
     qualifier: Option<Arc<str>>,
 }
 
 impl ResourceKey {
     /// 业务作用：为目标类型和 qualifier 创建资源 key。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `qualifier`：已经 trim 并确认非空的可选共享名称。
+    ///
+    /// 返回：以 T 的 TypeId 和可选名称区分实例的键；None 与同类型任一命名资源不同，
+    /// 此处不校验名称，也不登记或借用资源。
     fn of<T: 'static>(qualifier: Option<Arc<str>>) -> Self {
         Self {
             type_id: TypeId::of::<T>(),
@@ -78,17 +88,25 @@ impl ResourceKey {
 
 /// 保存单个擦除类型资源的锁、所有者、登记顺序和可选清理函数。
 struct ResourceEntry {
+    /// 仅用于错误归类的编译期类型名，不包含资源实例值。
     type_name: &'static str,
+    /// 借用持读锁、清理持写锁的共享资源，容器撤销键不会强制夺回已有读守卫。
     value: Arc<AsyncRwLock<ErasedResource>>,
+    /// 成功登记时分配的顺序号，用于同所有者内逆序释放。
     registration_order: u64,
+    /// 唯一负责把该条目移交清理的生命周期所有者。
     owner: ResourceOwner,
+    /// 受管资源的异步清理工厂，普通资源为空。
     shutdown: Option<ErasedShutdown>,
 }
 
 /// 隔离资源值与清理 future 的析构，覆盖显式释放、外层取消和最后一个借用归还。
 struct ResourceCleanup<T> {
+    /// 待释放的一次性所有权，释放前取走以避免展开后重复析构。
     value: Option<T>,
+    /// 析构告警使用的固定类型身份。
     type_name: &'static str,
+    /// 区分资源值与清理 future 释放的固定操作名称。
     operation: &'static str,
 }
 
@@ -142,6 +160,7 @@ impl<T> Drop for ResourceCleanup<T> {
 
 /// 业务作用：暂存一组异类型组件资源，全部 key 预检通过后再在单次写锁内发布。
 pub(crate) struct StagedResourceBatch {
+    /// 尚未公开的键与值，批量提交时统一验证冲突并分配所有者和顺序。
     entries: Vec<(ResourceKey, ResourceEntry)>,
 }
 
@@ -159,7 +178,9 @@ impl StagedResourceBatch {
 
     /// 业务作用：把普通组件资源加入本地暂存区，不触碰 Application 可见资源表。
     ///
-    /// 参数说明：`qualifier` 是可选稳定名称，`value` 是待转交资源。
+    /// 参数说明：
+    /// - `qualifier`：`qualifier` 是可选稳定名称。
+    /// - `value`：`value` 是待转交资源。
     ///
     /// 返回：名称合法时完成暂存；非法名称返回错误且批次尚未发布。
     #[cfg(any(feature = "db-pgsql", feature = "db-sqlite"))]
@@ -188,23 +209,27 @@ impl StagedResourceBatch {
 
 /// 在同一同步锁下维护资源阶段、顺序号和 key 集合的一致状态。
 struct RegistryState {
+    /// 与目录在同一锁内变更的登记和借用门禁。
     phase: ResourcePhase,
+    /// 下次成功登记使用的饱和递增序号。
     next_order: u64,
+    /// 当前可查找的资源目录，清理先撤销键再等待已有借用。
     entries: HashMap<ResourceKey, ResourceEntry>,
 }
 
 /// Application 拥有的类型资源容器，支持组件、UserHook 和 initializer 登记，以及运行期
 /// 只读借用和逆序清理。
 pub struct ResourceRegistry {
+    /// 同步保护目录发布、阶段变化及登记顺序，不跨异步等待持有。
     state: RwLock<RegistryState>,
 }
 
 impl Default for ResourceRegistry {
     /// 业务作用：创建处于 Open 阶段的空资源注册表。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；行为与 `new` 相同。
+    /// 返回：与 [`Self::new`] 相同的独立容器；尚未持有任何资源或异步清理责任。
     fn default() -> Self {
         Self::new()
     }
@@ -213,9 +238,9 @@ impl Default for ResourceRegistry {
 impl ResourceRegistry {
     /// 业务作用：创建处于 Open 阶段的空资源注册表。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；登记顺序从零开始。
+    /// 返回：允许登记和借用的独立空容器，登记序号从零开始；不创建资源或后台任务。
     pub fn new() -> Self {
         Self {
             state: RwLock::new(RegistryState {
@@ -228,18 +253,21 @@ impl ResourceRegistry {
 
     /// 业务作用：返回当前资源生命周期阶段。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；读取与 key 集合使用同一同步锁。
+    /// 返回：在注册表读锁内取得的瞬时阶段；不预留后续登记或借用权限，也不表示外部共享句柄已归还。
     pub fn phase(&self) -> ResourcePhase {
         read_unpoisoned(&self.state).phase
     }
 
     /// 业务作用：登记一个无 qualifier 的普通业务资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `value`：所有权交给 Application 的线程安全资源。
+    ///
+    /// 返回：Open 阶段且无同类型无名资源时成功发布；否则返回错误并按普通析构释放本次传入值。
+    /// 普通资源仅由容器释放所有权，不调用 ManagedResource::shutdown。
     pub fn register<T>(&self, value: T) -> ApplicationResult<()>
     where
         T: Send + Sync + 'static,
@@ -249,10 +277,13 @@ impl ResourceRegistry {
 
     /// 业务作用：登记一个带 qualifier 的普通业务资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `qualifier`：区分同类型实例的非空名称。
     /// - `value`：所有权交给 Application 的线程安全资源。
+    ///
+    /// 返回：名称去除首尾空白后非空、阶段为 Open 且类型与名称组合未登记时成功。
+    /// 失败不替换已有资源，传入值按普通析构释放；普通资源不登记异步 shutdown。
     pub fn register_named<T>(&self, qualifier: impl AsRef<str>, value: T) -> ApplicationResult<()>
     where
         T: Send + Sync + 'static,
@@ -267,9 +298,12 @@ impl ResourceRegistry {
 
     /// 业务作用：登记一个无 qualifier 的受管业务资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `value`：需要显式异步 shutdown 且 Drop 非阻塞的资源。
+    ///
+    /// 返回：Open 阶段且无同类型无名资源时发布值和清理函数；失败按普通析构释放传入值，
+    /// 不调用其异步 shutdown。登记成功后由业务资源停机步骤按预算尝试清理，不保证超时后异步清理完成。
     pub fn register_managed<T>(&self, value: T) -> ApplicationResult<()>
     where
         T: ManagedResource,
@@ -284,10 +318,13 @@ impl ResourceRegistry {
 
     /// 业务作用：登记一个带 qualifier 的受管业务资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `qualifier`：区分同类型受管实例的非空名称。
     /// - `value`：需要显式异步 shutdown 且 Drop 非阻塞的资源。
+    ///
+    /// 返回：名称规范化后非空、阶段开放且键唯一时发布值及异步清理函数；否则保留已有条目，
+    /// 对传入值只执行普通析构。受管与普通资源共用同一键空间，不能以清理方式区分同名实例。
     pub fn register_named_managed<T>(
         &self,
         qualifier: impl AsRef<str>,
@@ -304,11 +341,12 @@ impl ResourceRegistry {
         )
     }
 
-    /// 业务作用：借用一个无 qualifier 的资源并返回 owned mapped read guard。
+    /// 业务作用：按类型借用无名资源，并在借用期间阻止容器取得该值的独占清理权。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无显式参数；类型 `T` 决定资源 key 和返回目标。
+    /// 返回：类型 T 的资源仍登记且允许借用时取得只读守卫；不存在、已关闭、等待期间撤销或类型不符时失败。
+    /// 等待资源锁不自设超时；守卫归还前容器的异步清理可能等待，调用方从资源内克隆的句柄不受此守卫追踪。
     pub async fn get<T>(&self) -> ApplicationResult<ResourceRef<'_, T>>
     where
         T: Send + Sync + 'static,
@@ -318,9 +356,12 @@ impl ResourceRegistry {
 
     /// 业务作用：借用一个指定 qualifier 的资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `qualifier`：登记时使用的非空名称。
+    ///
+    /// 返回：按 T 与去除首尾空白后的名称取得只读守卫；空白名称、缺失条目、关闭或等待期间撤销时失败。
+    /// 取锁后会复验同一条目仍被发布；不探测资源健康，也不为后续业务调用预留运行权限。
     pub async fn get_named<T>(
         &self,
         qualifier: impl AsRef<str>,
@@ -334,11 +375,14 @@ impl ResourceRegistry {
 
     /// 业务作用：由阶段上下文登记一个普通组件资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `component`：拥有资源并决定清理阶段的组件。
     /// - `qualifier`：同类型多实例的可选名称。
     /// - `value`：所有权交给组件资源容器的值。
+    ///
+    /// 返回：阶段开放、名称合法且键唯一时发布普通资源并记录组件所有权；错误不替换旧资源，传入值普通析构。
+    /// 组件身份不参与键匹配，因此其它所有者已登记的同类型同名资源也构成冲突。
     pub(crate) fn register_component<T>(
         &self,
         component: ComponentId,
@@ -354,11 +398,14 @@ impl ResourceRegistry {
 
     /// 业务作用：由阶段上下文登记一个受管组件资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `component`：拥有资源并决定清理阶段的组件。
     /// - `qualifier`：同类型多实例的可选名称。
     /// - `value`：需要显式异步 shutdown 的组件资源。
+    ///
+    /// 返回：登记条件成立时发布资源及类型对应的清理函数；组件清理阶段会在取得独占权后尝试调用 shutdown。
+    /// 非法名称、封口或键冲突时失败，传入值仅普通析构，不自动执行异步清理。
     pub(crate) fn register_component_managed<T>(
         &self,
         component: ComponentId,
@@ -379,7 +426,9 @@ impl ResourceRegistry {
 
     /// 业务作用：原子发布一组异类型组件资源，避免启动期观察到跨 driver 半张表。
     ///
-    /// 参数说明：`component` 是统一所有者，`batch` 是尚未公开的完整资源集合。
+    /// 参数说明：
+    /// - `component`：`component` 是统一所有者。
+    /// - `batch`：`batch` 是尚未公开的完整资源集合。
     ///
     /// 返回：阶段开放且全部 key 唯一时一次性提交；任一冲突时不登记任何条目。
     pub(crate) fn register_component_batch(
@@ -395,6 +444,7 @@ impl ResourceRegistry {
             )));
         }
         let mut batch_keys = std::collections::HashSet::with_capacity(batch.entries.len());
+        // 全部键先验证，任何冲突都不能让调用方观察到批次的一部分资源。
         for (key, entry) in &batch.entries {
             if !batch_keys.insert(key.clone()) || state.entries.contains_key(key) {
                 return Err(resource_error(format!(
@@ -466,9 +516,10 @@ impl ResourceRegistry {
 
     /// 业务作用：在业务初始化成功且任务登记关闭后封存资源 key 集合。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；封存后只允许已有资源借用。
+    /// 返回：仅 Open 可转为 Sealed，此后禁止登记而允许借用已有资源；重复封口或处于关闭阶段返回错误。
+    /// 阶段检查与写入共用注册表写锁，不能与资源插入交错；此处不执行健康探测或清理。
     pub(crate) fn seal(&self) -> ApplicationResult<()> {
         let mut state = write_unpoisoned(&self.state);
         if state.phase != ResourcePhase::Open {
@@ -477,15 +528,19 @@ impl ResourceRegistry {
                 state.phase
             )));
         }
+        // 与登记共用写锁，在封存之后不能再插入新的资源键。
         state.phase = ResourcePhase::Sealed;
         Ok(())
     }
 
     /// 业务作用：按逆登记顺序清理所有业务资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：限制所有锁等待和 managed shutdown 的全局清理上下文。
+    ///
+    /// 返回：撤销业务资源并关闭全部新借用后，按逆登记顺序尝试清理，返回可观测的失败列表。
+    /// 等待超时不会强制撤销已有借用；空失败列表不证明从资源内部克隆的外部句柄已经释放。
     pub(crate) async fn shutdown_business(
         &self,
         context: &ShutdownContext,
@@ -496,10 +551,13 @@ impl ResourceRegistry {
 
     /// 业务作用：按逆登记顺序清理指定组件拥有的资源。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `component`：需要移除资源的组件身份。
     /// - `context`：限制锁等待和 managed shutdown 的全局清理上下文。
+    ///
+    /// 返回：先撤销该组件的所有键，再按逆序尝试独占清理并收集失败；未进入全局关闭时，其它所有者仍可被借用。
+    /// 此步骤会封住后续登记，单项失败不跳过同批后续条目，已有借用可延迟最终析构。
     pub(crate) async fn shutdown_component(
         &self,
         component: ComponentId,
@@ -529,7 +587,8 @@ impl ResourceRegistry {
     ///
     /// 参数说明：无。
     ///
-    /// 返回：先关闭登记与借用，再在注册表锁外释放条目；析构异常由所有权守卫单独报告。
+    /// 返回：先关闭登记与新借用，再在注册表锁外释放容器持有的条目，不调用异步 shutdown。
+    /// 已有借用可延迟最终析构，因此 Closed 只证明容器所有权已移交；析构异常由守卫单独报告。
     pub(crate) fn close(&self) {
         let entries = {
             let mut state = write_unpoisoned(&self.state);
@@ -574,7 +633,8 @@ impl ResourceRegistry {
     /// - `owner`：决定该条目进入哪个 active 清理步骤的所有者。
     /// - `shutdown`：受管资源的类型擦除清理函数，普通资源为 `None`。
     ///
-    /// 返回：成功时发布携带析构隔离守卫的资源；阶段关闭或 key 重复时不接管资源。
+    /// 返回：成功时发布携带析构隔离守卫的资源；阶段关闭或 key 重复时不插入，传入值按普通析构释放。
+    /// 失败路径尚未建立资源值的析构隔离守卫，不调用异步清理，也不把传入值交还调用方。
     fn register_inner<T>(
         &self,
         qualifier: Option<Arc<str>>,
@@ -859,7 +919,9 @@ fn resource_panic_error(type_name: &'static str, operation: &'static str) -> App
 
 /// 资源借用通过 owned mapped guard 绑定到 `Application` 的借用期，不泄露内部锁。
 pub struct ResourceRef<'app, T: ?Sized> {
+    /// 映射到具体类型的资源读守卫，在归还前阻止独占清理。
     guard: OwnedRwLockReadGuard<ErasedResource, T>,
+    /// 将借用约束到取得它的容器或应用生命周期，避免拥有式锁守卫逸出该范围。
     application_lifetime: PhantomData<&'app ()>,
 }
 
@@ -868,9 +930,10 @@ impl<T: ?Sized> Deref for ResourceRef<'_, T> {
 
     /// 业务作用：返回 mapped read guard 指向的资源借用。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；借用不能越过 ResourceRef 生命周期。
+    /// 返回：生命周期受 ResourceRef 约束的只读引用；不重新查找资源或检查健康，
+    /// 容器撤销键后已有守卫仍可读取，直到调用方归还借用。
     fn deref(&self) -> &Self::Target {
         &self.guard
     }
@@ -906,9 +969,12 @@ where
 
 /// 业务作用：trim 并校验资源 qualifier。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`：调用方提供的资源名称。
+///
+/// 返回：去除首尾 Unicode 空白后非空的共享名称；全空白输入返回资源错误。
+/// 不限制长度或字符集，不校验凭据内容；登记与查询使用同一规范化结果匹配。
 fn normalize_qualifier(value: &str) -> ApplicationResult<Arc<str>> {
     let value = value.trim();
     if value.is_empty() {
@@ -919,27 +985,36 @@ fn normalize_qualifier(value: &str) -> ApplicationResult<Arc<str>> {
 
 /// 业务作用：创建资源容器的稳定运行期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`：不包含资源值的错误摘要。
+///
+/// 返回：标记为 Resources 组件、Running 阶段的错误，与当前实际生命周期无关；
+/// 保留传入摘要，不执行脱敏、资源清理或状态转换。
 fn resource_error(message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Resources, ApplicationPhase::Running, message)
 }
 
 /// 业务作用：从同步状态锁取得读守卫，并在先前 panic 污染时继续保护内部值。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `lock`：保护注册表结构状态的同步读写锁。
+///
+/// 返回：共享读守卫；写者展开导致中毒时取回其守卫继续加锁访问，但不清除中毒标志、
+/// 不重建内部状态。调用方仍负责验证所读取的生命周期与条目约束。
 fn read_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 业务作用：从同步状态锁取得写守卫，并在先前 panic 污染时继续保护内部值。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `lock`：保护注册表结构状态的同步读写锁。
+///
+/// 返回：独占写守卫；中毒时仍保留互斥保护并继续访问，不自动恢复旧状态或清除中毒标志。
+/// 该同步等待不能被异步超时抢占，持锁路径须保持有限且不执行业务析构。
 fn write_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     lock.write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

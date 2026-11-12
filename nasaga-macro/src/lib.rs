@@ -44,12 +44,13 @@ struct SagaArgs {
     managed: bool,
 }
 
-/// 业务作用：`#[saga]` 入口——校验合同并生成 descriptor 与 adapter。
+/// 业务作用：`#[saga]` 入口——校验合同并生成 descriptor 与 adapter。 标注对象必须是 `impl SagaStep for ServiceType` 块；宏保留业务方法体不变，追加： 1. `COLLECTED_SAGA_STEPS` 中的静态 descriptor（启动预检与 definition 对齐）； 2. `ServiceType::saga_handle_command`——按 envelope phase 分发到 runtime 的 execute/cancel/compensate/resolve 完整事务 wrapper。
 ///
-/// 标注对象必须是 `impl SagaStep for ServiceType` 块；宏保留业务方法体不变，追加：
-/// 1. `COLLECTED_SAGA_STEPS` 中的静态 descriptor（启动预检与 definition 对齐）；
-/// 2. `ServiceType::saga_handle_command`——按 envelope phase 分发到 runtime 的
-///    execute/cancel/compensate/resolve 完整事务 wrapper。
+/// 参数说明：
+/// - `attr`：工作流、定义版本、步骤、payload 与取消补偿合同的属性 token。
+/// - `item`：待保留并生成适配的 SagaStep 实现块 token。
+///
+/// 返回：合同和 impl 形态合法时保留业务方法并生成 descriptor 与阶段适配；语法、依赖路径或合同非法时返回编译错误，不在宏展开时调用事务或消息接口。
 #[proc_macro_attribute]
 pub fn saga(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
@@ -64,9 +65,11 @@ pub fn saga(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// 业务作用：生成固定绑定 PostgreSQL Saga wrapper 的步骤 descriptor 与参与方 adapter。
 ///
-/// 参数说明：`attr` 是步骤合同，`item` 是 `impl SagaStep` 块。
+/// 参数说明：
+/// - `attr`：步骤、定义版本、payload 与取消补偿合同的属性 token。
+/// - `item`：待保留的 SagaStep 实现块 token。
 ///
-/// 返回：合同合法时生成指向 `nasaga-runtime-pgsql` 或 `nasa::saga::pgsql` 的代码；否则生成编译错误。
+/// 返回：合同合法时生成固定 PostgreSQL 运行时路径的 descriptor 与适配，非法时生成编译错误；实际业务 trait 能力由生成代码的 Rust 类型检查约束。
 #[proc_macro_attribute]
 pub fn saga_pgsql(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
@@ -83,14 +86,13 @@ pub fn saga_pgsql(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// 业务作用：登记一份完整的类型化 workflow definition，由 Application 在 Prepare 阶段统一收集。
+/// 业务作用：登记一份完整的类型化 workflow definition，由 Application 在 Prepare 阶段统一收集。 被标注函数必须是无参数、同步、无泛型的自由函数；函数返回值必须可经 `?` 转换为 `anyhow::Result<WorkflowDefinition>`。宏不调用 Catalog、不开启 transport，也不构造 Orchestrator。
 ///
-/// 被标注函数必须是无参数、同步、无泛型的自由函数；函数返回值必须可经 `?` 转换为
-/// `anyhow::Result<WorkflowDefinition>`。宏不调用 Catalog、不开启 transport，也不构造 Orchestrator。
+/// 参数说明：
+/// - `attr`：必须为空的属性实参。
+/// - `item`：供启动收集的同步 definition factory 函数 token。
 ///
-/// 参数说明：`attr` 必须为空，`item` 是只读 definition factory。
-///
-/// 返回：形态合法时保留原函数并登记静态 factory；否则生成定位到声明处的编译错误。
+/// 返回：属性为空且 factory 形态合法时保留函数并登记静态 factory，否则生成编译错误；返回类型兼容性由生成代码检查，展开时不调用 factory。
 #[proc_macro_attribute]
 pub fn saga_workflow(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = TokenStream2::from(attr);
@@ -174,10 +176,11 @@ fn expand_workflow(
 /// 业务作用：完成属性解析、合同校验与代码生成的主流程。
 ///
 /// 参数说明：
-/// - `metas`: 属性参数列表。
-/// - `item_impl`: 被标注的 impl 块。
+/// - `metas`：待校验的步骤属性列表。
+/// - `item_impl`：待保留并追加适配的 SagaStep 实现块。
+/// - `root`：已经解析的目标数据库 Saga 运行时根路径。
 ///
-/// 返回：校验全部通过时返回生成代码；任一合同违规返回定位到源码的编译错误。
+/// 返回：属性与 impl 形态通过时返回静态 descriptor、可选受管 factory 和精确步骤适配；不满足语法或合同约束时返回错误。生成适配把阶段操作交给运行时，宏本身不持有事务。
 fn expand(
     metas: Punctuated<Meta, Token![,]>,
     item_impl: ItemImpl,
@@ -323,8 +326,8 @@ fn expand(
             /// - `envelope`: 已通过 transport 认证的命令 envelope。
             /// - `producer`: transport 从可信凭据映射出的 Orchestrator 逻辑身份。
             ///
-            /// 返回：可 ACK 的处理结论；`Retryable` 或基础设施失败返回错误
-            /// （事务已回滚，不得 ACK）。
+            /// 返回：成功时返回 runtime 的可 ACK 处理结论；阶段拒绝、Retryable 或基础设施失败返回错误，不得 ACK。
+            /// 发生提交错误时事务结果可能未知，不能从错误推导所有副作用已经回滚。
             pub async fn saga_handle_command(
                 &self,
                 runtime: &#root::ParticipantRuntime,
@@ -344,8 +347,8 @@ fn expand(
             /// - `producer`: transport 从可信凭据映射出的 Orchestrator 逻辑身份。
             /// - `receipt_trace`: transport 收据显式解析出的链路上下文。
             ///
-            /// 返回：可 ACK 的处理结论；`Retryable` 或基础设施失败返回错误
-            /// （事务已回滚，不得 ACK）。
+            /// 返回：成功时返回 runtime 的可 ACK 处理结论；阶段拒绝、Retryable 或基础设施失败返回错误，不得 ACK。
+            /// 发生提交错误时事务结果可能未知，不能从错误推导所有副作用已经回滚。
             pub async fn saga_handle_command_traced(
                 &self,
                 runtime: &#root::ParticipantRuntime,
@@ -374,6 +377,13 @@ fn expand(
 
         impl #root::SagaCommandService for #service_type {
             /// 业务作用：把已认证命令交给宏生成的精确步骤门禁与参与方事务 wrapper。
+            ///
+            /// 参数说明：
+            /// - `runtime`：已绑定同源事务能力的参与方运行时。
+            /// - `envelope`：经 transport 认证后仍需复验步骤合同的命令。
+            /// - `producer`：可信凭据映射出的编排服务身份。
+            ///
+            /// 返回：等待精确步骤适配并原样传播其处理结论或错误；失败时不得 ACK，提交错误可能代表结果未知。
             async fn handle_saga_command<'a>(
                 &'a self,
                 runtime: &'a #root::ParticipantRuntime,
@@ -384,6 +394,14 @@ fn expand(
             }
 
             /// 业务作用：把收据链路上下文随命令一起交给事务 wrapper，结果事件派生子上下文。
+            ///
+            /// 参数说明：
+            /// - `runtime`：已绑定同源事务能力的参与方运行时。
+            /// - `envelope`：经 transport 认证后仍需复验步骤合同的命令。
+            /// - `producer`：可信凭据映射出的编排服务身份。
+            /// - `receipt_trace`：已验证的可选收据因果上下文。
+            ///
+            /// 返回：等待精确步骤适配并原样传播其处理结论或错误；失败时不得 ACK，提交错误可能代表结果未知。
             async fn handle_saga_command_traced<'a>(
                 &'a self,
                 runtime: &'a #root::ParticipantRuntime,

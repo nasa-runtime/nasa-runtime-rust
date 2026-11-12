@@ -378,7 +378,8 @@ impl MySqlSagaStore {
 
     /// 业务作用：在指定 datasource 上创建并复验全部 Saga 持久结构。
     ///
-    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：是启动期已注册的数据源名称。
     ///
     /// 返回：结构完整时成功；名称、连接或结构升级失败时返回脱敏错误。
     pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), SagaStoreError> {
@@ -390,7 +391,8 @@ impl MySqlSagaStore {
     /// 业务作用：复用调用方已持有的 MySQL 连接创建并复验全部 Saga 持久结构，使 schema
     /// 互斥权与全部 DDL 位于同一数据库会话。
     ///
-    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    /// 参数说明：
+    /// - `connection`：是调用方已取得 schema 互斥权的连接。
     ///
     /// 返回：结构完整时成功；DDL、历史收敛或最终结构门禁失败时返回脱敏错误。
     pub async fn ensure_schema_on_connection(
@@ -969,7 +971,9 @@ const AUDIT_EVENT_COLUMNS: [AuditColumnContract; 28] = [
 /// 业务作用：确保统一审计 trigger 满足当前语义；只允许缺失对象或已知旧定义收敛，
 /// 未知同名对象拒绝进入 Ready，避免事实提交后没有对应审计事件。
 ///
-/// 参数说明：`connection` 是自举连接，`contract` 描述 trigger 的目标表、事件和执行体。
+/// 参数说明：
+/// - `connection`：是自举连接
+/// - `contract`：描述 trigger 的目标表、事件和执行体。
 ///
 /// 返回：对象符合当前合同或从已知旧定义升级成功时返回 `Ok`；未知结构或数据库失败返回错误。
 async fn ensure_audit_trigger(
@@ -1006,7 +1010,9 @@ async fn ensure_audit_trigger(
 
 /// 业务作用：读取 trigger 的权威元数据，供自举和最终合同复验共享同一判断依据。
 ///
-/// 参数说明：`connection` 是目标数据库连接，`name` 是编译期固定的 trigger 名称。
+/// 参数说明：
+/// - `connection`：是目标数据库连接
+/// - `name`：是编译期固定的 trigger 名称。
 ///
 /// 返回：对象存在时返回完整定义，不存在时返回 `None`；元数据读取失败返回错误。
 async fn load_audit_trigger(
@@ -1037,7 +1043,9 @@ async fn load_audit_trigger(
 
 /// 业务作用：使用受控静态 DDL 创建审计 trigger，保证 prepared protocol 限制不改变自举语义。
 ///
-/// 参数说明：`connection` 是目标连接，`statement` 只能来自编译期 trigger 合同。
+/// 参数说明：
+/// - `connection`：是目标连接
+/// - `statement`：只能来自编译期 trigger 合同。
 ///
 /// 返回：创建成功返回 `Ok`；DDL 被拒绝或连接失败返回脱敏错误。
 async fn create_audit_trigger(
@@ -1053,7 +1061,9 @@ async fn create_audit_trigger(
 
 /// 业务作用：核对 trigger 的挂载位置与行级触发语义，防止正确名称绑定到错误事实表或事件。
 ///
-/// 参数说明：`definition` 是数据库对象，`contract` 是当前静态合同。
+/// 参数说明：
+/// - `definition`：是数据库对象
+/// - `contract`：是当前静态合同。
 ///
 /// 返回：目标表、事件、时机和行级语义全部一致时返回 `true`。
 fn trigger_metadata_matches(
@@ -1068,7 +1078,8 @@ fn trigger_metadata_matches(
 
 /// 业务作用：把 MySQL 格式化差异归一化，同时保留字符串字面量内容，用于比较 trigger 业务语义。
 ///
-/// 参数说明：`sql` 是数据库返回或编译期定义中的 SQL 片段。
+/// 参数说明：
+/// - `sql`：是数据库返回或编译期定义中的 SQL 片段。
 ///
 /// 返回：移除非字面量空白与标识符引号、统一关键字大小写后的稳定文本。
 fn normalize_mysql_sql(sql: &str) -> String {
@@ -1100,7 +1111,8 @@ fn normalize_mysql_sql(sql: &str) -> String {
 
 /// 业务作用：从静态 CREATE TRIGGER 提取规范化执行体，避免把对象名称和格式化差异纳入语义摘要。
 ///
-/// 参数说明：`statement` 是当前编译期 trigger DDL。
+/// 参数说明：
+/// - `statement`：是当前编译期 trigger DDL。
 ///
 /// 返回：DDL 合法时返回规范化执行体；静态合同不完整时返回内部结构错误。
 fn expected_trigger_body(statement: &'static str) -> Result<String, SagaStoreError> {
@@ -1112,7 +1124,8 @@ fn expected_trigger_body(statement: &'static str) -> Result<String, SagaStoreErr
 
 /// 业务作用：从当前 trigger 合同推导唯一可升级的旧执行体，即写入同一事件但尚未取得 Saga guard。
 ///
-/// 参数说明：`statement` 是当前编译期 trigger DDL。
+/// 参数说明：
+/// - `statement`：是当前编译期 trigger DDL。
 ///
 /// 返回：合同可解析时返回已知旧执行体摘要；静态定义不符合包装约束时返回内部结构错误。
 fn expected_pre_guard_trigger_body(statement: &'static str) -> Result<String, SagaStoreError> {
@@ -1195,7 +1208,8 @@ const AUDIT_BACKFILL_SQL: [&str; 5] = [
 /// 业务作用：为统一事件表启用前已存在的审计事实生成当前快照，并让同一 Saga 的回填
 /// 与在线写入共用提交 guard，保证公开游标不会越过迟提交的较小序号。
 ///
-/// 参数说明：`connection` 指向完成建表与 trigger 自举的 datasource。
+/// 参数说明：
+/// - `connection`：指向完成建表与 trigger 自举的 datasource。
 ///
 /// 返回：全部缺失事实已在 guard 保护下幂等映射时返回 `Ok`；任一事务失败返回错误。
 async fn backfill_audit_events(connection: &mut natx::Conn) -> Result<(), SagaStoreError> {
@@ -1234,7 +1248,8 @@ async fn backfill_audit_events(connection: &mut natx::Conn) -> Result<(), SagaSt
 
 /// 业务作用：复验统一审计流的 guard、事件表及逻辑唯一键，为 trigger 收敛和历史回填提供只读前置门禁。
 ///
-/// 参数说明：`connection` 是持有 schema 互斥权的目标连接。
+/// 参数说明：
+/// - `connection`：是持有 schema 互斥权的目标连接。
 ///
 /// 返回：两张表的列、引擎、排序规则和索引完整时返回 `Ok`；任何漂移或查询失败返回错误。
 async fn verify_audit_storage_schema(connection: &mut natx::Conn) -> Result<(), SagaStoreError> {
@@ -1271,7 +1286,8 @@ async fn verify_audit_storage_schema(connection: &mut natx::Conn) -> Result<(), 
 
 /// 业务作用：在回填完成后独立复验统一审计表、索引与全部 trigger，确保 Ready 对应完整语义合同。
 ///
-/// 参数说明：`connection` 是完成自举和历史映射的目标连接。
+/// 参数说明：
+/// - `connection`：是完成自举和历史映射的目标连接。
 ///
 /// 返回：全部审计对象精确符合合同返回 `Ok`；缺列、错索引、错执行体或查询失败返回错误。
 async fn verify_audit_schema(connection: &mut natx::Conn) -> Result<(), SagaStoreError> {
@@ -1294,9 +1310,13 @@ async fn verify_audit_schema(connection: &mut natx::Conn) -> Result<(), SagaStor
 
 /// 业务作用：复验审计表的列顺序、类型、默认值、引擎、排序规则与完整索引集合。
 ///
-/// 参数说明：连接和表名定位对象，`columns` 与 `indexes` 给出允许进入 Ready 的唯一结构。
+/// 参数说明：
+/// - `connection`：读取当前 DATABASE() 目录的连接。
+/// - `table`：需要核对的审计表名，作为绑定值查询。
+/// - `columns`：按物理顺序声明的完整列合同。
+/// - `indexes`：完整索引合同，分别为名称、非唯一标志、类型与有序列名文本。
 ///
-/// 返回：结构逐项一致返回 `Ok`；任何漂移或元数据读取失败返回错误。
+/// 返回：表引擎与排序规则、全部列及聚合索引描述和合同相同则成功；缺失、差异或元数据读取失败返回错误。只比较查询投影字段，不证明触发器行为或索引未投影属性。
 async fn verify_audit_table(
     connection: &mut natx::Conn,
     table: &str,

@@ -29,15 +29,21 @@ pub use namapper_macro::{
 pub use observation::{classify_method_result, classify_sqlx_result};
 pub use sqlx::types::Json;
 
+/// 持有查询连接及其行类型的擦除流；固定在堆上以保留异步执行期间的地址。
+type OwnedRowStream<T> =
+    Pin<Box<dyn futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static>>;
+
 /// SQLite Mapper 流式查询返回类型。
 ///
 /// 事务外持有 datasource 的池连接；`#[transactional_sqlite]` ambient 事务内则持有事务连接的槽锁
 /// 直到流消费完、失败、丢弃或预算到期；流持有连接期间同一事务不得发出其它语句，未释放就返回事务体会在提交
 /// 门禁处显式失败。
 pub struct MapperStream<T> {
-    inner:
-        Option<Pin<Box<dyn futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static>>>,
+    /// 尚未结束的数据库行流；终止后释放其连接责任。
+    inner: Option<OwnedRowStream<T>>,
+    /// 记录结果行与最终状态，避免多次终止重复计数。
     observation: Option<observability::MapperStreamGuard>,
+    /// 从连接继承的消费期限与来源资格，防止缓冲结果越过权限边界。
     budget: Option<natx_sqlite::SqliteStreamBudget>,
 }
 
@@ -60,9 +66,11 @@ impl<T> MapperStream<T> {
     }
 
     /// 业务作用：将 SQLite 行流绑定独立状态机，区分数据库读取和消费者间隔。
+    ///
     /// 参数说明：
-    /// - `stream` 为拥有型行流
-    /// - `observation` 为构造时建立的守卫。
+    /// - `stream`：拥有型行流。
+    /// - `observation`：构造时建立的守卫。
+    ///
     /// 返回：终止时只记一次事实的受观测结果流。
     pub fn observed<S>(stream: S, observation: observability::MapperStreamGuard) -> Self
     where
@@ -76,10 +84,12 @@ impl<T> MapperStream<T> {
     }
 
     /// 业务作用：把生成的 Mapper 流绑定来源消费预算，未消费和小结果缓冲都不能越过空闲期限。
+    ///
     /// 参数说明：
     /// - `stream`：持有连接的行流。
     /// - `observation`：记录一次最终结果的观测守卫。
     /// - `budget`：在流交付之前由同一连接创建的消费预算。
+    ///
     /// 返回：到期时交付一次错误并释放内部流，原生责任仍等待 worker 收口。
     pub fn observed_with_budget<S>(
         stream: S,
@@ -110,8 +120,10 @@ impl<T> futures_core::Stream for MapperStream<T> {
     type Item = Result<T, sqlx::Error>;
 
     /// 业务作用：按底层取行边界采集 SQLite 活跃耗时、首行与终态，排除消费者停顿。
+    ///
     /// 参数说明：
-    /// - `context` 为异步运行时唤醒上下文。
+    /// - `context`：异步运行时唤醒上下文。
+    ///
     /// 返回：消费、执行期限和来源资格有效时交付结果；失效时只交付一次错误，保留已确认的数据库失败。
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();

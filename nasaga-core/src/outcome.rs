@@ -59,7 +59,15 @@ impl<T> SagaOutcome<T> {
     pub fn code(&self) -> Option<&'static str> {
         match self {
             Self::Succeeded(_) => None,
-            Self::Rejected { code } | Self::Unknown { code } | Self::Halted { code } => Some(code),
+            Self::Rejected {
+                code,
+            }
+            | Self::Unknown {
+                code,
+            }
+            | Self::Halted {
+                code,
+            } => Some(code),
         }
     }
 }
@@ -102,7 +110,12 @@ impl CompensationOutcome {
     pub fn code(&self) -> Option<&'static str> {
         match self {
             Self::Succeeded => None,
-            Self::Unknown { code } | Self::Halted { code } => Some(code),
+            Self::Unknown {
+                code,
+            }
+            | Self::Halted {
+                code,
+            } => Some(code),
         }
     }
 }
@@ -128,7 +141,9 @@ impl SagaExecutionError {
     /// 返回：故障原因码。
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Retryable { code } => code,
+            Self::Retryable {
+                code,
+            } => code,
         }
     }
 }
@@ -142,7 +157,9 @@ impl std::fmt::Display for SagaExecutionError {
     /// 返回：格式化成功返回 `Ok`；写入失败时透传格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Retryable { code } => write!(formatter, "saga retryable execution error: {code}"),
+            Self::Retryable {
+                code,
+            } => write!(formatter, "saga retryable execution error: {code}"),
         }
     }
 }

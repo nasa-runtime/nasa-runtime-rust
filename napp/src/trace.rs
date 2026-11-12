@@ -19,6 +19,11 @@ const TRACEPARENT_HEADER: &str = "traceparent";
 const TRACE_ID_HEADER: &str = "trace-id";
 
 /// 业务作用：只接受唯一且语法有效的 `traceparent`，重复 header 按不可信输入处理。
+///
+/// 参数说明：
+/// - `request`：仅借用其入站头部进行链路解析的请求。
+///
+/// 返回：恰好一个可转换为文本且符合 TraceContext 语法的头部时返回上下文；缺失、重复或非法时返回 None，不选择其中任意一个值。
 fn inbound_trace_context(request: &Request) -> Option<TraceContext> {
     let mut values = request.headers().get_all(TRACEPARENT_HEADER).iter();
     match (values.next(), values.next()) {
@@ -32,6 +37,10 @@ fn inbound_trace_context(request: &Request) -> Option<TraceContext> {
 
 #[cfg(feature = "telemetry")]
 /// 业务作用：返回当前 UNIX 纳秒并饱和到 u64，供服务端 span 记录开始/结束时刻。
+///
+/// 参数说明: 无。
+///
+/// 返回：系统时钟对应的纳秒时间戳，上溢饱和为 u64::MAX，早于纪元时为零；不保证连续调用单调递增。
 fn unix_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -162,7 +162,8 @@ let opts = RestDiscoveryOptions::new()
 #[rest_client_macro::rest_client(service = "order-service")]
 trait OrderApi {
     /// 业务作用：通过订单服务读取指定订单。
-    /// 参数说明：id 为订单标识。
+    /// 参数说明：
+    /// - `id`：需要查询的订单标识。
     /// 返回：订单对象；发现、请求或解码失败时返回错误。
     #[GetMapping("/api/orders/{id}")]
     async fn get(&self, #[PathVariable("id")] id: i64) -> anyhow::Result<OrderDto>;

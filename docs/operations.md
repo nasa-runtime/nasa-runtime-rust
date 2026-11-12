@@ -328,7 +328,7 @@ Digest 尾部字段保守一并隐藏，因此需要保留的诊断信息应使�
 
 | 现象 | 优先检查 |
 | --- | --- |
-| 找不到主配置 | 工作目录与 `zcf/application.yml` 是否随产物部署 |
+| 找不到主配置 | 非空 `APP_CONFIG_FILE` 指定的文件，或缺省 `zcf/application.yml` 是否可读；相对路径是否匹配进程工作目录 |
 | 无 Web 后进程在 Hook 返回后退出 | `application.mode` 是否显式为 `service` |
 | 配置反序列化失败 | 环境键层级、字段类型和冲突键 |
 | 声明组件但提示 feature 缺失 | 业务 manifest 是否开启对应门面 feature |

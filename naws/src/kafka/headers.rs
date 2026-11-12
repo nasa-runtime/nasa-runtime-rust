@@ -106,6 +106,12 @@ pub struct PassthroughConfig {
 
 impl Default for PassthroughConfig {
     /// 业务作用：返回二进制少拷贝路径的安全默认值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：限制路由元数据与本地扇出规模、要求全部目标入队的配置；
+    /// 默认只开放 BITPACK_TLV 和 VARINT_TLV，使用进程独占消费组并拒绝来源身份 header。
+    /// 只构造策略，不创建消费者或为来源完成认证。
     fn default() -> Self {
         Self {
             max_route_headers: 256,
@@ -125,11 +131,16 @@ impl Default for PassthroughConfig {
 }
 
 impl PassthroughConfig {
-    /// 业务作用：校验所有安全和容量不变量。
+    /// 业务作用：在启动数据面适配器前检查本地容量、模式和消费组配置是否可用。
+    ///
+    /// 参数说明: 无。
     ///
     /// # 错误
     ///
     /// 任一上限为零、默认 mode 不在 allowlist、开放未实现 mode 或 group 配置非法时返回文本。
+    ///
+    /// 返回：约束全部满足时为 `Ok(())`；否则返回首个配置错误，保持原配置不变。
+    /// 不连接 Kafka，不证明 broker ACL、来源身份或业务目标的授权有效。
     pub fn validate(&self) -> Result<(), String> {
         if self.max_route_headers == 0
             || self.max_route_header_bytes == 0
@@ -149,10 +160,12 @@ impl PassthroughConfig {
             return Err("FAST_FIXED 尚未开放".into());
         }
         match &self.group_mode {
-            GroupMode::EphemeralNode { scope } if scope.trim().is_empty() => {
-                Err("ephemeral group scope 不能为空".into())
-            }
-            GroupMode::Durable { group } if group.trim().is_empty() || group == "default" => {
+            GroupMode::EphemeralNode {
+                scope,
+            } if scope.trim().is_empty() => Err("ephemeral group scope 不能为空".into()),
+            GroupMode::Durable {
+                group,
+            } if group.trim().is_empty() || group == "default" => {
                 Err("durable group 必须显式且不能为 default".into())
             }
             _ => Ok(()),
@@ -190,7 +203,7 @@ pub struct BorrowedWsRoute<'a> {
 
 /// 业务作用：严格解析一条借用 header 视图。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `headers`: 消息原始有序 header。
 /// - `config`: 解析和容量策略。
@@ -199,6 +212,10 @@ pub struct BorrowedWsRoute<'a> {
 ///
 /// 数量/字节超限、未知路由 header、null/空/非法 UTF-8、singleton 重复、来源身份不合规、
 /// 空目标或不允许的 mode 都返回安全文本，且不包含 header value。
+///
+/// 返回：借用原始 header 文本的路由视图，多值字段保留顺序和重复项；不读取或反序列化消息 payload。
+/// 非 `X-Nasa-WS-` header 忽略，解析失败不发布局部视图。来源字段仅做结构和策略检查，不构成来源认证。
+/// 调用方须先验证配置，并在后续阶段执行目标权限、节点身份和实际扇出数量检查。
 pub fn parse_route<'a>(
     headers: &nafka::KafkaHeadersRef<'a>,
     config: &PassthroughConfig,
@@ -235,6 +252,7 @@ pub fn parse_route<'a>(
             .checked_add(header.name.len())
             .and_then(|total| total.checked_add(value_len))
             .ok_or_else(|| "路由 header 字节数溢出".to_string())?;
+        // 先限制路由元数据数量与字节，再扩展字段列表，防止单条记录无限占用解析资源。
         if route_count > config.max_route_headers || route_bytes > config.max_route_header_bytes {
             return Err("路由 header 超过配置上限".into());
         }
@@ -270,24 +288,28 @@ pub fn parse_route<'a>(
         }
     }
 
+    // 缺少事件或目标不能隐式扩大成全量广播，整条记录必须拒绝。
     if route.events.is_empty() {
         return Err("至少需要一个客户端事件 header".into());
     }
     if route.group.is_none() && route.uids.is_empty() && route.routers.is_empty() {
         return Err("目标 group、uid、router 不能全部为空".into());
     }
+    // 消费端直接借用 payload，只能接受已约定的 raw 布局，避免误按其它信封转发。
     if layout.is_some_and(|value| value != PAYLOAD_LAYOUT_RAW) {
         return Err("v1 只接受 raw payload layout".into());
     }
+    // 节点名与进程实例必须成对，残缺身份不能参与集群来源识别或去重。
     if route.source_node.is_some() != source_incarnation_text.is_some() {
         return Err("来源 node 与 incarnation 必须同时存在".into());
     }
+    // 普通发布者与集群转发者允许携带的身份字段不同，按适配器策略拒绝越界输入。
     match config.source_identity_policy {
         SourceIdentityPolicy::Forbidden if route.source_node.is_some() => {
-            return Err("当前 route 禁止来源身份 header".into())
+            return Err("当前 route 禁止来源身份 header".into());
         }
         SourceIdentityPolicy::Required if route.source_node.is_none() => {
-            return Err("当前 route 缺少来源身份 header".into())
+            return Err("当前 route 缺少来源身份 header".into());
         }
         _ => {}
     }
@@ -305,6 +327,7 @@ pub fn parse_route<'a>(
         route.message_mode =
             nafka::mode_from_wire_name(value).ok_or_else(|| "消息 mode 未知".to_string())?;
     }
+    // 记录声明的模式不能越过适配器允许范围，也不能触发尚未实现的编码路径。
     if route.message_mode == Mode::FastFixed
         || !config.allowed_message_modes.contains(&route.message_mode)
     {
@@ -315,9 +338,12 @@ pub fn parse_route<'a>(
 
 /// 业务作用：校验 header 值为非空、无控制字符的 UTF-8。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: header 原始字节。
+///
+/// 返回：有效文本的借用切片，不分配副本；非法 UTF-8、空值或控制字符返回不含输入内容的错误。
+/// 不裁剪空格，也不验证该文本作为用户、端点或订阅名称时的业务含义。
 fn valid_text(value: &[u8]) -> Result<&str, String> {
     let text = std::str::from_utf8(value).map_err(|_| "路由 header 不是 UTF-8".to_string())?;
     if text.is_empty() || text.chars().any(char::is_control) {
@@ -329,11 +355,14 @@ fn valid_text(value: &[u8]) -> Result<&str, String> {
 
 /// 业务作用：写入一个严格 singleton 字段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `slot`: 目标字段。
 /// - `value`: 已校验文本。
 /// - `name`: 仅用于稳定错误分类的 header 名。
+///
+/// 返回：原槽位为空时保存新值并成功；原槽位已有值时返回重复错误。
+/// 出错前槽位已被新值覆盖，调用方必须丢弃整次解析的临时视图，不得继续使用局部结果。
 fn set_singleton<'a>(slot: &mut Option<&'a str>, value: &'a str, name: &str) -> Result<(), String> {
     if slot.replace(value).is_some() {
         Err(format!("singleton header 重复: {name}"))

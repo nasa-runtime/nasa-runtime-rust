@@ -35,6 +35,10 @@ pub struct MetadataOptions {
 
 impl Default for MetadataOptions {
     /// 业务作用：使用 3 秒、256 KiB 且不扩展跨 host 信任的保守缺省。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回三秒总超时、256 KiB 响应上限和空主机白名单；空白名单时后续 jwks_uri 必须与元数据 URL 主机名相同，不表示任意跨主机可用。
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(3),
@@ -61,6 +65,11 @@ pub enum MetadataError {
 
 impl std::fmt::Display for MetadataError {
     /// 业务作用：输出稳定错误分类，不附带 issuer、URL 或远端响应正文。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收分类说明的格式化器。
+    ///
+    /// 返回：输出错误枚举的 Debug 分类或传播格式化写出错误，不在本方法读取远端正文。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "authorization server metadata error: {self:?}")
     }
@@ -78,6 +87,13 @@ pub struct MetadataClient {
 
 impl MetadataClient {
     /// 业务作用：创建客户端；非 loopback 的 HTTP、userinfo、fragment 和未允许 host 均被拒。
+    ///
+    /// 参数说明：
+    /// - `expected_issuer`：返回文档必须精确匹配的可信发行方原文。
+    /// - `metadata_uri`：由配置指定的元数据 URL，须满足协议与主机策略。
+    /// - `options`：总超时、有界响应及可选主机白名单。
+    ///
+    /// 返回：发行方非空白、超时及容量在上限内、元数据 URL 通过策略且 HTTP 客户端构建成功时返回实例；否则返回 InvalidConfiguration。不去除发行方原值空白，不读取元数据或 JWKS。
     pub fn new(
         expected_issuer: impl Into<String>,
         metadata_uri: &str,
@@ -110,6 +126,10 @@ impl MetadataClient {
     }
 
     /// 业务作用：拉取、限长、解析并校验 issuer/jwks_uri。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：成功返回有界 JSON 文档且 issuer 精确匹配、jwks_uri 合法的元数据；空白名单时只比较两 URL 的 host_str，不要求端口相同。状态、超限、网络、文档或身份异常返回错误，不跟随重定向、不获取 JWKS 本身。
     pub async fn fetch(&self) -> Result<AuthorizationServerMetadata, MetadataError> {
         let mut response = self
             .client
@@ -154,6 +174,12 @@ impl MetadataClient {
 }
 
 /// 业务作用：校验 metadata/JWKS URL 的 scheme、host、userinfo、fragment 与 SSRF 白名单。
+///
+/// 参数说明：
+/// - `url`：已解析的元数据或 JWKS URL。
+/// - `allowed_hosts`：可选的精确主机白名单，空集合不在本函数限制主机名。
+///
+/// 返回：有主机、无用户凭据和片段，使用 HTTPS 或指定本机 HTTP 主机，且非空白名单精确包含 host_str 时成功；否则返回单位错误。允许查询参数，不解析 DNS 或验证连接目标 IP。
 fn validate_url(url: &reqwest::Url, allowed_hosts: &BTreeSet<String>) -> Result<(), ()> {
     if !url.username().is_empty()
         || url.password().is_some()

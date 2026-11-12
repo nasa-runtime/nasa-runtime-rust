@@ -13,14 +13,23 @@ use crate::ownership::FileOwner;
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SqliteOptions {
+    /// 持久数据库的文件路径；不接受 URI 或内存数据库。
     pub path: PathBuf,
+    /// 文件缺失时是否允许创建；只读来源必须关闭。
     pub create_if_missing: bool,
+    /// 是否允许创建缺失的父目录；只读来源必须关闭。
     pub create_parent_directories: bool,
+    /// 以只读权限打开，禁止写事务、迁移应用及写入型维护。
     pub read_only: bool,
+    /// 声明的日志模式；已有文件的实际模式必须与之相符。
     pub journal_mode: JournalMode,
+    /// 同步策略；未指定时根据日志模式选取受管默认值。
     pub synchronous: Option<Synchronous>,
+    /// 是否启用外键约束；受管来源要求为 true。
     pub foreign_keys: bool,
+    /// 原生锁竞争等待上限，单位为毫秒；操作总预算仍可提前终止等待。
     pub busy_timeout_ms: u64,
+    /// WAL 自动 checkpoint 的页数阈值；仅可写 WAL 来源可显式配置。
     pub wal_autocheckpoint_pages: Option<u32>,
 }
 
@@ -28,8 +37,10 @@ pub struct SqliteOptions {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JournalMode {
+    /// 使用 WAL；读者可持有提交快照，日志回收受读者生命周期约束。
     #[default]
     Wal,
+    /// 使用 DELETE 回滚日志；提交结束后由引擎删除回滚日志。
     Delete,
 }
 
@@ -37,14 +48,19 @@ pub enum JournalMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Synchronous {
+    /// 使用 SQLite NORMAL 同步策略。
     Normal,
+    /// 使用 SQLite FULL 同步策略。
     Full,
+    /// 使用 SQLite EXTRA 同步策略。
     Extra,
 }
 
 impl Default for SqliteOptions {
     /// 业务作用：给已有文件提供私有访问、外键与持久提交的默认策略。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：路径仍须显式填写，不默认创建数据库。
     fn default() -> Self {
         Self {
@@ -65,23 +81,37 @@ impl Default for SqliteOptions {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DataSourceConfig {
+    /// 文件访问、日志与连接初始化策略。
     pub sqlite: SqliteOptions,
+    /// 同时存活的物理连接上限，关闭中的连接仍占容量。
     pub max_connections: u32,
+    /// 启动预热连接数；为零时仍建立首条连接以确认引擎与文件策略。
     pub min_connections: u32,
+    /// 借用连接的默认等待上限，单位为毫秒。
     pub acquire_timeout_ms: u64,
+    /// 启动连接建立与初始化的等待上限，单位为毫秒。
     pub connect_timeout_ms: u64,
+    /// 单次数据库操作的默认总预算，单位为毫秒。
     pub operation_timeout_ms: u64,
+    /// 最外层事务的默认存活预算，单位为毫秒。
     pub transaction_timeout_ms: u64,
+    /// 流消费者未继续取行的最大间隔，单位为毫秒；防止长期占用连接与读快照。
     pub stream_idle_timeout_ms: u64,
+    /// 单次结果允许的累计行数上限，超过即停止交付。
     pub max_result_rows: usize,
+    /// 单次结果允许的累计数据字节上限，防止无界结果占用内存。
     pub max_result_bytes: usize,
+    /// 写入准入要求的最小可用磁盘字节数。
     pub min_free_bytes: u64,
+    /// WAL 字节压力阈值，超过时限制新写入。
     pub max_wal_bytes: u64,
 }
 
 impl Default for DataSourceConfig {
     /// 业务作用：限制文件库的物理线程、结果内存和无上游预算调用的存活时间。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：四连接上限和有限执行预算，路径仍由业务指定。
     fn default() -> Self {
         Self {
@@ -103,7 +133,9 @@ impl Default for DataSourceConfig {
 
 impl DataSourceConfig {
     /// 业务作用：在创建目录和取得文件锁前拒绝不支持的部署与无界参数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：全部配置一致且有界时成功；不产生 I/O。
     pub fn validate(&self) -> anyhow::Result<()> {
         let path = self.sqlite.path.to_string_lossy();
@@ -196,15 +228,19 @@ pub struct SqliteDataSourceOwner {
 
 impl SqliteDataSourceOwner {
     /// 业务作用：取得共享使用句柄而不转移关闭责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：指向同一个文件与连接池的轻量句柄。
     pub fn datasource(&self) -> SqliteDataSource {
         self.source.clone()
     }
 
     /// 业务作用：关闭新根调用并等待全部物理 worker 退出，保持超时后的文件权威。
+    ///
     /// 参数说明：
     /// - `deadline`：宿主给予关闭过程的绝对截止点。
+    ///
     /// 返回：实际连接全部关闭才成功；超时保持关闭态和未结束连接的 owner。
     pub async fn close(&self, deadline: tokio::time::Instant) -> anyhow::Result<()> {
         let _serial = tokio::time::timeout_at(deadline, self.source.0.close.lock()).await?;
@@ -303,7 +339,9 @@ struct CloseGuard<'a>(&'a SqliteDataSource);
 
 impl Drop for CloseGuard<'_> {
     /// 业务作用：关闭流程取消或失败时继续移交物理清理，不能恢复新业务接纳。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：清理空闲连接，活动连接继续保活原 owner。
     fn drop(&mut self) {
         self.0.stop_accepting();
@@ -312,7 +350,9 @@ impl Drop for CloseGuard<'_> {
 
 impl Drop for SqliteDataSourceOwner {
     /// 业务作用：拥有者离开时撤销新业务准入，真实连接继续保活文件锁直到物理退出。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：空闲连接收到关闭，活动责任不会被提前计为已结束。
     fn drop(&mut self) {
         self.source.stop_accepting();
@@ -321,79 +361,101 @@ impl Drop for SqliteDataSourceOwner {
 
 impl SqliteDataSource {
     /// 业务作用：让同时管理外部对象文件的宿主核对元数据来源与业务数据根的一致性。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：创建 owner 时固定、父目录已解析的绝对数据库路径；调用方不得据此绕过来源直接读写活动数据库。
     pub fn database_path(&self) -> &std::path::Path {
         &self.0.file.path
     }
 
     /// 业务作用：将外部对象目录的独占权绑定到同一文件 owner，取消异步调用也不能提前释放。
+    ///
     /// 参数说明：
     /// - `guard`：宿主持有的独占权；不得直接或间接引用本 datasource，以免形成所有权环。
+    ///
     /// 返回：仅首次绑定成功；关闭开始后拒绝，原生连接全部退出并释放文件权威后解除保活。
     pub fn retain_file_guard<T: Send + Sync + 'static>(&self, guard: Arc<T>) -> anyhow::Result<()> {
         self.0.file.retain_companion(guard)
     }
 
     /// 业务作用：向宿主暴露冻结的借用等待预算，用于观测阈值校验。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：创建数据源时确定的有限毫秒数。
     pub fn acquire_timeout_ms(&self) -> u64 {
         self.0.config.acquire_timeout_ms
     }
 
     /// 业务作用：读取同源已提交写入的本地序号，防止写后继续命中旧查询结果。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前进程内单调递增的提交序号。
     pub fn cache_epoch(&self) -> u64 {
         self.0.cache_epoch.load(Ordering::Acquire)
     }
 
     /// 业务作用：读取当前 owner 专用缓存前缀，防止同名来源跨生命周期复用缓存。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不含路径、仅在该来源生命周期内稳定的身份。
     pub fn cache_namespace(&self) -> &str {
         &self.0.cache_namespace
     }
 
     /// 业务作用：判断共享缓存是否仍具有可信数据库写入边界。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：没有不确定写入或缓存清理失败时为真。
     pub fn cache_safe(&self) -> bool {
         self.0.cache_safe.load(Ordering::Acquire)
     }
 
     /// 业务作用：缓存清理或提交结果不确定时隔离当前 owner 的共享缓存。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：来源余下生命周期不再读写共享缓存。
     pub fn quarantine_cache(&self) {
         self.0.cache_safe.store(false, Ordering::Release);
     }
 
     /// 业务作用：读取稳定 datasource 名称，用于宏、事务和观测对齐。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不含文件路径的已校验名称。
     pub fn name(&self) -> &str {
         self.0.name.as_str()
     }
 
     /// 业务作用：确认两个句柄是否具有完全相同的文件与生命周期权威。
+    ///
     /// 参数说明：
     /// - `other`：待比较的来源句柄。
+    ///
     /// 返回：同一 source 时为真，不以相同名字代替身份。
     pub fn same_source(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
     /// 业务作用：读取数据源是否只允许数据库读取。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：冻结的只读策略。
     pub fn is_read_only(&self) -> bool {
         self.0.config.sqlite.read_only
     }
 
     /// 业务作用：撤销业务准入并转入关闭清理，保留回滚与原生收口责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：来源停止业务借用与建连，不再提供业务排空窗口；文件权威仅在真实连接全部退出后释放。
     pub(crate) fn stop_accepting(&self) {
         // 先撤销新根调用和排空标志，避免 owner 离开或关闭清理开始后仍把连接回池用于业务。
@@ -412,8 +474,10 @@ impl SqliteDataSource {
     }
 
     /// 业务作用：从有界池借用同源物理连接，不在文件丢失后创建替代库。
+    ///
     /// 参数说明：
     /// - `deadline`：调用链固定的操作、事务或维护截止点，局部 acquire 等待不能覆盖它。
+    ///
     /// 返回：完成原生期限交接的拥有型借用责任；局部等待到期或来源关闭时失败。
     pub(crate) async fn acquire(
         &self,
@@ -503,9 +567,11 @@ impl SqliteDataSource {
 }
 
 /// 业务作用：建立 standalone 文件数据源及唯一关闭 owner，不自动安装全局名称。
+///
 /// 参数说明：
 /// - `name`：稳定 datasource 名称。
 /// - `config`：已经冻结的文件、连接与预算配置。
+///
 /// 返回：完成文件身份、原生能力和连接策略校验后返回 owner；失败保留真实磁盘事实。
 pub async fn open_owned(
     name: &str,

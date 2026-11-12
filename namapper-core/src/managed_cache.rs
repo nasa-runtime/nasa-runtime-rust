@@ -14,7 +14,9 @@ struct ManagedCache {
 
 impl ManagedCache {
     /// 业务作用：在新调用进入前复验当前代次仍接受缓存工作。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：持有至整个缓存或 loader 调用结束的读守卫；关闭后拒绝。
     async fn enter(&self) -> anyhow::Result<RwLockReadGuard<'_, Option<Arc<dyn MapperL2Cache>>>> {
         anyhow::ensure!(
@@ -38,7 +40,10 @@ pub struct MapperCacheOwner {
 
 impl MapperCacheOwner {
     /// 业务作用：安装受 owner 门禁保护的默认缓存，拒绝与其它标准或自定义安装冲突。
-    /// 参数说明：`cache` 为已完成后端校验的缓存。
+    ///
+    /// 参数说明：
+    /// - `cache`：为已完成后端校验的缓存。
+    ///
     /// 返回：安装成功的 owner；重复安装返回错误，不覆盖当前实例。
     pub fn install(cache: Arc<dyn MapperL2Cache>) -> anyhow::Result<Self> {
         let managed = Arc::new(ManagedCache {
@@ -46,11 +51,15 @@ impl MapperCacheOwner {
             inner: RwLock::new(Some(cache)),
         });
         crate::set_default_l2_cache(managed.clone())?;
-        Ok(Self { cache: managed })
+        Ok(Self {
+            cache: managed,
+        })
     }
 
     /// 业务作用：撤下当前代次的默认入口并关闭所有旧句柄的新调用准入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同步生效，不等待已经接纳的缓存调用或数据库 loader。
     pub fn close(&self) {
         let installed: Arc<dyn MapperL2Cache> = self.cache.clone();
@@ -68,7 +77,10 @@ impl MapperCacheOwner {
     }
 
     /// 业务作用：关闭准入后等待已接纳的 loader 和缓存调用归还资源。
-    /// 参数说明：`deadline` 为宿主统一停机截止点。
+    ///
+    /// 参数说明：
+    /// - `deadline`：为宿主统一停机截止点。
+    ///
     /// 返回：全部调用退出后释放后端；超时保留资源及关闭态，可再次等待。
     pub async fn shutdown(&self, deadline: tokio::time::Instant) -> anyhow::Result<()> {
         self.close();
@@ -84,7 +96,9 @@ impl MapperCacheOwner {
 
 impl Drop for MapperCacheOwner {
     /// 业务作用：启动失败或 owner 被释放时撤销入口，不遗留不可撤销全局引用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：新调用立即拒绝；已接纳调用按其原有生命周期结束。
     fn drop(&mut self) {
         self.close();
@@ -94,7 +108,11 @@ impl Drop for MapperCacheOwner {
 #[crate::async_trait]
 impl MapperL2Cache for ManagedCache {
     /// 业务作用：在当前 owner 准入下读取字段。
-    /// 参数说明：`key` 为命名空间；`hash_key` 为查询字段。
+    ///
+    /// 参数说明：
+    /// - `key`：为命名空间
+    /// - `hash_key`：为查询字段。
+    ///
     /// 返回：命中值、未命中或关闭/后端错误。
     async fn get(&self, key: &str, hash_key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let guard = self.enter().await?;
@@ -106,7 +124,13 @@ impl MapperL2Cache for ManagedCache {
     }
 
     /// 业务作用：在当前 owner 准入下写入查询结果。
-    /// 参数说明：`key` 为命名空间；`hash_key` 为字段；`value` 为编码值；`ttl_ms` 为可选过期时间。
+    ///
+    /// 参数说明：
+    /// - `key`：为命名空间
+    /// - `hash_key`：为字段
+    /// - `value`：为编码值
+    /// - `ttl_ms`：为可选过期时间。
+    ///
     /// 返回：写入确认或关闭/后端错误。
     async fn put(
         &self,
@@ -124,7 +148,11 @@ impl MapperL2Cache for ManagedCache {
     }
 
     /// 业务作用：在当前 owner 准入下失效单个字段。
-    /// 参数说明：`key` 为命名空间；`hash_key` 为字段。
+    ///
+    /// 参数说明：
+    /// - `key`：为命名空间
+    /// - `hash_key`：为字段。
+    ///
     /// 返回：删除确认或关闭/后端错误。
     async fn evict(&self, key: &str, hash_key: &str) -> anyhow::Result<()> {
         let guard = self.enter().await?;
@@ -136,7 +164,10 @@ impl MapperL2Cache for ManagedCache {
     }
 
     /// 业务作用：在当前 owner 准入下失效整个命名空间。
-    /// 参数说明：`key` 为命名空间。
+    ///
+    /// 参数说明：
+    /// - `key`：为命名空间。
+    ///
     /// 返回：清理确认或关闭/后端错误。
     async fn clear_key(&self, key: &str) -> anyhow::Result<()> {
         let guard = self.enter().await?;
@@ -144,7 +175,13 @@ impl MapperL2Cache for ManagedCache {
     }
 
     /// 业务作用：在一次完整准入中执行缓存查询、数据库回源和回填。
-    /// 参数说明：`key` 为命名空间；`hash_key` 为字段；`ttl_ms` 为回填过期时间；`loader` 为业务回源方法。
+    ///
+    /// 参数说明：
+    /// - `key`：为命名空间
+    /// - `hash_key`：为字段
+    /// - `ttl_ms`：为回填过期时间
+    /// - `loader`：为业务回源方法。
+    ///
     /// 返回：查询结果或错误；owner 排干包含回源与回填，不只等待首次读取。
     async fn get_or_load(
         &self,
@@ -170,7 +207,11 @@ pub struct MapperDefaultsOwner {
 
 impl MapperDefaultsOwner {
     /// 业务作用：原子占用所需的默认算法和观测槽，拒绝与已有安装混用。
-    /// 参数说明：`codec` 为可选编解码策略；`metrics` 为可选观测出口。
+    ///
+    /// 参数说明：
+    /// - `codec`：为可选编解码策略
+    /// - `metrics`：为可选观测出口。
+    ///
     /// 返回：全部所选槽空闲时安装成功；冲突不改变任何槽。
     pub fn install(
         codec: Option<std::sync::Arc<dyn crate::MapperCacheCodec>>,
@@ -204,7 +245,9 @@ impl MapperDefaultsOwner {
     }
 
     /// 业务作用：只撤销当前 owner 仍占有的槽，允许同进程再次启动。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：首次关闭撤下仍属于本次安装的入口；重复关闭不影响后续安装，已借出的算法引用可完成调用。
     pub fn close(&self) {
         // 同一个策略 Arc 可以在后续应用再次安装；旧凭证只能撤销一次，不能把复用指针当作自己的新占用。
@@ -238,7 +281,9 @@ impl MapperDefaultsOwner {
 
 impl Drop for MapperDefaultsOwner {
     /// 业务作用：安装失败回滚和宿主释放时同步撤下仍属于自己的默认槽。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不创建后台任务，也不撤销后续 owner。
     fn drop(&mut self) {
         self.close();

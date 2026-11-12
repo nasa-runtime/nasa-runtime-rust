@@ -25,7 +25,9 @@ pub(super) struct CatalogSecurityStamp {
 /// 业务作用：让业务执行资格在配置原子发布或凭据窗口到期时立即失效，无需等待 watcher 调度。
 pub(super) trait CatalogSecurityEpoch: Send + Sync {
     /// 业务作用：取得当前安全材料与有效信任集合的不可逆身份。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：从同一原子快照取得的单调发布代际及有效合同摘要；材料缺失时返回空值，不能授予执行权。
     /// 发布代际不得因材料恢复旧值而复用，不能分别读取代际与材料后拼接资格。
     fn epoch(&self) -> Option<CatalogSecurityStamp>;
@@ -41,7 +43,9 @@ pub(super) struct CatalogPermit<'a> {
 
 impl CatalogPermit<'_> {
     /// 业务作用：在异步等待后复验同一次快照资格，阻止旧操作跨越撤销或到期边界。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：原期限未到且资格从未撤销时为真；后续续租或重新确认不能复活失效操作。
     pub(super) fn is_valid(&self) -> bool {
         let state = self
@@ -65,7 +69,9 @@ impl CatalogPermit<'_> {
 
 impl CatalogAuthority {
     /// 业务作用：为不依赖动态 Catalog 的计划建立静态资格，动态计划须在发布前撤销它。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：静态计划可用、尚未持有动态租约的资格容器。
     pub(super) fn new() -> Self {
         Self {
@@ -76,7 +82,9 @@ impl CatalogAuthority {
     }
 
     /// 业务作用：关闭动态快照的执行资格，阻止未确认或代际切换中的副本处理新工作。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：后续读取均拒绝，直到完整快照取得新的有效确认。
     pub(super) fn revoke(&self) {
         // 同时更换撤销身份，确保在途操作不能借后续快照确认重新获得执行权。
@@ -88,7 +96,11 @@ impl CatalogAuthority {
     }
 
     /// 业务作用：把已验证的安全材料身份与有效期限一起发布，拒绝等待期间发生的凭据切换。
-    /// 参数说明：`deadline` 是数据库确认或只读合同证据的截止时刻，`epoch` 是该轮校验固定的安全发布代际与合同摘要。
+    ///
+    /// 参数说明：
+    /// - `deadline`：`deadline` 是数据库确认或只读合同证据的截止时刻。
+    /// - `epoch`：`epoch` 是该轮校验固定的安全发布代际与合同摘要。
+    ///
     /// 返回：期限有效且安全合同仍为当前值时开放；否则保持关闭。
     pub(super) fn confirm_with_security(
         &self,
@@ -113,14 +125,20 @@ impl CatalogAuthority {
     }
 
     /// 业务作用：在动态 watcher 首次授予资格前绑定安全材料来源，重复绑定不能替换控制权威。
-    /// 参数说明：`source` 是固定配置引用对应的动态安全快照来源。
+    ///
+    /// 参数说明：
+    /// - `source`：`source` 是固定配置引用对应的动态安全快照来源。
+    ///
     /// 返回：首次绑定成功，已绑定时返回 false。
     pub(super) fn bind_security(&self, source: Arc<dyn CatalogSecurityEpoch>) -> bool {
         self.security_source.set(source).is_ok()
     }
 
     /// 业务作用：比较操作固定的安全身份与当前材料，配置发布和旧凭据到期都不能延长旧执行权。
-    /// 参数说明：`epoch` 是 Catalog 确认时冻结的发布代际与有效安全摘要。
+    ///
+    /// 参数说明：
+    /// - `epoch`：`epoch` 是 Catalog 确认时冻结的发布代际与有效安全摘要。
+    ///
     /// 返回：无动态来源的静态计划或精确命中的动态材料返回 true，其余拒绝。
     fn security_matches(&self, epoch: Option<&CatalogSecurityStamp>) -> bool {
         match self.security_source.get() {
@@ -133,14 +151,18 @@ impl CatalogAuthority {
     }
 
     /// 业务作用：在实际业务入口独立复验执行资格，不依赖 watcher 能否继续调度。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：静态计划或未过期的动态确认允许执行；未确认或过期时拒绝。
     pub(super) fn is_authoritative(&self) -> bool {
         self.permit().is_some()
     }
 
     /// 业务作用：在读取受管快照前冻结本次执行期限与撤销身份。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：当前资格有效时返回有界凭据；未确认或过期时不给予执行权。
     pub(super) fn permit(&self) -> Option<CatalogPermit<'_>> {
         let state = self

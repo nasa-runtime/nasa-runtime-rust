@@ -49,14 +49,23 @@ static FILE_COLOR: AtomicBool = AtomicBool::new(false);
 static LOG_PATTERN: ArcSwapOption<CompiledLogPattern> = ArcSwapOption::const_empty();
 static DEFAULT_PATTERN: OnceLock<CompiledLogPattern> = OnceLock::new();
 
-/// 业务作用：返回默认日志格式模板；用于未配置格式时保持统一输出。
+/// 业务作用：惰性取得日志事件的默认已编译格式。
+///
+/// 参数说明: 无。
+///
+/// 返回：返回进程内共享的默认格式，首次解析常量失败时 panic，不修改运行期自定义格式槽。
 fn default_pattern() -> &'static CompiledLogPattern {
     DEFAULT_PATTERN.get_or_init(|| {
         CompiledLogPattern::parse(DEFAULT_LOG_PATTERN).expect("DEFAULT_LOG_PATTERN must compile")
     })
 }
 
-/// 业务作用：【运行期】热替换全局输出 pattern(被 [`config::LogManager::apply`]/[`config::apply_config`] 提交)。
+/// 业务作用：发布已经编译完成的后续事件格式。
+///
+/// 参数说明：
+/// - `pattern`：调用方已解析校验的共享格式树。
+///
+/// 返回：替换全局格式槽，后续读取使用新树；已取得旧树的渲染仍可完成，不在此重新校验或输出日志。
 pub(crate) fn set_log_pattern(pattern: std::sync::Arc<CompiledLogPattern>) {
     LOG_PATTERN.store(Some(pattern));
 }
@@ -92,11 +101,12 @@ pub struct FileLogConfig {
 }
 
 impl FileLogConfig {
-    /// 业务作用：用默认滚动参数构造文件配置：`max_file_size=500MB`、`max_history_days=30`、
-    /// `total_size_cap=30GB`、`clean_history_on_start=true`、`split_error_file=true`、`color=false`。
+    /// 业务作用：为显式目录构造文件日志轮转及保留策略。
     ///
-    /// # 参数
-    /// - `dir`: 文件日志目录,会在其下写入 `info.log` 和可选的 `error.log`。
+    /// 参数说明：
+    /// - `dir`：应用指定的日志目录，构造时不创建或验证。
+    ///
+    /// 返回：返回单文件 500 MiB、保留三十天、归档总量三十 GiB、启动清理和独立错误文件开启、颜色关闭的配置。
     pub fn new(dir: impl Into<String>) -> Self {
         Self {
             dir: dir.into(),
@@ -112,10 +122,12 @@ impl FileLogConfig {
     // ── 链式覆盖(便于直接喂 yml 的 `Option<...>`:None 保持默认/上一次值,Some 才覆盖)──
     // 把"MB→字节换算 + 有值才覆盖"的样板从各下游 main 收敛到这里(下游只读自己的配置字段传入)。
 
-    /// 业务作用：按 MB 设置单文件滚动上限；`None` 保持当前值。
+    /// 业务作用：按 MiB 设置触发单文件轮转的大小。
     ///
-    /// # 参数
-    /// - `mb`: 单个滚动日志文件的 MB 上限;`None` 表示保留当前配置。
+    /// 参数说明：
+    /// - `mb`：Some 提供 MiB 阈值，None 保留既有设置。
+    ///
+    /// 返回：返回更新后的配置，字节换算溢出时饱和到 u64 上限，不校验零或直接执行轮转。
     pub fn with_max_file_size_mb(mut self, mb: Option<u64>) -> Self {
         if let Some(mb) = mb {
             self.max_file_size = mb.saturating_mul(1024 * 1024);
@@ -123,10 +135,12 @@ impl FileLogConfig {
         self
     }
 
-    /// 业务作用：设置归档保留天数；`None` 保持当前值。
+    /// 业务作用：设置归档的日期保留窗口。
     ///
-    /// # 参数
-    /// - `days`: 归档文件保留天数;`None` 表示保留当前配置。
+    /// 参数说明：
+    /// - `days`：Some 保存天数，负值关闭按天清理，None 保留原设置。
+    ///
+    /// 返回：返回更新后的配置，不检查日期算术可表示性，也不立即删除归档。
     pub fn with_max_history_days(mut self, days: Option<i64>) -> Self {
         if let Some(d) = days {
             self.max_history_days = d;
@@ -134,10 +148,12 @@ impl FileLogConfig {
         self
     }
 
-    /// 业务作用：按 MB 设置归档总量上限；`None` 保持当前值。
+    /// 业务作用：按 MiB 设置每类文件归档的累计容量阈值。
     ///
-    /// # 参数
-    /// - `mb`: 归档总容量 MB 上限;`None` 表示保留当前配置。
+    /// 参数说明：
+    /// - `mb`：Some 提供 MiB 阈值，零表示关闭容量清理，None 保留原值。
+    ///
+    /// 返回：返回更新后的配置，字节乘法饱和，不执行目录扫描或删除。
     pub fn with_total_size_cap_mb(mut self, mb: Option<u64>) -> Self {
         if let Some(mb) = mb {
             self.total_size_cap = mb.saturating_mul(1024 * 1024);
@@ -145,19 +161,23 @@ impl FileLogConfig {
         self
     }
 
-    /// 业务作用：文件是否带 ANSI 颜色(`tail` 可见色,代价 grep 见转义码)。
+    /// 业务作用：选择文件日志是否渲染 ANSI 颜色。
     ///
-    /// # 参数
-    /// - `color`: `true` 表示文件日志写入 ANSI 颜色转义码,`false` 表示纯文本。
+    /// 参数说明：
+    /// - `color`：文件输出是否启用颜色，独立于控制台终端判断。
+    ///
+    /// 返回：返回更新后的配置，仅在配置被发布后影响后续文件事件。
     pub fn with_color(mut self, color: bool) -> Self {
         self.color = color;
         self
     }
 }
 
-/// 业务作用：返回当前本地日期字符串 `YYYY-MM-DD`。
+/// 业务作用：取得本地时区下用于日志归档的当前日期。
 ///
-/// 文件滚动命名与日志时间戳都使用 Local 时区,确保归档日期和业务看到的日志日期一致。
+/// 参数说明: 无。
+///
+/// 返回：返回 YYYY-MM-DD 文本，日期随系统墙钟和本地时区变化，不是单调时间。
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
@@ -187,28 +207,36 @@ struct RollingFile {
 }
 
 impl RollingFile {
-    /// 业务作用：计算当前日志文件路径；用于确定正在写入的目标文件。
+    /// 业务作用：在指定目录下派生活动日志文件名。
     ///
-    /// # 参数
-    /// - `dir`: 日志、存储或配置文件所在目录。
-    /// - `base`: 归档、配置或路径拼接使用的基础名称。
+    /// 参数说明：
+    /// - `dir`：文件所在目录。
+    /// - `base`：由调用方限定的文件类别名，例如 info 或 error。
+    ///
+    /// 返回：返回 base.log 路径，不创建文件或校验类别名是否含路径分隔符。
     fn active_path(dir: &Path, base: &str) -> PathBuf {
         dir.join(format!("{base}.log"))
     }
 
-    /// 业务作用：计算归档日志文件路径；用于滚动时生成带日期和序号的文件名。
+    /// 业务作用：组合日志类别、归档日期和序号的文件路径。
     ///
-    /// # 参数
-    /// - `dir`: 日志、存储或配置文件所在目录。
-    /// - `base`: 归档、配置或路径拼接使用的基础名称。
-    /// - `date`: 日志归档日期字符串。
-    /// - `index`: 列表下标、归档序号或字段位置。
+    /// 参数说明：
+    /// - `dir`：归档所在目录。
+    /// - `base`：调用方限定的日志类别。
+    /// - `date`：调用方提供的归档日期文本。
+    /// - `index`：同日同类别的归档序号。
+    ///
+    /// 返回：返回 base_date.index.log 路径，不检查日期或目标存在性。
     fn archive_path(dir: &Path, base: &str, date: &str, index: u32) -> PathBuf {
         dir.join(format!("{base}_{date}.{index}.log"))
     }
 
     /// 业务作用：验证日志目录与活动文件可写，准备阶段不归档或删除现有日志。
-    /// 参数说明：`cfg` 为文件容量和保留策略；`base` 为固定日志文件类别。
+    ///
+    /// 参数说明：
+    /// - `cfg`：为文件容量和保留策略
+    /// - `base`：为固定日志文件类别。
+    ///
     /// 返回：已打开但尚未使用的 writer；路径不可写时失败且不改变当前输出选择。
     fn open(cfg: &FileLogConfig, base: &str) -> io::Result<Self> {
         let dir = PathBuf::from(&cfg.dir);
@@ -231,18 +259,23 @@ impl RollingFile {
     }
 
     // 扫描既有 `{base}_{date}.{i}.log`,返回该日期下一个可用序号(max+1,无则 0)。
-    /// 业务作用：扫描既有 `{base}_{date}.{i}.log`,返回该日期下一个可用序号(max+1,无则 0)。
-    /// # 参数
-    /// - `dir`: 日志、存储或配置文件所在目录。
-    /// - `base`: 归档、配置或路径拼接使用的基础名称。
-    /// - `date`: 日志归档日期字符串。
+    /// 业务作用：扫描同类别同日归档并计算下一编号。
+    ///
+    /// 参数说明：
+    /// - `dir`：需要扫描的日志目录。
+    /// - `base`：要匹配的日志类别。
+    /// - `date`：限定本次编号范围的日期文本。
+    ///
+    /// 返回：无可解析编号或目录不可读时返回零，否则返回最大 u32 编号加一；达到编号上限时算术可能溢出，不在此返回错误。
     fn next_index(dir: &Path, base: &str, date: &str) -> u32 {
         let prefix = format!("{base}_{date}.");
         let mut max_idx: Option<u32> = None;
         if let Ok(rd) = read_dir(dir) {
             for ent in rd.flatten() {
                 let name = ent.file_name();
-                let Some(name) = name.to_str() else { continue };
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
                 if let Some(rest) = name.strip_prefix(&prefix) {
                     if let Some(num) = rest.strip_suffix(".log") {
                         if let Ok(i) = num.parse::<u32>() {
@@ -256,9 +289,12 @@ impl RollingFile {
     }
 
     // 需要时滚动:跨天 → 归档旧日期并重置序号;同日超限 → 归档当前序号并 +1。
-    /// 业务作用：需要时滚动:跨天 → 归档旧日期并重置序号;同日超限 → 归档当前序号并 +1。
-    /// # 参数
-    /// - `incoming`: 即将写入日志文件的字节数。
+    /// 业务作用：在首次写入同步文件状态，并按日期或预计大小执行轮转。
+    ///
+    /// 参数说明：
+    /// - `incoming`：本次准备写入的字节数。
+    ///
+    /// 返回：无需轮转或重命名及重开成功时完成，元数据及文件操作失败返回 IO 错误。先归档再重开，中途失败不回滚；空文件允许首批字节超过大小阈值，归档清理按尽力原则执行。
     fn maybe_roll(&mut self, incoming: usize) -> io::Result<()> {
         if self.first_write {
             // 候选准备时旧 writer 仍可能滚动；首次真正使用时重新取得活动文件，避免写入过时 inode。
@@ -305,18 +341,23 @@ impl RollingFile {
         Ok(())
     }
 
-    /// 业务作用：清理超出保留策略的归档日志。
+    /// 业务作用：按归档命名模式执行日期及累计容量清理。
     ///
-    /// 按保留天数与总量上限清理，只删除形如 `{base}_YYYY-MM-DD.{i}.log` 的归档，
-    /// 先按日期淘汰,再按总大小从最旧归档开始删除；活动文件 `{base}.log` 不匹配归档前缀,不会被误删。
+    /// 参数说明: 无。
+    ///
+    /// 返回：扫描同类别且日期外形匹配的归档，先删除过期项再从最旧项削减容量；读取或删除失败被忽略，不保证最终满足阈值。不检查文件来源或日期的日历有效性，调用方应使用专门日志目录。
     fn cleanup(&self) {
         let prefix = format!("{}_", self.base);
-        // (date, index, path, size)
+        // 保存归档日期、滚动序号、完整路径和字节数，以便按保留策略选择删除目标。
         let mut archives: Vec<Archive> = Vec::new();
-        let Ok(rd) = read_dir(&self.dir) else { return };
+        let Ok(rd) = read_dir(&self.dir) else {
+            return;
+        };
         for ent in rd.flatten() {
             let name = ent.file_name();
-            let Some(name) = name.to_str() else { continue };
+            let Some(name) = name.to_str() else {
+                continue;
+            };
             let Some(rest) = name.strip_prefix(&prefix) else {
                 continue;
             };
@@ -368,11 +409,12 @@ impl RollingFile {
     }
 }
 
-/// 业务作用：校验归档文件名的日期段严格为 `YYYY-MM-DD`(4 位数-2 位数-2 位数),而非仅 `len()==10`。
-/// 用于保留清理只删真正的归档,不误删同名外部文件(如 `info_helloworld.0.log`)。
+/// 业务作用：按数字和连字符位置识别归档日期的固定外形。
 ///
-/// # 参数
-/// - `s`: 要解析的输入字符串。
+/// 参数说明：
+/// - `s`：待识别的文件名日期片段。
+///
+/// 返回：恰为四位数字、连字符、两位数字、连字符及两位数字时 true；不检查真实年月日范围。
 fn is_archive_date(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 10
@@ -384,10 +426,12 @@ fn is_archive_date(s: &str) -> bool {
 }
 
 impl Write for RollingFile {
-    /// 业务作用：写入 write 内容；用于输出数据或持久化状态。
+    /// 业务作用：在轮转尝试后将字节写入当前持有的日志文件句柄。
     ///
-    /// # 参数
-    /// - `buf`: 需要写入目标日志 writer 的字节缓冲。
+    /// 参数说明：
+    /// - `buf`：本次底层输出的字节缓冲区，不保证对应完整事件。
+    ///
+    /// 返回：返回实际写入字节数并累计计数，文件写入错误传播；轮转错误只输出到 stderr，仍尝试当前句柄写入，不承诺归档失败时路径状态已恢复。
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // 滚动失败不影响写入:记一行 stderr,继续写当前文件
         if let Err(e) = self.maybe_roll(buf.len()) {
@@ -398,7 +442,11 @@ impl Write for RollingFile {
         Ok(n)
     }
 
-    /// 业务作用：刷新缓冲内容；用于确保已写数据及时落地。
+    /// 业务作用：将活动日志文件的用户态缓冲交给底层文件。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回底层 flush 成功或 IO 错误，不执行 fsync 或保证断电持久性。
     fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
     }
@@ -409,7 +457,11 @@ impl Write for RollingFile {
 struct InfoFileWriter;
 impl<'a> MakeWriter<'a> for InfoFileWriter {
     type Writer = EitherWriter<NonBlocking, io::Sink>;
-    /// 业务作用：创建 writer；用于向调用方提供临时工作对象。
+    /// 业务作用：为普通文件输出取得当前非阻塞写入器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：文件槽已启用时返回写入器克隆，否则返回丢弃输出的 sink；已取得克隆不因随后关闭槽而自动失效。
     fn make_writer(&'a self) -> Self::Writer {
         match INFO_FILE_WRITER.load_full() {
             Some(nb) => EitherWriter::A((*nb).clone()),
@@ -423,7 +475,11 @@ impl<'a> MakeWriter<'a> for InfoFileWriter {
 struct ErrorFileWriter;
 impl<'a> MakeWriter<'a> for ErrorFileWriter {
     type Writer = EitherWriter<NonBlocking, io::Sink>;
-    /// 业务作用：创建 writer；用于向调用方提供临时工作对象。
+    /// 业务作用：为独立错误文件输出取得当前非阻塞写入器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：错误文件槽存在时返回克隆，否则 sink；是否只接收 ERROR 由日志 layer 的过滤器控制。
     fn make_writer(&'a self) -> Self::Writer {
         match ERROR_FILE_WRITER.load_full() {
             Some(nb) => EitherWriter::A((*nb).clone()),
@@ -436,7 +492,11 @@ impl<'a> MakeWriter<'a> for ErrorFileWriter {
 // 公开入口
 // ────────────────────────────────────────────────────────────────────────────
 
-/// 业务作用：初始化全局日志(仅控制台,默认 `info` 级别)。
+/// 业务作用：以 info 作为环境配置缺失时的默认过滤表达式安装全局日志订阅器。
+///
+/// 参数说明: 无。
+///
+/// 返回：成功后后续 tracing 事件进入控制台及可选文件层；全局订阅器已经安装等初始化失败会 panic，不自动开启文件日志。
 pub fn init() {
     init_with_default("info");
 }
@@ -445,24 +505,23 @@ pub fn init() {
 type LevelReloader = Box<dyn Fn(EnvFilter) -> Result<EnvFilter, String> + Send + Sync>;
 static LEVEL_RELOADER: OnceLock<LevelReloader> = OnceLock::new();
 
-/// 业务作用：初始化全局日志:按配置模板输出的 formatter + `RUST_LOG`/默认级别过滤。
+/// 业务作用：以显式默认过滤表达式初始化全局日志输出。
 ///
-/// # 参数
-/// - `default_filter`: 未设置 `RUST_LOG` 时使用的默认 EnvFilter 表达式。
+/// 参数说明：
+/// - `default_filter`：环境 RUST_LOG 解析失败时使用的表达式。
 ///
-/// 在 main 最早期调用(nacos 之前)。此时:
-///   - 级别 = `default_filter`(或 `RUST_LOG`),且【可被 [`set_level`] 运行期重置】
-///   - info/error 文件 layer 已挂载但写入丢弃 → 实际只输出控制台
-///
-/// 待 nacos 配置就绪后,再调用 [`set_level`] + [`enable_file_logging`] 接入最终配置。
+/// 返回：安装控制台及动态文件层，不自动开启文件；重复安装全局订阅器会 panic。
 pub fn init_with_default(default_filter: &str) {
     init_with_optional_layer(default_filter, None);
 }
 
-/// 业务作用：初始化全局日志并附加一个 `tracing` layer。
+/// 业务作用：初始化默认日志输出并接入调用方提供的附加采集层。
 ///
-/// 该入口供 OpenTelemetry 等与日志共用同一 subscriber 栈的组件使用；额外 layer 仍位于全局
-/// reload filter 之下，不会绕过运行期日志级别。初始化必须且只能在进程启动早期调用一次。
+/// 参数说明：
+/// - `default_filter`：环境过滤器不可用时使用的默认表达式。
+/// - `layer`：随全局 Registry 安装的附加 layer。
+///
+/// 返回：订阅器安装成功后统一处理事件；附加层的内部生命周期由其实现决定，重复全局初始化会 panic。
 pub fn init_with_default_and_layer<L>(default_filter: &str, layer: L)
 where
     L: Layer<tracing_subscriber::Registry> + Send + Sync + 'static,
@@ -472,7 +531,13 @@ where
 
 type OptionalRegistryLayer = Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync + 'static>;
 
-/// 业务作用：组装一次性全局 subscriber、可热更新过滤器、控制台层、文件层及可选扩展层。
+/// 业务作用：组装可重载过滤器、可选采集层、控制台和动态文件输出。
+///
+/// 参数说明：
+/// - `default_filter`：RUST_LOG 不可解析时采用的过滤表达式。
+/// - `extra_layer`：可选的全局 Registry 附加层。
+///
+/// 返回：安装成功时保存过滤重载入口，控制台颜色按终端判断、文件颜色按槽设置；订阅器安装失败 panic，不创建文件目录。
 fn init_with_optional_layer(default_filter: &str, extra_layer: Option<OptionalRegistryLayer>) {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
@@ -532,11 +597,12 @@ fn init_with_optional_layer(default_filter: &str, extra_layer: Option<OptionalRe
         .init();
 }
 
-/// 业务作用：【nacos 之后调用】把日志级别热切到最终配置(如 `"info,my_app=debug"`)。
-/// 在 [`init`]/[`init_with_default`] 之前调用无效(reloader 尚未就绪)。
+/// 业务作用：尝试用新过滤表达式更新已安装的日志过滤层。
 ///
-/// # 参数
-/// - `level`: 新的 EnvFilter 表达式,例如全局级别或模块级别组合。
+/// 参数说明：
+/// - `level`：tracing EnvFilter 支持的级别或目标过滤表达式。
+///
+/// 返回：有效且重载成功后影响后续过滤；无效表达式、未初始化或重载失败被忽略，不返回执行结果。
 pub fn set_level(level: &str) {
     if let Ok(filter) = EnvFilter::try_new(level) {
         let _ = install_level(filter);
@@ -544,16 +610,20 @@ pub fn set_level(level: &str) {
 }
 
 /// 业务作用：安装已解析的日志过滤器，不在提交阶段重新解析配置。
+///
 /// 参数说明：
 /// - `filter`：为已验证的过滤器。
+///
 /// 返回：已初始化且过滤器可替换时成功；否则不改变文件输出。
 fn install_level(filter: EnvFilter) -> Result<(), String> {
     replace_level(filter).map(|_| ())
 }
 
 /// 业务作用：切换过滤器并保留精确旧值，使配置事务可在不重新解析的情况下恢复。
+///
 /// 参数说明：
 /// - `filter`：已完成解析的候选过滤器。
+///
 /// 返回：成功返回先前过滤器；句柄不可用时不改变过滤状态。
 fn replace_level(filter: EnvFilter) -> Result<EnvFilter, String> {
     LEVEL_RELOADER
@@ -566,15 +636,12 @@ fn replace_level(filter: EnvFilter) -> Result<EnvFilter, String> {
 #[must_use = "LogGuard 一旦 drop 后台刷盘线程即停止、缓冲日志丢失,务必持有到进程结束"]
 pub struct LogGuard(#[allow(dead_code)] Vec<WorkerGuard>);
 
-/// 业务作用：在最终配置可用后按默认参数接入 `info.log` 与 `error.log` 文件输出。
+/// 业务作用：用默认文件策略按显式目录尝试开启日志输出。
 ///
-/// - `path` 为 `None`/空 → 不接文件(保持只控制台),返回 `None`
-/// - `path` 有值 → 在该目录下创建滚动文件 + 非阻塞写,原子塞进全局槽,此后日志同时落文件
+/// 参数说明：
+/// - `path`：可选目录文本，None 或仅含空白时不开启。
 ///
-/// 等价 `enable_file_logging_with(&FileLogConfig::new(path))`。
-///
-/// # 参数
-/// - `path`: 日志输出目录;为空或 `None` 时不启用文件日志。
+/// 返回：成功返回需持有的后台写入 guard；未提供目录或打开失败返回 None，打开失败可写 stderr。已有全局 writer 仅在准备成功后被替换。
 pub fn enable_file_logging(path: Option<&str>) -> Option<LogGuard> {
     let dir = path?;
     if dir.trim().is_empty() {
@@ -600,10 +667,12 @@ pub enum LogOpenError {
 }
 
 impl std::fmt::Display for LogOpenError {
-    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：展示文件日志打开失败的类别及文件系统原因。
     ///
-    /// # 参数
-    /// - `f`: Debug 或 Display 输出使用的标准格式化器。
+    /// 参数说明：
+    /// - `f`：接收错误文本的格式化目标。
+    ///
+    /// 返回：写入空目录提示或类别、目录及 IO 原因，格式化失败传播；目录文本不在此脱敏。
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::EmptyDir => write!(f, "log dir is empty"),
@@ -617,24 +686,28 @@ impl std::fmt::Display for LogOpenError {
 }
 
 impl std::error::Error for LogOpenError {
-    /// 业务作用：返回底层错误来源；用于错误链追踪。
+    /// 业务作用：提供日志打开错误对应的底层 IO 原因链。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：Open 返回底层 IO 错误引用，EmptyDir 返回 None，不复制或记录错误。
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Open { source, .. } => Some(source),
+            Self::Open {
+                source,
+                ..
+            } => Some(source),
             Self::EmptyDir => None,
         }
     }
 }
 
-/// 业务作用：【nacos 之后调用】按完整配置接入文件日志(滚动 + 保留清理 + 可选 error.log),**严格版**:
-/// 任一需要的文件打不开 → 返回 `Err`,**不改任何 writer 槽**(避免半更新);全部就绪后才原子替换。
+/// 业务作用：准备全部文件输出资源后发布新文件日志槽。
 ///
-/// # 参数
-/// - `cfg`: 文件日志配置,包括目录、滚动大小、保留天数、总容量、error.log 和颜色设置。
+/// 参数说明：
+/// - `cfg`：目录、轮转、清理及独立错误文件配置。
 ///
-/// 文件准备失败必须显式返回错误；`apply_config` 使用本入口。
-/// 旧 [`enable_file_logging_with`] 降级调用本函数(IO 失败 → `eprintln` + `None`,保持兼容)。
-/// 返回的 [`LogGuard`] **必须被持有到进程结束**(见其文档)。
+/// 返回：成功返回调用方必须持有的 guard；空目录或任一文件打开失败返回 LogOpenError 并保留旧 writer 槽。已创建的目录或文件不会因此删除，多槽发布不是同一原子操作。
 pub fn try_enable_file_logging_with(cfg: &FileLogConfig) -> Result<LogGuard, LogOpenError> {
     Ok(prepare_file_logging(cfg)?.install())
 }
@@ -649,10 +722,13 @@ struct PreparedFileLogging {
 
 impl PreparedFileLogging {
     /// 业务作用：将已准备的文件 writer 切换为当前输出，并移交刷盘线程责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：必须持有到输出被替换后才释放的日志守卫；不执行文件打开或刷盘等待。
     fn install(self) -> LogGuard {
         FILE_COLOR.store(self.color, Ordering::Relaxed);
+        // 文件和 worker 已全部准备后才发布 writer，打开失败不能替换仍可用的旧槽；各槽依次切换。
         INFO_FILE_WRITER.store(Some(Arc::new(self.info)));
         ERROR_FILE_WRITER.store(self.error.map(Arc::new));
         self.guards
@@ -660,7 +736,10 @@ impl PreparedFileLogging {
 }
 
 /// 业务作用：在发布锁之外准备文件和后台 writer，失败不改变已生效的输出。
-/// 参数说明：`cfg` 为文件日志配置。
+///
+/// 参数说明：
+/// - `cfg`：为文件日志配置。
+///
 /// 返回：尚未安装的候选；目录或文件无法打开时返回错误。
 fn prepare_file_logging(cfg: &FileLogConfig) -> Result<PreparedFileLogging, LogOpenError> {
     if cfg.dir.trim().is_empty() {
@@ -697,8 +776,12 @@ fn prepare_file_logging(cfg: &FileLogConfig) -> Result<PreparedFileLogging, LogO
     })
 }
 
-/// 业务作用：写一条 "file logging enabled" 状态行(用**当前**全局 pattern)。`LogManager::apply`/`enable_file_logging_with`
-/// 在 writer 接入 + pattern 提交**之后**调用,确保状态行也遵循新 pattern。
+/// 业务作用：用当前日志格式记录已启用文件输出的配置状态。
+///
+/// 参数说明：
+/// - `cfg`：已经成功安装的文件配置。
+///
+/// 返回：提交 info 级配置状态事件，是否实际输出由当前过滤和写入器决定，不提供落盘确认。
 pub(crate) fn emit_file_logging_enabled(cfg: &FileLogConfig) {
     tracing::info!(
         "file logging enabled (post-nacos): {}/info.log{} (max_file_size={}B, max_history_days={}, total_size_cap={}B, color={})",
@@ -715,12 +798,12 @@ pub(crate) fn emit_file_logging_enabled(cfg: &FileLogConfig) {
     );
 }
 
-/// 业务作用：【nacos 之后调用】按完整配置接入文件日志(滚动 + 保留清理 + 可选 error.log)。best-effort 版:
-/// 打开失败 → `eprintln` + 返回 `None`(**全有或全无**,失败时不改 writer 槽)。需失败可见请用
-/// [`try_enable_file_logging_with`]。返回的 [`LogGuard`] **必须被持有到进程结束**。
+/// 业务作用：按配置尝试开启文件日志并记录启用状态。
 ///
-/// # 参数
-/// - `cfg`: 文件日志配置,包括目录、滚动大小、保留天数、总容量、error.log 和颜色设置。
+/// 参数说明：
+/// - `cfg`：明确指定目录和轮转保留策略的配置。
+///
+/// 返回：准备及安装成功返回 guard，失败写 stderr 并返回 None；启用事件不代表已经完成持久化。
 pub fn enable_file_logging_with(cfg: &FileLogConfig) -> Option<LogGuard> {
     match try_enable_file_logging_with(cfg) {
         Ok(g) => {
@@ -734,10 +817,11 @@ pub fn enable_file_logging_with(cfg: &FileLogConfig) -> Option<LogGuard> {
     }
 }
 
-/// 业务作用：【运行期】关闭文件日志,回到**只控制台**:清空 info/error 两个 writer 槽(此后文件 layer 写入丢弃)。
+/// 业务作用：从全局输出槽撤下普通和错误文件写入器。
 ///
-/// 用于 Nacos 热更新把 `path` 置空时真正停掉文件输出(`enable_file_logging(None)` 是 no-op、不会关已接入的文件,
-/// 故另设此显式入口)。**调用方仍应 drop 旧 [`LogGuard`]**,以停止旧的后台刷盘线程(否则线程空转到进程结束)。
+/// 参数说明: 无。
+///
+/// 返回：后续从空槽取得的 writer 丢弃输出；已经取得的写入器及排队字节不会立即撤销，后台资源仍由各 guard 持有和释放。
 pub fn disable_file_logging() {
     INFO_FILE_WRITER.store(None);
     ERROR_FILE_WRITER.store(None);
@@ -747,7 +831,7 @@ pub fn disable_file_logging() {
 // 按 `LOG_PATTERN` 模板格式化，字段展开由 pattern 模块负责。
 // ────────────────────────────────────────────────────────────────────────────
 // 输出形如:
-//   2026-05-27 12:34:56.789 [INFO ] [tokio-runtime-worker] r.s.mvc::main[260] - mysql connection ok
+//   2026-05-27 12:34:56.789 [INFO ] [tokio-runtime-worker] a.s.service::main[260] - 数据库连接已建立
 //
 // 默认格式由 DEFAULT_LOG_PATTERN 定义，包含时间、级别、线程与调用位置。
 // 业务可经 LogConfig.pattern 覆盖;颜色是否输出由 `color` 决定(控制台=TTY,文件=FILE_COLOR)。
@@ -766,7 +850,11 @@ pub struct LogFormatter {
 }
 
 impl LogFormatter {
-    /// 业务作用：读取 ansi 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：根据当前渲染器策略确定是否输出 ANSI 颜色。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：固定策略直接返回开关；文件槽策略读取当前文件颜色标志，不修改输出配置。
     fn ansi(&self) -> bool {
         match self.color {
             Colorize::Always => true,
@@ -781,12 +869,14 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
     N: for<'a> FormatFields<'a> + 'static,
 {
-    /// 业务作用：格式化单条日志事件；用于写入控制台或文件前生成文本。
+    /// 业务作用：用本次取得的格式树和颜色策略渲染一个 tracing 事件。
     ///
-    /// # 参数
-    /// - `ctx`: 本次格式化、日志或运行阶段的上下文。
-    /// - `writer`: 日志或格式化内容的目标 writer。
-    /// - `event`: 当前 tracing 日志事件,由 pattern 渲染器读取字段和元数据。
+    /// 参数说明：
+    /// - `ctx`：提供 span 及事件字段格式化上下文。
+    /// - `writer`：接收当前事件文本的目标写入器。
+    /// - `event`：要按当前格式渲染的 tracing 事件。
+    ///
+    /// 返回：优先使用已发布格式，否则使用惰性默认格式；格式化失败传播，不在此执行事件内容脱敏或文件持久化确认。
     fn format_event(
         &self,
         ctx: &FmtContext<'_, S, N>,

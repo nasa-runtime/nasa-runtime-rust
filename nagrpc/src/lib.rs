@@ -150,7 +150,10 @@ pub struct GrpcTlsAcceptor {
 
 impl GrpcTlsAcceptor {
     /// 业务作用：在配置准备阶段完成 TLS 材料校验，保证发布后的新连接无需解析不可信候选。
-    /// 参数说明：`identity` 固定同一代证书、私钥、client CA 与有效期边界。
+    ///
+    /// 参数说明：
+    /// - `identity`：固定同一代证书、私钥、client CA 与有效期边界。
+    ///
     /// 返回：全部材料匹配时返回可接受连接的资源；非法材料返回脱敏错误。
     pub fn prepare(identity: &GrpcTlsIdentity) -> Result<Self, GrpcServerError> {
         Ok(Self {
@@ -162,7 +165,9 @@ impl GrpcTlsAcceptor {
 /// 业务作用：从受信配置的原子快照读取 TLS 接收资源，使轮换无需重新绑定 listener。
 pub trait GrpcTlsAcceptorSource: Send + Sync {
     /// 业务作用：为一次新握手选取完整证书、私钥与信任根快照。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已全部校验的接收资源；正在握手的连接保留其原始快照。
     fn acceptor(&self) -> GrpcTlsAcceptor;
 }
@@ -246,8 +251,14 @@ fn validate_certificate_lifetime(
 }
 
 /// 业务作用：按身份用途校验证书链的生效、到期与扩展用途，避免仅凭 PEM 可解析就接受候选。
-/// 参数说明：`certificates` 是有序证书链，`minimum_remaining` 和 `clock_skew` 限制时间窗口，`server` 选择 serverAuth 或 clientAuth。
-/// 返回：全部证书时间有效且叶证书允许对应用途时返回最早到期 Unix 秒，否则拒绝材料。
+///
+/// 参数说明：
+/// - `certificates`：按叶证书在前排列的身份链。
+/// - `minimum_remaining`：每张证书需要至少剩余的有效时长，按整秒比较。
+/// - `clock_skew`：允许 not_before 晚于当前时刻的整秒偏差。
+/// - `server`：true 检查 serverAuth，false 检查 clientAuth；无 EKU 或 any 用途可通过。
+///
+/// 返回：链中每张证书可完整解析且满足时间窗口、叶证书 EKU 允许用途时返回计入身份的最早到期秒数；空链、解析、时间或用途失败时报错。末尾 subject=issuer 的锚不计入最早到期，但仍检查时间；本函数不验证链签名或主机名。
 fn validate_certificate_purpose_lifetime(
     certificates: &[rustls::pki_types::CertificateDer<'_>],
     minimum_remaining: Duration,
@@ -549,7 +560,8 @@ impl PeerIdentity {
 
 /// 业务作用：从 client 实际使用的 PEM certificate chain 派生与服务端 `PeerIdentity` 相同的身份。
 ///
-/// 参数说明：`certificate_chain_pem` 的第一张证书必须是 client leaf certificate。
+/// 参数说明：
+/// - `certificate_chain_pem`：的第一张证书必须是 client leaf certificate。
 ///
 /// 返回：证书可解析且非空时返回 `sha256:<hex>` principal；其它输入返回 TLS 配置错误。
 pub fn client_certificate_principal(
@@ -573,7 +585,10 @@ pub fn client_certificate_principal(
 }
 
 /// 业务作用：在客户端凭据或入站身份映射发布前校验 clientAuth 证书链的时间边界。
-/// 参数说明：`certificate_chain_pem` 是从叶证书开始的 PEM 身份链。
+///
+/// 参数说明：
+/// - `certificate_chain_pem`：是从叶证书开始的 PEM 身份链。
+///
 /// 返回：链完整可解析、已生效且允许客户端身份时返回最早到期 Unix 秒，否则返回脱敏配置错误。
 pub fn client_certificate_expiry_timestamp(
     certificate_chain_pem: &[u8],
@@ -660,7 +675,9 @@ pub struct Deadline {
 
 impl Deadline {
     /// 业务作用：将入站 RPC 截止点交给其它 adapter，保持同一绝对时刻。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：共享截止点的请求预算；RPC Deadline 本身不携带客户端断开的取消信号。
     pub fn request_budget(&self) -> nabudget::RequestBudget {
         nabudget::RequestBudget::until(self.effective)
@@ -712,7 +729,11 @@ pub fn propagate_deadline_from<T>(
 }
 
 /// 业务作用：把调用链预算传播到下游 RPC 的超时 metadata。
-/// 参数说明：`request` 为尚未发出的请求；`budget` 为当前调用链预算。
+///
+/// 参数说明：
+/// - `request`：为尚未发出的请求
+/// - `budget`：为当前调用链预算。
+///
 /// 返回：取消或到期时本地拒绝；成功时写入不超过剩余预算的 grpc-timeout。
 pub fn propagate_request_budget<T>(
     request: &mut tonic::Request<T>,
@@ -729,7 +750,11 @@ pub fn propagate_request_budget<T>(
 }
 
 /// 业务作用：使一个已传播超时的下游 RPC 等待同时响应本地取消和截止点。
-/// 参数说明：`budget` 为当前预算；`operation` 为下游调用 future。
+///
+/// 参数说明：
+/// - `budget`：为当前预算
+/// - `operation`：为下游调用 future。
+///
 /// 返回：保留 RPC 结果；停止等待不能证明服务端未收到或未执行请求。
 pub async fn call_with_budget<T>(
     budget: &nabudget::RequestBudget,
@@ -739,7 +764,10 @@ pub async fn call_with_budget<T>(
 }
 
 /// 业务作用：将本地预算终止原因映射为协议状态，保持取消与超时的区别。
-/// 参数说明：`error` 为预算终止原因。
+///
+/// 参数说明：
+/// - `error`：为预算终止原因。
+///
 /// 返回：不包含业务数据的固定 gRPC 状态。
 fn budget_status(error: nabudget::BudgetError) -> tonic::Status {
     match error {
@@ -1693,7 +1721,9 @@ impl MessagePermits {
     ///
     /// 返回：可由请求和响应 body 同时申请实际在途字节的状态。
     fn new(semaphore: Arc<Semaphore>) -> Self {
-        Self { semaphore }
+        Self {
+            semaphore,
+        }
     }
 
     /// 业务作用：为已经实际读入或即将交给 transport 的消息字节取得 permit，避免声明长度预扣整份预算。
@@ -2966,7 +2996,10 @@ impl ServerPlan {
     }
 
     /// 业务作用：把 listener 绑定到受信配置发布点，每条新连接使用最新完整 TLS 快照。
-    /// 参数说明：`source` 必须始终提供经过准备校验的接收资源。
+    ///
+    /// 参数说明：
+    /// - `source`：必须始终提供经过准备校验的接收资源。
+    ///
     /// 返回：采用动态 TLS 来源的计划；已有固定 identity 由该来源替代。
     pub fn tls_source(mut self, source: Arc<dyn GrpcTlsAcceptorSource>) -> Self {
         self.tls_source = Some(source);
@@ -2987,7 +3020,10 @@ impl ServerPlan {
     }
 
     /// 业务作用：冻结路由、TLS 与容量并预绑定 socket，将接流许可交给上层启动屏障。
-    /// 参数说明：`bind` 为本地监听地址，可使用端口 0 取得操作系统分配的地址。
+    ///
+    /// 参数说明：
+    /// - `bind`：为本地监听地址，可使用端口 0 取得操作系统分配的地址。
+    ///
     /// 返回：成功得到唯一 shutdown owner 与一次性激活权；激活前仅为 Bound，丢弃激活权会关闭 listener。
     /// TCP backlog 可能完成连接建立，但未激活时不会 accept、处理协议或返回 health/RPC 响应。
     pub async fn bind(
@@ -4184,7 +4220,9 @@ pub struct GrpcServerActivation {
 
 impl GrpcServerActivation {
     /// 业务作用：允许已绑定 listener 发布 Serving 并开始接流，等待所有权确认。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：serve owner 已接受许可且发布 Running 时成功；owner 已关闭时失败。
     /// 请求发出后取消等待不撤回许可，调用方仍须通过 GrpcServerHandle 关闭 listener。
     pub async fn activate(self) -> Result<(), GrpcServerError> {

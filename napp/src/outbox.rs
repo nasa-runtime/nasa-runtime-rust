@@ -44,7 +44,9 @@ type PublisherRoutes = BTreeMap<(String, String), Arc<dyn OutboxPublisher + Send
 
 /// 一个事务域共享同一 dispatcher；业务事件按精确身份选择发布端，其余事件保留原计划语义。
 struct RoutedOutboxPublisher {
+    /// 未命中精确事件规则时沿用的计划发布端。
     fallback: Arc<dyn OutboxPublisher + Send + Sync>,
+    /// 按聚合类型与事件类型匹配的冻结发布规则，不改变数据库 claim 范围。
     routes: PublisherRoutes,
 }
 
@@ -52,7 +54,8 @@ struct RoutedOutboxPublisher {
 impl OutboxPublisher for RoutedOutboxPublisher {
     /// 业务作用：在取得同一 Outbox claim 后选择事件目标，保持数据库顺序与原有失败策略。
     ///
-    /// 参数说明：`event` 是已提交的待投递事件。
+    /// 参数说明：
+    /// - `event`：`event` 是已提交的待投递事件。
     ///
     /// 返回：目标确认才成功；失败分类原样交给 dispatcher，未登记事件委托原计划。
     async fn publish(&self, event: &OutboxEvent) -> Result<(), OutboxPublishError> {
@@ -75,7 +78,9 @@ enum OutboxBackend {
 /// 业务作用：把受管 Outbox 的后端身份与后端中立能力绑定，避免运行循环按具体数据库复制。
 #[derive(Clone)]
 struct ManagedOutbox {
+    /// 与创建时数据源一致的驱动身份，用于结构门禁和进程级策略选择。
     backend: OutboxBackend,
+    /// 绑定指定数据源的持久能力，投递、积压读取和保留清理共用。
     store: Arc<dyn DurableOutbox>,
 }
 
@@ -94,7 +99,8 @@ impl std::ops::Deref for ManagedOutbox {
 
 /// 业务作用：按当前编译能力校验 lane 名，保证配置在具体 adapter 安装前得到一致裁决。
 ///
-/// 参数说明：`channel` 是待进入路由表与指标 label 的 lane 名。
+/// 参数说明：
+/// - `channel`：`channel` 是待进入路由表与指标 label 的 lane 名。
 ///
 /// 返回：任一已编入 adapter 接受该规范名称时返回真。
 fn valid_channel_name(channel: &str) -> bool {
@@ -197,6 +203,13 @@ async fn create_managed_outbox(
 }
 
 /// 业务作用：按冻结后端安装 Outbox 进程级租户配额，保持写侧与受管 dispatcher 口径一致。
+///
+/// 参数说明：
+/// - `backend`：Ready 为当前计划选定的数据库驱动，决定使用哪个进程级配额目录。
+/// - `quotas`：受信租户到在途事件上限的完整映射，未列出的租户不受此表限制。
+///
+/// 返回：后端校验通过且首次安装或与已有内容相同时成功；非法条目或内容冲突时返回错误。
+/// 配额在进程生命周期内冻结，须在业务写入前安装；此处不初始化持久账本，也不回滚已安装目录。
 fn install_tenant_quotas(
     backend: OutboxBackend,
     quotas: BTreeMap<String, u64>,
@@ -210,6 +223,13 @@ fn install_tenant_quotas(
 }
 
 /// 业务作用：按冻结后端安装 aggregate 到 lane 的唯一写侧路由。
+///
+/// 参数说明：
+/// - `backend`：当前受管计划选定的数据库驱动，决定写侧使用的路由目录。
+/// - `routes`：聚合类型到规范通道名的完整映射，未列出的类型继续进入默认通道。
+///
+/// 返回：内容合法且首次安装或与已冻结目录相同时成功；非法名称或不同内容返回错误。
+/// 该映射作用于此后写入，不能迁移持久事件已有的通道，也不在应用停机时清除。
 fn install_channel_routes(
     backend: OutboxBackend,
     routes: BTreeMap<String, String>,
@@ -222,7 +242,15 @@ fn install_channel_routes(
     }
 }
 
-/// 业务作用：在 Ready 前按实际后端复验 Outbox 事件表与可选配额账本。
+/// 业务作用：在 Ready 阶段按实际后端检查事件表及可选配额账本的必要结构。
+///
+/// 参数说明：
+/// - `outbox`：提供当前已选后端身份的句柄，本函数不通过其 store 执行检查。
+/// - `datasource`：调用方保证与句柄相同的受管数据源名称，底层检查按此名称取得数据库连接。
+/// - `quotas_enabled`：为 true 时在事件表检查成功后追加配额账本检查。
+///
+/// 返回：后端要求的结构满足时完成，任一连接或结构检查失败立即返回；不建表或迁移数据。
+/// 这是后端定义的必要结构门禁，不是全部数据库结构与业务数据完整性的证明。
 async fn verify_outbox_schema(
     outbox: &ManagedOutbox,
     datasource: &str,
@@ -248,6 +276,12 @@ async fn verify_outbox_schema(
 }
 
 /// 业务作用：读取当前受管 Outbox 后端的低基数配额拒绝累计值。
+///
+/// 参数说明：
+/// - `outbox`：用于选择后端的可选句柄，不作为数据源或租户过滤条件。
+///
+/// 返回：所选后端在本进程内因配额拒绝写入的累计次数；未提供句柄时为零。
+/// 该值不代表单个数据源或租户的计数，也不查询持久积压或集群总量。
 fn quota_rejections_total(outbox: Option<&ManagedOutbox>) -> u64 {
     match outbox.map(|outbox| outbox.backend) {
         #[cfg(feature = "outbox")]
@@ -495,11 +529,17 @@ static OUTBOX_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 26] = [
 #[serde(default, deny_unknown_fields)]
 /// 业务作用：承载 Outbox dispatcher 的轮询、退避、单轮预算、批次与摘流配置。
 struct OutboxSettings {
+    /// 未在计划中显式覆盖时使用的规范数据源名称。
     datasource_ref: String,
+    /// 健康轮次后的最大等待毫秒数；本进程提交通知可以提前唤醒。
     poll_interval_ms: u64,
+    /// 故障轮次后的退避毫秒数，不因新事件提交提前结束。
     error_backoff_ms: u64,
+    /// 单轮投递的等待预算毫秒数，不代表超时后外部副作用已经撤销。
     operation_timeout_ms: u64,
+    /// 单轮最多处理的事件行数，约束本轮工作量。
     batch_size: u32,
+    /// 就绪贡献连续失败达到该次数后影响整体接流。
     failure_threshold: u32,
 }
 
@@ -536,16 +576,22 @@ pub enum OutboxPoisonPolicy {
     },
 }
 
-/// 业务作用：描述一个进程唯一的受管 Outbox 发布计划。
+/// 业务作用：描述一个受管数据源的 Outbox 发布计划；同一应用内数据源必须唯一。
 ///
 /// 发布端负责把事件映射到 Kafka、Redis Streams 或其它下游；组件只负责持久化轮询和生命周期，
 /// 因而 Outbox 可以脱离 Saga 独立使用。
 pub struct OutboxApplicationPlan {
+    /// 可选数据源覆盖，省略时在 Ready 使用运行参数中的数据源。
     datasource_ref: Option<String>,
+    /// 默认发布端，必须以真实下游确认作为成功条件。
     publisher: Arc<dyn OutboxPublisher + Send + Sync>,
+    /// 首个失败事件继续阻塞或达到次数后进入死信的明确选择。
     poison_policy: OutboxPoisonPolicy,
+    /// 显式批准的保留清理计划；缺省不启动删除循环。
     retention: Option<OutboxRetentionPlan>,
+    /// 显式启用的通道划分与固定路由；缺省使用未分片投递。
     channels: Option<OutboxChannelPlan>,
+    /// 可选进程级租户在途上限，不能与多数据源计划同时启用。
     tenant_quotas: Option<std::collections::BTreeMap<String, u64>>,
 }
 
@@ -555,16 +601,23 @@ pub struct OutboxApplicationPlan {
 /// 分片是显式 opt-in：未提交本计划时保持单一 `global` lane 的未分片 dispatcher，
 /// 升级不会静默开启并行发布。
 pub struct OutboxChannelPlan {
+    /// 聚合类型到通道的冻结写侧映射，未列出的类型使用 global。
     routes: std::collections::BTreeMap<String, String>,
+    /// 为每个通道创建独立 dispatcher 的唯一名称集合，包含默认通道。
     lanes: Vec<String>,
 }
 
 /// 业务作用：单个 lane 的进程级观测状态，区分"某个领域停摆"与"整个 dispatcher 退出"。
 pub(crate) struct LaneRuntime {
+    /// 启动冻结的通道名，作为有限指标标签而非运行期事件输入。
     channel: String,
+    /// 本通道从成功返回的投递报告累计的已确认事件数。
     published: AtomicU64,
+    /// 本通道发生存储、发布失败或等待超时的轮次数。
     failed_rounds: AtomicU64,
+    /// 最近一轮健康状态，创建时为 true，停机时置为 false；不证明已完成首轮投递。
     healthy: AtomicBool,
+    /// 最近一次持久指标刷新读到的积压，不随每次发布实时调整。
     pending: AtomicU64,
 }
 
@@ -596,11 +649,11 @@ impl LaneRuntime {
         self.failed_rounds.load(Ordering::Relaxed)
     }
 
-    /// 业务作用：读取本 lane 最近一轮是否健康。
+    /// 业务作用：读取本通道对整体就绪裁决的当前健康标记。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：最近一轮无失败返回真。
+    /// 返回：创建后初始为 true，此后随投递轮次结果更新，停机时为 false；不能单凭 true 判断首轮已完成。
     pub(crate) fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
     }
@@ -618,8 +671,11 @@ impl LaneRuntime {
 /// 业务作用：冻结受管 Outbox 的保留清理子计划——策略、归档端与轮询节奏在 UserHook
 /// 一次提交，Ready 前完成全部校验，没有已批准策略就没有清理任务。
 pub struct OutboxRetentionPlan {
+    /// 已校验的保留期限、删除权限和单轮执行预算。
     policy: OutboxRetentionPolicy,
+    /// 可选归档端；策略要求归档时必须在删除前取得有效收据。
     archive: Option<Arc<dyn OutboxArchive + Send + Sync>>,
+    /// 清理轮次之间的固定等待毫秒数，失败不缩短间隔。
     interval_ms: u64,
 }
 
@@ -646,7 +702,8 @@ impl OutboxApplicationPlan {
 
     /// 业务作用：把发布计划精确绑定到一个命名 datasource，供多事务域服务启动独立 dispatcher。
     ///
-    /// 参数说明：`datasource_ref` 是 Application datasource catalog 中的规范名称。
+    /// 参数说明：
+    /// - `datasource_ref`：`datasource_ref` 是 Application datasource catalog 中的规范名称。
     ///
     /// 返回：名称合法且首次绑定时返回计划；重复或非法引用返回配置错误。
     pub fn with_datasource_ref(
@@ -762,7 +819,10 @@ impl OutboxApplicationPlan {
                 ));
             }
         }
-        self.channels = Some(OutboxChannelPlan { routes, lanes });
+        self.channels = Some(OutboxChannelPlan {
+            routes,
+            lanes,
+        });
         Ok(self)
     }
 
@@ -823,7 +883,9 @@ impl OutboxApplicationPlan {
                 "outbox dead-letter attempts must be greater than zero",
             ));
         }
-        self.poison_policy = OutboxPoisonPolicy::DeadLetter { max_attempts };
+        self.poison_policy = OutboxPoisonPolicy::DeadLetter {
+            max_attempts,
+        };
         Ok(self)
     }
 }
@@ -831,20 +893,35 @@ impl OutboxApplicationPlan {
 /// 业务作用：提供 Outbox 当前累计投递状态的低基数快照。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutboxSnapshot {
+    /// 投递轮次累计值，包含空轮次、返回错误与等待超时。
     rounds: u64,
+    /// 已返回投递报告中的确认事件累计值，不包含结果不明轮次的推测值。
     published: u64,
+    /// 发布、存储或单轮超时导致的失败轮次数。
     failed_rounds: u64,
+    /// 已结束清理轮次数，包含空轮、竞争让路和失败。
     retention_rounds: u64,
+    /// 已返回清理报告中确认取得归档收据的事件累计值。
     retention_archived: u64,
+    /// 已返回清理报告中确认删除的已投递行数。
     retention_deleted_dispatched: u64,
+    /// 已返回清理报告中经批准并确认删除的死信行数。
     retention_deleted_dead: u64,
+    /// 清理失败轮次数，包含提交不确定，不包含单独记录的行锁竞争。
     retention_failed_rounds: u64,
+    /// 因其他持有者占用清理 claim 而让路的轮次数。
     retention_claim_contended: u64,
+    /// 未处理完候选即耗尽清理预算的轮次数，不刷新最近成功时刻。
     retention_budget_exhausted: u64,
+    /// 最近一次清理报告中的最老候选年龄毫秒数，尚无报告或无候选时为零。
     retention_oldest_candidate_age_ms: u64,
+    /// 因行锁等待超时或死锁让路的清理轮次数。
     retention_lock_contention: u64,
+    /// 已发送提交但未确认结果的清理轮次数，不计入已确认删除数。
     retention_commit_uncertain: u64,
+    /// 清理循环记录的固定间隔毫秒数，未运行清理时为零。
     retention_interval_ms: u64,
+    /// 最近完成候选或确认无候选的清理轮起始 epoch 毫秒；零表示尚无成功记录。
     retention_last_success_ms: u64,
 }
 
@@ -989,6 +1066,7 @@ impl OutboxSnapshot {
 /// 业务作用：提供 Ready 后的 Outbox 只读能力，不授予替换 publisher 或停止 dispatcher 的权限。
 #[derive(Clone)]
 pub struct OutboxHandle {
+    /// 供只读查询的共享状态，保留句柄不授予修改发布计划或阻止停机的权限。
     pub(crate) state: Arc<OutboxRuntimeState>,
 }
 
@@ -1172,31 +1250,50 @@ impl OutboxHandle {
 
 /// 业务作用：保存 Outbox 计划、生命周期门禁、累计计数和最近一份完整持久化指标快照。
 pub(crate) struct OutboxRuntimeState {
+    /// UserHook 提交、Ready 一次性取走的计划集合，None 表示已消费。
     pending: Mutex<Option<Vec<OutboxApplicationPlan>>>,
+    /// 按数据源隔离的精确事件发布规则，Ready 取走后绑定到原计划。
     routes: Mutex<BTreeMap<String, PublisherRoutes>>,
+    /// Ready 开始消费计划后永久封口，拒绝晚到的计划与发布规则。
     sealed: AtomicBool,
+    /// 能力访问门禁：0 未就绪、1 已就绪、2 已停止。
     lifecycle: AtomicU8,
     /// Ready 门禁、dispatcher、retention 与指标查询共用的命名 datasource Outbox。
     outboxes: OnceLock<BTreeMap<String, ManagedOutbox>>,
+    /// 所有数据源及通道已经结束的投递轮次数，包含失败和空轮次。
     rounds: AtomicU64,
+    /// 从返回的投递报告累计确认事件，不对超时轮次补记推测值。
     published: AtomicU64,
+    /// 投递报告有失败、存储返回错误或等待超时的轮次数。
     failed_rounds: AtomicU64,
+    /// 清理执行器已经返回的轮次数，包含错误与竞争让路。
     retention_rounds: AtomicU64,
+    /// 清理报告确认取得有效归档收据的累计事件数。
     retention_archived: AtomicU64,
+    /// 清理报告确认已提交删除的已投递事件数。
     retention_deleted_dispatched: AtomicU64,
+    /// 清理报告确认经批准删除的死信事件数。
     retention_deleted_dead: AtomicU64,
+    /// 清理错误累计，包含提交结果不明，行锁竞争单独计数。
     retention_failed_rounds: AtomicU64,
+    /// 清理 claim 由其他持有者占用而本轮让路的次数。
     retention_claim_contended: AtomicU64,
+    /// 清理报告表明预算耗尽的次数，不据此更新最近成功时刻。
     retention_budget_exhausted: AtomicU64,
+    /// 最近一次有效清理报告的候选年龄毫秒数；错误时保留此前观测。
     retention_oldest_candidate_age_ms: AtomicU64,
+    /// 清理因行锁超时或死锁让路的轮次数，不与普通存储失败合并。
     retention_lock_contention: AtomicU64,
+    /// 清理提交结果不明的轮次数，同时计入清理失败总数。
     retention_commit_uncertain: AtomicU64,
+    /// 清理驱动启动时记录的固定间隔毫秒数，失败不会缩短它。
     retention_interval_ms: AtomicU64,
     /// 最近一轮成功清理的 epoch 毫秒；0 表示从未成功。长期不前进即"严格治理 degraded"
     /// 信号，但清理停摆绝不反向停止 dispatcher。
     retention_last_success_ms: AtomicU64,
     /// 指标出口最近一次从已提交事实查询到的待投递数。
     metrics_pending: AtomicU64,
+    /// 按 OUTBOX_AGE_EVENT_TYPES 固定顺序保存的最老未确认事件年龄毫秒数。
     metrics_event_age_ms: [AtomicU64; 3],
     /// 指标出口最近一次从已提交事实查询到的死信数。
     metrics_dead: AtomicU64,
@@ -1259,7 +1356,8 @@ impl OutboxRuntimeState {
 
     /// 业务作用：发布多数据源 dispatcher 健康集合，供任一循环恢复时复验整体状态。
     ///
-    /// 参数说明：`health` 与 Ready 时冻结的 datasource 计划一一对应。
+    /// 参数说明：
+    /// - `health`：`health` 与 Ready 时冻结的 datasource 计划一一对应。
     ///
     /// 返回：首次发布成功；重复发布返回 Ready 错误。
     fn publish_datasource_health(&self, health: Vec<Arc<AtomicBool>>) -> ApplicationResult<()> {
@@ -1376,7 +1474,11 @@ impl OutboxRuntimeState {
 
     /// 业务作用：为同一 dispatcher 登记精确的业务事件发布目标，不产生额外 claim 域。
     ///
-    /// 参数说明：`datasource` 指定事务域，`aggregate_type` 和 `event_type` 唯一标识业务事件，`publisher` 负责下游确认。
+    /// 参数说明：
+    /// - `datasource`：规范数据源名称，限定这条发布规则所属的事务域。
+    /// - `aggregate_type`：聚合类型选择条件，与事件类型构成精确匹配键；禁止使用 Saga 前缀。
+    /// - `event_type`：事件种类选择条件，不匹配单条事件 ID；禁止使用 saga. 前缀。
+    /// - `publisher`：匹配事件使用的发布端，须按 OutboxPublisher 契约报告确认或失败。
     ///
     /// 返回：登记成功后由 Ready 冻结；名称非法、协议保留名称、重复或晚到登记均拒绝。
     pub(crate) fn register_publisher(
@@ -1455,7 +1557,8 @@ impl OutboxRuntimeState {
 
     /// 业务作用：在 Ready 前一次性发布受管 Outbox 的 datasource 绑定。
     ///
-    /// 参数说明：`outbox` 是已经过资源存在性与数据库探针复验的句柄。
+    /// 参数说明：
+    /// - `outboxes`：`outbox` 是已经过资源存在性与数据库探针复验的句柄。
     ///
     /// 返回：首次发布成功；重复发布返回 Ready 阶段错误。
     fn publish_outboxes(&self, outboxes: BTreeMap<String, ManagedOutbox>) -> ApplicationResult<()> {
@@ -1506,20 +1609,22 @@ impl OutboxRuntimeState {
         }
     }
 
-    /// 业务作用：发布停机保护态，使能力入口与 dispatcher 在下一轮边界拒绝新投递。
+    /// 业务作用：发布 Outbox 只读能力入口的停止状态，阻止旧句柄继续开始受保护查询。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：无；Release 发布保证任务随后观察到停止状态，应用生命周期通知负责唤醒等待任务。
+    /// 返回：同步设置能力门禁为已停止；不等待在途查询，也不直接终止 dispatcher。
+    /// 投递循环另由 Application 停机状态控制，调用方必须先进入统一停机流程。
     fn stop(&self) {
         self.lifecycle.store(2, Ordering::Release);
     }
 
-    /// 业务作用：生成进程级投递计数的一致近似快照。
+    /// 业务作用：读取进程投递与保留清理的累计计数和最近观测，形成只读摘要。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：各字段独立单调，不携带事件或发布端身份。
+    /// 返回：各原子字段分别读取的近似快照，不保证所有值属于同一轮次；年龄和时间读数也不保证单调。
+    /// 不携带事件或发布端身份，不重置计数，也不访问数据库。
     fn snapshot(&self) -> OutboxSnapshot {
         OutboxSnapshot {
             rounds: self.rounds.load(Ordering::Relaxed),
@@ -1545,7 +1650,9 @@ impl OutboxRuntimeState {
 
 /// 持久化指标刷新门禁；同一进程的 Prometheus 与 OTLP 出口共享该状态。
 struct OutboxMetricsRefreshGate {
+    /// 最近一次刷新尝试开始的单调时刻，用于限制后续数据库查询频率。
     last_attempt: Option<Instant>,
+    /// 最近尝试是否成功，决定采用常规刷新间隔还是较短失败重试间隔。
     last_succeeded: bool,
 }
 
@@ -1565,6 +1672,7 @@ impl OutboxMetricsRefreshGate {
 
 /// 将 Outbox 已提交事实与进程计数接入唯一指标目录的兼容源。
 struct OutboxMetricsSource {
+    /// 进程计数和最近持久观测的共享来源，读取不主动修改投递事实。
     state: Arc<OutboxRuntimeState>,
 }
 
@@ -1896,9 +2004,13 @@ async fn query_and_publish_metrics(state: &Arc<OutboxRuntimeState>) -> Applicati
 
 /// 业务作用：在 Application 生命周期内建立、监督并逆序关闭 Outbox dispatcher 与清理循环。
 pub(crate) struct OutboxComponent {
+    /// Start 校验后供 Ready 冻结各数据源投递预算的设置。
     settings: Option<OutboxSettings>,
+    /// 所有受管投递任务共用、在 Ready 移交的整体就绪贡献项。
     contributor: Option<ReadinessContributor>,
+    /// 已组合投递和清理循环、等待 Runner 取出执行的任务。
     critical_task: Option<ApplicationFuture<'static>>,
+    /// 仅使用直接调用的 Saga 客户端时不启用持久发布；仍拒绝未绑定计划的业务事件规则。
     inactive_direct_client: bool,
 }
 
@@ -1923,12 +2035,12 @@ impl ApplicationComponent for OutboxComponent {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：`ComponentId::Outbox`。
+    /// 返回：固定 Outbox 身份，用于生命周期排序和错误归属，不表示投递当前健康。
     fn id(&self) -> ComponentId {
         ComponentId::Outbox
     }
 
-    /// 业务作用：声明 MySQL dispatcher 必须晚于数据库组件启动。
+    /// 业务作用：声明 Outbox 的准备与投递依赖数据库组件先完成对应生命周期阶段。
     ///
     /// 参数说明: 无。
     ///
@@ -2299,6 +2411,7 @@ impl ApplicationComponent for OutboxComponent {
 
 /// 业务作用：在数据库释放前刷新最终事实并关闭新的 Outbox 投递轮次。
 struct OutboxShutdown {
+    /// 停机时关闭能力门禁并尝试刷新最终持久指标的共享状态。
     state: Arc<OutboxRuntimeState>,
 }
 
@@ -2340,9 +2453,11 @@ impl ShutdownAction for OutboxShutdown {
 /// - `outbox`：Ready 时冻结且绑定 `datasource_ref` 的持久句柄。
 /// - `plan`：冻结的 publisher 与毒丸策略。
 /// - `settings`：轮询、退避、单轮预算和批次上限。
-/// - `contributor`：Outbox 独占的 readiness 贡献项。
+/// - `contributor`：Outbox 整体就绪贡献项，多数据源投递循环共用。
+/// - `datasource_health`：当前数据源的健康标记；存在时逐轮更新，并与其它数据源共同裁决整体恢复。
 ///
-/// 返回：应用停机时正常退出；循环本身不因瞬时下游或数据库故障丢失持久化事件。
+/// 返回：观察到应用停止阶段时标记不可用并正常退出；启动中等待，瞬时失败记录计数并退避后继续。
+/// 单轮受操作期限限制，超时不证明下游尚未接收；重试和持久标记由后端契约约束，不能保证只投递一次。
 async fn run_dispatch_loop(
     application: Application,
     state: Arc<OutboxRuntimeState>,
@@ -2383,7 +2498,9 @@ async fn run_dispatch_loop(
                         .dispatch_batch(plan.publisher.as_ref(), settings.batch_size)
                         .await
                 }
-                OutboxPoisonPolicy::DeadLetter { max_attempts } => {
+                OutboxPoisonPolicy::DeadLetter {
+                    max_attempts,
+                } => {
                     outbox
                         .dispatch_batch_with_dlt(
                             plan.publisher.as_ref(),
@@ -2502,7 +2619,9 @@ async fn run_lane_dispatch_loop(
                         )
                         .await
                 }
-                OutboxPoisonPolicy::DeadLetter { max_attempts } => {
+                OutboxPoisonPolicy::DeadLetter {
+                    max_attempts,
+                } => {
                     outbox
                         .dispatch_batch_channel_with_dlt(
                             publisher.as_ref(),
@@ -2726,15 +2845,15 @@ async fn wait_for_next_round(
     if accept_commit_wake {
         tokio::select! {
             biased;
-            _ = application_states.changed() => {}
-            _ = committed_appends.changed() => {}
-            _ = &mut delay => {}
+            _ = application_states.changed() => {},
+            _ = committed_appends.changed() => {},
+            _ = &mut delay => {},
         }
     } else {
         tokio::select! {
             biased;
-            _ = application_states.changed() => {}
-            _ = &mut delay => {}
+            _ = application_states.changed() => {},
+            _ = &mut delay => {},
         }
     }
 }

@@ -21,11 +21,13 @@ pub(crate) struct FileOwner {
 
 impl FileOwner {
     /// 业务作用：取得稳定路径锁并固定主文件身份，阻止两个受管来源同时接管一个文件。
+    ///
     /// 参数说明：
     /// - `path`：相对于已固定工作目录的数据库路径。
     /// - `create`：仅授权本次启动创建缺失主文件。
     /// - `parents`：允许建立缺失的专用父目录。
     /// - `read_only`：禁止新建主文件和写入数据库。
+    ///
     /// 返回：文件类型、权限和独占锁均成立时返回 owner 与新建标记；失败不会删除已有材料。
     pub(crate) fn acquire(
         path: &Path,
@@ -119,7 +121,9 @@ impl FileOwner {
     }
 
     /// 业务作用：撤销新物理连接的权威，在最后一个原生访问者退出后释放路径锁。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：闲置时立即解锁，否则由物理析构完成解锁。
     pub(crate) fn release_when_idle(&self) {
         let mut releasing = self
@@ -146,8 +150,10 @@ impl FileOwner {
     }
 
     /// 业务作用：让宿主数据卷权威覆盖真实原生访问，防止启动回滚或运行时退出提前交接外部对象目录。
+    ///
     /// 参数说明：
     /// - `guard`：不引用此 datasource 的宿主独占权守卫。
+    ///
     /// 返回：每个文件 owner 只接纳一次，已开始释放或已绑定时拒绝。
     pub(crate) fn retain_companion(&self, guard: Arc<dyn Send + Sync>) -> anyhow::Result<()> {
         let releasing = self
@@ -168,7 +174,9 @@ impl FileOwner {
     }
 
     /// 业务作用：在每次物理建连前复验文件与 sidecar，避免重连误开替换文件或空库。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：身份和权限保持成立时成功；任何漂移都拒绝继续打开。
     pub(crate) fn verify(&self) -> anyhow::Result<()> {
         let lock_metadata = std::fs::symlink_metadata(&self.lock_path)?;
@@ -199,9 +207,11 @@ impl FileOwner {
 }
 
 /// 业务作用：校验可由原生关闭删除的辅助文件，区分已解除目录链接的旧快照与当前仍可访问的材料。
+///
 /// 参数说明：
 /// - `path`：同一受管目录内的 WAL、SHM 或 journal 路径。
 /// - `metadata`：不跟随符号链接取得的初次快照。
+///
 /// 返回：现存材料满足普通、单链接及私有权限时成功；已删除的旧快照只允许复验一次当前路径。
 fn validate_sidecar(path: &Path, metadata: &std::fs::Metadata) -> anyhow::Result<()> {
     if metadata.is_file() && metadata.nlink() == 0 {
@@ -227,8 +237,10 @@ pub(crate) struct LeaseCapacity(Mutex<(bool, Option<OwnedSemaphorePermit>)>);
 
 impl LeaseCapacity {
     /// 业务作用：将逻辑借用绑定到尚未物理关闭的连接，避免关闭与借出竞争留下永久占位。
+    ///
     /// 参数说明：
     /// - `permit`：本次借用获得的来源容量。
+    ///
     /// 返回：连接仍存活且没有其它借用时接纳，否则交还原凭证供调用方继续选择连接。
     pub(crate) fn acquire(&self, permit: OwnedSemaphorePermit) -> Result<(), OwnedSemaphorePermit> {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
@@ -240,7 +252,9 @@ impl LeaseCapacity {
     }
 
     /// 业务作用：正常归还可复用连接后释放逻辑借用，允许下一位调用者进入池。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只归还借用容量，不撤销物理连接的文件权威。
     pub(crate) fn release(&self) {
         self.0
@@ -251,7 +265,9 @@ impl LeaseCapacity {
     }
 
     /// 业务作用：物理访问最终结束后收回失效句柄的逻辑占位，旧句柄不能再次取得该连接。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：永久关闭本连接的借用入口并归还剩余容量。
     fn close(&self) {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
@@ -262,9 +278,11 @@ impl LeaseCapacity {
 
 impl PhysicalLifetime {
     /// 业务作用：在开始打开物理连接之前占据容量并登记尚未退出的文件访问责任。
+    ///
     /// 参数说明：
     /// - `owner`：本次数据库文件的独占 owner。
     /// - `permit`：受管物理连接容量。
+    ///
     /// 返回：直到原生析构完成才解除的共享责任。
     pub(crate) fn new(
         owner: Arc<FileOwner>,
@@ -288,7 +306,9 @@ impl PhysicalLifetime {
 
 impl Drop for PhysicalLifetime {
     /// 业务作用：最后一个原生连接引用结束后发布物理退出证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：归还连接容量并唤醒等待关闭的拥有者。
     fn drop(&mut self) {
         // 必须等 actor 与原生析构保活责任均结束，不能因 Rust 句柄到期就提前放开实际连接容量。
@@ -326,8 +346,10 @@ static PROCESS_OWNERS: std::sync::LazyLock<Mutex<std::collections::BTreeSet<Path
 
 impl ProcessLock {
     /// 业务作用：以规范路径登记进程内唯一创建权，补充操作系统锁在不同文件系统下的进程语义。
+    ///
     /// 参数说明：
     /// - `path`：规范父目录与末级文件名组成的精确路径。
+    ///
     /// 返回：首次登记成功；同进程另一个 owner 在任何文件 I/O 前拒绝。
     pub(crate) fn acquire(path: &Path) -> anyhow::Result<Self> {
         anyhow::ensure!(
@@ -343,7 +365,9 @@ impl ProcessLock {
 
 impl Drop for ProcessLock {
     /// 业务作用：仅在文件权威实际释放后撤销当前进程登记。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：允许之后的新 owner 重新进入跨进程锁竞争。
     fn drop(&mut self) {
         PROCESS_OWNERS
@@ -354,8 +378,10 @@ impl Drop for ProcessLock {
 }
 
 /// 业务作用：拒绝链接别名和向其它账号开放的数据库材料。
+///
 /// 参数说明：
 /// - `metadata`：通过不跟随末级符号链接取得的文件元数据。
+///
 /// 返回：普通、单链接、私有文件时成功。
 pub(crate) fn validate_file(metadata: &std::fs::Metadata) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -374,8 +400,10 @@ pub(crate) fn validate_file(metadata: &std::fs::Metadata) -> anyhow::Result<()> 
 }
 
 /// 业务作用：只创建本次缺失的目录并从创建时限制访问，不改写已有目录权限。
+///
 /// 参数说明：
 /// - `path`：需要建立的专用目录。
+///
 /// 返回：路径可用时成功；权限或并发创建异常按原始 I/O 失败返回。
 fn create_private_directories(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::DirBuilderExt;

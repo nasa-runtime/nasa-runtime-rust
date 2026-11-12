@@ -1,7 +1,9 @@
 use crate::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
 
 /// 业务作用：在 Service Ready 或 Batch 工作负载之前确认缓存查询的默认 L2 已装配。
+///
 /// 参数说明：无。
+///
 /// 返回：无缓存查询或已有默认 L2 时成功；缺少缓存资源时阻断工作负载。
 pub(crate) fn ensure_mapper_l2_installed() -> ApplicationResult<()> {
     namapper_core::assert_l2_cache_installed_for_cached_queries().map_err(|error| {
@@ -24,7 +26,10 @@ struct ManagedMapperCacheConfig {
 }
 
 /// 业务作用：在 Redis 已建连后从 mapper_cache 段装配默认 L2，复用已持有的来源连接。
-/// 参数说明：`context` 提供应用配置、资源目录和逆序清理链。
+///
+/// 参数说明：
+/// - `context`：`context` 提供应用配置、资源目录和逆序清理链。
+///
 /// 返回：成功安装 owner 或未启用时成功；来源、能力或重复安装不满足时阻断启动。
 pub(crate) async fn install_managed(
     context: &mut crate::StartContext<'_>,
@@ -59,7 +64,11 @@ pub(crate) async fn install_managed(
 }
 
 /// 业务作用：用固定摘要归类 Mapper 装配错误，不公开源连接参数。
-/// 参数说明：`message` 为稳定摘要；`error` 为内部原因。
+///
+/// 参数说明：
+/// - `message`：`message` 为稳定摘要。
+/// - `error`：`error` 为内部原因。
+///
 /// 返回：带来源链的启动错误。
 fn mapper_error(message: &'static str, error: impl Into<anyhow::Error>) -> ApplicationError {
     ApplicationError::with_source(ComponentId::Redis, ApplicationPhase::Start, message, error)
@@ -69,14 +78,19 @@ struct MapperCacheShutdown(namapper_core::MapperCacheOwner);
 
 impl crate::ShutdownAction for MapperCacheShutdown {
     /// 业务作用：为默认缓存 owner 提供稳定清理名称。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定动作名称。
     fn label(&self) -> &'static str {
         "mapper-cache"
     }
 
     /// 业务作用：撤下默认缓存并等待在途查询和回填归还 Redis 依赖。
-    /// 参数说明：`context` 为宿主共享停机预算。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 为宿主共享停机预算。
+    ///
     /// 返回：排干后成功；超时保持关闭并报告尚未完成。
     fn shutdown<'a>(
         &'a mut self,

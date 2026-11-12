@@ -23,6 +23,7 @@ const DEREGISTER_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct DiscoveryConfigRoot {
+    /// 出站发现与自注册配置，缺段时采用禁用发现的默认设置。
     rest_discovery: DiscoveryConfig,
 }
 
@@ -36,19 +37,21 @@ struct DiscoveryConfigRoot {
 /// 后两条由 active stack 的严格逆序天然保证：注册动作压在 Ready，runtime 动作压在 Start，
 /// 中间隔着 business-resources / user-tasks 两个动态步骤。
 pub(crate) struct NacosDiscoveryComponent {
+    /// Start 已装配的共享会话，注册和运行时关闭动作按各自阶段借用。
     session: Option<Arc<Mutex<DiscoverySession>>>,
     /// 入站服务的就绪贡献句柄：Start 登记，全应用放行后注册实例成功才 observe Ready；
     /// 纯消费者(只出站)不注册,为 None。
     readiness: Option<ReadinessContributor>,
+    /// Ready 准备、等待 Runner 放行的注册及后续回查任务，只移交一次。
     critical_task: Option<ApplicationFuture<'static>>,
 }
 
 impl NacosDiscoveryComponent {
     /// 业务作用：创建尚未连接注册中心的服务发现组件。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；provider 连接发生在 Start 阶段。
+    /// 返回：没有会话、就绪贡献和注册任务的组件；不读取配置、连接 provider 或发布实例。
     pub(crate) fn new() -> Self {
         Self {
             session: None,
@@ -59,7 +62,9 @@ impl NacosDiscoveryComponent {
 }
 
 /// 业务作用：服务发现就绪策略：注册中心尚未确认本实例时保持应用 readiness 为不可用。
+///
 /// 参数说明：无。
+///
 /// 返回：即时关键依赖策略，未注册或失去就绪证据时不报告应用可用。
 fn discovery_readiness_policy() -> ReadinessPolicy {
     ReadinessPolicy::critical_immediate()
@@ -68,18 +73,21 @@ fn discovery_readiness_policy() -> ReadinessPolicy {
 impl ApplicationComponent for NacosDiscoveryComponent {
     /// 业务作用：返回服务发现组件稳定身份。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；Runner 用它归类注册与出站调用相关错误。
+    /// 返回：固定的 ComponentId::NacosDiscovery，供生命周期排序和错误归类，不反映远端注册是否成功。
     fn id(&self) -> ComponentId {
         ComponentId::NacosDiscovery
     }
 
-    /// 业务作用：连接 provider 并安装出站 RestDiscovery runtime，不注册本实例。
+    /// 业务作用：准备出站 RestDiscovery 运行时并托管会话；启用发现时连接 provider，禁用时保留普通 HTTP 出站能力。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供最终配置与 active stack 写入口的 Start 上下文。
+    ///
+    /// 返回：会话和关闭动作已登记、能力入口发布成功后完成；要求自注册时同时预登记就绪贡献，但不发布远端实例。
+    /// 配置、连接、能力重复发布或就绪登记失败时返回 Start 错误，已激活的运行时由 Runner 统一清理。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let config = read_discovery_config(context.application())?;
@@ -126,8 +134,12 @@ impl ApplicationComponent for NacosDiscoveryComponent {
     }
 
     /// 业务作用：以预绑定地址冻结注册计划，登记摘流所有权，外部注册延后至全应用放行。
-    /// 参数说明：`context` 提供 Application、共享启动截止时刻与 active stack。
-    /// 返回：计划与清理权就绪时成功；未登记出站会话或纯消费者不创建注册任务。
+    ///
+    /// 参数说明：
+    /// - `context`：提供预绑定监听事实、固定启动截止点及摘流动作的清理栈。
+    ///
+    /// 返回：注册信息、取消令牌和摘流动作准备好后保存受监督任务；成功不代表远端已注册，实际任务仍受原启动截止点限制。
+    /// 无出站会话或不要求注册时直接成功；端口、配置或安全元数据不满足要求时拒绝准备，尚不向 provider 发布实例。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let Some(session) = self.session.clone() else {
@@ -196,14 +208,14 @@ impl ApplicationComponent for NacosDiscoveryComponent {
                                     tokio::select! {
                                         biased;
                                         _ = cancel.cancelled() => return Ok(()),
-                                        _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                                        _ = tokio::time::sleep(Duration::from_millis(1)) => {},
                                     }
                                 }
                                 _ => {
                                     return Err(discovery_error(
                                         ApplicationPhase::Running,
                                         "gRPC endpoint is not serving",
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -252,7 +264,9 @@ impl ApplicationComponent for NacosDiscoveryComponent {
     }
 
     /// 业务作用：将外部注册与健康回查交给统一放行和停机监督，避免 Ready 内部自行产生可发现实例。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：一次性注册/monitor 任务；纯消费者或已经移交时返回 None。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.critical_task
@@ -263,24 +277,29 @@ impl ApplicationComponent for NacosDiscoveryComponent {
 
 /// 停机时先摘流的可逆 action。
 struct NacosDiscoveryRegistrationShutdown {
+    /// 尚未移交摘流流程的会话引用，取出后本动作不自动重试远端删除。
     session: Option<Arc<Mutex<DiscoverySession>>>,
+    /// 通知尚未发出的注册及轮次间回查停止，不代表远端操作已经结束。
     cancel: CancellationToken,
 }
 
 impl ShutdownAction for NacosDiscoveryRegistrationShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；名称不含服务名或注册地址。
+    /// 返回：固定的 nacos-discovery-registration 标签，标识停机摘流步骤，不含服务名或注册地址。
     fn label(&self) -> &'static str {
         "nacos-discovery-registration"
     }
 
     /// 业务作用：在自身上限与全局剩余预算的较小值内完成摘流。
     ///
-    /// 参数说明：`context` 提供全局剩余停机预算。
-    /// 返回：先取消后续注册和回查，再摘除已有实例；失败或超时交给统一清理报告，不阻止后续资源收口。
+    /// 参数说明：
+    /// - `context`：提供全局剩余停机预算，摘流等待取其与三秒局部上限的较小值。
+    ///
+    /// 返回：先通知停止后续注册与回查，再等待会话锁并摘流；未持有会话或摘流成功时完成，锁等待或调用超时也计入同一预算。
+    /// 失败或超时返回 Stopping 错误，不证明远端实例已删除；本动作已取出的会话不会在后续调用中自动重试。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             // 先阻止尚未发出的注册与后续健康回查，再等待会话内的注册完成并摘流。
@@ -308,9 +327,11 @@ impl ShutdownAction for NacosDiscoveryRegistrationShutdown {
 }
 
 impl Drop for NacosDiscoveryRegistrationShutdown {
-    /// 业务作用：生命周期 owner 被直接释放时撤销注册与监控许可，不遗留后置发布动作。
+    /// 业务作用：摘流动作被直接释放时发出取消通知，使尚未开始的注册与后续回查能够停止。
+    ///
     /// 参数说明：无。
-    /// 返回：发布取消信号；受管任务和会话的实际释放由各自所有者完成。
+    ///
+    /// 返回：仅发布取消信号，不等待在途注册或回查退出，也不执行远端摘流；任务结束及会话释放仍由宿主监督和各自所有者负责。
     fn drop(&mut self) {
         self.cancel.cancel();
     }
@@ -318,22 +339,27 @@ impl Drop for NacosDiscoveryRegistrationShutdown {
 
 /// 在所有下游调用结束后关闭出站 runtime 的可逆 action。
 struct NacosDiscoveryRuntimeShutdown {
+    /// 负责出站能力关闭与排空的会话，成功后才从本动作移除。
     session: Option<Arc<Mutex<DiscoverySession>>>,
 }
 
 impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；名称不含注册中心地址。
+    /// 返回：固定的 nacos-discovery-runtime 标签，标识出站运行时清理步骤，不含注册中心地址或凭据。
     fn label(&self) -> &'static str {
         "nacos-discovery-runtime"
     }
 
     /// 业务作用：撤下本实例出站入口并等待它的任务和调用退出。
-    /// 参数说明：`context` 为宿主共享停机预算。
-    /// 返回：排干后释放会话；未排干报告失败并保留当前 owner。
+    ///
+    /// 参数说明：
+    /// - `context`：提供宿主固定停机截止点，出站任务排空不得从此重新起算等待时间。
+    ///
+    /// 返回：撤下属于本实例的出站入口并完成任务排空后清空会话；错误时保留本动作的会话引用以便后续处置。
+    /// 异步锁等待由外层 Runner 的预算约束，底层排空使用同一截止点；动作最终释放不等于远端注销已成功。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             if let Some(session) = &self.session {
@@ -356,25 +382,18 @@ impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
     }
 }
 
-/// 业务作用：自注册就绪 monitor:周期回查本实例是否仍在自己服务的健康实例集里,把注册健康反映进 `/readyz`。
+/// 业务作用：周期查询本实例在注册中心健康实例集中的状态，将结果提交给应用就绪聚合，避免探针请求路径直接调用远端。
 ///
-/// 调用 [`DiscoverySession::self_registration_healthy`](rest_discovery_nacos::DiscoverySession::self_registration_healthy)
-/// 向注册中心查询本服务的可用实例集(已过滤健康/启用/正权重),按注册身份 `(ip, port)` 定位本实例:
-/// - 在册且健康 → Ready(HEALTHY);
-/// - 不在册(心跳滞后/短暂驱逐)→ **Degraded**(NOT_READY):本地注册 guard 仍持有、SDK 持续心跳会自愈,
-///   surface 异常但不摘流,避免注册表抖动把关键依赖打成 503(与 web-mapping monitor 同哲学);
-/// - 回查本身失败(provider 抖动)→ **Degraded**(PROBE_TIMEOUT):探测失败不等于本实例失联,不升级为摘流。
+/// 参数说明：
+/// - `application`：每轮查询前检查的生命周期状态，Starting 跳过查询，停机或失败时结束。
+/// - `session`：持有实际注册身份和 provider 的共享会话，回查期间持有异步锁。
+/// - `contributor`：接收自注册健康、确认缺席或回查失败的观测槽。
+/// - `critical`：确认缺席时是否记 NotReady；为 false 时记 Degraded，回查错误始终记 Degraded。
+/// - `cancel`：摘流动作发出的取消信号，可中断轮次间五秒等待。
 ///
-/// 进入停机态即优雅退出。只读注册中心、低频执行,绝不从 `/readyz` handler 直接回查远程。
-///
-/// # 参数
-///
-/// - `application`:读取全局生命周期状态,停机即退出。
-/// - `session`:出站/注册会话;`self_registration_healthy` 需其保存的注册身份与 provider 客户端。
-/// - `contributor`:自注册就绪贡献句柄。
-/// - `critical`:确认失联是否升级为关键(`rest_discovery.registration.readiness_critical`):`true` → 置
-///   NotReady(→503),`false` → 置 Degraded(不摘流)。回查失败(失联未确认)始终 Degraded,不受此旗影响。
-/// - `cancel`:停机取消令牌。
+/// 返回：取消等待或轮次前观察到停机时结束；在册记 Ready，无注册身份跳过，确认缺席按策略处理。
+/// 锁等待和远端回查本身不监听该取消信号，也无本层独立超时；退出还依赖底层请求预算和宿主任务监督。
+/// 本循环不重新注册实例，不保证底层 SDK 必然恢复注册，也不把查询失败等同于实例失联。
 async fn run_discovery_monitor(
     application: Application,
     session: Arc<Mutex<DiscoverySession>>,
@@ -387,7 +406,7 @@ async fn run_discovery_monitor(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(INTERVAL) => {}
+            _ = tokio::time::sleep(INTERVAL) => {},
         }
         match application.state() {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
@@ -402,8 +421,8 @@ async fn run_discovery_monitor(
             Ok(Some(true)) => {
                 contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
             }
-            // 确认失联:默认非摘流降级(SDK 心跳会自愈、本地 guard 仍持有,surface 不 503);
-            // `readiness_critical` 时升级为 NotReady(affects_ready 关键 → `/readyz` 503,交编排替换)。
+            // 查询确认不在可用实例集中，与查询失败分别处理；critical 决定是否让该事实阻止应用就绪。
+            // 此处只发布观测，不重新注册，也不保证底层 SDK 的后续恢复结果。
             Ok(Some(false)) => {
                 let state = if critical {
                     DependencyState::NotReady
@@ -430,10 +449,13 @@ async fn run_discovery_monitor(
 ///
 /// Web 与 gRPC 共存时保留 Web 主端口；纯 gRPC 进程使用 listener 实际端口；其它进程才读取显式端口。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：提供真实监听地址的共享上下文。
 /// - `config`：已读取的服务发现配置。
+///
+/// 返回：按 Web 实际端口、gRPC 预绑定端口、显式非零端口的顺序选择；均无可用值时返回 Ready 错误。
+/// 不绑定监听器、不检查端口可达性，实际注册仍由会话结合注册配置解析。
 fn registration_port(
     application: &Application,
     config: &DiscoveryConfig,
@@ -455,12 +477,13 @@ fn registration_port(
     ))
 }
 
-/// 业务作用：选择仅用于兼容展示的监听 IP，不参与 provider 的注册 IP 优先级。
+/// 业务作用：选择传入注册信息及派生元数据的本地监听标识，不替代 provider 的注册地址解析。
 ///
 /// 参数说明：
 /// - `application`: 提供 Web 与 gRPC 已发布 listener 的共享上下文。
 ///
-/// 返回：优先返回 Web 绑定 IP；纯 gRPC 返回其绑定 IP；均不存在时返回空串。
+/// 返回：优先使用 Web 绑定 IP 字符串；纯 gRPC 使用端点 authority，未设置或无端点时为空串。
+/// 不做主机解析或可路由性检查，返回字符串不能一概视为绑定 IP。
 fn registration_bind_ip(application: &Application) -> String {
     if let Some(address) = application.web_addr() {
         return address.ip().to_string();
@@ -474,9 +497,12 @@ fn registration_bind_ip(application: &Application) -> String {
 
 /// 业务作用：从最终配置读取 `rest_discovery` 段；段缺失时使用禁用的缺省配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：提供当前不可变配置快照的共享上下文。
+///
+/// 返回：从一次快照反序列化的发现配置，缺段时采用 DiscoveryConfig 默认值；类型错误返回 Start 错误。
+/// 不执行 provider 连接、注册地址解析或端口可用性检查。
 fn read_discovery_config(application: &Application) -> ApplicationResult<DiscoveryConfig> {
     let snapshot = application.config();
     let root: DiscoveryConfigRoot =
@@ -492,10 +518,12 @@ fn read_discovery_config(application: &Application) -> ApplicationResult<Discove
 
 /// 业务作用：在不连接注册中心的前提下校验候选配置树中的 `rest_discovery` 段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：合并、插值完成但尚未发布的候选配置树。
 /// - `phase`：本次无副作用校验所属的生命周期阶段。
+///
+/// 返回：段缺失或能按 DiscoveryConfig 反序列化时成功，否则返回指定阶段错误；只做结构绑定，不证明 provider 可达或注册计划可用。
 pub(crate) fn validate_discovery_section(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
@@ -516,21 +544,25 @@ pub(crate) fn validate_discovery_section(
 
 /// 业务作用：创建服务发现组件的稳定生命周期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含注册中心凭据的稳定摘要。
+///
+/// 返回：带 NacosDiscovery 身份与指定阶段、不含底层 source 的 ApplicationError；不主动输出或脱敏传入摘要。
 fn discovery_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::NacosDiscovery, phase, message)
 }
 
 /// 业务作用：创建带底层错误链的服务发现错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含注册中心凭据的稳定摘要。
 /// - `source`：只供诊断、输出前统一脱敏的底层错误。
+///
+/// 返回：带组件、阶段与底层原因的 ApplicationError；source 保持原样供诊断，对外呈现仍须经过统一脱敏边界。
 fn discovery_error_src(
     phase: ApplicationPhase,
     message: impl Into<String>,

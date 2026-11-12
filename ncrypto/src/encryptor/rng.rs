@@ -7,10 +7,12 @@ use crate::{CryptoError, Result};
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore};
 
-/// 业务作用: 生成随机盐(小写 hex)。`byte_len` 推荐 16 或 32。
+/// 业务作用：从操作系统随机源生成给定字节长度的盐。
 ///
-/// # 参数
-/// - `byte_len`: 随机盐的原始字节长度;返回值会变成两倍长度的小写 HEX。
+/// 参数说明：
+/// - `byte_len`：原始随机字节数，由调用方限制分配规模。
+///
+/// 返回：返回两倍字节数的小写 HEX 文本，零长度返回空串；此入口不返回随机源或分配错误。
 pub fn generate_salt(byte_len: usize) -> String {
     let mut salt = vec![0u8; byte_len];
     OsRng.fill_bytes(&mut salt);
@@ -18,9 +20,10 @@ pub fn generate_salt(byte_len: usize) -> String {
 }
 
 /// 业务作用：生成指定强度的随机 AES 密钥并编码为 Base64。
+///
 /// 返回：128、192 或 256 位密钥；其它位数返回错误，不截断为另一种强度。
 ///
-/// # 参数
+/// 参数说明：
 /// - `bits`: AES 密钥位数,只接受 128、192 或 256。
 pub fn generate_aes_key(bits: usize) -> Result<String> {
     let len = match bits {
@@ -34,18 +37,23 @@ pub fn generate_aes_key(bits: usize) -> Result<String> {
     Ok(b64_encode(&key))
 }
 
-/// 业务作用: 生成 16 字节随机 AES-128 密钥(小写 hex,32 字符,可直接作 `encrypt_aes` 的 key 参数)。
+/// 业务作用：生成 16 个随机字节并输出十六进制密钥材料。
+///
+/// 参数说明: 无。
+///
+/// 返回：返回 32 字符小写 HEX。按 HEX 解码后是 16 字节；若直接传给按 UTF-8 取密钥的 AES 入口，则实际使用 32 字节文本密钥，不能把两种表示视为同一密钥。
 pub fn generate_aes_key_hex() -> String {
     let mut key = [0u8; 16];
     OsRng.fill_bytes(&mut key);
     hex_lower(&key)
 }
 
-/// 业务作用: 生成 `len` 个 `[0-9a-zA-Z]` 随机字符。
-/// Web RSA_AES 策略的临时 AES key 用它(`random_ascii(16)` = 16 字节 ASCII = 合法 AES-128 key)。
+/// 业务作用：从字母数字集合独立采样固定长度的随机 ASCII 文本。
 ///
-/// # 参数
-/// - `len`: 要生成的 ASCII 字符个数。
+/// 参数说明：
+/// - `len`：输出字符数，也等于输出 UTF-8 字节数。
+///
+/// 返回：返回仅含数字及大小写英文字母的文本，零长度返回空串；调用方限制长度，本入口不返回随机源错误。
 pub fn random_ascii(len: usize) -> String {
     const CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let mut rng = OsRng;

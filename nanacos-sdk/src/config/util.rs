@@ -1,18 +1,11 @@
-/// A special splitter that reduces user-defined character repetition.
-const GROUP_KEY_SPLIT: &str = "+_+";
-
-/// group to data_id '+_+' group '+_+' namespace
+/// 业务作用：为配置缓存构造无歧义的三字段身份，分隔符不会合并不同配置。
+///
+/// 参数说明：
+/// - `data_id`：原始配置标识。
+/// - `group`：原始分组。
+/// - `namespace`：原始命名空间。
+///
+/// 返回：固定 JSON 数组，不执行路径解释或 Unicode 归一化。
 pub(crate) fn group_key(data_id: &str, group: &str, namespace: &str) -> String {
-    "".to_string() + data_id + GROUP_KEY_SPLIT + group + GROUP_KEY_SPLIT + namespace
-}
-
-/// parse group_key to (data_id, group, namespace)
-#[allow(dead_code, clippy::get_first)]
-pub(crate) fn parse_key(group_key: &str) -> (String, String, String) {
-    let v: Vec<&str> = group_key.split(GROUP_KEY_SPLIT).collect();
-    (
-        v.get(0).expect("data_id should exist").to_string(),
-        v.get(1).expect("group should exist").to_string(),
-        v.get(2).expect("namespace should exist").to_string(),
-    )
+    serde_json::to_string(&[data_id, group, namespace]).expect("string tuple serialization")
 }

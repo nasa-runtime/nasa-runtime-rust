@@ -18,7 +18,10 @@ pub struct FilePattern {
 
 impl FilePattern {
     /// 业务作用：限定文件名通配范围，禁止扩大为递归目录遍历。
-    /// 参数说明：`path` 为已经确定目录的精确路径或模式。
+    ///
+    /// 参数说明：
+    /// - `path`：为已经确定目录的精确路径或模式。
+    ///
     /// 返回：合法模式；父级跳转、目录通配和未支持的模式语法失败。
     pub fn new(path: &Path) -> Result<Self> {
         if path.as_os_str().len() > 4096 {
@@ -56,28 +59,37 @@ impl FilePattern {
     }
 
     /// 业务作用：返回模式的固定观察目录。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不包含文件名通配符的目录。
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 
     /// 业务作用：区分精确路径和需要枚举的模式。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：存在文件名通配符时为真。
     pub fn is_glob(&self) -> bool {
         self.glob
     }
 
     /// 业务作用：取得逻辑模式路径，真实链接目标不参与文件名排序。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：原目录与文件名组合。
     pub fn path(&self) -> PathBuf {
         self.directory.join(&self.filename)
     }
 
     /// 业务作用：按完整文件名匹配，问号匹配一个 Unicode 标量。
-    /// 参数说明：`name` 是目录项原始 UTF-8 文件名。
+    ///
+    /// 参数说明：
+    /// - `name`：是目录项原始 UTF-8 文件名。
+    ///
     /// 返回：满足模式且符合隐藏文件约定时为真。
     pub fn matches(&self, name: &str) -> bool {
         if name.len() > 4096
@@ -112,7 +124,11 @@ impl FilePattern {
     }
 
     /// 业务作用：让隔离读取者提供的目录清单复用同一匹配与自然排序规则。
-    /// 参数说明：`names` 为单目录完整名称列表；`limits` 约束枚举与命中数量。
+    ///
+    /// 参数说明：
+    /// - `names`：为单目录完整名称列表
+    /// - `limits`：约束枚举与命中数量。
+    ///
     /// 返回：自然升序的完整逻辑路径；条目或命中超限时失败。
     pub fn expand_names(
         &self,
@@ -147,8 +163,12 @@ impl FilePattern {
 }
 
 /// 业务作用：按文件名自然升序确定同一通配符组的覆盖优先级。
-/// 参数说明：`left/right` 为完整 UTF-8 文件名，包含扩展名。
-/// 返回：数字按值比较，同值短数字段在前，其余原始字节比较；不依赖 locale 或固定宽度整数。
+///
+/// 参数说明：
+/// - `left`：左侧完整 UTF-8 文件名，包含扩展名。
+/// - `right`：右侧完整 UTF-8 文件名，包含扩展名。
+///
+/// 返回：同时遇到数字段时按去前导零后的位数与数字比较，同值短段在前；其它部分按 UTF-8 字节比较，全部相同返回 Equal，不依赖 locale 或固定宽度整数解析。
 pub fn natural_filename_cmp(left: &str, right: &str) -> Ordering {
     let (left, right) = (left.as_bytes(), right.as_bytes());
     let (mut l, mut r) = (0, 0);
@@ -189,14 +209,23 @@ pub fn natural_filename_cmp(left: &str, right: &str) -> Ordering {
 }
 
 /// 业务作用：严格解释导入清单，任何非法项都阻止形成不完整来源计划。
-/// 参数说明：`tree` 已完成引导依赖求值；`base_dir` 为可信相对路径根。
+///
+/// 参数说明：
+/// - `tree`：已完成引导依赖求值
+/// - `base_dir`：为可信相对路径根。
+///
 /// 返回：保持声明顺序的 file/Nacos 描述；map 必须显式声明 optional。
 pub fn parse_imports_checked(tree: &Value, base_dir: &Path) -> Result<Vec<YmlImport>> {
     parse_imports_limited(tree, base_dir, super::LoadLimits::default().declarations)
 }
 
 /// 业务作用：让加载器的声明预算覆盖解析分配，独立入口仍使用默认上限。
-/// 参数说明：`tree` 是引导树；`base_dir` 固定相对目录；`limit` 为本轮声明上限。
+///
+/// 参数说明：
+/// - `tree`：是引导树
+/// - `base_dir`：固定相对目录
+/// - `limit`：为本轮声明上限。
+///
 /// 返回：有界且保持声明顺序的来源列表。
 pub(crate) fn parse_imports_limited(
     tree: &Value,
@@ -228,7 +257,11 @@ pub(crate) fn parse_imports_limited(
 }
 
 /// 业务作用：区分来源缺失策略与已经取得内容的校验要求。
-/// 参数说明：`entry` 是单项声明；`base_dir` 为相对文件根。
+///
+/// 参数说明：
+/// - `entry`：是单项声明
+/// - `base_dir`：为相对文件根。
+///
 /// 返回：唯一来源描述，未知字段和互斥来源立即拒绝。
 fn parse_entry(entry: &Value, base_dir: &Path) -> Result<YmlImport> {
     let invalid = || ConfigError::new(ErrorKind::Declaration);
@@ -310,7 +343,10 @@ fn parse_entry(entry: &Value, base_dir: &Path) -> Result<YmlImport> {
 
 impl std::fmt::Debug for FilePattern {
     /// 业务作用：模式默认诊断不泄露环境展开后的目录和文件名。
-    /// 参数说明：`f` 是格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：是格式化目标。
+    ///
     /// 返回：仅是否需要目录匹配的摘要。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FilePattern")
@@ -320,7 +356,12 @@ impl std::fmt::Debug for FilePattern {
 }
 
 /// 业务作用：在访问来源前统一校验本地协议、格式和模式，再以主文档目录确定路径。
-/// 参数说明：`text` 为声明路径；`base_dir` 为固定根；`optional` 只允许缺失。
+///
+/// 参数说明：
+/// - `text`：为声明路径
+/// - `base_dir`：为固定根
+/// - `optional`：只允许缺失。
+///
 /// 返回：合法逻辑来源；不支持的协议或扩展名与来源是否存在无关，均拒绝。
 fn file_entry(text: &str, base_dir: &Path, optional: bool) -> Result<YmlImport> {
     if text.trim().is_empty() {
@@ -343,5 +384,8 @@ fn file_entry(text: &str, base_dir: &Path, optional: bool) -> Result<YmlImport> 
         base_dir.join(path)
     };
     FilePattern::new(&path)?;
-    Ok(YmlImport::File { path, optional })
+    Ok(YmlImport::File {
+        path,
+        optional,
+    })
 }

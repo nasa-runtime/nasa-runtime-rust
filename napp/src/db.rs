@@ -16,8 +16,7 @@ use crate::{
     StartContext,
 };
 
-/// DB 健康 monitor 的固定探测间隔。从既有池 acquire 一条连接(触发 sqlx 的 test_before_acquire
-/// ping)即可判活,不占用业务连接。
+/// DB 健康 monitor 完成一轮后的固定等待时间；探针短暂借用既有业务池连接，不建立独立探测池。
 const DB_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 默认数据源使用的 qualifier；单库配置 `database` 与多库配置里的同名条目共用它。
@@ -26,7 +25,7 @@ pub(crate) const DEFAULT_DATASOURCE: &str = "default";
 /// 完整配置树中数据源组件负责读取的两种顶层写法。
 ///
 /// 两种写法只允许出现一种：同时出现时无法确定 `default` 该取谁，隐式合并会在多库场景下
-/// 静默改变事务默认库，因此按 直接报冲突。
+/// 静默改变事务默认库，因此直接拒绝冲突配置。
 ///
 /// 两种写法都以**原始 JSON 值**接收：`driver` 与 `migrations` 是 napp 编排字段而非 natx
 /// 数据源字段，而 `DataSourceConfig` 是 `deny_unknown_fields`，因此必须先由 [`split_datasource`]
@@ -34,7 +33,9 @@ pub(crate) const DEFAULT_DATASOURCE: &str = "default";
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct DbConfigRoot {
+    /// 单库配置原始段，解析后固定使用 default 身份。
     database: Option<serde_json::Value>,
+    /// 多库配置原始表，按名称排序处理且不能与单库段同时出现。
     datasources: Option<BTreeMap<String, serde_json::Value>>,
 }
 
@@ -90,8 +91,11 @@ impl DbComponent {
 
 /// 单个数据源健康 monitor 的不可变输入。
 struct DbMonitorInput {
+    /// 启动时冻结的数据源名称，用于探针归类和就绪贡献身份。
     name: String,
+    /// 与业务共用的连接池，探针结束即归还所借连接。
     pool: MySqlPool,
+    /// 将连续探针结果纳入关键依赖迟滞策略的观测入口。
     contributor: ReadinessContributor,
 }
 
@@ -112,13 +116,14 @@ fn db_readiness_policy() -> ReadinessPolicy {
     }
 }
 
-/// 业务作用：进入 Ready 后持续复验所有受管数据源，并把连接权威变化发布到应用就绪状态。
+/// 业务作用：进入 Ready 后逐个探测受管 MySQL 池，将连接获取结果交给就绪策略判断。
 ///
 /// 参数说明：
-/// - `application`：用于读取全局生命周期状态；进入 Stopping/Stopped/Failed 时发布未就绪并优雅退出。
-/// - `inputs`：各数据源的池与就绪贡献句柄。
+/// - `application`：提供生命周期状态和变化通知，状态变更优先中断正在等待的探针或轮次间休眠。
+/// - `inputs`：按启动顺序冻结的数据源名称、共享池和就绪贡献句柄；探针短暂占用这些业务池的连接容量。
 ///
-/// 返回：Application 进入停机态时返回成功；连接获取失败只发布未就绪，不提前终止监督任务。
+/// 返回：观察到停机、失败或状态通道关闭时正常结束；获取失败仅提交失败观测，由三次失败、一次成功的迟滞策略影响就绪。
+/// 每轮顺序探测后等待五秒，连接获取受池预算约束；不执行业务 SQL、重建池或终止应用中的其它任务。
 async fn run_db_monitor(
     application: Application,
     inputs: Vec<DbMonitorInput>,
@@ -147,7 +152,7 @@ async fn run_db_monitor(
 
         let now = Instant::now();
         for input in &inputs {
-            // acquire 成功即触发 sqlx test_before_acquire ping;连接立即归还池,不占业务连接。
+            // 借用同一池才能观察业务连接路径；探针短暂占用池容量，完成本次观测后立即归还。
             // 停机权威优先于连接探测；连接池不可达时也不能等待 acquire timeout 后才开始反向清理。
             let acquired = tokio::select! {
                 biased;
@@ -157,7 +162,11 @@ async fn run_db_monitor(
                     }
                     continue 'monitor;
                 }
-                result = natx::observed_pool_acquire(&input.name, natx::observability::ConnectionPurpose::Probe, &input.pool) => result,
+                result = natx::observed_pool_acquire(
+                    &input.name,
+                    natx::observability::ConnectionPurpose::Probe,
+                    &input.pool,
+                ) => result,
             };
             match acquired {
                 Ok(_conn) => {
@@ -180,7 +189,7 @@ async fn run_db_monitor(
                     return Ok(());
                 }
             }
-            _ = tokio::time::sleep(DB_MONITOR_INTERVAL) => {}
+            _ = tokio::time::sleep(DB_MONITOR_INTERVAL) => {},
         }
     }
 }
@@ -345,8 +354,7 @@ impl ApplicationComponent for DbComponent {
             #[cfg(feature = "mapper-observability")]
             crate::sql_observability::install_mysql_pools(&application, &self.pools).await?;
 
-            // 全部 pool 建立并登记后才冻结命名表；事务、Mapper 和持久适配器只能看到
-            // 这一次完整发布，任一前置失败都不会留下可读的半张资源表。
+            // 池资源已逐项登记，事务解析权威仍须等完整命名表冻结后一次发布；前置失败不能开放部分事务数据源。
             let registry = Arc::new(
                 DataSourceRegistry::try_new(
                     self.pools
@@ -390,7 +398,7 @@ impl ApplicationComponent for DbComponent {
     /// 校验版本/checksum 一致、apply 应用未决 migration。未应用、checksum 漂移或后端错误直接 fail
     /// startup(错误只含版本与稳定 reason,无 SQL 正文)。指向未配置数据源的登记同样拒绝启动。
     ///
-    /// 没有任何登记项时本阶段是无副作用的空操作,不触碰数据库。
+    /// 常规路径没有迁移登记时不访问数据库；延后引导路径仍须先接管默认池并完成连接探针，不能因没有迁移跳过。
     ///
     /// 参数说明：
     /// - `context`：提供 Application(据此取走迁移登记队列)的 Prepare 上下文。
@@ -530,12 +538,15 @@ impl ApplicationComponent for DbComponent {
 
 /// 持有单个连接池并在停机时显式关闭它的可逆 action。
 struct DbShutdown {
+    /// 用于定位关闭过程的数据源身份，不保存凭据或连接串。
     name: String,
+    /// 尚未移交显式关闭流程的共享池句柄；取出后本动作不会重复等待。
     pool: Option<MySqlPool>,
 }
 
 /// 在任何 pool 释放前封口 natx 受管解析入口的停机动作。
 struct DbRegistryShutdown {
+    /// 仅允许撤销自身身份的受管 registry，取出后关闭动作幂等。
     registry: Option<Arc<DataSourceRegistry>>,
 }
 
@@ -549,11 +560,12 @@ impl ShutdownAction for DbRegistryShutdown {
         "db-registry"
     }
 
-    /// 业务作用：撤销当前 Application 的事务资源表，使新查询在 pool 关闭前即失败。
+    /// 业务作用：撤销当前 Application 的受管事务解析入口，在连接池关闭前阻止从该入口取得新资源。
     ///
-    /// 参数说明：`_context` 携带全局停机预算，本动作不执行网络等待。
+    /// 参数说明：
+    /// - `_context`：宿主停机上下文；本动作只同步撤销资源表，不另行等待连接归还或分配超时。
     ///
-    /// 返回：无论槽位是否仍属于当前 registry 都安全完成。
+    /// 返回：取出 registry 并尝试撤销本实例后成功，未持有或已经移交时直接成功；不能撤销后续实例的资源表，也不关闭已借出的池句柄。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             if let Some(registry) = self.registry.take() {
@@ -567,7 +579,9 @@ impl ShutdownAction for DbRegistryShutdown {
 /// 业务作用：持有 Start 阶段预占、Prepare 阶段填充的动态默认池关闭所有权。
 #[cfg(feature = "saga")]
 struct DeferredDbShutdown {
+    /// 延后接管的默认数据源名称，用于停机定位。
     name: String,
+    /// Start 预占、Prepare 填充的关闭槽，尚未接管时走独立引导资源回收。
     registry: DeferredDbResources,
 }
 
@@ -624,18 +638,21 @@ impl ShutdownAction for DeferredDbShutdown {
 impl ShutdownAction for DbShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；名称不含连接串或凭据。
+    /// 返回：固定的 db-pool 标签，不含连接串或凭据；数据源名称由清理动作自己的诊断记录提供。
     fn label(&self) -> &'static str {
         "db-pool"
     }
 
     /// 业务作用：关闭连接池并等待已借出的连接归还。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `_context`：共享停机预算；`close()` 的等待由 Runner 的整体 timeout 约束。
+    ///
+    /// 返回：首次调用取出池并等待关闭完成后成功，已取出时直接成功；不自行设置新期限。
+    /// 被外层取消时不把尚未归还的连接记为已排空，后续调用也不会重新取得已移交的池句柄。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             if let Some(pool) = self.pool.take() {
@@ -651,9 +668,12 @@ impl ShutdownAction for DbShutdown {
 ///
 /// 返回值按名称排序，保证多库启动顺序、错误顺序和停机逆序在同一份配置下完全确定。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：提供当前不可变配置快照的共享上下文。
+///
+/// 返回：从同一快照解析的具名 MySQL 配置及可选迁移设置，单库命名为 default，多库按名称排序。
+/// 两种写法冲突、缺少配置、空表、数量超限、名称或字段非法时返回 Start 错误；不建池，不执行连接参数的完整取值校验。
 #[allow(clippy::type_complexity)]
 fn read_datasources(
     application: &Application,
@@ -724,11 +744,14 @@ fn read_datasources(
 /// 不把编译能力缺失误报为未知配置字段。摘出编排字段后的对象仍按 `deny_unknown_fields` 严格校验，
 /// 数据源字段本身的拼写错误不受影响；`MigrationSettings` 自身同样拒绝未知字段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`：配置树中某个数据源对象(`database` 或 `datasources.<name>` 的值)。
 /// - `name`：数据源 qualifier,仅用于错误信息定位。
 /// - `phase`：本次读取/校验所属生命周期阶段。
+///
+/// 返回：移除 driver 和 migrations 后得到的数据源配置及已校验的迁移设置；非 MySQL 驱动、专属字段、非法结构或关闭启动探针时拒绝。
+/// 不验证名称或连接参数的全部取值，不建连、不执行迁移；后续调用方仍须执行 DataSourceConfig::validate。
 fn split_datasource(
     mut value: serde_json::Value,
     name: &str,
@@ -793,7 +816,7 @@ fn split_datasource(
             error,
         )
     })?;
-    //:napp 声明 `db` 即**强制**启动握手探针,不继承 natx 的 `probe_on_start` 逃生口——否则错误
+    // napp 声明 db 即要求启动握手探针，不允许关闭 probe_on_start；否则错误
     // 地址仍能建 lazy pool、Application 误入 Ready,直到首条业务 SQL 才暴露 pool timeout。natx 默认 true,
     // 故最终值为 false ⟺ 配置里**显式**写了 `probe_on_start: false`:在配置校验期直接拒绝(不静默改 true)。
     // 本 choke point 同时覆盖 Start 期 `read_datasources` 与配置发布期 `validate_datasource_sections`。
@@ -813,10 +836,13 @@ fn split_datasource(
 /// 供启动期初始校验与配置热刷新使用：只做结构反序列化与取值校验，冲突（同时写 `database` 和
 /// `datasources`）在这里就会被拒绝，不会等到建池时才发现。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：合并、插值完成但尚未发布的候选配置树。
 /// - `phase`：本次无副作用校验所属的生命周期阶段。
+///
+/// 返回：未声明数据源段时成功；有配置时检查唯一写法、数量、名称、驱动、迁移和连接参数取值，首次不满足约束即返回指定阶段错误。
+/// 成功不证明数据库可达、凭据有效或迁移已应用，也不发布候选配置。
 pub(crate) fn validate_datasource_sections(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
@@ -914,21 +940,25 @@ pub(crate) async fn datasource_handle(
 
 /// 业务作用：创建数据源组件的稳定生命周期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：只含 qualifier 与 host/port/database 等定位信息的摘要。
+///
+/// 返回：归属 Db 与指定阶段、不带底层 source 的 ApplicationError；摘要原样保存，不自动脱敏或输出日志。
 fn db_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Db, phase, message)
 }
 
 /// 业务作用：创建带底层错误链的数据源错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含连接串的稳定摘要。
 /// - `source`：只供诊断、输出前统一脱敏的底层错误。
+///
+/// 返回：保留 Db 身份、生命周期阶段与原始错误链的 ApplicationError；不主动记录或过滤 source，对外输出须经过统一脱敏。
 fn db_error_src(
     phase: ApplicationPhase,
     message: impl Into<String>,

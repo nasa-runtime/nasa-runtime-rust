@@ -113,8 +113,10 @@ pub struct AuthRequest {
 impl std::fmt::Debug for AuthRequest {
     /// 业务作用：格式化鉴权请求;`token` 脱敏(只标记是否存在),其余字段正常。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `f`: 标准格式化器,由日志或调试输出提供。
+    ///
+    /// 返回：输出 token 存在性及其它请求字段；格式化目标失败时传播错误，不输出 token 正文。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthRequest")
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))

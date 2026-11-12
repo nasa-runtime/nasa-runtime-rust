@@ -78,6 +78,10 @@ enum HandlerShape {
 
 impl HandlerShape {
     /// 业务作用：返回关联业务消息类型。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用四种消费者形态中已经提取的业务消息类型，不包括 Vec 或 KafkaRecord 外壳。
     fn message_type(&self) -> &Type {
         match self {
             Self::SinglePayload(ty)
@@ -88,21 +92,31 @@ impl HandlerShape {
     }
 
     /// 业务作用：判断是否使用批消费者契约。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：BatchPayload 或 BatchRecord 返回 true，其它形态 false，不检查运行时批量大小。
     fn is_batch(&self) -> bool {
         matches!(self, Self::BatchPayload(_) | Self::BatchRecord(_))
     }
 
     /// 业务作用：判断业务参数是否拿得到可信记录确认能力。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：SingleRecord 或 BatchRecord 返回 true，表示业务保留 KafkaRecord 外壳；是否允许确认仍由路由确认模式与运行时能力决定。
     fn receives_record(&self) -> bool {
         matches!(self, Self::SingleRecord(_) | Self::BatchRecord(_))
     }
 }
 
-/// 业务作用：收集无状态异步消费函数。
+/// 业务作用：收集无状态异步消费函数。 支持 `T`、`KafkaRecord<T>`、`Vec<T>`、`Vec<KafkaRecord<T>>` 四种参数形态。
 ///
-/// 支持 `T`、`KafkaRecord<T>`、`Vec<T>`、`Vec<KafkaRecord<T>>` 四种参数形态。
-/// 参数说明：attr 为 topic、事件、来源和确认等属性；item 为被标注的异步自由函数。
-/// 返回：保留业务函数并追加类型适配和静态登记；非法声明生成编译错误，不创建任何运行期客户端。
+/// 参数说明：
+/// - `attr`：topics、事件、客户端、组身份、执行与确认策略的属性 token。
+/// - `item`：需要作为无状态消费者登记的异步自由函数 token。
+///
+/// 返回：属性、签名和形态合法时保留业务函数并生成适配与链接期登记，非法时生成编译错误，不创建运行时客户端。
 #[proc_macro_attribute]
 pub fn kafka_consumer(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
@@ -114,8 +128,12 @@ pub fn kafka_consumer(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// 业务作用：校验路由属性和函数签名，生成消费 trait 实现与静态收集项。
-/// 参数说明：metas 为路由属性；function 为被标注的异步自由函数。
-/// 返回：一致的类型适配与登记代码；非法属性、函数限定符、参数形态或按键批声明返回编译错误。
+///
+/// 参数说明：
+/// - `metas`：已经解析的路由与消费合同属性。
+/// - `function`：待保留并生成适配的业务异步函数。
+///
+/// 返回：成功返回单条或批消费者实现和静态登记；属性、签名、形态、运行时路径不合法，或按键批处理、无记录的手动确认时返回错误。生成代码的实际类型兼容性仍由 Rust 编译检查。
 fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<TokenStream2> {
     let args = parse_args(metas)?;
     validate_function(&function)?;
@@ -170,39 +188,66 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
             impl #root::BatchConsumer for __NafkaConsumer {
                 type Message = #message;
 
-                /// 业务作用：返回属性中声明的 topic 列表。
+                /// 业务作用：提供宏声明的主题列表。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回按声明顺序复制的主题名称，不访问 broker。
                 fn topics(&self) -> ::std::vec::Vec<::std::string::String> {
                     ::std::vec![#(::std::string::ToString::to_string(#topics)),*]
                 }
 
-                /// 业务作用：返回属性中声明的事件名。
+                /// 业务作用：提供宏声明的精确事件路由名。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回原事件字符串副本，不去空白或改名。
                 fn event(&self) -> ::std::string::String {
                     ::std::string::ToString::to_string(#event)
                 }
 
-                /// 业务作用：返回属性中声明的 group 解析规则。
+                /// 业务作用：提供宏声明的消费位点身份规则。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回 Named、广播或默认组元数据；最终组名由运行时解析。
                 fn group(&self) -> #root::GroupSpec {
                     #group
                 }
 
-                /// 业务作用：返回模块路径与函数名组成的稳定 id。
+                /// 业务作用：提供模块与函数路径构成的消费者身份。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回静态模块路径与函数名，不包含运行期请求数据。
                 fn id(&self) -> &'static str {
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#function_name))
                 }
 
-                /// 业务作用：返回属性中声明的确认模式。
+                /// 业务作用：提供业务声明的消费确认模式。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回冻结的 Auto 或 Manual 模式，不执行确认。
                 fn ack_mode(&self) -> #root::AckMode {
                     #ack_mode
                 }
 
-                /// 业务作用：冻结路由的执行顺序域。
-                /// 参数说明：无。
-                /// 返回：声明的模式，同组混合模式在启动前拒绝。
+                /// 业务作用：提供路由的有序执行范围。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回声明的分区或按键顺序模式，组合是否合法由启动装配继续检查。
                 fn execution_mode(&self) -> #root::ExecutionMode {
                     #execution_mode
                 }
 
-                /// 业务作用：将框架批记录转换为业务函数声明的参数形态并调用。
+                /// 业务作用：把批记录按声明形态交给业务函数。
+                ///
+                /// 参数说明：
+                /// - `records`：本批已解码并携带确认能力的记录，顺序由上层运行时固定。
+                ///
+                /// 返回：等待业务函数并原样返回其消费结果，不在本适配方法中提交位点。
                 async fn consume_batch(
                     &self,
                     records: ::std::vec::Vec<#root::KafkaRecord<Self::Message>>,
@@ -216,39 +261,66 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
             impl #root::SingleConsumer for __NafkaConsumer {
                 type Message = #message;
 
-                /// 业务作用：返回属性中声明的 topic 列表。
+                /// 业务作用：提供宏声明的主题列表。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回按声明顺序复制的主题名称，不访问 broker。
                 fn topics(&self) -> ::std::vec::Vec<::std::string::String> {
                     ::std::vec![#(::std::string::ToString::to_string(#topics)),*]
                 }
 
-                /// 业务作用：返回属性中声明的事件名。
+                /// 业务作用：提供宏声明的精确事件路由名。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回原事件字符串副本，不去空白或改名。
                 fn event(&self) -> ::std::string::String {
                     ::std::string::ToString::to_string(#event)
                 }
 
-                /// 业务作用：返回属性中声明的 group 解析规则。
+                /// 业务作用：提供宏声明的消费位点身份规则。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回 Named、广播或默认组元数据；最终组名由运行时解析。
                 fn group(&self) -> #root::GroupSpec {
                     #group
                 }
 
-                /// 业务作用：返回模块路径与函数名组成的稳定 id。
+                /// 业务作用：提供模块与函数路径构成的消费者身份。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回静态模块路径与函数名，不包含运行期请求数据。
                 fn id(&self) -> &'static str {
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#function_name))
                 }
 
-                /// 业务作用：返回属性中声明的确认模式。
+                /// 业务作用：提供业务声明的消费确认模式。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回冻结的 Auto 或 Manual 模式，不执行确认。
                 fn ack_mode(&self) -> #root::AckMode {
                     #ack_mode
                 }
 
-                /// 业务作用：冻结路由的执行顺序域。
-                /// 参数说明：无。
-                /// 返回：声明的模式，同组混合模式在启动前拒绝。
+                /// 业务作用：提供路由的有序执行范围。
+                ///
+                /// 参数说明: 无。
+                ///
+                /// 返回：返回声明的分区或按键顺序模式，组合是否合法由启动装配继续检查。
                 fn execution_mode(&self) -> #root::ExecutionMode {
                     #execution_mode
                 }
 
-                /// 业务作用：将框架单记录转换为业务函数声明的参数形态并调用。
+                /// 业务作用：把单条记录按声明形态交给业务函数。
+                ///
+                /// 参数说明：
+                /// - `record`：已经解码并携带当前投递确认能力的记录。
+                ///
+                /// 返回：等待业务函数并原样返回其消费结果，不在本适配方法中提交位点。
                 async fn consume(
                     &self,
                     record: #root::KafkaRecord<Self::Message>,
@@ -273,7 +345,11 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
 
             #trait_impl
 
-            /// 业务作用：构造由运行时统一实现的类型擦除 adapter。
+            /// 业务作用：构造当前静态消费者的类型擦除适配。
+            ///
+            /// 参数说明: 无。
+            ///
+            /// 返回：返回共享的擦除消费者或底层适配构造错误，不创建 broker 客户端。
             fn __build() -> #root::Result<
                 ::std::sync::Arc<dyn #root::__private::ErasedConsumer>
             > {
@@ -305,8 +381,11 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
 }
 
 /// 业务作用：解析路由属性，拒绝不完整、冲突或无法形成确定身份的声明。
-/// 参数说明：metas 为逗号分隔的属性项。
-/// 返回：合法属性的冻结值；缺少必填项、重复或未知属性、非法值及字面量类型错误返回编译错误。
+///
+/// 参数说明：
+/// - `metas`：按声明顺序提供的逗号分隔属性项。
+///
+/// 返回：必需 topics、event 存在且属性类型、重复、互斥及身份边界合法时返回选项；否则返回编译错误。缺省 client 为 default，ack 为 auto，execution 为 partition_ordered，不连接 broker。
 fn parse_args(metas: Punctuated<Meta, Token![,]>) -> syn::Result<ConsumerArgs> {
     let mut topics = None;
     let mut event = None;
@@ -450,8 +529,11 @@ fn parse_args(metas: Punctuated<Meta, Token![,]>) -> syn::Result<ConsumerArgs> {
 }
 
 /// 业务作用：在编译期拒绝共同广播身份中不可安全编码的字面量。
-/// 参数说明：value 为作用域或实例身份字面量。
-/// 返回：保留精确 UTF-8；空值、超长、控制字符及首尾 ASCII 空格产生编译错误。
+///
+/// 参数说明：
+/// - `value`：broadcast_scope 或 instance_id 的字面量身份。
+///
+/// 返回：非空、不超 4096 UTF-8 字节、无控制字符及首尾 ASCII 空格时成功，否则报错；原值保留，不拒绝所有 Unicode 空白形态。
 fn validate_broadcast_identity(value: &LitStr) -> syn::Result<()> {
     let identity = value.value();
     if identity.is_empty()
@@ -470,15 +552,12 @@ fn validate_broadcast_identity(value: &LitStr) -> syn::Result<()> {
 
 /// 业务作用：拒绝同名属性重复出现。
 ///
-/// # 参数
+/// 参数说明：
+/// - `current`：已解析的可选值。
+/// - `meta`：当前属性项。
+/// - `name`：诊断显示名。
 ///
-/// - `current`: 已解析的可选值。
-/// - `meta`: 当前属性项。
-/// - `name`: 诊断显示名。
-///
-/// # 错误
-///
-/// `current` 已有值时返回重复属性错误。
+/// 返回：current 为 None 时成功，否则返回以 meta 定位的重复属性错误，不覆盖旧值。
 fn ensure_missing<T>(current: &Option<T>, meta: &Meta, name: &str) -> syn::Result<()> {
     if current.is_some() {
         Err(syn::Error::new_spanned(meta, format!("属性 `{name}` 重复")))
@@ -487,13 +566,13 @@ fn ensure_missing<T>(current: &Option<T>, meta: &Meta, name: &str) -> syn::Resul
     }
 }
 
-/// 业务作用：校验 client、broadcast scope 与 topic 字面量的首尾空白边界。
+/// 业务作用：校验 client、broadcast scope 与 topic 字面量的首尾空白边界。 这些字段参与资源选择或消费组派生，声明中的首尾空白直接拒绝，不能静默裁剪后改用另一个身份。 event 与普通 group 使用各自的精确文本合同及空白边界，不经过本门禁。
 ///
-/// 这些字段参与资源选择或消费组派生，声明中的首尾空白直接拒绝，不能静默裁剪后改用另一个身份。
-/// event 与普通 group 使用各自的精确文本合同及空白边界，不经过本门禁。
+/// 参数说明：
+/// - `value`：参与 client、广播或 topic 选择的原始字面量。
+/// - `field`：用于定位属性错误的字段显示名。
 ///
-/// 参数说明：value 为待校验字面量，field 为诊断中的字段名。
-/// 返回：无首尾空白时通过，否则返回编译错误且不生成路由。
+/// 返回：原文与 trim 后相等时成功，否则返回编译错误，不静默更改消费资源或派生身份。
 fn deny_padded(value: &LitStr, field: &str) -> syn::Result<()> {
     let raw = value.value();
     if raw != raw.trim() {
@@ -506,8 +585,11 @@ fn deny_padded(value: &LitStr, field: &str) -> syn::Result<()> {
 }
 
 /// 业务作用：在生成静态路由前执行普通组的共同输入边界。
-/// 参数说明：group 为声明中的组名字面量，按 UTF-8 字节计长。
-/// 返回：非纯空白、无 NUL、首尾不含 U+0000–0020 且1至1024字节时通过，否则返回编译错误；不裁剪或改名。
+///
+/// 参数说明：
+/// - `group`：声明中用于消费位点归属的精确组名字面量。
+///
+/// 返回：非纯协议空白、无 NUL、最多 1024 字节且首尾字节不在 U+0000 至 U+0020 时成功，否则报错；不去空白或改名。
 fn validate_group(group: &LitStr) -> syn::Result<()> {
     let value = group.value();
     if is_blank_event(&value)
@@ -525,8 +607,11 @@ fn validate_group(group: &LitStr) -> syn::Result<()> {
 }
 
 /// 业务作用：在展开前拒绝运行时不能注册的空白事件，保持事件字面量与线路合同一致。
-/// 参数说明：event 为宏参数中的事件原文。
-/// 返回：空串或仅含事件空白字符时为 true；不裁剪其它合法事件名。
+///
+/// 参数说明：
+/// - `event`：需要验证非空白的事件或普通组名原文。
+///
+/// 返回：空串或所有字符均在本层事件空白字符集合时返回 true，否则 false；不采用通用 Unicode trim，也不改写事件。
 fn is_blank_event(event: &str) -> bool {
     event.chars().all(|value| {
         matches!(value, '\u{0009}'..='\u{000d}' | '\u{001c}'..='\u{0020}' | '\u{1680}'
@@ -537,13 +622,10 @@ fn is_blank_event(event: &str) -> bool {
 
 /// 业务作用：解析 `topics = ["a", "b"]`。
 ///
-/// # 参数
+/// 参数说明：
+/// - `meta`：topics 属性项。
 ///
-/// - `meta`: topics 属性项。
-///
-/// # 错误
-///
-/// 不是非空字符串数组、含空 topic 或含重复 topic 时返回编译错误。
+/// 返回：非空字符串数组且各项非空白、无首尾 Unicode 空白和精确重复时，按原序返回字面量；否则报错。不在此处检查 broker 是否存在该 topic 或完整 native 命名限制。
 fn parse_topics(meta: &Meta) -> syn::Result<Vec<LitStr>> {
     let Meta::NameValue(value) = meta else {
         return Err(syn::Error::new_spanned(
@@ -551,7 +633,11 @@ fn parse_topics(meta: &Meta) -> syn::Result<Vec<LitStr>> {
             "topics 必须使用字符串数组赋值",
         ));
     };
-    let Expr::Array(ExprArray { elems, .. }) = &value.value else {
+    let Expr::Array(ExprArray {
+        elems,
+        ..
+    }) = &value.value
+    else {
         return Err(syn::Error::new_spanned(
             &value.value,
             "topics 必须是字符串数组",
@@ -589,14 +675,11 @@ fn parse_topics(meta: &Meta) -> syn::Result<Vec<LitStr>> {
 
 /// 业务作用：解析字符串赋值属性。
 ///
-/// # 参数
+/// 参数说明：
+/// - `meta`：属性项。
+/// - `name`：诊断显示名。
 ///
-/// - `meta`: 属性项。
-/// - `name`: 诊断显示名。
-///
-/// # 错误
-///
-/// 不是字符串字面量赋值时返回编译错误。
+/// 返回：字符串字面量赋值时返回其副本，非 NameValue、非字面量或非字符串时返回编译错误；不校验空值或语义。
 fn parse_string_value(meta: &Meta, name: &str) -> syn::Result<LitStr> {
     let Meta::NameValue(value) = meta else {
         return Err(syn::Error::new_spanned(
@@ -621,13 +704,10 @@ fn parse_string_value(meta: &Meta, name: &str) -> syn::Result<LitStr> {
 
 /// 业务作用：校验被标注函数的限定符和输入输出数量。
 ///
-/// # 参数
+/// 参数说明：
+/// - `function`：被标注函数。
 ///
-/// - `function`: 被标注函数。
-///
-/// # 错误
-///
-/// 非异步、非普通 free function、带泛型或参数数量不为一时返回编译错误。
+/// 返回：安全、非 const、无 ABI、非可变参数、无泛型与 where 且单参数 async 函数通过时成功，否则报错。这里只要求显式返回类型，不证明恰为 Result<()>；接收者与参数形态由后续检查。
 fn validate_function(function: &ItemFn) -> syn::Result<()> {
     let signature = &function.sig;
     if signature.asyncness.is_none() {
@@ -666,13 +746,10 @@ fn validate_function(function: &ItemFn) -> syn::Result<()> {
 
 /// 业务作用：识别四种规范参数形态并提取业务消息类型。
 ///
-/// # 参数
+/// 参数说明：
+/// - `ty`：函数唯一参数类型。
 ///
-/// - `ty`: 函数唯一参数类型。
-///
-/// # 错误
-///
-/// 类型不是可识别的路径，或容器泛型参数不规范时返回编译错误。
+/// 返回：按末段识别 KafkaRecord、Vec 及嵌套组合并提取业务类型；其它无 qself 路径作为单消息，无法识别形态或容器参数不合法时返回错误，不解析类型别名或路径来源。
 fn parse_shape(ty: &Type) -> syn::Result<HandlerShape> {
     if let Some(inner) = one_type_argument(ty, "KafkaRecord")? {
         return Ok(HandlerShape::SingleRecord(inner.clone()));
@@ -695,14 +772,11 @@ fn parse_shape(ty: &Type) -> syn::Result<HandlerShape> {
 
 /// 业务作用：若类型末段是指定容器，返回其唯一类型参数。
 ///
-/// # 参数
+/// 参数说明：
+/// - `ty`：待检查类型。
+/// - `container`：末段标识符。
 ///
-/// - `ty`: 待检查类型。
-/// - `container`: 末段标识符。
-///
-/// # 错误
-///
-/// 命中容器但泛型参数不是唯一类型时返回编译错误。
+/// 返回：类型末段不匹配时返回 None，匹配且恰有一个类型实参时返回借用，容器实参不符时报错；不解析完整类型身份。
 fn one_type_argument<'a>(ty: &'a Type, container: &str) -> syn::Result<Option<&'a Type>> {
     let Type::Path(path) = ty else {
         return Ok(None);
@@ -736,11 +810,12 @@ fn one_type_argument<'a>(ty: &'a Type, container: &str) -> syn::Result<Option<&'
 
 /// 业务作用：生成 group 元数据表达式。
 ///
-/// # 参数
+/// 参数说明：
+/// - `args`：已解析宏参数。
+/// - `function_name`：业务函数名。
+/// - `root`：运行时根路径。
 ///
-/// - `args`: 已解析宏参数。
-/// - `function_name`: 业务函数名。
-/// - `root`: 运行时根路径。
+/// 返回：返回按 StableBroadcast、Named、Broadcast 或 Default 选择的元数据表达式；裸 broadcast 用模块与函数名派生作用域，不在宏展开时计算最终消费组或取得位点。
 fn group_tokens(
     args: &ConsumerArgs,
     function_name: &syn::Ident,
@@ -776,10 +851,11 @@ fn group_tokens(
 
 /// 业务作用：生成四种函数参数形态对应的调用表达式。
 ///
-/// # 参数
+/// 参数说明：
+/// - `shape`：已识别参数形态。
+/// - `function_name`：业务函数名。
 ///
-/// - `shape`: 已识别参数形态。
-/// - `function_name`: 业务函数名。
+/// 返回：返回等待业务函数的调用表达式；payload 形态只移动 value，record 形态保留记录外壳，批 payload 按原序提取，不在宏展开时执行函数。
 fn invocation_tokens(shape: &HandlerShape, function_name: &syn::Ident) -> TokenStream2 {
     match shape {
         HandlerShape::SinglePayload(_) => quote!(#function_name(record.value).await),

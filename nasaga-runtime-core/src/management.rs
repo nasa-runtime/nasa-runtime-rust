@@ -76,7 +76,8 @@ pub enum SagaManagementError {
 impl SagaManagementError {
     /// 业务作用：从可能附加事务上下文的错误链提取可公开管理拒绝类别。
     ///
-    /// 参数说明：`error` 是管理查询或动作返回的完整错误链。
+    /// 参数说明：
+    /// - `error`：是管理查询或动作返回的完整错误链。
     ///
     /// 返回：命中管理拒绝或后端唯一身份冲突时返回对应类别；基础设施或未知失败返回 `None`。
     pub fn from_error(error: &anyhow::Error) -> Option<Self> {
@@ -101,7 +102,8 @@ impl SagaManagementError {
 impl std::fmt::Display for SagaManagementError {
     /// 业务作用：输出不暴露实例存在性、租户用量或业务状态细节的稳定管理错误摘要。
     ///
-    /// 参数说明：`formatter` 是标准格式化输出目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化输出目标。
     ///
     /// 返回：摘要写入成功时返回 `Ok`；格式化失败返回对应错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -139,9 +141,11 @@ pub struct SagaManagementExpectation {
 impl SagaManagementExpectation {
     /// 业务作用：构造管理动作的可选双版本 CAS 合同。
     ///
-    /// 参数说明：两个 expected version 分别约束业务状态和控制状态；未提供的一侧不参与比较。
+    /// 参数说明：
+    /// - `expected_state_version`：可选业务状态版本；None 不比较此侧。
+    /// - `expected_control_version`：可选控制状态版本；None 不比较此侧。
     ///
-    /// 返回：返回不可变前置条件，最终比较必须在持有实例事务锁后执行。
+    /// 返回：返回保存两侧可选期望值的不可变合同，不读取数据库或取得事务锁。
     pub fn new(expected_state_version: Option<u64>, expected_control_version: Option<u64>) -> Self {
         Self {
             expected_state_version,
@@ -151,9 +155,11 @@ impl SagaManagementExpectation {
 
     /// 业务作用：在实例已进入当前数据库事务后复验调用方快照，防止管理动作覆盖并发推进。
     ///
-    /// 参数说明：`state_version` 与 `control_version` 来自事务内刚装载的实例行。
+    /// 参数说明：
+    /// - `state_version`：调用方在当前事务中刚读取的业务状态版本。
+    /// - `control_version`：调用方在当前事务中刚读取的控制状态版本。
     ///
-    /// 返回：已提供版本全部一致时成功；任一过期返回稳定并发裁决。
+    /// 返回：已提供的期望值全部相等时成功，任一不一致返回 StaleSnapshot；两侧均 None 时通过，不自行加载行或证明持锁。
     pub(crate) fn verify(self, state_version: u64, control_version: u64) -> anyhow::Result<()> {
         if self
             .expected_state_version

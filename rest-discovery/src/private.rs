@@ -19,21 +19,23 @@ const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// 业务作用：把单个值编码成安全的 path 段(`/` 等会被转义,不会穿透成路径层级)。
+/// 业务作用：按路径参数字符集编码一个 UTF-8 值。
 ///
-/// # 参数
+/// 参数说明：
+/// - `value`：将被替换进单个路径段的原始文本。
 ///
-/// - `value`: 待作为单个 path segment 放入 URL 的原始值。
+/// 返回：转义字母数字及 -._~ 之外的字节；斜杠被编码，点号原样保留。本函数不拒绝单独的点或双点段，不保证后续 URL 解析保持所有路径层级。
 pub fn encode_path_segment(value: &str) -> String {
     percent_encoding::utf8_percent_encode(value, PATH_SEGMENT).to_string()
 }
 
-/// 业务作用：替换 path 模板里的 `{name}` 为 percent-encoded 值。缺失占位 / 未闭合 `{` → `RequestBuildFailed`。
+/// 业务作用：按占位名查找参数并以路径段编码替换模板。
 ///
-/// # 参数
+/// 参数说明：
+/// - `template`：含花括号占位符的路径模板。
+/// - `vars`：有序名称与原始值列表，同名使用首项。
 ///
-/// - `template`: 含 `{name}` 占位符的路径模板。
-/// - `vars`: 占位符名称到原始值的映射，值会按 path segment 规则编码。
+/// 返回：成功返回替换后的路径；未闭合左括号或占位名缺失返回 RequestBuildFailed。多余参数和未配对的右括号不在此拒绝，不校验最终路径。
 pub fn replace_path_variables(template: &str, vars: &[(&str, String)]) -> Result<String> {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
@@ -60,12 +62,13 @@ pub fn replace_path_variables(template: &str, vars: &[(&str, String)]) -> Result
     Ok(out)
 }
 
-/// 业务作用：拼 `context_path` + `path`,保证只有一个 `/`。`context_path` 为空时直接用 `path`(已保证以 `/` 开头)。
+/// 业务作用：将去除尾斜杠的上下文路径与方法路径拼接。
 ///
-/// # 参数
+/// 参数说明：
+/// - `context_path`：可为空的客户端上下文路径。
+/// - `path`：调用方已保证以斜杠开头的方法路径。
 ///
-/// - `context_path`: 客户端级上下文路径，可为空或带尾部 `/`。
-/// - `path`: 方法级路径，通常以 `/` 开头。
+/// 返回：上下文去尾斜杠后为空则原样返回 path，否则直接拼接；不额外补斜杠或规范化点段。
 pub fn join_path(context_path: &str, path: &str) -> String {
     let ctx = context_path.trim_end_matches('/');
     if ctx.is_empty() {

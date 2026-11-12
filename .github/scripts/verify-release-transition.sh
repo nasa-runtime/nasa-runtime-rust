@@ -40,7 +40,8 @@ printf '%s\n' "$plan" | awk -F '\t' -v stage="$current_stage" '
 ' > "$predecessors_file"
 
 # 业务作用：判断指定 crate 是否仍由根级 crates.io patch 指向本地工作区。
-# 参数说明：`$1` 为 crate 名称。
+# 参数说明：
+# - `$1`：需要查找本地 crates.io patch 的 crate 名称。
 # 返回：仍存在本地 path 覆盖时成功，不存在时返回非零状态。
 has_local_patch() {
   local crate_name="$1"

@@ -121,13 +121,17 @@ static DESCRIPTORS: [&MetricDescriptor; 12] = [
 struct Source;
 impl LegacyMetricsSource for Source {
     /// 业务作用：冻结接口域的公共指标合同。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与独立 Prometheus 出口一致的 descriptor。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         &DESCRIPTORS
     }
     /// 业务作用：把接口生命周期计数映射为各出口共用的累计样本。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：保留命令、分组、结局及固定 histogram 桶的快照。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         Some(
@@ -155,7 +159,10 @@ impl LegacyMetricsSource for Source {
         )
     }
     /// 业务作用：保持独立调用方的文本快照合同。
-    /// 参数说明：`output` 为追加目标。
+    ///
+    /// 参数说明：
+    /// - `output`：已有 Prometheus 文本缓冲，向末尾追加接口指标，不清空其它来源的内容。
+    ///
     /// 返回：与结构化指标同源的文本。
     fn render_prometheus(&self, output: &mut String) {
         output.push_str(&crate::render_metrics());
@@ -163,7 +170,9 @@ impl LegacyMetricsSource for Source {
 }
 
 /// 业务作用：提供进程唯一的接口指标源，受管 Application 自动登记，独立宿主可显式登记。
+///
 /// 参数说明：无。
+///
 /// 返回：共享 source；重复登记同一对象不会产生重复 family。
 pub fn metrics_source() -> Arc<dyn LegacyMetricsSource> {
     static SOURCE: OnceLock<Arc<dyn LegacyMetricsSource>> = OnceLock::new();

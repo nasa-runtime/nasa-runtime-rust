@@ -48,14 +48,24 @@ pub type WebRouteMetaFactory = fn() -> Vec<RouteMeta>;
 /// napp Ready 阶段交给业务二进制自动路由工厂的完整构建上下文。
 #[cfg(feature = "web")]
 pub struct WebBuildContext {
+    /// 路由构建与处理器共用的应用句柄。
     application: Application,
+    /// 已按应用装配的映射运行环境。
     mapping_runtime: Arc<naweb::MappingRuntime>,
+    /// 已封口并等待工厂消费的路由计划。
     mapping_plan: naweb::MappingPlan<Application>,
 }
 
 #[cfg(feature = "web")]
 impl WebBuildContext {
     /// 业务作用：建立同源 Application、MappingRuntime 和已封口 MappingPlan 的构建上下文。
+    ///
+    /// 参数说明：
+    /// - `application`：将传给路由工厂的应用状态句柄。
+    /// - `mapping_runtime`：该应用的共享映射运行环境。
+    /// - `mapping_plan`：已完成目录校验的映射计划，由调用方保证与应用同源。
+    ///
+    /// 返回：持有三个构建输入的上下文；不注册路由，也不自行复验输入来源。
     pub(crate) fn new(
         application: Application,
         mapping_runtime: Arc<naweb::MappingRuntime>,
@@ -69,6 +79,11 @@ impl WebBuildContext {
     }
 
     /// 业务作用：调用业务 crate 中单态化的 `try_register_all`，并把 mapping 构建错误收敛为 Web Ready 错误。
+    ///
+    /// 参数说明：
+    /// - `factory`：消费空路由、共享运行环境、映射计划与应用状态的一次性构建函数。
+    ///
+    /// 返回：工厂成功时提供仍待补齐 Application 状态的路由；工厂错误包装为 Web Ready 错误，本方法不绑定监听端口。
     pub fn build<F>(self, factory: F) -> ApplicationResult<axum::Router<Application>>
     where
         F: FnOnce(
@@ -105,11 +120,16 @@ pub type WebRouterFactory = fn(WebBuildContext) -> ApplicationResult<axum::Route
 /// 属性入口生成的静态应用描述，保存进程元数据、组件顺序和业务二进制内的 Web 工厂。
 #[derive(Debug, Clone, Copy)]
 pub struct ApplicationSpec {
+    /// 保持声明顺序、供启动与逆序清理使用的组件列表。
     components: &'static [ComponentId],
+    /// 严格配置来源的构造函数，未设置时采用兼容入口。
     pub(crate) config_loader: Option<fn() -> naml::strict::Result<naml::strict::ConfigLoader>>,
+    /// 配置未声明应用名时使用的静态名称。
     default_name: &'static str,
+    /// 构建路由前用于冲突校验和文档投影的元数据工厂。
     #[cfg(feature = "web")]
     web_route_meta: Option<WebRouteMetaFactory>,
+    /// Ready 装配期间调用的路由构建工厂。
     #[cfg(feature = "web")]
     web_factory: Option<WebRouterFactory>,
 }
@@ -117,9 +137,11 @@ pub struct ApplicationSpec {
 impl ApplicationSpec {
     /// 业务作用：创建只包含静态组件声明的应用描述。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `components`：属性入口按源码顺序生成的静态组件切片。
+    ///
+    /// 返回：缺省名为 application、未安装加载器和 Web 工厂的描述；组件顺序仍需显式校验。
     pub const fn new(components: &'static [ComponentId]) -> Self {
         Self {
             components,
@@ -133,7 +155,10 @@ impl ApplicationSpec {
     }
 
     /// 业务作用：在 preflight 前选择严格来源装配，并固定随后重载使用的环境与权限。
-    /// 参数说明：`factory` 构造受信加载器；不能在业务 Hook 中补设此策略。
+    ///
+    /// 参数说明：
+    /// - `factory`：`factory` 构造受信加载器。
+    ///
     /// 返回：使用显式严格入口的静态描述，未设置时保持兼容加载边界。
     pub const fn with_config_loader(
         mut self,
@@ -145,9 +170,11 @@ impl ApplicationSpec {
 
     /// 业务作用：设置配置未声明名称时使用的编译期缺省名。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `default_name`：通常来自业务包元数据、trim 后必须非空的静态名称。
+    ///
+    /// 返回：保存指定名称的描述；此处不裁剪或校验名称，空白名称在 validate 时拒绝。
     pub const fn with_default_name(mut self, default_name: &'static str) -> Self {
         self.default_name = default_name;
         self
@@ -155,9 +182,11 @@ impl ApplicationSpec {
 
     /// 业务作用：设置由业务二进制生成的自动路由元数据投影函数。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `factory`：每次调用都返回同一组静态路由语义的无捕获函数。
+    ///
+    /// 返回：保存或替换元数据工厂后的描述；不调用工厂，不检查路由冲突，也不自动声明 Web 组件。
     #[cfg(feature = "web")]
     pub const fn with_web_route_meta(mut self, factory: WebRouteMetaFactory) -> Self {
         self.web_route_meta = Some(factory);
@@ -166,9 +195,11 @@ impl ApplicationSpec {
 
     /// 业务作用：设置由业务二进制生成的 Web 路由构造函数。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
-    /// - `factory`：接收统一 Application 状态并返回已补齐状态的路由。
+    /// - `factory`：接收 WebBuildContext，返回仍待由 Web 组件补齐 Application 状态的路由。
+    ///
+    /// 返回：保存或替换构建工厂后的描述；不执行构建，不自动安装元数据工厂或声明组件。
     #[cfg(feature = "web")]
     pub const fn with_web_factory(mut self, factory: WebRouterFactory) -> Self {
         self.web_factory = Some(factory);
@@ -177,27 +208,27 @@ impl ApplicationSpec {
 
     /// 业务作用：返回保持源码声明顺序的组件切片。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；运行时校验不会重排该切片。
+    /// 返回：保持声明顺序的静态组件切片；不增补依赖、不进行拓扑重排或合法性检查。
     pub fn components(&self) -> &'static [ComponentId] {
         self.components
     }
 
     /// 业务作用：返回同步 preflight 使用的编译期缺省应用名。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；名称不会写回配置树。
+    /// 返回：描述中保存的静态缺省名；不会写回配置树，也不代表配置解析后最终使用的应用名。
     pub fn default_name(&self) -> &'static str {
         self.default_name
     }
 
     /// 业务作用：校验重复声明和内置组件的静态顺序约束。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；错误直接拒绝启动而不会静默拓扑重排。
+    /// 返回：缺省名非空白且组件身份、依赖和顺序满足约束时成功；否则返回 Bootstrap 错误，不校验 Web 工厂绑定。
     pub fn validate(&self) -> ApplicationResult<()> {
         if self.default_name.trim().is_empty() {
             return Err(spec_error("application default name cannot be empty"));
@@ -208,9 +239,9 @@ impl ApplicationSpec {
 
     /// 业务作用：校验声明组件所需的业务二进制工厂是否已经同时提供。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；属性入口生成工厂，手写描述缺失工厂时会在创建运行时前失败。
+    /// 返回：Web 声明与编译能力、两个工厂完整匹配时成功；缺失能力、工厂或未声明组件却安装工厂时返回 Bootstrap 错误，不执行工厂。
     pub(crate) fn validate_runtime_bindings(&self) -> ApplicationResult<()> {
         #[cfg(feature = "web")]
         {
@@ -242,9 +273,9 @@ impl ApplicationSpec {
 
     /// 业务作用：返回 Web 组件使用的路由元数据投影函数。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；只有运行时绑定校验通过且声明 Web 时才返回值。
+    /// 返回：已保存的元数据工厂，未设置则为 None；读取本身不检查 Web 是否声明或绑定是否通过校验。
     #[cfg(feature = "web")]
     pub(crate) fn web_route_meta(&self) -> Option<WebRouteMetaFactory> {
         self.web_route_meta
@@ -252,9 +283,9 @@ impl ApplicationSpec {
 
     /// 业务作用：返回 Web 组件使用的业务路由构造函数。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；函数指针不捕获业务状态，具体状态由调用参数传入。
+    /// 返回：已保存的路由构建函数，未设置则为 None；不调用函数或验证绑定，实际构建状态由调用方传入。
     #[cfg(feature = "web")]
     pub(crate) fn web_factory(&self) -> Option<WebRouterFactory> {
         self.web_factory
@@ -508,11 +539,13 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
 
 /// 业务作用：当两个组件同时声明时校验前者必须先出现。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `components`：保持源码声明顺序的组件切片。
 /// - `first`：有条件要求先出现的组件。
 /// - `second`：与前者同时存在时必须后出现的组件。
+///
+/// 返回：任一组件缺席或前者位置不晚于后者时成功；逆序时返回 Bootstrap 错误，重复身份由上层单独拒绝。
 fn ensure_before_if_both(
     components: &[ComponentId],
     first: ComponentId,
@@ -532,9 +565,11 @@ fn ensure_before_if_both(
 
 /// 业务作用：创建静态应用描述的 Bootstrap 错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `message`：不包含配置值的稳定校验摘要。
+///
+/// 返回：归属 Application 的 Bootstrap 错误，供启动前拒绝无效描述，不产生外部副作用。
 fn spec_error(message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(
         ComponentId::Application,

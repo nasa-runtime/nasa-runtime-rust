@@ -26,6 +26,10 @@ pub enum ParameterLocation {
 
 impl ParameterLocation {
     /// 业务作用：OpenAPI `in` 字段的稳定值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 query 或 header 的固定小写值，不接受外部字符串。
     const fn as_str(self) -> &'static str {
         match self {
             Self::Query => "query",
@@ -126,6 +130,11 @@ pub enum OpenApiError {
 
 impl std::fmt::Display for OpenApiError {
     /// 业务作用：输出稳定合同错误分类，不包含完整 schema 文本。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收合同错误分类及其附带字段的格式器。
+    ///
+    /// 返回：写入成功时成功，格式器失败时传播错误；Debug 表示可能包含合同字段与解析原因，不自动脱敏输入文本。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "OpenAPI contract error: {self:?}")
     }
@@ -134,6 +143,13 @@ impl std::fmt::Display for OpenApiError {
 impl std::error::Error for OpenApiError {}
 
 /// 业务作用：生成排序稳定的 OpenAPI 3.1 JSON 文档。
+///
+/// 参数说明：
+/// - `title`：文档标题，trim 后必须非空，输出保留原文。
+/// - `version`：公开 API 的业务版本文本，trim 后必须非空。
+/// - `routes`：调用方已完成启动安全审计的静态路由合同集合。
+///
+/// 返回：合同通过本层检查时返回包含路径、schema 与标准错误组件的文档；标题版本空白、路由、参数、媒体类型、响应或 schema 冲突时返回错误，不发布路由。要求身份的路由会以标准组件覆盖 401/403，schema 仅检查 JSON 形态而非完整语义有效性。
 pub fn generate(
     title: &str,
     version: &str,
@@ -342,6 +358,11 @@ pub fn generate(
 }
 
 /// 业务作用：校验 query/header 参数名；header 使用 RFC token，query 在此基础上允许方括号。
+///
+/// 参数说明：
+/// - `parameter`：待登记的 query/header 参数合同。
+///
+/// 返回：名称在 1..=128 字节且字符满足位置规则时成功，否则返回包含名称的参数错误；不检查同位置重名或 schema 内容。
 fn validate_parameter_name(parameter: &ParameterContract) -> Result<(), OpenApiError> {
     if parameter.name.is_empty() || parameter.name.len() > 128 {
         return Err(OpenApiError::InvalidParameter(parameter.name.clone()));
@@ -374,6 +395,10 @@ fn validate_parameter_name(parameter: &ParameterContract) -> Result<(), OpenApiE
 }
 
 /// 业务作用：构造 RFC 9457 Problem Details 的共享 OpenAPI schema。
+///
+/// 参数说明: 无。
+///
+/// 返回：返回共享 Problem 对象 schema，要求 type、title、status、code 字段，不校验实际响应。
 fn problem_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -390,6 +415,12 @@ fn problem_schema() -> serde_json::Value {
 }
 
 /// 业务作用：校验并登记命名 schema；同名同结构复用，不同结构明确报冲突。
+///
+/// 参数说明：
+/// - `schemas`：文档当前命名 schema 表，新 schema 将加入此表。
+/// - `contract`：业务声明的稳定名称与 JSON schema 原文。
+///
+/// 返回：名称与大小合法、JSON 为对象或布尔且同名结构一致时返回组件引用；新名称会写入 schemas，不满足约束时报错。不会验证 JSON Schema 关键字语义、引用目标或实际 DTO。
 fn register_schema(
     schemas: &mut BTreeMap<String, serde_json::Value>,
     contract: &SchemaContract,
@@ -429,6 +460,11 @@ fn register_schema(
 }
 
 /// 业务作用：构造引用共享 Problem schema 的标准错误响应组件。
+///
+/// 参数说明：
+/// - `description`：标准错误响应的公开描述文本。
+///
+/// 返回：返回以 application/problem+json 引用共享 Problem schema 的响应 JSON，保留描述原文，不自行登记该 schema。
 fn problem_response(description: &str) -> serde_json::Value {
     serde_json::json!({
         "description": description,
@@ -441,6 +477,11 @@ fn problem_response(description: &str) -> serde_json::Value {
 }
 
 /// 业务作用：将 handler 标识中的非字母数字字符稳定归一为下划线。
+///
+/// 参数说明：
+/// - `handler`：用作 operationId 来源的静态 handler 标识。
+///
+/// 返回：返回逐 Unicode 字符映射的文本；ASCII 字母数字保持，其他字符各变为一个下划线。不同输入可能归一到同一 ID，唯一性由生成入口检查。
 fn stable_operation_id(handler: &str) -> String {
     handler
         .chars()
@@ -455,6 +496,11 @@ fn stable_operation_id(handler: &str) -> String {
 }
 
 /// 业务作用：提取并验证不带参数的 HTTP media type，拒绝超长或非法 token。
+///
+/// 参数说明：
+/// - `value`：业务声明的媒体类型原文，可包含将被舍弃的参数。
+///
+/// 返回：总长不超 255 字节且首个分号前 trim 后满足本层 type/subtype 字符集时返回借用切片，否则报错；分号后的参数被舍弃且不验证，不改写大小写。
 fn media_type(value: &str) -> Result<&str, OpenApiError> {
     if value.len() > 255 {
         return Err(OpenApiError::InvalidMediaType(value.to_owned()));
@@ -480,6 +526,11 @@ fn media_type(value: &str) -> Result<&str, OpenApiError> {
 }
 
 /// 业务作用：从路由模板提取唯一 `{name}` 段并生成必填 path parameter 合同。
+///
+/// 参数说明：
+/// - `path`：需要提取整段占位符的路由模板。
+///
+/// 返回：完整花括号段名称非空、无嵌套且唯一时返回必填 string 参数数组；花括号位置或重复不合法时返回路径错误。名称字符不再限制，不在此处校验路径是否以斜线开始或包含查询部分。
 fn path_parameters(path: &str) -> Result<Vec<serde_json::Value>, OpenApiError> {
     let mut names = BTreeSet::new();
     let mut parameters = Vec::new();

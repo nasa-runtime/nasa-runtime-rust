@@ -135,7 +135,9 @@ fn delivery_receipt(receipt: SagaGrpcReceipt) -> proto::SagaDeliveryReceipt {
     let (kind, reason) = match receipt {
         SagaGrpcReceipt::Committed => (proto::SagaReceiptKind::Committed, String::new()),
         SagaGrpcReceipt::Duplicate => (proto::SagaReceiptKind::Duplicate, String::new()),
-        SagaGrpcReceipt::DeterministicReject { reason } => (
+        SagaGrpcReceipt::DeterministicReject {
+            reason,
+        } => (
             proto::SagaReceiptKind::DeterministicReject,
             reason.to_owned(),
         ),
@@ -221,7 +223,10 @@ impl<H: SagaCommandHandler> SagaGrpcCommandTransportService<H> {
     /// 返回：尚未加入 listener、可由 `SagaApplicationPlan` 自动登记的 service 实现。
     pub fn new(handler: Arc<H>, peer: SagaGrpcPeerBinding) -> Self {
         let adjudicator = SagaGrpcCommandServer::new(handler, peer.producer.clone());
-        Self { adjudicator, peer }
+        Self {
+            adjudicator,
+            peer,
+        }
     }
 }
 
@@ -304,7 +309,9 @@ impl<H: SagaCommandHandler> SagaGrpcCommandServer<H> {
             ) => SagaGrpcReceipt::Committed,
             Ok(ParticipantHandled::Duplicate) => SagaGrpcReceipt::Duplicate,
             Err(error) => match crate::command_dead_letter_reason(&error) {
-                Some(reason) => SagaGrpcReceipt::DeterministicReject { reason },
+                Some(reason) => SagaGrpcReceipt::DeterministicReject {
+                    reason,
+                },
                 // 事务未提交/结果不确定/数据库不可达:一律可重试,行留在发布端 Outbox。
                 None => SagaGrpcReceipt::Retryable,
             },
@@ -334,7 +341,10 @@ impl<H: SagaResultHandler> SagaGrpcResultTransportService<H> {
     /// 返回：尚未加入 listener、可由 `SagaApplicationPlan` 自动登记的 service 实现。
     pub fn new(handler: Arc<H>, peer: SagaGrpcPeerBinding) -> Self {
         let adjudicator = SagaGrpcResultServer::new(handler, peer.producer.clone());
-        Self { adjudicator, peer }
+        Self {
+            adjudicator,
+            peer,
+        }
     }
 }
 
@@ -419,7 +429,9 @@ impl<H: SagaResultHandler> SagaGrpcResultServer<H> {
             .handle_authenticated_result_traced(&envelope, peer.producer(), receipt_trace, now_ms)
             .await;
         match outcome {
-            Ok(HandleOutcome::Applied { .. }) => SagaGrpcReceipt::Committed,
+            Ok(HandleOutcome::Applied {
+                ..
+            }) => SagaGrpcReceipt::Committed,
             Ok(HandleOutcome::Duplicate) => SagaGrpcReceipt::Duplicate,
             Err(error) => {
                 if matches!(
@@ -435,7 +447,9 @@ impl<H: SagaResultHandler> SagaGrpcResultServer<H> {
                         })
                         .and_then(crate::SagaResultProcessingError::dead_letter_reason)
                         .unwrap_or("saga_result_contract_invalid");
-                    SagaGrpcReceipt::DeterministicReject { reason }
+                    SagaGrpcReceipt::DeterministicReject {
+                        reason,
+                    }
                 } else {
                     // PAUSED 与全部瞬态:可重试;gRPC 无 PEL,重投责任在发布端 Outbox。
                     SagaGrpcReceipt::Retryable
@@ -459,9 +473,9 @@ pub fn outbox_disposition_of(
 ) -> Result<(), naoutbox_core::OutboxPublishError> {
     match receipt {
         Some(SagaGrpcReceipt::Committed) | Some(SagaGrpcReceipt::Duplicate) => Ok(()),
-        Some(SagaGrpcReceipt::DeterministicReject { reason }) => {
-            Err(naoutbox_core::OutboxPublishError::new(*reason))
-        }
+        Some(SagaGrpcReceipt::DeterministicReject {
+            reason,
+        }) => Err(naoutbox_core::OutboxPublishError::new(*reason)),
         // 结果不确定(超时/断连/回包丢失)与显式 Retryable 同类:保留重投。
         Some(SagaGrpcReceipt::Retryable) | None => Err(
             naoutbox_core::OutboxPublishError::transient("saga_grpc_delivery_unresolved"),

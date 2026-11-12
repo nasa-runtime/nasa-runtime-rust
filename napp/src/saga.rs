@@ -414,7 +414,8 @@ struct AwaitingCatalogPublisher;
 impl OutboxPublisher for AwaitingCatalogPublisher {
     /// 业务作用：拒绝在尚无 active definition 与受信 route 时前移任何 Outbox 事件。
     ///
-    /// 参数说明：`_event` 是已提交但尚不具备路由权威的事件。
+    /// 参数说明：
+    /// - `_event`：`_event` 是已提交但尚不具备路由权威的事件。
     ///
     /// 返回：始终返回瞬态失败，禁止 dispatcher 将未投递事实标记为成功或死信。
     async fn publish(&self, _event: &naoutbox_core::OutboxEvent) -> Result<(), OutboxPublishError> {
@@ -595,7 +596,8 @@ struct SagaStartIntentPublisher {
 impl SagaRemoteClient {
     /// 业务作用：通过受管远程 Orchestrator 发起 Saga，并把提交与重复收敛为类型化收据。
     ///
-    /// 参数说明：`request` 携带稳定 Saga 身份、定义版本、业务幂等键、触发身份和首步输入。
+    /// 参数说明：
+    /// - `request`：`request` 携带稳定 Saga 身份、定义版本、业务幂等键、触发身份和首步输入。
     ///
     /// 返回：远端明确提交或确认重复时返回快照；网络结果不明、认证拒绝、合同冲突或响应越界时返回错误，调用方可用同一请求重试。
     pub async fn start(
@@ -680,7 +682,7 @@ impl SagaRemoteClient {
                         return Err(saga_error(
                             ApplicationPhase::Running,
                             "remote Saga gRPC start receipt is invalid",
-                        ))
+                        ));
                     }
                 };
                 let saga = response.saga.ok_or_else(|| {
@@ -699,7 +701,9 @@ impl SagaRemoteClient {
 
     /// 业务作用：读取远程 Orchestrator 中同租户 Saga 的已提交快照，不在 client 进程缓存业务状态。
     ///
-    /// 参数说明：`tenant_id` 与 `saga_id` 共同定位认证主体获准读取的实例。
+    /// 参数说明：
+    /// - `tenant_id`：实例所属租户；本地校验身份格式，远端再校验调用主体的租户权限。
+    /// - `saga_id`：该租户内的实例标识；不跨租户查找或合并同名实例。
     ///
     /// 返回：实例存在时返回快照，不存在时返回空；认证拒绝、网络结果不明或响应非法时返回错误。
     pub async fn get(
@@ -777,7 +781,8 @@ impl SagaRemoteClient {
 
     /// 业务作用：按租户、workflow 与状态从远程 Orchestrator 读取一页低敏实例摘要。
     ///
-    /// 参数说明：`request` 的 token 只能重用于完全相同的过滤条件，页大小范围为 1..=1000。
+    /// 参数说明：
+    /// - `request`：`request` 的 token 只能重用于完全相同的过滤条件。
     ///
     /// 返回：HTTP/gRPC 均返回协议无关页面；参数、认证、token、网络或响应合同异常时返回封闭运行期错误。
     pub async fn query(
@@ -906,7 +911,9 @@ impl SagaRemoteClient {
 
     /// 业务作用：在当前同源业务事务内持久化可靠发起意图，使业务事实提交后可持续重投到远程 Orchestrator。
     ///
-    /// 参数说明：`request` 必须在重试中保持相同 Saga/trigger 身份，`traceparent` 是可选的受信链路上下文。
+    /// 参数说明：
+    /// - `request`：`request` 必须在重试中保持相同 Saga/trigger 身份。
+    /// - `traceparent`：`traceparent` 是可选的受信链路上下文。
     ///
     /// 返回：意图已追加到当前业务事务时返回稳定事件身份；外层事务仍须明确提交，返回值不表示远端已受理或完成。
     /// direct 模式、缺失事务、跨数据源或持久化失败时返回错误；dispatcher 固定扫描 client 指定的数据源。
@@ -967,7 +974,8 @@ impl SagaRemoteClient {
 impl OutboxPublisher for SagaStartIntentPublisher {
     /// 业务作用：投递已提交的 start-intent，只有远端明确 Committed 或 Duplicate 才允许 Outbox 前移。
     ///
-    /// 参数说明：`event` 必须是可靠 client 写入的稳定 Saga start 请求。
+    /// 参数说明：
+    /// - `event`：`event` 必须是可靠 client 写入的稳定 Saga start 请求。
     ///
     /// 返回：持久收据明确时成功；确定性合同拒绝可进入 DLT，网络不明、限流或服务端故障保留原事件重投。
     async fn publish(&self, event: &naoutbox_core::OutboxEvent) -> Result<(), OutboxPublishError> {
@@ -1039,7 +1047,8 @@ impl OutboxPublisher for SagaStartIntentPublisher {
 
 /// 业务作用：只把 gRPC 明确返回的调用方或合同拒绝判为可靠 start-intent 的确定性失败。
 ///
-/// 参数说明：`error` 是远程 client 保留底层 gRPC status 的运行期错误。
+/// 参数说明：
+/// - `error`：`error` 是远程 client 保留底层 gRPC status 的运行期错误。
 ///
 /// 返回：无需等待外部状态变化即可确定同一意图不会成功时返回真；无 status、限额和传输失败返回假。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1067,9 +1076,15 @@ fn managed_grpc_start_rejection_is_deterministic(error: &ApplicationError) -> bo
 impl SagaRemoteHttpClient {
     /// 业务作用：为远程 Saga API 的实际规范路径和原始 body 生成一次性签名并执行有界请求。
     ///
-    /// 参数说明：`method`、`url`、`signed_path` 与 `body` 必须描述同一线上请求，禁止重定向改变签名目标。
+    /// 参数说明：
+    /// - `method`：本次 API 操作使用的 HTTP 方法，直接交给请求构造器。
+    /// - `url`：提供请求查询串；实际主机和基础路径取自本次解析到的服务实例。
+    /// - `signed_path`：基于配置入口构造的操作路径，须保留入口前缀；替换为解析后的基础路径再签名。
+    /// - `body`：签名与发送共同使用的原始正文，避免重新序列化造成验签差异。
     ///
-    /// 返回：收到有界响应时返回状态与原始字节；时钟、网络或响应大小不确定时返回可重试错误。
+    /// 共同约束：禁止重定向改变签名目标。
+    ///
+    /// 返回：解析、签名和读取成功且正文未超过上限时返回状态与字节；路径、时钟、传输或大小检查失败返回错误，不在此处重试。
     async fn send_signed(
         &self,
         method: reqwest::Method,
@@ -1161,7 +1176,11 @@ impl SagaRemoteHttpClient {
 
     /// 业务作用：为同一远程调用事实生成 HMAC，不让签名参数在调用路径分散组装。
     ///
-    /// 参数说明：`path`、`timestamp_ms`、`nonce` 与 `body` 是即将线上发送的原始字段。
+    /// 参数说明：
+    /// - `path`：实际请求的规范路径，绑定接收端验签的操作入口。
+    /// - `timestamp_ms`：本次请求使用的 Unix 毫秒时间戳，供接收端判定允许的时间窗口。
+    /// - `nonce`：单次请求随机标识，供接收端识别重复提交的签名。
+    /// - `body`：实际发送的正文原始字节，任何内容变动均须重新签名。
     ///
     /// 返回：绑定 client 身份和远端规范路径的十六进制签名。
     fn http_signature(&self, path: &str, timestamp_ms: u64, nonce: &str, body: &[u8]) -> String {
@@ -1173,7 +1192,8 @@ impl SagaRemoteHttpClient {
 
 /// 业务作用：在网络调用前复验远程 start 的领域身份，避免把非法路径或无效定义版本交给认证端点。
 ///
-/// 参数说明：`request` 是业务调用方准备以稳定身份重试的发起意图。
+/// 参数说明：
+/// - `request`：`request` 是业务调用方准备以稳定身份重试的发起意图。
 ///
 /// 返回：全部领域字段符合核心类型合同且触发身份非空时成功；否则在 client 本地拒绝。
 fn validate_remote_start_request(request: &SagaRemoteStartRequest) -> ApplicationResult<()> {
@@ -1236,7 +1256,8 @@ fn validate_remote_start_request(request: &SagaRemoteStartRequest) -> Applicatio
 
 /// 业务作用：统一约束 HTTP、gRPC 与远程 client 的业务启动触发身份。
 ///
-/// 参数说明：`value` 是调用方在网络重试期间保持稳定的事件身份。
+/// 参数说明：
+/// - `value`：`value` 是调用方在网络重试期间保持稳定的事件身份。
 ///
 /// 返回：无首尾空白且长度位于持久化合同范围内时返回真。
 fn managed_start_trigger_is_valid(value: &str) -> bool {
@@ -1245,7 +1266,9 @@ fn managed_start_trigger_is_valid(value: &str) -> bool {
 
 /// 业务作用：把远端非成功 HTTP 状态收敛为不包含响应体或凭据的稳定 Application 错误。
 ///
-/// 参数说明：`operation` 是固定 API 名，`status` 是远端返回的标准状态码。
+/// 参数说明：
+/// - `operation`：`operation` 是固定 API 名。
+/// - `status`：`status` 是远端返回的标准状态码。
 ///
 /// 返回：归属于 Saga Running 阶段且可安全记录的脱敏错误。
 fn remote_http_status_error(
@@ -1259,6 +1282,15 @@ fn remote_http_status_error(
 }
 
 /// 业务作用：统一 tenant、workflow、definition version 与 step 组成的受管路由键。
+#[cfg(any(
+    feature = "web",
+    feature = "saga-kafka",
+    feature = "saga-kafka-pgsql",
+    feature = "saga-redis-stream",
+    feature = "saga-redis-stream-pgsql",
+    feature = "saga-grpc",
+    feature = "saga-grpc-pgsql"
+))]
 type ManagedStepRouteKey = (String, String, u32, String);
 
 /// 业务作用：保存一个 generation 内每个步骤的 HTTP 多实例 command 目标。
@@ -1419,7 +1451,9 @@ struct ManagedDefinitionActivationSecurity {
 
 impl catalog_authority::CatalogSecurityEpoch for ManagedDefinitionActivationContract {
     /// 业务作用：把当前 publisher 和结果验签集合绑定为 Catalog 操作可复验的安全身份。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同一原子快照的发布代际与完整合同摘要；材料不能准备时拒绝产生权威身份。
     fn epoch(&self) -> Option<catalog_authority::CatalogSecurityStamp> {
         let current = self.current().ok()?;
@@ -1442,7 +1476,9 @@ impl catalog_authority::CatalogSecurityEpoch for ManagedDefinitionActivationCont
 
 impl ManagedDefinitionActivationContract {
     /// 业务作用：为一次 Catalog 操作固定实际 publisher 材料与仍受信的 result 凭据集合。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：同一安全快照形成的完整合同；引用缺失或旧证书失效时拒绝构造权威证据。
     fn current(&self) -> ApplicationResult<Self> {
         let Some(source) = &self.security else {
@@ -1555,7 +1591,9 @@ struct ManagedGrpcResultService {
 impl nasaga_runtime::SagaCommandHandler for ManagedGrpcCommandHandler {
     /// 业务作用：把已认证 gRPC command 交给 envelope 精确命中的本地步骤事务。
     ///
-    /// 参数说明：`envelope` 是命令事实，`producer` 来自 mTLS 映射。
+    /// 参数说明：
+    /// - `envelope`：`envelope` 是命令事实。
+    /// - `producer`：`producer` 来自 mTLS 映射。
     ///
     /// 返回：本地提交或重复时返回可确认结论；未 Ready、未知步骤或事务失败返回错误。
     async fn handle_authenticated_command(
@@ -1569,7 +1607,10 @@ impl nasaga_runtime::SagaCommandHandler for ManagedGrpcCommandHandler {
 
     /// 业务作用：在同一 gRPC 收据 trace 下执行精确步骤事务，不让协议层接触业务 handler。
     ///
-    /// 参数说明：命令与 producer 已认证，`receipt_trace` 是可选 W3C 上下文。
+    /// 参数说明：
+    /// - `envelope`：来自受管协议边界的命令或结果事实。
+    /// - `producer`：命令与 producer 已认证。
+    /// - `receipt_trace`：`receipt_trace` 是可选 W3C 上下文。
     ///
     /// 返回：事务明确提交后返回；其它结果保持 Outbox 可重投。
     async fn handle_authenticated_command_traced(
@@ -1591,7 +1632,10 @@ impl nasaga_runtime::SagaCommandHandler for ManagedGrpcCommandHandler {
 impl nasaga_runtime::SagaResultHandler for ManagedGrpcResultHandler {
     /// 业务作用：把已认证 gRPC result 交给当前 Orchestrator 的唯一推进事务。
     ///
-    /// 参数说明：结果、producer 与当前时刻共同形成推进输入。
+    /// 参数说明：
+    /// - `envelope`：来自受管协议边界的命令或结果事实。
+    /// - `producer`：结果、producer 与当前时刻共同形成推进输入。
+    /// - `now_ms`：推进裁决使用的当前毫秒时刻。
     ///
     /// 返回：推进或重复已提交时返回；未 Ready、角色不符或事务失败返回错误。
     async fn handle_authenticated_result(
@@ -1606,7 +1650,11 @@ impl nasaga_runtime::SagaResultHandler for ManagedGrpcResultHandler {
 
     /// 业务作用：携带受信 trace 推进 result，保持 HTTP 与 gRPC 共用同一状态机事务。
     ///
-    /// 参数说明：结果、认证 producer、可选 trace 与当前时刻均来自受管协议边界。
+    /// 参数说明：
+    /// - `envelope`：来自受管协议边界的命令或结果事实。
+    /// - `producer`：结果、认证 producer、可选 trace 与当前时刻均来自受管协议边界。
+    /// - `receipt_trace`：可选的受信 W3C 链路上下文。
+    /// - `now_ms`：推进裁决使用的当前毫秒时刻。
     ///
     /// 返回：本地提交明确时返回；其它结论不允许发布端前移。
     async fn handle_authenticated_result_traced(
@@ -1636,7 +1684,9 @@ impl nasaga_runtime::SagaResultHandler for ManagedGrpcResultHandler {
 impl nasaga_runtime::SagaCommandHandler for ManagedRedisCommandHandler {
     /// 业务作用：把已验证 Redis command 交给 envelope 精确命中的本地步骤事务。
     ///
-    /// 参数说明：`envelope` 是命令事实，`producer` 来自 key id 或独占 stream ACL 绑定。
+    /// 参数说明：
+    /// - `envelope`：`envelope` 是命令事实。
+    /// - `producer`：`producer` 来自 key id 或独占 stream ACL 绑定。
     ///
     /// 返回：本地提交或重复时返回可确认结论；未 Ready、未知步骤或事务失败返回错误。
     async fn handle_authenticated_command(
@@ -1650,7 +1700,10 @@ impl nasaga_runtime::SagaCommandHandler for ManagedRedisCommandHandler {
 
     /// 业务作用：在同一 Redis 收据 trace 下执行步骤事务，保持 Inbox、gate、业务事实与 result Outbox 原子。
     ///
-    /// 参数说明：命令与 `producer` 已通过 transport 认证，`receipt_trace` 是可选 W3C 上下文。
+    /// 参数说明：
+    /// - `envelope`：来自受管协议边界的命令或结果事实。
+    /// - `producer`：命令与 `producer` 已通过 transport 认证。
+    /// - `receipt_trace`：`receipt_trace` 是可选 W3C 上下文。
     ///
     /// 返回：事务明确提交后返回；其它结论保留 PEL 等待重投。
     async fn handle_authenticated_command_traced(
@@ -1672,7 +1725,10 @@ impl nasaga_runtime::SagaCommandHandler for ManagedRedisCommandHandler {
 impl nasaga_runtime::SagaResultHandler for ManagedRedisResultHandler {
     /// 业务作用：把已验证 Redis result 交给当前 Orchestrator 的唯一推进事务。
     ///
-    /// 参数说明：结果、认证 `producer` 与当前时刻共同形成推进输入。
+    /// 参数说明：
+    /// - `envelope`：来自受管协议边界的命令或结果事实。
+    /// - `producer`：结果、认证 `producer` 与当前时刻共同形成推进输入。
+    /// - `now_ms`：推进裁决使用的当前毫秒时刻。
     ///
     /// 返回：推进或重复吸收已提交时返回；其它结论不允许 XACK。
     async fn handle_authenticated_result(
@@ -1687,7 +1743,13 @@ impl nasaga_runtime::SagaResultHandler for ManagedRedisResultHandler {
 
     /// 业务作用：携带受信 Redis 收据 trace 推进 result，不在 transport 复制状态机。
     ///
-    /// 参数说明：结果、认证生产者、可选 trace 与当前时刻来自受管边界。
+    /// 参数说明：
+    /// - `envelope`：来自受管协议边界的命令或结果事实。
+    /// - `producer`：已认证的生产者身份。
+    /// - `receipt_trace`：可选的受信 W3C 链路上下文。
+    /// - `now_ms`：推进裁决使用的当前毫秒时刻。
+    ///
+    /// 共同约束：结果、认证生产者、可选 trace 与当前时刻来自受管边界。
     ///
     /// 返回：本地提交明确时返回；未 Ready、角色不符或数据库异常返回错误。
     async fn handle_authenticated_result_traced(
@@ -1715,7 +1777,9 @@ impl nasaga_runtime::SagaResultHandler for ManagedRedisResultHandler {
 
 /// 业务作用：从受管 gRPC request 的 TLS extension 解析可信逻辑服务身份。
 ///
-/// 参数说明：`request` 含 listener 写入的 PeerIdentity，`peers` 是 Ready 前冻结的指纹映射。
+/// 参数说明：
+/// - `request`：`request` 含 listener 写入的 PeerIdentity。
+/// - `peers`：`peers` 是 Ready 前冻结的指纹映射。
 ///
 /// 返回：指纹命中时返回逻辑身份；缺失或未知对端返回 Unauthenticated。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1732,7 +1796,8 @@ fn authenticate_managed_grpc_peer<T>(
 
 /// 业务作用：从唯一合法的 gRPC traceparent metadata 生成受信收据上下文。
 ///
-/// 参数说明：`request` 是 listener 已完成大小与 TLS 门禁的 unary 请求。
+/// 参数说明：
+/// - `request`：`request` 是 listener 已完成大小与 TLS 门禁的 unary 请求。
 ///
 /// 返回：恰有一个合法值时返回上下文；其它情况不续接调用方 trace。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1749,7 +1814,8 @@ fn managed_grpc_trace<T>(request: &nagrpc::Request<T>) -> Option<nasaga_runtime:
 
 /// 业务作用：把运行核心的封闭 gRPC 收据投影为公开 protobuf 收据。
 ///
-/// 参数说明：`receipt` 已包含全部合法投递结论。
+/// 参数说明：
+/// - `receipt`：`receipt` 已包含全部合法投递结论。
 ///
 /// 返回：调用端可按 enum 裁决 Outbox，不解析 status 文本。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1765,7 +1831,9 @@ fn managed_grpc_receipt(
             nasaga_runtime::grpc_proto::SagaReceiptKind::Duplicate,
             String::new(),
         ),
-        nasaga_runtime::SagaGrpcReceipt::DeterministicReject { reason } => (
+        nasaga_runtime::SagaGrpcReceipt::DeterministicReject {
+            reason,
+        } => (
             nasaga_runtime::grpc_proto::SagaReceiptKind::DeterministicReject,
             reason.to_owned(),
         ),
@@ -1787,7 +1855,8 @@ impl nasaga_runtime::grpc_proto::saga_command_transport_server::SagaCommandTrans
 {
     /// 业务作用：认证 Orchestrator 证书并仅在本地事务明确提交后返回成功收据。
     ///
-    /// 参数说明：`request` 携带不可改写的 envelope JSON 与 TLS peer extension。
+    /// 参数说明：
+    /// - `request`：`request` 携带不可改写的 envelope JSON 与 TLS peer extension。
     ///
     /// 返回：身份错误返回 Unauthenticated；其余业务结论返回封闭收据。
     async fn deliver(
@@ -1821,7 +1890,8 @@ impl nasaga_runtime::grpc_proto::saga_result_transport_server::SagaResultTranspo
 {
     /// 业务作用：认证参与方证书并仅在 Orchestrator 结果事务明确提交后返回成功收据。
     ///
-    /// 参数说明：`request` 携带 result JSON 与 TLS peer extension。
+    /// 参数说明：
+    /// - `request`：`request` 携带 result JSON 与 TLS peer extension。
     ///
     /// 返回：身份错误返回 Unauthenticated；时钟不可用返回 Internal；其它结论返回封闭收据。
     async fn deliver(
@@ -1856,7 +1926,9 @@ impl nasaga_runtime::grpc_proto::saga_result_transport_server::SagaResultTranspo
 
 /// 业务作用：认证公开 gRPC API 调用者，并以 mTLS principal 取得冻结权限快照。
 ///
-/// 参数说明：`request` 的 PeerIdentity 来自 listener TLS 层，`callers` 是 Start 时冻结的 RBAC 映射。
+/// 参数说明：
+/// - `request`：`request` 的 PeerIdentity 来自 listener TLS 层。
+/// - `callers`：`callers` 是 Start 时冻结的 RBAC 映射。
 ///
 /// 返回：命中返回调用主体；缺失或未知 principal 返回 Unauthenticated。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1873,7 +1945,10 @@ fn managed_grpc_api_caller<T>(
 
 /// 业务作用：在 Catalog 读取或写入前把 registry 权限同时约束到租户和 workflow。
 ///
-/// 参数说明：`caller` 是认证快照，`tenant` 与 `workflow` 是 DefinitionKey 的完整授权目标。
+/// 参数说明：
+/// - `caller`：`caller` 是认证快照。
+/// - `tenant`：待访问定义所属的租户，必须命中调用主体的租户范围。
+/// - `workflow`：该租户内待访问的工作流名称，必须另行命中 registry 工作流授权。
 ///
 /// 返回：通用 registry 权限及 workflow grant 均命中时成功；其它情况返回 PermissionDenied。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1889,14 +1964,18 @@ fn authorize_managed_grpc_registry(
 
 /// 业务作用：把 Unix 毫秒转换为 protobuf Timestamp，保持负时刻也使用规范 nanos。
 ///
-/// 参数说明：`millis` 是数据库或领域时钟的 Unix 毫秒。
+/// 参数说明：
+/// - `millis`：`millis` 是数据库或领域时钟的 Unix 毫秒。
 ///
 /// 返回：秒和纳秒规范化后的 Timestamp。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 fn managed_grpc_timestamp(millis: i64) -> nagrpc::codegen::prost_types::Timestamp {
     let seconds = millis.div_euclid(1_000);
     let nanos = i32::try_from(millis.rem_euclid(1_000) * 1_000_000).unwrap_or_default();
-    nagrpc::codegen::prost_types::Timestamp { seconds, nanos }
+    nagrpc::codegen::prost_types::Timestamp {
+        seconds,
+        nanos,
+    }
 }
 
 /// 业务作用：编码标准 `google.rpc.ErrorInfo`，让跨语言客户端按稳定 reason 分类确定性拒绝。
@@ -1925,7 +2004,10 @@ struct ManagedGoogleRpcStatus {
 
 /// 业务作用：构造同时具有标准 gRPC code 和稳定 `ErrorInfo.reason` 的公开错误。
 ///
-/// 参数说明：`code` 是协议状态，`message` 是可读摘要，`reason` 是客户端稳定分支键。
+/// 参数说明：
+/// - `code`：`code` 是协议状态。
+/// - `message`：`message` 是可读摘要。
+/// - `reason`：`reason` 是客户端稳定分支键。
 ///
 /// 返回：details 中只包含低基数原因，不携带租户、实例或业务内容。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1953,7 +2035,9 @@ fn managed_grpc_error_info_status(
 
 /// 业务作用：把 Registry 类型化失败映射为一致的 gRPC status，并保留确定性冲突的稳定 ErrorInfo。
 ///
-/// 参数说明：`error` 是 Catalog 错误链，`operation` 是不含业务标识的公开动作摘要。
+/// 参数说明：
+/// - `error`：`error` 是 Catalog 错误链。
+/// - `operation`：`operation` 是不含业务标识的公开动作摘要。
 ///
 /// 返回：参数、权限、不存在、前置条件和冲突使用确定性 code；存储失败返回 Unavailable。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -1994,7 +2078,8 @@ fn managed_grpc_catalog_status(error: &anyhow::Error, operation: &'static str) -
 
 /// 业务作用：把 protobuf Timestamp 复验并转换为领域使用的 Unix 毫秒。
 ///
-/// 参数说明：`timestamp` 是调用方提供的 deadline。
+/// 参数说明：
+/// - `timestamp`：`timestamp` 是调用方提供的 deadline。
 ///
 /// 返回：规范且可表示时返回毫秒；非法 nanos 或溢出返回 InvalidArgument。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -2015,7 +2100,8 @@ fn managed_grpc_timestamp_ms(
 
 /// 业务作用：把 generated gRPC 快照收敛为协议无关的远程 client 读取模型。
 ///
-/// 参数说明：`snapshot` 来自经 mTLS 验证的 SagaOrchestrator 服务。
+/// 参数说明：
+/// - `snapshot`：`snapshot` 来自经 mTLS 验证的 SagaOrchestrator 服务。
 ///
 /// 返回：key 与 enum 均合法时返回快照；缺失 key 或零值状态返回运行期协议错误。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -2074,7 +2160,8 @@ fn remote_snapshot_from_grpc(
 
 /// 业务作用：把 gRPC query 的低敏快照投影为远程 client 统一摘要并强制时间字段存在。
 ///
-/// 参数说明：`snapshot` 必须来自受管 QuerySagas 响应。
+/// 参数说明：
+/// - `snapshot`：`snapshot` 必须来自受管 QuerySagas 响应。
 ///
 /// 返回：身份、enum 与数据库时间完整时返回摘要；缺失或零值字段作为协议错误拒绝。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -2135,7 +2222,8 @@ fn remote_summary_from_grpc(
 
 /// 业务作用：把数据库实例事实投影为不携带 payload 的公开 protobuf 快照。
 ///
-/// 参数说明：`row` 是已提交实例；该读取模型当前不复制数据库时间列。
+/// 参数说明：
+/// - `row`：`row` 是已提交实例。
 ///
 /// 返回：身份、冻结 definition、业务/控制状态和 CAS 版本的稳定消息。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -2187,7 +2275,8 @@ fn managed_grpc_instance_snapshot(
 
 /// 业务作用：把检索摘要投影为带创建/更新时间的公开 protobuf 快照。
 ///
-/// 参数说明：`row` 是不含 payload 的租户受限摘要。
+/// 参数说明：
+/// - `row`：`row` 是不含 payload 的租户受限摘要。
 ///
 /// 返回：保留业务身份、状态、版本和时间的稳定消息。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -2220,7 +2309,8 @@ fn managed_grpc_summary_snapshot(
 
 /// 业务作用：把数据库无关的统一审计事实投影为公开 protobuf 记录并填充标准时间戳。
 ///
-/// 参数说明：`record` 是运行时已完成租户门禁和 keyset 排序的一条事实。
+/// 参数说明：
+/// - `record`：`record` 是运行时已完成租户门禁和 keyset 排序的一条事实。
 ///
 /// 返回：返回不暴露表结构、但保留稳定身份与事实细节的 protobuf 记录。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -2350,7 +2440,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_server::SagaOrchestra
 {
     /// 业务作用：通过公开 gRPC 合同发起 Saga，并复用唯一创建摘要和首步原子事务。
     ///
-    /// 参数说明：请求显式携带租户、Saga、definition 版本、业务键、trigger 与原始 JSON payload。
+    /// 参数说明：
+    /// - `request`：请求显式携带租户、Saga、definition 版本、业务键、trigger 与原始 JSON payload。
     ///
     /// 返回：首次创建或幂等命中返回快照；参数、权限、摘要冲突和暂时失败使用标准 status。
     async fn start_saga(
@@ -2415,7 +2506,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_server::SagaOrchestra
 
     /// 业务作用：读取同租户实例快照，并在检查存在性前完成 mTLS 与租户权限门禁。
     ///
-    /// 参数说明：请求 key 共同定位租户与实例。
+    /// 参数说明：
+    /// - `request`：请求 key 共同定位租户与实例。
     ///
     /// 返回：命中返回快照；不存在返回 NotFound，其它失败返回标准 status。
     async fn get_saga(
@@ -2443,7 +2535,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_server::SagaOrchestra
 
     /// 业务作用：按租户、workflow、状态和不透明 keyset token 执行有界实例检索。
     ///
-    /// 参数说明：请求过滤条件与 token 必须保持一致，page_size 范围为 1..=1000。
+    /// 参数说明：
+    /// - `request`：请求过滤条件与 token 必须保持一致，page_size 范围为 1..=1000。
     ///
     /// 返回：返回一页摘要及下一页 token；非法 token 或权限不足不访问数据库。
     async fn query_sagas(
@@ -2513,7 +2606,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_server::SagaOrchestra
 
     /// 业务作用：读取有界审计事实并投影为统一记录，不暴露数据库表结构。
     ///
-    /// 参数说明：请求 key、page_size 与不透明有界游标定位审计页。
+    /// 参数说明：
+    /// - `request`：请求 key、page_size 与不透明有界游标定位审计页。
     ///
     /// 返回：授权且实例存在时返回记录；非法游标、越权或存储失败返回标准 status。
     async fn get_audit_trail(
@@ -2565,7 +2659,9 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_server::SagaOrchestra
 impl ManagedGrpcApiService {
     /// 业务作用：执行一个经 mTLS/RBAC 认证的管理动作，并以 expected version 防止覆盖并发推进。
     ///
-    /// 参数说明：`request` 携带实例、操作身份、原因和可选 CAS 版本，`action` 是方法名冻结的动作。
+    /// 参数说明：
+    /// - `request`：`request` 携带实例、操作身份、原因和可选 CAS 版本。
+    /// - `action`：`action` 是方法名冻结的动作。
     ///
     /// 返回：动作与审计同事务提交后返回最新快照；越权、不存在、CAS 或状态冲突返回标准 status。
     async fn execute_admin(
@@ -2613,7 +2709,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_admin_server::SagaOrc
 {
     /// 业务作用：暂停实例自动推进并持久记录认证主体与原因。
     ///
-    /// 参数说明：`request` 携带目标实例、幂等操作号、原因以及受信调用方元数据。
+    /// 参数说明：
+    /// - `request`：`request` 携带目标实例、幂等操作号、原因以及受信调用方元数据。
     ///
     /// 返回：管理事务提交后返回最新实例快照；身份、配额或状态门禁不满足时拒绝操作。
     async fn pause_saga(
@@ -2626,7 +2723,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_admin_server::SagaOrc
 
     /// 业务作用：恢复实例自动推进且不重置已过去的业务期限。
     ///
-    /// 参数说明：`request` 携带目标实例、幂等操作号、原因以及受信调用方元数据。
+    /// 参数说明：
+    /// - `request`：`request` 携带目标实例、幂等操作号、原因以及受信调用方元数据。
     ///
     /// 返回：管理事务提交后返回最新实例快照；身份、配额或状态门禁不满足时拒绝操作。
     async fn resume_saga(
@@ -2640,7 +2738,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_admin_server::SagaOrc
 
     /// 业务作用：沿冻结逆序计划开启受审计的补偿重试。
     ///
-    /// 参数说明：`request` 携带目标实例、幂等操作号、原因以及受信调用方元数据。
+    /// 参数说明：
+    /// - `request`：`request` 携带目标实例、幂等操作号、原因以及受信调用方元数据。
     ///
     /// 返回：补偿重试事务提交后返回最新实例快照；非补偿状态或越权请求被拒绝。
     async fn retry_compensation(
@@ -2654,7 +2753,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_admin_server::SagaOrc
 
     /// 业务作用：为 Unknown 效果开启受审计的新 resolve 周期。
     ///
-    /// 参数说明：`request` 携带目标实例、幂等操作号、原因以及受信调用方元数据。
+    /// 参数说明：
+    /// - `request`：`request` 携带目标实例、幂等操作号、原因以及受信调用方元数据。
     ///
     /// 返回：resolve 重试事务提交后返回最新实例快照；不存在 Unknown 效果时拒绝操作。
     async fn retry_resolution(
@@ -2668,7 +2768,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_admin_server::SagaOrc
 
     /// 业务作用：记录系统外处置并终止自动推进，不伪造成功业务事实。
     ///
-    /// 参数说明：`request` 携带目标实例、幂等操作号、关闭原因以及受信调用方元数据。
+    /// 参数说明：
+    /// - `request`：`request` 携带目标实例、幂等操作号、关闭原因以及受信调用方元数据。
     ///
     /// 返回：人工关闭事实提交后返回最新实例快照；身份或状态门禁不满足时拒绝操作。
     async fn manual_close(
@@ -2683,7 +2784,8 @@ impl nasaga_runtime::orchestrator_proto::saga_orchestrator_admin_server::SagaOrc
 
 /// 业务作用：计算协议 canonical document 的小写 SHA-256，避免信任调用方自报摘要。
 ///
-/// 参数说明：`document` 是 protobuf 中未经改写的原始文档字节。
+/// 参数说明：
+/// - `document`：`document` 是 protobuf 中未经改写的原始文档字节。
 ///
 /// 返回：64 个小写十六进制字符。
 fn managed_document_sha256(document: &[u8]) -> String {
@@ -2695,7 +2797,8 @@ fn managed_document_sha256(document: &[u8]) -> String {
 
 /// 业务作用：把持久 definition 记录投影为 gRPC 生命周期收据。
 ///
-/// 参数说明：`record` 已复验 artifact seal 与数据库 key 一致。
+/// 参数说明：
+/// - `record`：`record` 已复验 artifact seal 与数据库 key 一致。
 ///
 /// 返回：包含完整 key、seal、生命周期和 Catalog generation 的消息。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -2725,9 +2828,13 @@ fn managed_grpc_definition_record(
 
 /// 业务作用：按当前 Orchestrator datasource/driver 读取完整 definition 记录。
 ///
-/// 参数说明：runtime 固定持久后端，tenant/workflow/version 定位定义。
+/// 参数说明：
+/// - `runtime`：runtime 固定持久后端。
+/// - `tenant`：定义所属租户，作为持久查询的隔离条件。
+/// - `workflow`：租户内的工作流名称，限定读取的定义系列。
+/// - `version`：该工作流的确切定义版本，不自动选择最新或活动版本。
 ///
-/// 返回：存在返回记录，不存在返回空，数据库或内容漂移返回错误。
+/// 返回：存在时返回完整记录，不存在返回空；数据库驱动未启用、查询失败或内容漂移返回错误。
 #[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 async fn load_managed_definition(
     runtime: &SagaOrchestratorApi,
@@ -2773,7 +2880,8 @@ impl nasaga_runtime::orchestrator_proto::saga_definition_registry_server::SagaDe
 {
     /// 业务作用：登记或续租认证 owner 的逐实例 capability，不允许请求字段冒充其它服务。
     ///
-    /// 参数说明：canonical_document 必须是 runtime CapabilityDescriptor JSON，key/owner/step/摘要必须一致。
+    /// 参数说明：
+    /// - `request`：canonical_document 必须是 runtime CapabilityDescriptor JSON，key/owner/step/摘要必须一致。
     ///
     /// 返回：运行期间数据库时钟裁剪后的租约收据，Catalog 摘流不阻止合法续租；认证、合同、摘要、停机或持久化失败返回标准 status。
     async fn register_capability(
@@ -2849,7 +2957,8 @@ impl nasaga_runtime::orchestrator_proto::saga_definition_registry_server::SagaDe
 
     /// 业务作用：持久化认证 workflow owner 的完整不可变 definition seal。
     ///
-    /// 参数说明：canonical_document 必须是 runtime DefinitionArtifact JSON，protobuf key 与摘要需一致。
+    /// 参数说明：
+    /// - `request`：canonical_document 必须是 runtime DefinitionArtifact JSON，protobuf key 与摘要需一致。
     ///
     /// 返回：首次或幂等发布返回 candidate 记录；同 key 异摘要、越权或持久化失败返回标准 status。
     async fn publish_definition(
@@ -2921,7 +3030,8 @@ impl nasaga_runtime::orchestrator_proto::saga_definition_registry_server::SagaDe
 
     /// 业务作用：激活已满足 schema、capability、route 和集群确认门禁的 candidate definition。
     ///
-    /// 参数说明：`request` 携带完整 definition key 与受信调用方元数据。
+    /// 参数说明：
+    /// - `request`：`request` 携带完整 definition key 与受信调用方元数据。
     ///
     /// 返回：原子切换后返回 active 记录；任一激活前置条件不成立时保持原状态并拒绝请求。
     async fn activate_definition(
@@ -2937,7 +3047,8 @@ impl nasaga_runtime::orchestrator_proto::saga_definition_registry_server::SagaDe
 
     /// 业务作用：将 active definition 标记为 deprecated，只阻止新 start 而不打断在途实例。
     ///
-    /// 参数说明：`request` 携带完整 definition key 与受信调用方元数据。
+    /// 参数说明：
+    /// - `request`：`request` 携带完整 definition key 与受信调用方元数据。
     ///
     /// 返回：状态提交后返回 deprecated 记录；目标不存在或调用方越权时拒绝请求。
     async fn deprecate_definition(
@@ -2953,7 +3064,8 @@ impl nasaga_runtime::orchestrator_proto::saga_definition_registry_server::SagaDe
 
     /// 业务作用：由 workflow owner 退休已经释放持久引用的 deprecated definition。
     ///
-    /// 参数说明：`request` 绑定定义键、预期摘要、操作身份和审计原因。
+    /// 参数说明：
+    /// - `request`：`request` 绑定定义键、预期摘要、操作身份和审计原因。
     ///
     /// 返回：原子提交后返回 retired 记录；仍有引用、越权或摘要冲突时拒绝变更。
     async fn retire_definition(
@@ -2969,7 +3081,8 @@ impl nasaga_runtime::orchestrator_proto::saga_definition_registry_server::SagaDe
 
     /// 业务作用：按完整 key 读取当前 definition 生命周期，且先执行租户 registry 权限门禁。
     ///
-    /// 参数说明：`request` 携带完整 definition key 与受信调用方元数据。
+    /// 参数说明：
+    /// - `request`：`request` 携带完整 definition key 与受信调用方元数据。
     ///
     /// 返回：授权通过时返回持久记录；目标不存在、运行时未就绪或调用方越权时返回对应协议错误。
     async fn get_definition(
@@ -3009,7 +3122,11 @@ impl nasaga_runtime::orchestrator_proto::saga_definition_registry_server::SagaDe
 impl ManagedGrpcApiService {
     /// 业务作用：复用一个封闭入口执行 definition 生命周期迁移并复验 expected digest。
     ///
-    /// 参数说明：请求携带完整 key、预期 seal、幂等操作身份和原因，`target` 选择生命周期动作。
+    /// 参数说明：
+    /// - `request`：携带当前操作要求的请求字段及受信调用方材料。
+    /// - `target`：`target` 选择生命周期动作。
+    ///
+    /// 共同约束：请求携带完整 key、预期 seal、幂等操作身份和原因
     ///
     /// 返回：变更提交后返回记录；越权、摘要、状态或集群门禁失败返回标准 status。
     async fn change_definition(
@@ -3106,7 +3223,8 @@ impl nafka::SingleConsumer for ManagedKafkaCommandConsumer {
 
     /// 业务作用：按 topic 与 envelope 身份选择唯一 handler，并在本地提交后确认消息。
     ///
-    /// 参数说明：`record` 携带已解码命令、可信投递次数和回调期 ACK 能力。
+    /// 参数说明：
+    /// - `record`：`record` 携带已解码命令、可信投递次数和回调期 ACK 能力。
     ///
     /// 返回：提交或 Inbox 重复时确认成功；瞬态/不确定结果保留，确定性合同错误进入 DLT。
     async fn consume(&self, record: nafka::KafkaRecord<Self::Message>) -> nafka::Result<()> {
@@ -3219,7 +3337,8 @@ impl nafka::SingleConsumer for ManagedKafkaResultConsumer {
 
     /// 业务作用：从实际 owner topic 派生可信 producer，并在结果事务提交后确认消息。
     ///
-    /// 参数说明：`record` 携带已解码结果、实际 topic 与回调期 ACK 能力。
+    /// 参数说明：
+    /// - `record`：`record` 携带已解码结果、实际 topic 与回调期 ACK 能力。
     ///
     /// 返回：推进或重复吸收时确认；暂时失败保留，确定性拒绝进入 DLT。
     async fn consume(&self, record: nafka::KafkaRecord<Self::Message>) -> nafka::Result<()> {
@@ -3327,7 +3446,8 @@ struct ManagedHttpServer {
 impl ManagedHttpPublisher {
     /// 业务作用：根据 Outbox 事件类型与冻结 definition 解析唯一 HTTP 接收端，不信任 payload 自报地址。
     ///
-    /// 参数说明：`event` 是 dispatcher 从持久 Outbox 按序领取的 Saga 事件。
+    /// 参数说明：
+    /// - `event`：`event` 是 dispatcher 从持久 Outbox 按序领取的 Saga 事件。
     ///
     /// 返回：合同中存在唯一 owner route 时返回目标；载荷或路由不合法时返回确定性拒绝。
     fn target_for(
@@ -3387,7 +3507,8 @@ impl ManagedHttpPublisher {
 impl OutboxPublisher for ManagedHttpPublisher {
     /// 业务作用：对持久事件原始字节签名并投递，只有接收方返回 `Committed` 或 `Duplicate` 收据才允许 Outbox 前移。
     ///
-    /// 参数说明：`event` 携带稳定 event id、原始 JSON 和可选 traceparent。
+    /// 参数说明：
+    /// - `event`：`event` 携带稳定 event id、原始 JSON 和可选 traceparent。
     ///
     /// 返回：远端持久收据明确时成功；确定性拒绝返回可持久死信的封闭类别，其它结论保留原事件。
     async fn publish(&self, event: &naoutbox_core::OutboxEvent) -> Result<(), OutboxPublishError> {
@@ -3461,7 +3582,8 @@ impl OutboxPublisher for ManagedHttpPublisher {
 impl OutboxPublisher for ManagedKafkaPublisher {
     /// 业务作用：把 command/result 原始 JSON 投递到冻结 topic，并只在 broker delivery report 成功后确认。
     ///
-    /// 参数说明：`event` 是 dispatcher 从指定 datasource 按顺序领取的持久事实。
+    /// 参数说明：
+    /// - `event`：`event` 是 dispatcher 从指定 datasource 按顺序领取的持久事实。
     ///
     /// 返回：broker ACK 成功时完成；路由或载荷非法为确定性失败，网络及 ACK 不明保留原事件。
     async fn publish(&self, event: &naoutbox_core::OutboxEvent) -> Result<(), OutboxPublishError> {
@@ -3509,7 +3631,7 @@ impl OutboxPublisher for ManagedKafkaPublisher {
             _ => {
                 return Err(OutboxPublishError::new(
                     "managed Saga Kafka received an unrelated Outbox event",
-                ))
+                ));
             }
         };
         let mut publish = self
@@ -3537,7 +3659,8 @@ impl OutboxPublisher for ManagedKafkaPublisher {
 impl OutboxPublisher for ManagedRedisPublisher {
     /// 业务作用：按受信 envelope 身份选择唯一 Redis stream 发布端。
     ///
-    /// 参数说明：`event` 是 dispatcher 按数据源与 lane 顺序领取的持久事实。
+    /// 参数说明：
+    /// - `event`：`event` 是 dispatcher 按数据源与 lane 顺序领取的持久事实。
     ///
     /// 返回：`XADD` 明确确认时成功；路由或载荷非法为确定性失败，往返不明保留原事件。
     async fn publish(&self, event: &naoutbox_core::OutboxEvent) -> Result<(), OutboxPublishError> {
@@ -3589,7 +3712,8 @@ impl OutboxPublisher for ManagedRedisPublisher {
 impl OutboxPublisher for ManagedGrpcPublisher {
     /// 业务作用：把 command/result Outbox 交给冻结 generated client，只有明确提交或重复才前移。
     ///
-    /// 参数说明：`event` 是 dispatcher 从持久 datasource 顺序领取的原始事件。
+    /// 参数说明：
+    /// - `event`：`event` 是 dispatcher 从持久 datasource 顺序领取的原始事件。
     ///
     /// 返回：Committed/Duplicate 成功，确定性拒绝交给 DLT，deadline、断连、Retryable 与非法回包均保留重投。
     async fn publish(&self, event: &naoutbox_core::OutboxEvent) -> Result<(), OutboxPublishError> {
@@ -3634,7 +3758,7 @@ impl OutboxPublisher for ManagedGrpcPublisher {
             _ => {
                 return Err(OutboxPublishError::new(
                     "managed Saga gRPC received an unrelated Outbox event",
-                ))
+                ));
             }
         };
         let mut request = nagrpc::Request::new(nasaga_runtime::grpc_proto::SagaDeliveryRequest {
@@ -3716,7 +3840,8 @@ struct ManagedPublisherBuild {
 impl OutboxPublisher for ManagedProtocolPublisher {
     /// 业务作用：把单条持久事件交给 Ready 时冻结的唯一 transport 实现。
     ///
-    /// 参数说明：`event` 是不得被改写身份和载荷的 Outbox 事实。
+    /// 参数说明：
+    /// - `event`：`event` 是不得被改写身份和载荷的 Outbox 事实。
     ///
     /// 返回：具体协议收据明确时成功；其它结论保留原事件并返回封闭失败分类。
     async fn publish(&self, event: &naoutbox_core::OutboxEvent) -> Result<(), OutboxPublishError> {
@@ -3947,6 +4072,7 @@ struct ManagedAdminRequest<'a> {
 }
 
 /// 业务作用：把运行核心的类型化管理拒绝收敛为 HTTP 与 gRPC 共用的协议无关类别。
+#[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 #[derive(Clone, Copy)]
 enum ManagedApiFailure {
     Invalid,
@@ -3959,6 +4085,7 @@ enum ManagedApiFailure {
 }
 
 /// 业务作用：把 Definition Registry 存储裁决收敛为 HTTP 与 gRPC 共用的封闭协议类别。
+#[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 #[derive(Clone, Copy)]
 enum ManagedCatalogApiFailure {
     Invalid,
@@ -3973,9 +4100,11 @@ enum ManagedCatalogApiFailure {
 
 /// 业务作用：只依据类型化 Catalog 错误分类公开响应，数据库与事务失败统一保持可重试。
 ///
-/// 参数说明：`error` 是 Catalog 入口返回且可能携带上下文的完整错误链。
+/// 参数说明：
+/// - `error`：`error` 是 Catalog 入口返回且可能携带上下文的完整错误链。
 ///
 /// 返回：确定性参数、权限、存在性与冲突分别返回对应类别；未知失败视为暂时不可用。
+#[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 fn classify_managed_catalog_api_failure(error: &anyhow::Error) -> ManagedCatalogApiFailure {
     match nasaga_runtime::DefinitionCatalogError::from_error(error) {
         Some(nasaga_runtime::DefinitionCatalogError::InvalidArgument) => {
@@ -4005,7 +4134,8 @@ fn classify_managed_catalog_api_failure(error: &anyhow::Error) -> ManagedCatalog
 
 /// 业务作用：把 Registry 封闭错误类别转换为 HTTP 状态，暂时性存储失败始终保持可重试。
 ///
-/// 参数说明：`error` 是 Catalog 写入口返回的完整错误链。
+/// 参数说明：
+/// - `error`：`error` 是 Catalog 写入口返回的完整错误链。
 ///
 /// 返回：参数、权限、不存在、前置条件或冲突返回对应 4xx，未知失败返回 503。
 #[cfg(feature = "web")]
@@ -4024,9 +4154,11 @@ fn managed_http_catalog_status(error: &anyhow::Error) -> axum::http::StatusCode 
 
 /// 业务作用：分类管理查询或动作错误，不读取可变错误文本决定协议状态。
 ///
-/// 参数说明：`error` 是运行核心返回且可能带事务上下文的完整错误链。
+/// 参数说明：
+/// - `error`：`error` 是运行核心返回且可能带事务上下文的完整错误链。
 ///
 /// 返回：确定性上下文、权限、存在性、限额和并发拒绝分别返回封闭类别；其它失败视为暂时不可用。
+#[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 fn classify_managed_api_failure(error: &anyhow::Error) -> ManagedApiFailure {
     match nasaga_runtime::SagaManagementError::from_error(error) {
         Some(nasaga_runtime::SagaManagementError::InvalidContext) => ManagedApiFailure::Invalid,
@@ -4093,7 +4225,9 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：把一轮到期 timer 裁决委托给运行时构造时绑定的数据库后端。
     ///
-    /// 参数说明：`owner` 是本轮 timer 租约持有者，`now_ms` 是数据库裁决使用的当前毫秒时刻。
+    /// 参数说明：
+    /// - `owner`：`owner` 是本轮 timer 租约持有者。
+    /// - `now_ms`：`now_ms` 是数据库裁决使用的当前毫秒时刻。
     ///
     /// 返回：成功时返回本轮已处理 timer 数量；失权或持久化失败时返回错误且不冒充处理成功。
     async fn run_due_timers(&self, owner: &str, now_ms: i64) -> anyhow::Result<u32> {
@@ -4107,7 +4241,10 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：在具体数据库后端中以同一领域请求创建 Saga，不让 HTTP 协议适配器复制状态机逻辑。
     ///
-    /// 参数说明：`request` 是已完成身份与字段校验的创建请求，`trace` 是可选受信链路上下文，`state` 提供本次创建的冻结 Catalog 资格。
+    /// 参数说明：
+    /// - `request`：`request` 是已完成身份与字段校验的创建请求。
+    /// - `trace`：`trace` 是可选受信链路上下文。
+    /// - `state`：`state` 提供本次创建的冻结 Catalog 资格。
     ///
     /// 返回：透传运行核心的已创建或幂等命中结论；任何失败均保持事务原子性。
     async fn start_saga(
@@ -4154,9 +4291,13 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：在创建前读取当前 active definition 摘要，防止调用方以不兼容合同发起实例。
     ///
-    /// 参数说明：`workflow` 和 `version` 是调用方明确选择的流程版本。
+    /// 参数说明：
+    /// - `tenant`：授权范围内的租户身份。
+    /// - `workflow`：调用方明确选择的流程名称，与租户共同限定查询范围。
+    /// - `version`：需要与调用方请求合同核对的流程定义版本。
     ///
     /// 返回：已激活版本返回 canonical 摘要；未知版本返回空。
+    #[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     fn definition_digest(
         &self,
         tenant: &nasaga_runtime::__private::core::TenantId,
@@ -4175,7 +4316,8 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：原子发布已通过 Catalog generation 门禁的 definition 快照。
     ///
-    /// 参数说明：`registry` 同时保留 active 与在途实例仍需的 deprecated 定义。
+    /// 参数说明：
+    /// - `registry`：`registry` 同时保留 active 与在途实例仍需的 deprecated 定义。
     ///
     /// 返回：无；进行中的状态机操作继续使用进入事务前取得的旧快照。
     fn replace_registry(&self, registry: DefinitionRegistry) {
@@ -4189,7 +4331,8 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：在热切换前以持久非终态实例复验候选 registry，防止旧实例失去定义或摘要漂移。
     ///
-    /// 参数说明：`registry` 是共享 Catalog watcher 装载的完整候选快照。
+    /// 参数说明：
+    /// - `registry`：`registry` 是共享 Catalog watcher 装载的完整候选快照。
     ///
     /// 返回：全部在途实例仍能由同摘要定义驱动时成功；否则保持当前 generation。
     async fn verify_registry_snapshot(&self, registry: &DefinitionRegistry) -> anyhow::Result<()> {
@@ -4204,7 +4347,7 @@ impl SagaOrchestratorApi {
     /// 业务作用：吸收一个已认证参与方结果，并由唯一状态机决定去重、推进或补偿。
     ///
     /// 参数说明：
-    /// - `envelope`: 已通过 HTTP 原始字节认证的结果。
+    /// - `envelope`: 已通过所选传输协议身份认证的参与方结果。
     /// - `producer`: 凭据绑定的参与方身份。
     /// - `trace`: 可选收据链路上下文。
     /// - `now_ms`: 当前 Unix 毫秒。
@@ -4212,6 +4355,15 @@ impl SagaOrchestratorApi {
     /// - `permit`: 入站时冻结的结果资格，等待期间续期不能延长该次操作。
     ///
     /// 返回：本地事务已提交时返回应用或重复结论；其它错误不得返回成功收据。
+    #[cfg(any(
+        feature = "web",
+        feature = "saga-kafka",
+        feature = "saga-kafka-pgsql",
+        feature = "saga-redis-stream",
+        feature = "saga-redis-stream-pgsql",
+        feature = "saga-grpc",
+        feature = "saga-grpc-pgsql"
+    ))]
     async fn handle_result(
         &self,
         envelope: &nasaga_runtime::SagaResultEnvelope,
@@ -4250,7 +4402,9 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：按租户读取一个已提交实例快照，避免协议层直接访问数据库。
     ///
-    /// 参数说明：`tenant` 是已授权租户，`saga_id` 是实例身份。
+    /// 参数说明：
+    /// - `tenant`：`tenant` 是已授权租户。
+    /// - `saga_id`：`saga_id` 是实例身份。
     ///
     /// 返回：同租户实例存在时返回快照；不存在或跨租户统一返回空。
     async fn load_instance(
@@ -4268,7 +4422,8 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：执行一个已认证且已授权的标准管理动作，复用运行核心的权限、审计、幂等与 CAS。
     ///
-    /// 参数说明：`request` 把封闭动作、获权主体、实例键、幂等身份、时间与事务内版本绑定为单一输入。
+    /// 参数说明：
+    /// - `request`：`request` 把封闭动作、获权主体、实例键、幂等身份、时间与事务内版本绑定为单一输入。
     ///
     /// 返回：动作与同事务审计提交时成功；权限、状态、CAS 或数据库失败返回错误。
     #[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -4352,7 +4507,9 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：执行租户受限的有界实例检索，不让 HTTP 适配器接触后端连接。
     ///
-    /// 参数说明：`management` 提供只读权限，`query` 含租户、状态、时间窗与 keyset 游标。
+    /// 参数说明：
+    /// - `management`：`management` 提供只读权限。
+    /// - `query`：`query` 含租户、状态、时间窗与 keyset 游标。
     ///
     /// 返回：按 saga_id 升序返回摘要；权限、参数或数据库失败返回错误。
     #[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -4371,7 +4528,8 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：读取不含租户、payload 与实例高基数标签的 Saga 运行指标。
     ///
-    /// 参数说明：`now_ms` 用于统计已到期 timer。
+    /// 参数说明：
+    /// - `now_ms`：`now_ms` 用于统计已到期 timer。
     ///
     /// 返回：数据库聚合成功时返回快照；失败时指标端点不得伪造旧值为当前值。
     #[cfg(feature = "web")]
@@ -4389,7 +4547,14 @@ impl SagaOrchestratorApi {
 
     /// 业务作用：读取租户受限、跨类别 keyset 有界的统一实例审计页。
     ///
-    /// 参数说明：`management` 提供审计权限，租户与实例定位目标，`cursor` 与 limit 控制返回位置和规模。
+    /// 参数说明：
+    /// - `management`：`management` 提供审计权限。
+    /// - `tenant`：授权范围内的租户身份。
+    /// - `saga_id`：租户范围内的 Saga 实例身份。
+    /// - `cursor`：上一页给出的继续位置；为空时从固定类别顺序的起点读取。
+    /// - `limit`：本页最多返回的审计事实数量，由底层继续校验允许的范围。
+    ///
+    /// 共同约束：租户与实例定位目标
     ///
     /// 返回：固定类别顺序的事实和继续游标；越权、非法游标或数据库失败返回错误。
     #[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -4428,6 +4593,15 @@ enum ManagedParticipant {
 }
 
 /// 业务作用：统一保存不同数据库后端的受管步骤 handler，供 transport 按冻结命令身份分派。
+#[cfg(any(
+    feature = "web",
+    feature = "saga-kafka",
+    feature = "saga-kafka-pgsql",
+    feature = "saga-redis-stream",
+    feature = "saga-redis-stream-pgsql",
+    feature = "saga-grpc",
+    feature = "saga-grpc-pgsql"
+))]
 #[derive(Clone)]
 enum ManagedParticipantCommandHandler {
     #[cfg(feature = "saga")]
@@ -4436,6 +4610,15 @@ enum ManagedParticipantCommandHandler {
     PostgreSql(Arc<dyn nasaga_runtime_pgsql::ManagedSagaCommandHandler>),
 }
 
+#[cfg(any(
+    feature = "web",
+    feature = "saga-kafka",
+    feature = "saga-kafka-pgsql",
+    feature = "saga-redis-stream",
+    feature = "saga-redis-stream-pgsql",
+    feature = "saga-grpc",
+    feature = "saga-grpc-pgsql"
+))]
 impl ManagedParticipantCommandHandler {
     /// 业务作用：把已认证命令交给构造时冻结的唯一业务步骤实现。
     ///
@@ -4642,7 +4825,9 @@ pub(crate) fn database_bootstrap(
 
 /// 业务作用：在业务未单独声明 Outbox 配置时，把 managed Saga 的角色事务域作为内部 dispatcher 唯一数据源。
 ///
-/// 参数说明：`application` 提供最终 Saga 快照，`phase` 是读取失败应归属的阶段。
+/// 参数说明：
+/// - `application`：`application` 提供最终 Saga 快照。
+/// - `phase`：`phase` 是读取失败应归属的阶段。
 ///
 /// 返回：managed 单事务域角色返回 qualifier；custom、无本地事务域或多 binding 角色返回空。
 pub(crate) fn managed_outbox_datasource_ref(
@@ -4658,7 +4843,9 @@ pub(crate) fn managed_outbox_datasource_ref(
 
 /// 业务作用：识别无需本地事务域的 managed direct client，使隐式 DB 与 Outbox 生命周期保持无副作用。
 ///
-/// 参数说明：`application` 提供最终 Saga 配置，`phase` 标记配置错误所属生命周期阶段。
+/// 参数说明：
+/// - `application`：`application` 提供最终 Saga 配置。
+/// - `phase`：`phase` 标记配置错误所属生命周期阶段。
 ///
 /// 返回：已声明配置的角色为 client、计划受管且可靠发起关闭时返回 true；未配置 Saga 或其它角色返回 false，非法配置返回错误。
 pub(crate) fn is_managed_direct_client(
@@ -4772,7 +4959,9 @@ enum ManagedDefinitionPublishTransport {
         target: Box<ManagedHttpTarget>,
     },
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
-    Grpc { target: ManagedGrpcTarget },
+    Grpc {
+        target: ManagedGrpcTarget,
+    },
 }
 
 /// 业务作用：保存 workflow owner 自动发布全部本地 definition 所需的身份、seal 与唯一控制面。
@@ -4793,6 +4982,15 @@ struct ManagedGrpcCapabilityPublishPlan {
     lease_seconds: u32,
 }
 
+#[cfg(any(
+    feature = "web",
+    feature = "saga-kafka",
+    feature = "saga-kafka-pgsql",
+    feature = "saga-redis-stream",
+    feature = "saga-redis-stream-pgsql",
+    feature = "saga-grpc",
+    feature = "saga-grpc-pgsql"
+))]
 type ManagedCommandHandlerMap = BTreeMap<(String, u32, String), ManagedParticipantCommandHandler>;
 
 /// 业务作用：描述一个进程在 Saga 生命周期中托管的 Orchestrator 与参与方运行时。
@@ -4803,6 +5001,16 @@ pub struct SagaApplicationPlan {
     orchestrator: Option<OrchestratorPlan>,
     participants: BTreeMap<String, ManagedParticipant>,
     remote_client: Option<Arc<SagaRemoteClient>>,
+    /// 仅在存在受管入站协议时保存步骤入口，核心运行时仍可由自定义计划托管。
+    #[cfg(any(
+        feature = "web",
+        feature = "saga-kafka",
+        feature = "saga-kafka-pgsql",
+        feature = "saga-redis-stream",
+        feature = "saga-redis-stream-pgsql",
+        feature = "saga-grpc",
+        feature = "saga-grpc-pgsql"
+    ))]
     command_handlers: ManagedCommandHandlerMap,
     catalog_watch: Option<ManagedCatalogWatchPlan>,
     capability_publish: Option<ManagedCapabilityPublishPlan>,
@@ -4965,6 +5173,15 @@ impl SagaApplicationPlan {
             orchestrator: None,
             participants: BTreeMap::new(),
             remote_client: None,
+            #[cfg(any(
+                feature = "web",
+                feature = "saga-kafka",
+                feature = "saga-kafka-pgsql",
+                feature = "saga-redis-stream",
+                feature = "saga-redis-stream-pgsql",
+                feature = "saga-grpc",
+                feature = "saga-grpc-pgsql"
+            ))]
             command_handlers: BTreeMap::new(),
             catalog_watch: None,
             capability_publish: None,
@@ -5067,7 +5284,9 @@ impl SagaApplicationPlan {
 
     /// 业务作用：创建只包含 PostgreSQL Orchestrator 的受管计划，供双后端同时编入时显式选择后端。
     ///
-    /// 参数说明：`runtime` 是 PostgreSQL 状态机入口，`timer_owner` 是逐副本 fencing 身份。
+    /// 参数说明：
+    /// - `runtime`：`runtime` 是 PostgreSQL 状态机入口。
+    /// - `timer_owner`：`timer_owner` 是逐副本 fencing 身份。
     ///
     /// 返回：身份规范时返回 PostgreSQL 计划；非法身份返回 UserHook 错误。
     #[cfg(feature = "saga-pgsql")]
@@ -5080,7 +5299,9 @@ impl SagaApplicationPlan {
 
     /// 业务作用：创建只包含一个 PostgreSQL 参与方的受管计划。
     ///
-    /// 参数说明：`name` 是应用内身份，`runtime` 固定绑定 PostgreSQL datasource。
+    /// 参数说明：
+    /// - `name`：`name` 是应用内身份。
+    /// - `runtime`：`runtime` 固定绑定 PostgreSQL datasource。
     ///
     /// 返回：名称规范时返回计划；重复或非法名称返回 UserHook 错误。
     #[cfg(feature = "saga-pgsql")]
@@ -5093,7 +5314,9 @@ impl SagaApplicationPlan {
 
     /// 业务作用：向计划设置唯一 PostgreSQL Orchestrator，并保留其 timer fencing 身份。
     ///
-    /// 参数说明：`runtime` 是 PostgreSQL Orchestrator，`timer_owner` 是逐副本稳定身份。
+    /// 参数说明：
+    /// - `runtime`：`runtime` 是 PostgreSQL Orchestrator。
+    /// - `timer_owner`：`timer_owner` 是逐副本稳定身份。
     ///
     /// 返回：计划尚无 Orchestrator 且身份规范时成功；否则拒绝覆盖。
     #[cfg(feature = "saga-pgsql")]
@@ -5119,7 +5342,9 @@ impl SagaApplicationPlan {
 
     /// 业务作用：向计划加入一个命名 PostgreSQL 参与方，供混配构建保持显式后端选择。
     ///
-    /// 参数说明：`name` 是应用内唯一名称，`runtime` 是 PostgreSQL 参与方入口。
+    /// 参数说明：
+    /// - `name`：`name` 是应用内唯一名称。
+    /// - `runtime`：`runtime` 是 PostgreSQL 参与方入口。
     ///
     /// 返回：名称未占用时返回更新计划；非法或重复名称返回 UserHook 错误。
     #[cfg(feature = "saga-pgsql")]
@@ -5268,7 +5493,8 @@ impl SagaApplicationPlan {
 
     /// 业务作用：复验 custom 计划的实际运行角色与配置授权完全一致。
     ///
-    /// 参数说明：`role` 是受信配置中的封闭角色，不从计划内容反向推断。
+    /// 参数说明：
+    /// - `role`：`role` 是受信配置中的封闭角色。
     ///
     /// 返回：计划只持有该角色允许的权威时成功；多出或缺失角色时拒绝提交。
     fn validate_role(&self, role: SagaRole) -> ApplicationResult<()> {
@@ -5380,7 +5606,9 @@ impl SagaApplicationPlan {
 
     /// 业务作用：从计划中的唯一 PostgreSQL 参与方生成受管 Saga command gRPC service。
     ///
-    /// 参数说明：`service` 实现 PostgreSQL 宏合同，`peer_principal` 是可信 Orchestrator 证书指纹。
+    /// 参数说明：
+    /// - `service`：`service` 实现 PostgreSQL 宏合同。
+    /// - `peer_principal`：`peer_principal` 是可信 Orchestrator 证书指纹。
     ///
     /// 返回：角色与单一 producer 明确时登记 generated service；后端错配或身份含混时失败。
     #[cfg(feature = "saga-grpc-pgsql")]
@@ -5468,7 +5696,9 @@ impl SagaApplicationPlan {
 
     /// 业务作用：从计划中的 PostgreSQL Orchestrator 生成受管 Saga result gRPC service。
     ///
-    /// 参数说明：`trusted_producer` 是参与方逻辑身份，`peer_principal` 是对应证书指纹。
+    /// 参数说明：
+    /// - `trusted_producer`：`trusted_producer` 是参与方逻辑身份。
+    /// - `peer_principal`：`peer_principal` 是对应证书指纹。
     ///
     /// 返回：计划后端为 PostgreSQL 且身份绑定合法时登记 service；角色缺失或错配时失败。
     #[cfg(feature = "saga-grpc-pgsql")]
@@ -5633,14 +5863,19 @@ pub struct SagaOrchestratorHandle {
 
 impl SagaOrchestratorHandle {
     /// 业务作用：读取句柄冻结的数据源身份，供业务核对本地事务绑定。
+    ///
     /// 参数说明: 无。
+    ///
     /// 返回：不含连接凭据的规范数据源引用，不授予连接或调度控制权。
     pub fn datasource_ref(&self) -> &natx_core::DatasourceRef {
         self.runtime.datasource_ref()
     }
 
     /// 业务作用：在当前受管 Catalog 与生命周期约束下发起 Saga，业务不能自行替换运行定义。
-    /// 参数说明：`request` 是业务已校验的创建请求。
+    ///
+    /// 参数说明：
+    /// - `request`：`request` 是业务已校验的创建请求。
+    ///
     /// 返回：创建或幂等命中返回持久收据；失权、停机或数据库失败保留事务错误语义。
     pub async fn start_saga(
         &self,
@@ -5650,7 +5885,11 @@ impl SagaOrchestratorHandle {
     }
 
     /// 业务作用：携带受信链路上下文执行受管创建，缓存句柄不能绕过后续失权门禁。
-    /// 参数说明：`request` 是创建请求，`trace` 是入口已验证的可选链路上下文。
+    ///
+    /// 参数说明：
+    /// - `request`：`request` 是创建请求。
+    /// - `trace`：`trace` 是入口已验证的可选链路上下文。
+    ///
     /// 返回：事务确认的创建或幂等收据；错误不会被包装成已提交。
     pub async fn start_saga_traced(
         &self,
@@ -5662,7 +5901,11 @@ impl SagaOrchestratorHandle {
     }
 
     /// 业务作用：读取指定租户的已提交实例，业务查询不取得底层 Orchestrator 的控制方法。
-    /// 参数说明：`tenant` 是业务授权范围，`saga_id` 是目标实例身份。
+    ///
+    /// 参数说明：
+    /// - `tenant`：`tenant` 是业务授权范围。
+    /// - `saga_id`：`saga_id` 是目标实例身份。
+    ///
     /// 返回：当前组件可用时返回同租户快照或空；失权、停机或数据库失败返回错误。
     pub async fn load_instance(
         &self,
@@ -5673,7 +5916,13 @@ impl SagaOrchestratorHandle {
         self.runtime.load_instance(tenant, saga_id).await
     }
     /// 业务作用：通过已授权管理上下文暂停实例，不授予 timer owner 或 Catalog 替换权限。
-    /// 参数说明：`management` 包含主体、原因和权限，`tenant`/`saga_id` 定位实例，`operation_id` 保持管理重试幂等。
+    ///
+    /// 参数说明：
+    /// - `management`：`management` 包含主体、原因和权限。
+    /// - `tenant`：待暂停实例所属租户，必须在管理主体获准操作的范围内。
+    /// - `saga_id`：该租户内待暂停的实例标识，不改变其它租户的同名实例。
+    /// - `operation_id`：`operation_id` 保持管理重试幂等。
+    ///
     /// 返回：暂停及审计事务提交后成功；组件失权、权限不足、并发冲突或数据库失败返回错误。
     pub async fn pause(
         &self,
@@ -5700,7 +5949,10 @@ impl SagaOrchestratorHandle {
     }
 
     /// 业务作用：读取受管数据库的持久运行指标，供业务运维出口观测积压与状态。
-    /// 参数说明：`now_ms` 是用于判定到期 timer 的当前 epoch 毫秒。
+    ///
+    /// 参数说明：
+    /// - `now_ms`：`now_ms` 是用于判定到期 timer 的当前 epoch 毫秒。
+    ///
     /// 返回：组件可用且聚合成功时返回快照；失权、停机或查询失败返回错误。
     pub async fn load_operational_metrics(
         &self,
@@ -5819,7 +6071,8 @@ impl SagaHandle {
 
     /// 业务作用：按稳定名称取得 Ready 后发布的 PostgreSQL 参与方运行时。
     ///
-    /// 参数说明：`name` 是计划提交时使用的参与方名称。
+    /// 参数说明：
+    /// - `name`：`name` 是计划提交时使用的参与方名称。
     ///
     /// 返回：名称存在且后端为 PostgreSQL 时返回共享入口；否则失败。
     #[cfg(feature = "saga-pgsql")]
@@ -5856,6 +6109,16 @@ pub(crate) struct SagaRuntimeState {
     orchestrator: OnceLock<SagaOrchestratorApi>,
     participants: OnceLock<Arc<BTreeMap<String, ManagedParticipant>>>,
     remote_client: OnceLock<Arc<SagaRemoteClient>>,
+    /// Ready 后发布的协议分派快照；无受管入站协议时不保留此资源。
+    #[cfg(any(
+        feature = "web",
+        feature = "saga-kafka",
+        feature = "saga-kafka-pgsql",
+        feature = "saga-redis-stream",
+        feature = "saga-redis-stream-pgsql",
+        feature = "saga-grpc",
+        feature = "saga-grpc-pgsql"
+    ))]
     command_handlers: OnceLock<Arc<ManagedCommandHandlerMap>>,
     #[cfg(feature = "web")]
     http_server: OnceLock<Arc<ManagedHttpServer>>,
@@ -5882,6 +6145,15 @@ impl SagaRuntimeState {
             orchestrator: OnceLock::new(),
             participants: OnceLock::new(),
             remote_client: OnceLock::new(),
+            #[cfg(any(
+                feature = "web",
+                feature = "saga-kafka",
+                feature = "saga-kafka-pgsql",
+                feature = "saga-redis-stream",
+                feature = "saga-redis-stream-pgsql",
+                feature = "saga-grpc",
+                feature = "saga-grpc-pgsql"
+            ))]
             command_handlers: OnceLock::new(),
             #[cfg(feature = "web")]
             http_server: OnceLock::new(),
@@ -5966,6 +6238,16 @@ impl SagaRuntimeState {
                     "saga participants were already published",
                 )
             })?;
+        // 先发布该构建实际支持的协议入口，再开放生命周期，避免请求读到尚未就绪的分派快照。
+        #[cfg(any(
+            feature = "web",
+            feature = "saga-kafka",
+            feature = "saga-kafka-pgsql",
+            feature = "saga-redis-stream",
+            feature = "saga-redis-stream-pgsql",
+            feature = "saga-grpc",
+            feature = "saga-grpc-pgsql"
+        ))]
         self.command_handlers
             .set(Arc::new(plan.command_handlers))
             .map_err(|_| {
@@ -5980,7 +6262,8 @@ impl SagaRuntimeState {
 
     /// 业务作用：在 Saga 角色能力发布后登记唯一 HTTP 安全链快照，供随后启动的 Web 组件合并路由。
     ///
-    /// 参数说明：`server` 已冻结路径、凭据、角色、权限和共享 replay 数据源。
+    /// 参数说明：
+    /// - `server`：`server` 已冻结路径、凭据、角色、权限和共享 replay 数据源。
     ///
     /// 返回：首次发布成功；重复发布返回 Ready 错误。
     #[cfg(feature = "web")]
@@ -6005,9 +6288,19 @@ impl SagaRuntimeState {
 
     /// 业务作用：按冻结 workflow、definition version 与 step 读取唯一参与方 handler。
     ///
-    /// 参数说明：`envelope` 是已经完成 transport 认证、尚未进入本地事务的命令。
+    /// 参数说明：
+    /// - `envelope`：`envelope` 是已经完成 transport 认证、尚未进入本地事务的命令。
     ///
     /// 返回：本地二进制明确托管该步骤时返回 handler；未知路由返回空且不得猜测替代步骤。
+    #[cfg(any(
+        feature = "web",
+        feature = "saga-kafka",
+        feature = "saga-kafka-pgsql",
+        feature = "saga-redis-stream",
+        feature = "saga-redis-stream-pgsql",
+        feature = "saga-grpc",
+        feature = "saga-grpc-pgsql"
+    ))]
     fn command_handler(
         &self,
         envelope: &nasaga_runtime::SagaCommandEnvelope,
@@ -6028,6 +6321,13 @@ impl SagaRuntimeState {
     /// 参数说明: 无。
     ///
     /// 返回：协调角色返回共享 runtime；participant/client 角色返回空。
+    #[cfg(any(
+        feature = "web",
+        feature = "saga-redis-stream",
+        feature = "saga-redis-stream-pgsql",
+        feature = "saga-grpc",
+        feature = "saga-grpc-pgsql"
+    ))]
     fn managed_orchestrator(&self) -> Option<SagaOrchestratorApi> {
         self.orchestrator.get().cloned()
     }
@@ -6069,8 +6369,19 @@ impl SagaRuntimeState {
     }
 
     /// 业务作用：为单次结果请求冻结定义与身份信任资格，避免等待期间借续期或重新确认恢复旧操作。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：运行中且结果合同有效时返回原期限与撤销代际；其它情况返回须保留原事件的延后分类。
+    #[cfg(any(
+        feature = "web",
+        feature = "saga-kafka",
+        feature = "saga-kafka-pgsql",
+        feature = "saga-redis-stream",
+        feature = "saga-redis-stream-pgsql",
+        feature = "saga-grpc",
+        feature = "saga-grpc-pgsql"
+    ))]
     fn result_permit(
         &self,
     ) -> Result<catalog_authority::CatalogPermit<'_>, nasaga_runtime::SagaResultProcessingError>
@@ -6084,7 +6395,9 @@ impl SagaRuntimeState {
     }
 
     /// 业务作用：在共享 Catalog 变化或确认失败时关闭本副本的新请求与推进资格。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：资格立即关闭，直到完整快照获得有效确认。
     fn revoke_catalog_authority(&self) {
         self.catalog_authority.revoke();
@@ -6158,7 +6471,9 @@ impl SagaComponent {
 
 /// 业务作用：为纯 client 角色建立只含远程 start/query 权限的受管计划，不创建本地状态机或参与方表。
 ///
-/// 参数说明：`application` 提供受信 secret 快照，`settings` 提供调用身份、Orchestrator 地址和可靠发起等级。
+/// 参数说明：
+/// - `application`：`application` 提供受信 secret 快照。
+/// - `settings`：`settings` 提供调用身份、Orchestrator 地址和可靠发起等级。
 ///
 /// 返回：所选 HTTP/gRPC 地址、身份和凭据完整时返回远程 client 计划；可靠发起的写入与投递共享指定事务域，缺少 start-intent 合同时拒绝 Ready。
 async fn build_managed_client_plan(
@@ -6261,7 +6576,7 @@ async fn build_managed_client_plan(
                 return Err(saga_error(
                     ApplicationPhase::Ready,
                     "SQLite Saga backend is unavailable",
-                ))
+                ));
             }
             natx_core::DatabaseDriver::MySql => {
                 #[cfg(feature = "saga")]
@@ -6343,7 +6658,9 @@ async fn build_managed_client_plan(
 
 /// 业务作用：在一个明确共享事务域内合并 Orchestrator 与 participant 权威，只保留一个受管 Outbox 发布端。
 ///
-/// 参数说明：`application` 提供唯一 datasource catalog，`settings` 已显式批准 combined 角色。
+/// 参数说明：
+/// - `application`：`application` 提供唯一 datasource catalog。
+/// - `settings`：`settings` 已显式批准 combined 角色。
 ///
 /// 返回：两个角色的 driver 与 datasource 完全相同时返回合并计划；任意跨库或重复发布权威拒绝 Ready。
 async fn build_managed_combined_plan(
@@ -6371,7 +6688,18 @@ async fn build_managed_combined_plan(
     let mut orchestrator = build_managed_orchestrator_plan(application, settings).await?;
     let mut participant = build_managed_participant_plan(application, settings).await?;
     orchestrator.participants = std::mem::take(&mut participant.participants);
-    orchestrator.command_handlers = std::mem::take(&mut participant.command_handlers);
+    #[cfg(any(
+        feature = "web",
+        feature = "saga-kafka",
+        feature = "saga-kafka-pgsql",
+        feature = "saga-redis-stream",
+        feature = "saga-redis-stream-pgsql",
+        feature = "saga-grpc",
+        feature = "saga-grpc-pgsql"
+    ))]
+    {
+        orchestrator.command_handlers = std::mem::take(&mut participant.command_handlers);
+    }
     orchestrator.capability_publish = participant.capability_publish.take();
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     {
@@ -6384,7 +6712,9 @@ async fn build_managed_combined_plan(
 
 /// 业务作用：复验 managed 配置选择的协议已纳入同一 Application 生命周期。
 ///
-/// 参数说明：`application` 提供已声明组件集，`settings` 提供数据面与 API 暴露选择。
+/// 参数说明：
+/// - `application`：`application` 提供已声明组件集。
+/// - `settings`：`settings` 提供数据面与 API 暴露选择。
 ///
 /// 返回：HTTP、gRPC、Redis 或 Kafka 所需组件全部已声明时成功；缺失任一依赖时拒绝 Ready。
 fn validate_managed_component_capabilities(
@@ -6463,7 +6793,11 @@ fn validate_managed_component_capabilities(
 
 /// 业务作用：把冻结协议配置与当前 definition 快照组合为唯一 Outbox 发布端。
 ///
-/// 参数说明：`application` 提供同代 secret，`settings` 提供角色与协议，`registry` 与 `capabilities` 来自同一 Catalog generation。
+/// 参数说明：
+/// - `application`：`application` 提供同代 secret。
+/// - `settings`：`settings` 提供角色与协议。
+/// - `registry`：冻结的流程定义快照，用于核对发送合同。
+/// - `capabilities`：与定义同一 Catalog generation 的参与方路由；仅由已编入的协议适配器使用。
 ///
 /// 返回：静态 route 完整时返回可投递发布端；空动态 Catalog 返回不会虚假确认的等待端；其它缺口拒绝 Ready。
 async fn build_managed_protocol_publisher(
@@ -6549,11 +6883,12 @@ async fn build_managed_protocol_publisher(
     }
     #[cfg(not(feature = "web"))]
     {
-        let _ = (application, role);
-        return Err(saga_error(
+        // 未编入 HTTP 时不消费路由快照，也不能把空 Catalog 当作可发布能力。
+        let _ = capabilities;
+        Err(saga_error(
             ApplicationPhase::Ready,
             "managed Saga HTTP requires the Web capability",
-        ));
+        ))
     }
     #[cfg(feature = "web")]
     {
@@ -6741,7 +7076,14 @@ async fn build_managed_protocol_publisher(
 
 /// 业务作用：从受管 Kafka client、冻结 definition 与 capability 路由构造 command/result 发布端。
 ///
-/// 参数说明：Application 提供 producer lane，其余参数固定角色、topic 前缀与当前 Catalog 快照。
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `settings`：当前角色使用的已校验配置。
+/// - `role`：当前实例承担的 Saga 角色。
+/// - `registry`：本次使用的定义路由快照。
+/// - `capabilities`：与定义路由同代的能力快照。
+///
+/// 共同约束：Application 提供 producer lane；其余参数固定角色、topic 前缀与当前 Catalog 快照。
 ///
 /// 返回：所有静态 route 完整或动态快照可等待时返回发布端；client、topic 或 broker 写门禁失败时拒绝 Ready。
 #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
@@ -6887,7 +7229,9 @@ async fn build_managed_kafka_publisher(
 
 /// 业务作用：从 secret 冻结 Redis stream 生产者签名与消费者验签合同。
 ///
-/// 参数说明：`application` 提供当前 `SecretSnapshot`，`credential_ref` 是受信 secret 引用。
+/// 参数说明：
+/// - `application`：`application` 提供当前 `SecretSnapshot`。
+/// - `credential_ref`：`credential_ref` 是受信 secret 引用。
 ///
 /// 返回：JSON 形态、服务身份和密钥长度均合法时返回冻结材料；其它情况拒绝 Ready。
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
@@ -6921,7 +7265,9 @@ fn load_managed_redis_credentials(
 
 /// 业务作用：选择当前逻辑服务唯一的 Redis stream 出站签名密钥。
 ///
-/// 参数说明：`material` 是 secret 快照，`identity` 是当前 command 或 result 生产者。
+/// 参数说明：
+/// - `material`：`material` 是 secret 快照。
+/// - `identity`：`identity` 是当前 command 或 result 生产者。
 ///
 /// 返回：key id 合法且密钥至少 256 bit 时返回 HMAC 签名器；缺失绑定时拒绝 Ready。
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
@@ -6964,7 +7310,8 @@ fn managed_redis_signing_auth(
 
 /// 业务作用：把 Redis stream key id 验签表冻结为不可伪造的 `ServiceIdentity` 映射。
 ///
-/// 参数说明：`material` 来自不进入普通配置树的 secret。
+/// 参数说明：
+/// - `material`：`material` 来自不进入普通配置树的 secret。
 ///
 /// 返回：所有 key id、服务身份和 256 bit 密钥均合法时返回 keyring；空表或非法项拒绝 Ready。
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
@@ -7013,12 +7360,19 @@ fn managed_redis_verification_auth(
             })?,
         );
     }
-    Ok(nasaga_runtime::SagaStreamAuth::HmacKeyring { keys })
+    Ok(nasaga_runtime::SagaStreamAuth::HmacKeyring {
+        keys,
+    })
 }
 
 /// 业务作用：为一个明确 Redis stream 构造只接受指定 Saga 事件的 `XADD` 发布端。
 ///
-/// 参数说明：客户端、事件类型、stream、签名与 hash tag 来自同代受信配置。
+/// 参数说明：
+/// - `client`：当前数据面使用的受管客户端。
+/// - `event_type`：消息订阅的固定事件类型。
+/// - `stream`：客户端、事件类型、stream、签名与 hash tag 来自同代受信配置。
+/// - `auth`：同代配置提供的消息认证材料。
+/// - `key_tag`：保证 Redis 多键操作同槽的 hash tag。
 ///
 /// 返回：stream 名称与 cluster 同槽合同成立时返回发布端；其它情况拒绝 Ready。
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
@@ -7044,7 +7398,16 @@ fn managed_redis_event_publisher(
 
 /// 业务作用：从同代 definition/capability 快照构造 Redis command 发布路由。
 ///
-/// 参数说明：路由快照、Redis 客户端、签名、同槽标识与地址政策必须来自同一 Ready 配置。
+/// 参数说明：
+/// - `registry`：本次使用的定义路由快照。
+/// - `capabilities`：与定义路由同代的能力快照。
+/// - `client`：当前数据面使用的受管客户端。
+/// - `auth`：同代配置提供的消息认证材料。
+/// - `key_tag`：保证 Redis 多键操作同槽的 hash tag。
+/// - `address_policy`：限制动态路由地址与访问范围的冻结政策。
+/// - `allow_missing`：允许当前尚无可用路由时保留等待状态的开关。
+///
+/// 共同约束：路由快照、Redis 客户端、签名、同槽标识与地址政策必须来自同一 Ready 配置。
 ///
 /// 返回：每个 active 步骤有且仅有一个 stream 时返回映射；缺失或歧义路由拒绝切代。
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
@@ -7108,7 +7471,14 @@ fn build_dynamic_redis_command_publishers(
 
 /// 业务作用：仅依据配置、本地 descriptor 和 Catalog 快照构造 Redis command/result 闭环。
 ///
-/// 参数说明：Application 提供 Redis/secret/runtime，其余参数冻结角色与当前目录代际。
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `settings`：当前角色使用的已校验配置。
+/// - `role`：当前实例承担的 Saga 角色。
+/// - `registry`：本次使用的定义路由快照。
+/// - `capabilities`：与定义路由同代的能力快照。
+///
+/// 共同约束：Application 提供 Redis/secret/runtime；其余参数冻结角色与当前目录代际。
 ///
 /// 返回：publisher、动态路由和角色允许的消费计划全部就绪时返回；任一原子或身份边界缺失时拒绝 Ready。
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
@@ -7457,7 +7827,14 @@ async fn build_managed_redis_publisher(
 
 /// 业务作用：为受管 Redis stream 生成统一有界消费、重领与持久 DLT 配置。
 ///
-/// 参数说明：路由、group、consumer、认证与 hash tag 都来自 Ready 冻结合同。
+/// 参数说明：
+/// - `source`：已冻结的来源路由。
+/// - `dlt`：确定拒绝记录使用的死信路由。
+/// - `group`：同一逻辑消费职责共享的 Redis 消费组名称，决定组内进度和待确认记录的归属。
+/// - `consumer`：该消费组内本实例的消费者名称，用于区分消息领取者。
+/// - `auth`：同代配置提供的消息认证材料。
+/// - `producer`：已认证的生产者身份。
+/// - `key_tag`：保证 Redis 多键操作同槽的 hash tag。
 ///
 /// 返回：可交给 result 或 command poller 构造器复验的完整配置。
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
@@ -7491,7 +7868,14 @@ fn managed_redis_consumer_config(
 
 /// 业务作用：从 mTLS secret、definition 快照和受信 route 构造 generated gRPC Outbox 发布端。
 ///
-/// 参数说明：Application 提供 secret，其余参数固定角色、静态或动态路由及同代 capability。
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `settings`：当前角色使用的已校验配置。
+/// - `role`：当前实例承担的 Saga 角色。
+/// - `registry`：本次使用的定义路由快照。
+/// - `capabilities`：与定义路由同代的能力快照。
+///
+/// 共同约束：Application 提供 secret；其余参数固定角色、静态或动态路由及同代 capability。
 ///
 /// 返回：所有必需 channel 可构造时返回发布端；凭据、URI、owner route 或 TLS 合同缺失时拒绝 Ready。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -7622,7 +8006,13 @@ async fn build_managed_grpc_publisher(
 
 /// 业务作用：从同代 definition/capability 构造完整 gRPC command channel 快照。
 ///
-/// 参数说明：快照、mTLS 凭据、deadline、地址政策与 `allow_missing` 共同决定空租约启动边界。
+/// 参数说明：
+/// - `registry`：本次使用的定义路由快照。
+/// - `capabilities`：与定义路由同代的能力快照。
+/// - `credential`：固定目标使用的 mTLS 客户端凭据。
+/// - `timeout`：当前操作的完整时间预算。
+/// - `address_policy`：限制动态路由地址与访问范围的冻结政策。
+/// - `allow_missing`：快照、mTLS 凭据、deadline、地址政策与 `allow_missing` 共同决定空租约启动边界。
 ///
 /// 返回：每个步骤保留全部合法逐实例 endpoint；同副本冲突、严格模式缺失或 TLS 错误拒绝发布。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -7682,10 +8072,13 @@ fn build_dynamic_grpc_command_targets(
 
 /// 业务作用：在 candidate 获得数据库生命周期权威前，复验其每条 gRPC command route 的实际 mTLS health。
 ///
-/// 参数说明：`activation` 提供冻结证书、deadline 与地址政策，`snapshot`/`artifact` 提供同代候选路由，
-/// `phase` 标记人工或自动激活路径。
+/// 参数说明：
+/// - `activation`：`activation` 提供冻结证书、deadline 与地址政策。
+/// - `snapshot`：候选 Catalog 快照，其中的 capability 用于选择各步骤的服务副本。
+/// - `artifact`：准备激活的定义内容，提供租户、工作流版本和待逐一验证的步骤。
+/// - `phase`：`phase` 标记人工或自动激活路径。
 ///
-/// 返回：非 gRPC 数据面直接成功；全部候选端点明确 Serving 时成功，连接或认证不确定时拒绝激活。
+/// 返回：非 gRPC 数据面直接成功；gRPC 下所有候选地址符合政策且每个步骤至少一个副本明确 Serving 才成功，缺少凭据、无可用副本或探测失败均拒绝激活。
 async fn probe_managed_candidate_grpc_routes(
     activation: &ManagedDefinitionActivationContract,
     snapshot: &nasaga_runtime::DynamicCatalogSnapshot,
@@ -7752,8 +8145,15 @@ async fn probe_managed_candidate_grpc_routes(
 
 /// 业务作用：为当前 definition 步骤构造 Kafka command topic，动态模式只接受 capability 自报的精确 route。
 ///
-/// 参数说明：definition、有效能力、静态前缀、动态地址政策与两个模式开关共同决定
-/// 缺失 route 是否允许等待。
+/// 参数说明：
+/// - `registry`：本次使用的定义路由快照。
+/// - `capabilities`：与定义路由同代的能力快照。
+/// - `command_prefix`：静态命令 topic 的配置前缀。
+/// - `dynamic`：是否从受管目录选择动态地址。
+/// - `address_policy`：限制动态路由地址与访问范围的冻结政策。
+/// - `allow_missing`：允许当前尚无可用路由时保留等待状态的开关。
+///
+/// 共同约束：definition、有效能力、静态前缀、动态地址政策与两个模式开关共同决定缺失 route 是否允许等待。
 ///
 /// 返回：每个步骤至多一个 topic 时返回冻结映射；歧义、非法 topic 或严格模式缺失时拒绝。
 #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
@@ -7799,7 +8199,7 @@ fn build_managed_kafka_command_topics(
                         return Err(saga_error(
                             ApplicationPhase::Running,
                             "dynamic Saga Kafka route is absent",
-                        ))
+                        ));
                     }
                 }
             } else {
@@ -7828,7 +8228,12 @@ fn build_managed_kafka_command_topics(
 
 /// 业务作用：按公开稳定字段派生静态 command topic，使发送方与参与方不依赖业务装配代码。
 ///
-/// 参数说明：前缀、owner、workflow、版本和步骤共同形成唯一 topic。
+/// 参数说明：
+/// - `prefix`：当前数据面使用的名称前缀。
+/// - `owner`：定义中负责该步骤的逻辑服务身份，用于区分命令的接收职责。
+/// - `workflow`：步骤所属的工作流名称，用于区分同一 owner 承担的不同流程。
+/// - `version`：该流程的定义版本。
+/// - `step`：定义中的步骤名称。
 ///
 /// 返回：组合结果符合 Kafka 可移植名称边界时返回；超长或非法字段拒绝。
 #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
@@ -7846,7 +8251,9 @@ fn managed_kafka_step_topic(
 
 /// 业务作用：按参与方逻辑 owner 派生独占 result topic，使 Orchestrator 可从 topic 绑定可信 producer。
 ///
-/// 参数说明：`prefix` 是配置前缀，`owner` 是 definition 与凭据共同绑定的服务身份。
+/// 参数说明：
+/// - `prefix`：`prefix` 是配置前缀。
+/// - `owner`：`owner` 是 definition 与凭据共同绑定的服务身份。
 ///
 /// 返回：组合 topic 符合 Kafka 名称边界时返回，否则拒绝 Ready。
 #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
@@ -7860,9 +8267,17 @@ fn managed_kafka_owner_topic(prefix: &str, owner: &str) -> ApplicationResult<Str
 
 /// 业务作用：按步骤完整身份派生 Redis command stream，使每个消费路由可独立授权与排空。
 ///
-/// 参数说明：前缀必须已携带配置的 cluster hash tag，其余字段是冻结步骤身份。
+/// 参数说明：
+/// - `prefix`：当前数据面使用的名称前缀。
+/// - `owner`：冻结的流程所有者身份。
+/// - `workflow`：冻结的流程名称。
+/// - `version`：该流程的定义版本。
+/// - `step`：定义中的步骤名称。
+///
+/// 共同约束：前缀必须已携带配置的 cluster hash tag；其余字段是冻结步骤身份。
 ///
 /// 返回：名称可持久且不含控制字符时返回 stream；超界或字段非法时拒绝 Ready。
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 fn managed_redis_step_stream(
     prefix: &str,
     owner: &str,
@@ -7885,7 +8300,9 @@ fn managed_redis_step_stream(
 
 /// 业务作用：校验 Kafka topic/group 使用可移植字符和协议长度，避免启动后才由 broker 拒绝。
 ///
-/// 参数说明：`value` 是名称，`kind` 仅用于稳定配置诊断。
+/// 参数说明：
+/// - `value`：`value` 是名称。
+/// - `kind`：`kind` 仅用于稳定配置诊断。
 ///
 /// 返回：名称非空、有界且字符合法时成功；其它输入返回 Ready 错误。
 fn validate_managed_kafka_name(value: &str, kind: &str) -> ApplicationResult<()> {
@@ -7907,7 +8324,8 @@ fn validate_managed_kafka_name(value: &str, kind: &str) -> ApplicationResult<()>
 
 /// 业务作用：把 Kafka topic 前缀转义为 broker 正则中的字面量，避免配置字符扩大订阅范围。
 ///
-/// 参数说明：`value` 已通过 Kafka portable name 校验。
+/// 参数说明：
+/// - `value`：`value` 已通过 Kafka portable name 校验。
 ///
 /// 返回：返回可安全嵌入 POSIX extended regex 的字面量片段。
 #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
@@ -7927,8 +8345,12 @@ fn managed_kafka_regex_literal(value: &str) -> String {
 
 /// 业务作用：从同代 definition 与 capability 快照构造逐命令多实例 HTTP route，不从服务名猜测路径。
 ///
-/// 参数说明：`registry` 提供步骤 owner，`capabilities` 提供实例地址，`authenticator` 是协调者出站身份凭据，
-/// `address_policy` 限制协议、主机与端口，`allow_missing_routes` 仅供编排端重启时开放 capability 续租入口。
+/// 参数说明：
+/// - `registry`：`registry` 提供步骤 owner。
+/// - `capabilities`：`capabilities` 提供实例地址。
+/// - `authenticator`：`authenticator` 是协调者出站身份凭据。
+/// - `address_policy`：`address_policy` 限制协议、主机与端口。
+/// - `allow_missing_routes`：`allow_missing_routes` 仅供编排端重启时开放 capability 续租入口。
 ///
 /// 返回：严格模式下每个已装载 definition 步骤都有至少一个匹配 HTTP 实例时返回 route 表；
 /// 启动代允许暂缺 route，但不会为缺口构造可投递目标。
@@ -7983,7 +8405,9 @@ fn build_dynamic_http_routing(
 
 /// 业务作用：从当前配置 generation 的 secret 快照构造 Saga HTTP HMAC 认证器。
 ///
-/// 参数说明：`application` 提供已脱离普通配置树的 secret material，`credential_ref` 是受信 ID。
+/// 参数说明：
+/// - `application`：`application` 提供已脱离普通配置树的 secret material。
+/// - `credential_ref`：`credential_ref` 是受信 ID。
 ///
 /// 返回：密钥是六十四位小写十六进制文本时返回认证器；缺失或格式错误时拒绝 Ready。
 fn load_managed_http_authenticator(
@@ -7995,7 +8419,10 @@ fn load_managed_http_authenticator(
 
 /// 业务作用：把 capability 中的单实例 origin 与有效 Saga base path 扩展为唯一操作 URL。
 ///
-/// 参数说明：`base` 必须已含该实例 context path 与 Saga base path，`operation` 是框架固定相对操作名。
+/// 参数说明：
+/// - `base`：`base` 必须已含该实例 context path 与 Saga base path。
+/// - `operation`：`operation` 是框架固定相对操作名。
+/// - `authenticator`：出站请求使用的调用方认证材料。
 ///
 /// 返回：HTTP(S) 地址无凭据、query、fragment 且基础路径非根时返回签名目标；其它形态拒绝。
 fn managed_http_target(
@@ -8037,7 +8464,10 @@ fn managed_http_target(
 
 /// 业务作用：把 capability 同一实例的 origin 与 effective Saga path 拼接一次，形成签名和拨号共同目标。
 ///
-/// 参数说明：`descriptor` 携带逐实例 route，`operation` 是固定操作名，`authenticator` 是出站凭据。
+/// 参数说明：
+/// - `descriptor`：`descriptor` 携带逐实例 route。
+/// - `operation`：`operation` 是固定操作名。
+/// - `authenticator`：`authenticator` 是出站凭据。
 ///
 /// 返回：origin、路径和 generation 合同规范时返回目标；含凭据、query、fragment 或重复路径时拒绝。
 #[cfg(feature = "web")]
@@ -8091,7 +8521,9 @@ fn managed_http_capability_target(
 
 /// 业务作用：从受信配置冻结 managed HTTP 入站路径、逐主体凭据、权限与共享 replay 数据源。
 ///
-/// 参数说明：`application` 提供 secret 快照，`settings` 提供角色、transport 与 API 合同。
+/// 参数说明：
+/// - `application`：`application` 提供 secret 快照。
+/// - `settings`：`settings` 提供角色、transport 与 API 合同。
 ///
 /// 返回：当前部署有 HTTP 入站时返回安全快照；未启用时返回空；任何身份或凭据缺口拒绝 Ready。
 #[cfg(feature = "web")]
@@ -8348,7 +8780,8 @@ struct ManagedHttpAuditRequest {
 
 /// 业务作用：把统一审计事实编码成 HTTP JSON 记录，同时保留数据库时间和 epoch 毫秒。
 ///
-/// 参数说明：`record` 是运行时已完成租户门禁和 keyset 排序的一条事实。
+/// 参数说明：
+/// - `record`：`record` 是运行时已完成租户门禁和 keyset 排序的一条事实。
 ///
 /// 返回：返回带稳定类别、身份和发生时间的 JSON 值。
 #[cfg(feature = "web")]
@@ -8547,7 +8980,11 @@ async fn authenticate_managed_http_request(
 
 /// 业务作用：确认已认证 API 主体在指定租户拥有当前标准操作权限。
 ///
-/// 参数说明：`server` 是冻结政策，`producer` 是验签主体，`tenant` 是请求目标，`permission` 是封闭操作名。
+/// 参数说明：
+/// - `server`：`server` 是冻结政策。
+/// - `producer`：`producer` 是验签主体。
+/// - `tenant`：`tenant` 是请求目标。
+/// - `permission`：`permission` 是封闭操作名。
 ///
 /// 返回：主体同时命中租户与权限时成功；其它情况统一返回禁止访问。
 #[cfg(feature = "web")]
@@ -8567,7 +9004,11 @@ fn authorize_managed_http_api(
 
 /// 业务作用：把 HTTP registry 权限同时绑定到定义租户和 workflow，避免首次发布依赖请求自报 owner。
 ///
-/// 参数说明：`server` 与 `producer` 定位冻结主体，`tenant`/`workflow` 是完整授权目标。
+/// 参数说明：
+/// - `server`：保存已冻结 API 主体及权限绑定的 HTTP 服务配置。
+/// - `producer`：请求验签得到的服务身份，用于查找授权主体，不采用正文自报的 owner。
+/// - `tenant`：请求访问的定义所属租户，必须命中主体的租户范围。
+/// - `workflow`：该租户内的工作流名称，须同时命中 registry 的工作流授权。
 ///
 /// 返回：租户、registry 权限和 workflow grant 同时命中时成功；其它情况拒绝访问。
 #[cfg(feature = "web")]
@@ -8587,7 +9028,8 @@ fn authorize_managed_http_registry(
 
 /// 业务作用：从可选 `traceparent` 请求头解析显式链路上下文，非法值按无上下文处理而不改变业务裁决。
 ///
-/// 参数说明：`headers` 是当前 Saga 专用请求头集合。
+/// 参数说明：
+/// - `headers`：`headers` 是当前 Saga 专用请求头集合。
 ///
 /// 返回：规范 W3C 上下文存在时返回解析值，否则为空。
 #[cfg(feature = "web")]
@@ -8600,7 +9042,8 @@ fn managed_http_trace(headers: &axum::http::HeaderMap) -> Option<nasaga_runtime:
 
 /// 业务作用：生成 transport 发送端唯一认可的标准持久收据 JSON。
 ///
-/// 参数说明：`status` 是封闭的提交裁决名。
+/// 参数说明：
+/// - `status`：`status` 是封闭的提交裁决名。
 ///
 /// 返回：固定 content-type 与不含内部错误的 JSON 响应。
 #[cfg(feature = "web")]
@@ -8611,7 +9054,13 @@ fn managed_http_receipt(status: &'static str) -> axum::response::Response {
 
 /// 业务作用：处理参与方 command 入站，只有本地 Inbox、gate、业务事实和结果 Outbox 提交后返回成功收据。
 ///
-/// 参数说明：`application` 提供 Ready runtime，`uri/headers/body` 是未经业务中间件改写的请求事实。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：包含签名、生产者、事件标识及可选链路上下文的原始请求头。
+/// - `body`：先按原始字节验签，再解析为 SagaCommandEnvelope；命令标识须与事件头一致。
+///
+/// 共同约束：`application` 提供 Ready runtime
 ///
 /// 返回：提交或重复返回标准收据；认证、合同或事务失败返回封闭 HTTP 状态且不虚假确认。
 #[cfg(feature = "web")]
@@ -8678,7 +9127,13 @@ async fn managed_http_command(
 
 /// 业务作用：处理 Orchestrator result 入站，producer owner、Inbox 与状态推进全部成功后才确认。
 ///
-/// 参数说明：`application` 提供唯一 Orchestrator，`uri/headers/body` 是签名覆盖的原始请求事实。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：携带结果生产者的认证材料、事件标识和可选链路上下文。
+/// - `body`：验签使用的原始正文，随后解析为 SagaResultEnvelope 并核对事件标识。
+///
+/// 共同约束：`application` 提供唯一 Orchestrator
 ///
 /// 返回：应用或重复返回标准收据；身份、合同或本地提交不明时不返回成功。
 #[cfg(feature = "web")]
@@ -8757,7 +9212,8 @@ async fn managed_http_result(
 
 /// 业务作用：把已提交 Saga 实例投影成不携带业务 payload 的稳定 HTTP 快照。
 ///
-/// 参数说明：`row` 是数据库返回的已提交实例事实。
+/// 参数说明：
+/// - `row`：`row` 是数据库返回的已提交实例事实。
 ///
 /// 返回：包含身份、冻结 definition、状态与 CAS 版本的 JSON 值。
 #[cfg(feature = "web")]
@@ -8783,7 +9239,13 @@ fn managed_http_instance_json(row: &nasaga_runtime::SagaInstanceRow) -> serde_js
 
 /// 业务作用：通过标准 HTTP API 发起 Saga，并复用运行核心的创建幂等与原子首步事务。
 ///
-/// 参数说明：`application` 提供唯一 Orchestrator，`uri/headers/body` 是独立 Saga 安全链的请求事实。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：提供调用主体的签名材料及可选链路上下文，供 API 认证链验证。
+/// - `body`：验签后解析为创建请求的原始正文，携带目标租户、实例身份及输入合同。
+///
+/// 共同约束：`application` 提供唯一 Orchestrator
 ///
 /// 返回：创建或幂等命中返回标准收据与实例快照；认证、授权、合同或提交失败返回脱敏状态。
 #[cfg(feature = "web")]
@@ -8857,7 +9319,15 @@ async fn managed_http_start(
 
 /// 业务作用：通过标准 HTTP API 读取同租户 Saga 快照，不泄漏其它租户实例存在性。
 ///
-/// 参数说明：路径提供租户与实例身份，签名主体必须同时拥有该租户的 `read` 权限。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `tenant_text`：路径中的租户身份，必须符合调用方授权范围。
+/// - `saga_text`：租户范围内的 Saga 实例身份。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：用于验证调用方身份与签名的原始请求头。
+/// - `body`：签名覆盖的原始请求正文，不得在验签前改写。
+///
+/// 共同约束：路径提供租户与实例身份；签名主体必须同时拥有该租户的 `read` 权限。
 ///
 /// 返回：命中返回快照，不存在与跨租户统一为 404；认证、授权或数据库失败返回脱敏状态。
 #[cfg(feature = "web")]
@@ -8912,7 +9382,16 @@ async fn managed_http_get_instance(
 
 /// 业务作用：执行一个标准 Saga 管理动作，并在成功后回读同租户实例快照。
 ///
-/// 参数说明：`action` 是固定路由映射，路径定位租户和实例，body 提供审计 operation 与 reason。
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `action`：`action` 是固定路由映射。
+/// - `tenant_text`：路径中的租户身份，必须与调用方权限一致。
+/// - `saga_text`：路径中的 Saga 实例身份。
+/// - `uri`：参与签名校验的原始请求地址。
+/// - `headers`：用于验证调用方身份与签名的原始请求头。
+/// - `body`：body 提供审计 operation 与 reason。
+///
+/// 共同约束：路径定位租户和实例
 ///
 /// 返回：动作提交返回最新快照；认证、授权、状态、CAS 或数据库失败返回脱敏状态。
 #[cfg(feature = "web")]
@@ -8990,7 +9469,10 @@ macro_rules! managed_admin_handler {
     ($name:ident, $action:expr, $purpose:literal) => {
         #[doc = $purpose]
         ///
-        /// 参数说明：路径定位租户和实例，headers/body 携带受签名身份与审计字段。
+        /// 参数说明：
+        /// - `headers`：headers/body 携带受签名身份与审计字段。
+        /// - `body`：headers/body 携带受签名身份与审计字段。
+        /// 共同约束：路径定位租户和实例
         ///
         /// 返回：动作与审计同事务提交后返回最新实例；拒绝或失败返回脱敏 HTTP 状态。
         async fn $name(
@@ -9039,7 +9521,13 @@ managed_admin_handler!(
 
 /// 业务作用：通过标准 HTTP API 执行租户受限、状态可筛选且使用 keyset 的有界实例检索。
 ///
-/// 参数说明：签名 body 提供过滤条件，调用主体必须拥有目标租户的 `read` 权限。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：用于验证调用方身份与签名的原始请求头。
+/// - `body`：签名 body 提供过滤条件。
+///
+/// 共同约束：调用主体必须拥有目标租户的 `read` 权限。
 ///
 /// 返回：成功返回低敏摘要数组；认证、授权、参数或数据库失败返回脱敏状态。
 #[cfg(feature = "web")]
@@ -9092,10 +9580,10 @@ async fn managed_http_query_instances(
     {
         Ok(page) => page,
         Err(ManagedApiFailure::Invalid) => {
-            return axum::http::StatusCode::BAD_REQUEST.into_response()
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
         Err(ManagedApiFailure::PermissionDenied) => {
-            return axum::http::StatusCode::FORBIDDEN.into_response()
+            return axum::http::StatusCode::FORBIDDEN.into_response();
         }
         Err(_) => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
@@ -9136,7 +9624,15 @@ async fn managed_http_query_instances(
 
 /// 业务作用：通过标准 HTTP API 返回实例的有界审计链，且先鉴权再检查实例存在性。
 ///
-/// 参数说明：路径提供租户与实例身份，签名主体必须拥有目标租户的 `audit` 权限。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `tenant_text`：路径中的租户身份，必须符合调用方授权范围。
+/// - `saga_text`：租户范围内的 Saga 实例身份。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：用于验证调用方身份与签名的原始请求头。
+/// - `body`：签名覆盖的原始请求正文，不得在验签前改写。
+///
+/// 共同约束：路径提供租户与实例身份；签名主体必须拥有目标租户的 `audit` 权限。
 ///
 /// 返回：成功返回 attempt、迁移、控制、管理与冲突事实；越权、不存在或数据库失败均脱敏。
 #[cfg(feature = "web")]
@@ -9188,15 +9684,34 @@ async fn managed_http_audit(
     let Some(caller) = server.api_callers.get(&producer) else {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     };
-    match orchestrator.query_audit(&caller.actor, api::SagaApiAudit {tenant_id: tenant_text, saga_id: saga_text, page_size: request.page_size, page_token: request.page_token}, &server.page_token_key).await {
-        Ok(page) => axum::Json(serde_json::json!({"records":page.records.into_iter().map(managed_http_audit_record).collect::<Vec<_>>(),"next_page_token":page.next_page_token})).into_response(),
+    match orchestrator
+        .query_audit(
+            &caller.actor,
+            api::SagaApiAudit {
+                tenant_id: tenant_text,
+                saga_id: saga_text,
+                page_size: request.page_size,
+                page_token: request.page_token,
+            },
+            &server.page_token_key,
+        )
+        .await
+    {
+        Ok(page) => axum::Json(serde_json::json!({
+            "records": page.records.into_iter().map(managed_http_audit_record).collect::<Vec<_>>(),
+            "next_page_token": page.next_page_token
+        }))
+        .into_response(),
         Err(error) => error.http_status().into_response(),
     }
 }
 
 /// 业务作用：输出不含 tenant、payload 和 saga_id 标签的 Saga 指标，供控制面容量与积压观测。
 ///
-/// 参数说明：`application` 提供唯一 Orchestrator；指标端点不读取业务请求体。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+///
+/// 执行条件：`application` 提供唯一 Orchestrator；指标端点不读取业务请求体。
 ///
 /// 返回：数据库聚合成功返回 Prometheus 文本；角色不符或查询失败返回对应状态。
 #[cfg(feature = "web")]
@@ -9226,7 +9741,18 @@ async fn managed_http_metrics(
 }
 
 /// 业务作用：通过同一 Registry 授权和存储查询读取不可变 definition 及当前生命周期。
-/// 参数说明：路径定位完整定义键，`headers/body/uri` 是 HTTP 认证边界观察到的原始请求。
+///
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `tenant`：定义所属的授权租户。
+/// - `workflow`：路径指定的流程定义名称。
+/// - `version`：路径指定的流程定义版本。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：用于验证定义读取者身份的一次性签名请求头。
+/// - `body`：签名覆盖的原始字节；定义查询键取自路径，不从正文重新解释。
+///
+/// 共同约束：路径定位完整定义键
+///
 /// 返回：命中返回封签内容与生命周期；越权、非法键、不存在或存储失败返回统一 HTTP 状态。
 #[cfg(feature = "web")]
 async fn managed_http_get_definition(
@@ -9281,7 +9807,13 @@ async fn managed_http_get_definition(
 
 /// 业务作用：登记或续租一个已认证 owner 的逐实例 capability，不能由请求字段冒充其它服务。
 ///
-/// 参数说明：Application 提供共享 Catalog，`uri/headers/body` 是 Saga 安全链读取的原始请求。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：认证 capability 登记者的签名请求头，主体必须具备目标定义的登记权限。
+/// - `body`：CapabilityDescriptor 的原始 JSON；先验签，再核对描述中的 owner、定义身份和租约合同。
+///
+/// 共同约束：Application 提供共享 Catalog
 ///
 /// 返回：运行期间的持久租约收据，Catalog 摘流不阻止合法续租；认证、授权、合同、停机或数据库失败返回脱敏 HTTP 状态。
 #[cfg(feature = "web")]
@@ -9340,7 +9872,13 @@ async fn managed_http_register_capability(
 
 /// 业务作用：持久化 workflow owner 提交的完整 definition seal，候选激活由 Catalog watcher 统一裁决。
 ///
-/// 参数说明：Application 提供共享 Catalog，`uri/headers/body` 是 Saga 安全链读取的原始请求。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：确定发布者身份的 API 签名请求头，主体还须通过定义发布授权。
+/// - `body`：携带定义正文及封签的原始 JSON；请求验签与定义封签验证分别执行。
+///
+/// 共同约束：Application 提供共享 Catalog
 ///
 /// 返回：首次或幂等发布记录；越权、同键异摘要或非法流程返回脱敏状态。
 #[cfg(feature = "web")]
@@ -9408,7 +9946,16 @@ async fn managed_http_publish_definition(
 
 /// 业务作用：由获权 workflow owner 显式激活一个已满足 capability 门禁的 candidate。
 ///
-/// 参数说明：路径定位 definition，签名请求体携带 expected seal、操作身份与审计原因。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `tenant`：定义所属的授权租户。
+/// - `workflow`：路径指定的流程定义名称。
+/// - `version`：路径指定的流程定义版本。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：用于验证调用方身份与签名的原始请求头。
+/// - `body`：签名覆盖的原始请求正文，不得在验签前改写。
+///
+/// 共同约束：路径定位 definition；签名请求体携带 expected seal、操作身份与审计原因。
 ///
 /// 返回：active 记录；认证、授权、状态或能力缺口返回脱敏状态。
 #[cfg(feature = "web")]
@@ -9434,7 +9981,16 @@ async fn managed_http_activate_definition(
 
 /// 业务作用：由获权 workflow owner 将 active definition 标记为 deprecated，不打断在途实例。
 ///
-/// 参数说明：路径定位 definition，签名请求体携带 expected seal、操作身份与审计原因。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `tenant`：定义所属的授权租户。
+/// - `workflow`：路径指定的流程定义名称。
+/// - `version`：路径指定的流程定义版本。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：用于验证调用方身份与签名的原始请求头。
+/// - `body`：签名覆盖的原始请求正文，不得在验签前改写。
+///
+/// 共同约束：路径定位 definition；签名请求体携带 expected seal、操作身份与审计原因。
 ///
 /// 返回：deprecated 记录；认证、授权或状态非法返回脱敏状态。
 #[cfg(feature = "web")]
@@ -9460,7 +10016,16 @@ async fn managed_http_deprecate_definition(
 
 /// 业务作用：由获权 workflow owner 退休已无持久引用的 deprecated definition。
 ///
-/// 参数说明：路径定位 definition，签名请求体携带 expected seal、操作身份与审计原因。
+/// 参数说明：
+/// - `application`：提供当前角色的受管运行时与共享 Catalog。
+/// - `tenant`：定义所属的授权租户。
+/// - `workflow`：路径指定的流程定义名称。
+/// - `version`：路径指定的流程定义版本。
+/// - `uri`：参与认证与签名校验的原始请求地址。
+/// - `headers`：用于验证调用方身份与签名的原始请求头。
+/// - `body`：签名覆盖的原始请求正文，不得在验签前改写。
+///
+/// 共同约束：路径定位 definition；签名请求体携带 expected seal、操作身份与审计原因。
 ///
 /// 返回：retired 记录；认证、授权或状态非法返回脱敏状态。
 #[cfg(feature = "web")]
@@ -9486,7 +10051,15 @@ async fn managed_http_retire_definition(
 
 /// 业务作用：复用同一认证、授权和后端适配执行 definition 生命周期迁移。
 ///
-/// 参数说明：Application、定义键、原始请求与 `target` 封闭选择共同描述控制面操作。
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `tenant`：授权范围内的租户身份。
+/// - `workflow`：冻结的流程名称。
+/// - `version`：该流程的定义版本。
+/// - `uri`：参与签名校验的原始请求地址。
+/// - `headers`：用于验证调用方身份与签名的原始请求头。
+/// - `body`：签名覆盖的原始请求正文，不得在验签前改写。
+/// - `target`：Application、定义键、原始请求与 `target` 封闭选择共同描述控制面操作。
 ///
 /// 返回：生命周期记录；合同非法、越权、状态或数据库失败返回脱敏状态。
 #[cfg(feature = "web")]
@@ -9571,8 +10144,14 @@ async fn managed_http_change_definition(
 
 /// 业务作用：让 HTTP 与 gRPC 共用 definition 的事务、CAS、幂等审计和退休门禁。
 ///
-/// 参数说明：driver 与 datasource 定位权威，actor 是认证主体，key 与 target 定位生命周期动作，
-/// operation 固定摘要和审计身份，activation_gate 只用于激活。
+/// 参数说明：
+/// - `driver`：定义所在数据库的驱动类别，选择对应的事务实现。
+/// - `datasource`：保存定义记录的命名数据源，所有生命周期操作落在此持久后端。
+/// - `actor`：actor 是认证主体。
+/// - `key`：由租户、工作流名称和定义版本组成的完整目标键。
+/// - `target`：希望提交的生命周期状态；仅允许激活、弃用或退休，不能退回候选态。
+/// - `operation`：operation 固定摘要和审计身份。
+/// - `activation_gate`：activation_gate 只用于激活。
 ///
 /// 返回：后端原子提交的记录；协议适配器统一映射领域拒绝，不改变错误类别。
 #[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -9681,7 +10260,9 @@ async fn managed_http_not_found() -> axum::http::StatusCode {
 
 /// 业务作用：构造已补齐 Application 状态的独立 Saga Router，供 Web 在进入业务 middleware 前按保留前缀分派。
 ///
-/// 参数说明：`application` 提供 Ready Saga 状态，`context_path` 是 listener 已冻结的应用前缀。
+/// 参数说明：
+/// - `application`：`application` 提供 Ready Saga 状态。
+/// - `context_path`：`context_path` 是 listener 已冻结的应用前缀。
 ///
 /// 返回：未启用 HTTP 入站时为空；启用时返回唯一有效前缀和自带 body 与并发上限的 Router。
 #[cfg(feature = "web")]
@@ -9802,7 +10383,9 @@ pub(crate) fn managed_http_router(
 
 /// 业务作用：解析 datasource catalog 中的唯一 driver 权威，禁止根据已编入 feature 猜测数据库类型。
 ///
-/// 参数说明：`application` 提供冻结 catalog，`datasource` 是待解析的角色作用域引用。
+/// 参数说明：
+/// - `application`：`application` 提供冻结 catalog。
+/// - `datasource`：`datasource` 是待解析的角色作用域引用。
 ///
 /// 返回：canonical 引用存在时返回 driver；名称缺失或非法时拒绝 Ready。
 async fn managed_datasource_driver(
@@ -9850,7 +10433,10 @@ async fn managed_datasource_driver(
 
 /// 业务作用：按冻结 driver 从精确 datasource 装载一份共享动态 Catalog 快照。
 ///
-/// 参数说明：`driver` 来自 Application datasource catalog，`datasource` 是角色作用域内的明确引用。
+/// 参数说明：
+/// - `driver`：`driver` 来自 Application datasource catalog。
+/// - `datasource`：`driver` 来自 Application datasource catalog；`datasource` 是角色作用域内的明确引用。
+/// - `phase`：用于标记拒绝结果的应用生命周期阶段。
 ///
 /// 返回：generation、definition 与 capability 同代复验成功时返回快照；后端不可用或内容漂移拒绝 Ready。
 async fn load_managed_dynamic_catalog(
@@ -9860,7 +10446,7 @@ async fn load_managed_dynamic_catalog(
 ) -> ApplicationResult<nasaga_runtime::DynamicCatalogSnapshot> {
     match driver {
         natx_core::DatabaseDriver::Sqlite => {
-            return Err(saga_error(phase, "SQLite Saga backend is unavailable"))
+            Err(saga_error(phase, "SQLite Saga backend is unavailable"))
         }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
@@ -9905,7 +10491,9 @@ async fn load_managed_dynamic_catalog(
 
 /// 业务作用：提取 definition 激活时 Redis publisher 实际采用的 Cluster 同槽上下文。
 ///
-/// 参数说明：`settings` 是已通过 Ready 校验的配置，`transport` 是当前 command 数据面。
+/// 参数说明：
+/// - `settings`：`settings` 是已通过 Ready 校验的配置。
+/// - `transport`：`transport` 是当前 command 数据面。
 ///
 /// 返回：Redis Streams 返回必填的 `key_tag`，其它 transport 返回空。
 fn managed_activation_redis_key_tag(
@@ -9926,7 +10514,9 @@ fn managed_activation_redis_key_tag(
 
 /// 业务作用：把当前 transport 实际使用的地址 allowlist 规范化为副本确认合同摘要。
 ///
-/// 参数说明：`policy` 是已解析的受信地址政策，`transport` 选择其中生效的协议字段。
+/// 参数说明：
+/// - `policy`：`policy` 是已解析的受信地址政策。
+/// - `transport`：`transport` 选择其中生效的协议字段。
 ///
 /// 返回：集合字段排序去重后形成的 canonical SHA-256，不受配置项书写顺序影响。
 fn managed_address_policy_digest(
@@ -9986,7 +10576,9 @@ fn managed_address_policy_digest(
 
 /// 业务作用：把 JSON 配置按类型、长度和有序 object key 写入摘要，消除配置解析器的键顺序差异。
 ///
-/// 参数说明：`digest` 接收 canonical 字节，`value` 是已完成插值与脱敏分离的配置节点。
+/// 参数说明：
+/// - `digest`：`digest` 接收 canonical 字节。
+/// - `value`：`value` 是已完成插值与脱敏分离的配置节点。
 ///
 /// 返回：无；相同语义的 object 产生相同字节序列，数组保持业务声明顺序。
 fn update_managed_canonical_json(digest: &mut Sha256, value: &serde_json::Value) {
@@ -10032,9 +10624,13 @@ fn update_managed_canonical_json(digest: &mut Sha256, value: &serde_json::Value)
 
 /// 业务作用：提取 transport 实际引用的受管 Kafka 或 Redis client 配置节点。
 ///
-/// 参数说明：`application` 提供冻结配置树，`transport` 与 `client_ref` 定位唯一 client。
+/// 参数说明：
+/// - `application`：`application` 提供冻结配置树。
+/// - `transport`：选择 Kafka 或 Redis Stream 的配置命名空间；HTTP 和 gRPC 不适用此入口。
+/// - `client_ref`：命名客户端引用；Redis 的 default 允许映射 primary，Kafka 单客户端配置直接使用其唯一节点。
+/// - `phase`：用于标记拒绝结果的应用生命周期阶段。
 ///
-/// 返回：返回将参与 publisher 摘要的配置副本；引用无法映射到当前配置树时拒绝 Ready。
+/// 返回：供 publisher 摘要使用的配置副本；Kafka 只提取连接、安全和客户端属性。引用无法映射或传输类型不适用时返回对应阶段的错误。
 fn managed_backend_client_config(
     application: &Application,
     transport: SagaTransportKind,
@@ -10083,8 +10679,10 @@ fn managed_backend_client_config(
 
 /// 业务作用：为 Kafka command/result 双向闭环形成参与方与 Orchestrator 可独立计算的后端身份。
 ///
-/// 参数说明：`application` 提供所选 Kafka client 的冻结配置，`settings` 提供 client 引用和 result topic
-/// 前缀，`phase` 标记配置缺口所属的生命周期阶段。
+/// 参数说明：
+/// - `application`：`application` 提供所选 Kafka client 的冻结配置。
+/// - `settings`：`settings` 提供 client 引用和 result topic前缀。
+/// - `phase`：`phase` 标记配置缺口所属的生命周期阶段。
 ///
 /// 返回：规范化 broker 地址集合与 result topic 前缀形成的 SHA-256；字段缺失或含空地址时拒绝推进。
 fn managed_kafka_result_backend_digest(
@@ -10147,7 +10745,9 @@ fn managed_kafka_result_backend_digest(
 
 /// 业务作用：按带长度边界的字段序列计算 result 发送与接收双方可独立形成的凭据合同摘要。
 ///
-/// 参数说明：`domain` 隔离协议用途，`fields` 按协议定义的稳定顺序提供身份与密钥材料。
+/// 参数说明：
+/// - `domain`：`domain` 隔离协议用途。
+/// - `fields`：`fields` 按协议定义的稳定顺序提供身份与密钥材料。
 ///
 /// 返回：返回不暴露原始凭据的 canonical SHA-256。
 fn managed_result_contract_digest<'a>(
@@ -10170,7 +10770,10 @@ fn managed_result_contract_digest<'a>(
 
 /// 业务作用：从 HTTP result 实际使用的 HMAC secret 形成不暴露密钥的双向合同摘要。
 ///
-/// 参数说明：`application` 提供 secret 快照，`credential_ref` 定位发送或接收凭据，`phase` 标记缺口阶段。
+/// 参数说明：
+/// - `application`：`application` 提供 secret 快照。
+/// - `credential_ref`：`credential_ref` 定位发送或接收凭据。
+/// - `phase`：`phase` 标记缺口阶段。
 ///
 /// 返回：凭据可构造认证器时返回 SHA-256；缺失或格式非法时拒绝推进。
 fn managed_http_result_contract_digest(
@@ -10192,7 +10795,9 @@ fn managed_http_result_contract_digest(
 
 /// 业务作用：从 gRPC client leaf certificate 形成与 Orchestrator peer allowlist 可比较的合同摘要。
 ///
-/// 参数说明：`credential` 是实际用于 result channel 的 mTLS 身份，`phase` 标记证书解析失败阶段。
+/// 参数说明：
+/// - `credential`：`credential` 是实际用于 result channel 的 mTLS 身份。
+/// - `phase`：`phase` 标记证书解析失败阶段。
 ///
 /// 返回：leaf principal 可派生时返回 SHA-256；PEM 不合法时拒绝推进。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -10217,7 +10822,10 @@ fn managed_grpc_result_contract_digest(
 
 /// 业务作用：从 Redis result 的 key id 与 HMAC key 形成发送端和验签端一致的合同摘要。
 ///
-/// 参数说明：`key_id` 是 wire 身份，`key_hex` 是发送或接收配置中的密钥材料，`phase` 标记解析阶段。
+/// 参数说明：
+/// - `key_id`：`key_id` 是 wire 身份。
+/// - `key_hex`：`key_hex` 是发送或接收配置中的密钥材料。
+/// - `phase`：`phase` 标记解析阶段。
 ///
 /// 返回：key id 与至少 256 bit 的密钥合法时返回 SHA-256；其它输入拒绝推进。
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
@@ -10248,8 +10856,11 @@ fn managed_redis_result_contract_digest(
 
 /// 业务作用：计算最终 publisher 的配置、secret 与后端 client 身份摘要，供所有 Ready 副本比较。
 ///
-/// 参数说明：`application` 提供同代配置和 secret，`settings` 提供所选数据面，`transport` 固定分支，
-/// `phase` 标记拒绝发生的生命周期阶段。
+/// 参数说明：
+/// - `application`：`application` 提供同代配置和 secret。
+/// - `settings`：`settings` 提供所选数据面。
+/// - `transport`：`transport` 固定分支。
+/// - `phase`：`phase` 标记拒绝发生的生命周期阶段。
 ///
 /// 返回：全部引用可解析时返回 canonical SHA-256；缺失 publisher 输入时拒绝生命周期推进。
 fn managed_publisher_contract_seed(
@@ -10379,7 +10990,10 @@ fn managed_publisher_contract_seed(
 
 /// 业务作用：构造激活、人工操作与 watcher 共用的 publisher 安全合同。
 ///
-/// 参数说明：`application` 提供冻结运行资源，`settings` 是已校验 Saga 配置，`phase` 标记构造阶段。
+/// 参数说明：
+/// - `application`：`application` 提供冻结运行资源。
+/// - `settings`：`settings` 是已校验 Saga 配置。
+/// - `phase`：`phase` 标记构造阶段。
 ///
 /// 返回：路由、接收端 owner 身份、后端 client 与 gRPC 探针材料完整时返回合同；缺口拒绝推进。
 fn managed_definition_activation_contract(
@@ -10577,8 +11191,10 @@ fn managed_definition_activation_contract(
 
 /// 业务作用：证明每个可启动 definition owner 都能被当前 result consumer 认证，避免形成单向流程。
 ///
-/// 参数说明：`activation` 提供受信 owner 与凭据合同，`registry` 是拟发布的 active/deprecated 快照，
-/// `phase` 标记首次 Ready 或运行期切代。
+/// 参数说明：
+/// - `activation`：`activation` 提供受信 owner 与凭据合同。
+/// - `registry`：`registry` 是拟发布的 active/deprecated 快照。
+/// - `phase`：`phase` 标记首次 Ready 或运行期切代。
 ///
 /// 返回：HTTP、gRPC、Redis 的全部 owner 均有接收凭据时成功；缺口拒绝发布 registry。
 fn validate_managed_registry_result_contract(
@@ -10612,8 +11228,14 @@ fn validate_managed_registry_result_contract(
 
 /// 业务作用：构造绑定完整 transport 发布上下文的 definition 激活门禁。
 ///
-/// 参数说明：服务身份、generation 与摘要冻结集群快照，`activation` 冻结实际 publisher 的
-/// route、安全和后端 client 合同，`phase` 标记拒绝发生的生命周期阶段。
+/// 参数说明：
+/// - `service_identity`：冻结的逻辑服务身份。
+/// - `catalog_generation`：本次目录快照的代次。
+/// - `snapshot_digest`：绑定目录快照内容的摘要。
+/// - `activation`：`activation` 冻结实际 publisher 的route、安全和后端 client 合同。
+/// - `phase`：`phase` 标记拒绝发生的生命周期阶段。
+///
+/// 共同约束：服务身份、generation 与摘要冻结集群快照
 ///
 /// 返回：运行时路由字段均合法时返回带 canonical 合同摘要的门禁；配置不完整时拒绝激活。
 fn managed_definition_activation_gate(
@@ -10698,11 +11320,16 @@ fn managed_definition_activation_gate(
 
 /// 业务作用：从数据库当前完整快照构造 definition 激活的同代副本与数据面门禁。
 ///
-/// 参数说明：`driver`/`datasource` 定位共享 Catalog，`service_identity` 定位逻辑 Orchestrator，
-/// `activation` 固定当前部署的实际投递与接收边界，`definition_key` 的租户、workflow 与版本定位待激活记录，
-/// `phase` 标记调用阶段。
+/// 参数说明：
+/// - `driver`：读取共享 Catalog 所用的数据库驱动，须具备对应的运行时支持。
+/// - `datasource`：共享 Catalog 的命名数据源，用于一次装载完整定义与 capability 快照。
+/// - `service_identity`：`service_identity` 定位逻辑 Orchestrator。
+/// - `activation`：`activation` 固定当前部署的实际投递与接收边界。
+/// - `definition_key`：`definition_key` 的租户、workflow 与版本定位待激活记录。
+/// - `phase`：`phase` 标记调用阶段。
 ///
 /// 返回：candidate 与 capability 均已纳入摘要时返回门禁；装载漂移或字段非法时拒绝激活。
+#[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 async fn load_managed_definition_activation_gate(
     driver: natx_core::DatabaseDriver,
     datasource: &str,
@@ -10746,10 +11373,21 @@ async fn load_managed_definition_activation_gate(
 
 /// 业务作用：把当前二进制的 MySQL managed 工厂实例化为按命令身份唯一索引的 handler 快照。
 ///
-/// 参数说明：`runtime` 是所有本地步骤共享的同源 Participant 事务运行时。
+/// 参数说明：
+/// - `runtime`：`runtime` 是所有本地步骤共享的同源 Participant 事务运行时。
+/// - `expected`：当前定义要求的流程、版本与步骤键集合。
 ///
 /// 返回：每个步骤恰有一个显式 managed 工厂时返回快照；缺失或重复时拒绝 Ready。
 #[cfg(feature = "saga")]
+#[cfg(any(
+    feature = "web",
+    feature = "saga-kafka",
+    feature = "saga-kafka-pgsql",
+    feature = "saga-redis-stream",
+    feature = "saga-redis-stream-pgsql",
+    feature = "saga-grpc",
+    feature = "saga-grpc-pgsql"
+))]
 fn build_mysql_managed_command_handlers(
     runtime: Arc<nasaga_runtime::ParticipantRuntime>,
     expected: &std::collections::BTreeSet<(String, u32, String)>,
@@ -10789,10 +11427,21 @@ fn build_mysql_managed_command_handlers(
 
 /// 业务作用：把当前二进制的 PostgreSQL managed 工厂实例化为按命令身份唯一索引的 handler 快照。
 ///
-/// 参数说明：`runtime` 是所有本地步骤共享的同源 Participant 事务运行时。
+/// 参数说明：
+/// - `runtime`：`runtime` 是所有本地步骤共享的同源 Participant 事务运行时。
+/// - `expected`：当前定义要求的流程、版本与步骤键集合。
 ///
 /// 返回：每个步骤恰有一个显式 managed 工厂时返回快照；缺失或重复时拒绝 Ready。
 #[cfg(feature = "saga-pgsql")]
+#[cfg(any(
+    feature = "web",
+    feature = "saga-kafka",
+    feature = "saga-kafka-pgsql",
+    feature = "saga-redis-stream",
+    feature = "saga-redis-stream-pgsql",
+    feature = "saga-grpc",
+    feature = "saga-grpc-pgsql"
+))]
 fn build_pgsql_managed_command_handlers(
     runtime: Arc<nasaga_runtime_pgsql::PgParticipantRuntime>,
     expected: &std::collections::BTreeSet<(String, u32, String)>,
@@ -10833,7 +11482,10 @@ fn build_pgsql_managed_command_handlers(
 
 /// 业务作用：把当前二进制的完整流程定义投影为每个获批租户的不可变发布产物。
 ///
-/// 参数说明：`settings` 提供受信租户范围，`publisher` 是 workflow owner，`phase` 是错误归属阶段。
+/// 参数说明：
+/// - `settings`：`settings` 提供受信租户范围。
+/// - `publisher`：`publisher` 是 workflow owner。
+/// - `phase`：`phase` 是错误归属阶段。
 ///
 /// 返回：本地没有定义时返回空集合；所有定义、租户与 seal 都合法时返回稳定排序的产物集合。
 fn collect_managed_definition_artifacts(
@@ -10886,7 +11538,10 @@ fn collect_managed_definition_artifacts(
 
 /// 业务作用：把 workflow owner 链接的完整定义签名后绑定到唯一远程 Registry 控制面。
 ///
-/// 参数说明：`application` 提供私钥与客户端凭据，`settings` 冻结租户和 Registry 路由，`publisher` 是定义 owner。
+/// 参数说明：
+/// - `application`：`application` 提供私钥与客户端凭据。
+/// - `settings`：`settings` 冻结租户和 Registry 路由。
+/// - `publisher`：`publisher` 是定义 owner。
 ///
 /// 返回：没有本地定义或不是动态模式时返回空；其余情况只有全部 seal、身份与协议配置完整才返回发布计划。
 fn build_managed_definition_publish_plan(
@@ -11064,7 +11719,9 @@ fn build_managed_definition_publish_plan(
 
 /// 业务作用：只为 orchestrator 角色建立全局状态结构、definition 快照、推进引擎与 timer fencing 身份。
 ///
-/// 参数说明：`application` 提供数据库资源，`settings` 只读取 orchestrator 作用域。
+/// 参数说明：
+/// - `application`：`application` 提供数据库资源。
+/// - `settings`：`settings` 只读取 orchestrator 作用域。
 ///
 /// 返回：建表复验、definition 门禁和 runtime 构造成功时返回只含 Orchestrator 的计划。
 async fn build_managed_orchestrator_plan(
@@ -11097,7 +11754,7 @@ async fn build_managed_orchestrator_plan(
             return Err(saga_error(
                 ApplicationPhase::Ready,
                 "SQLite Saga backend is unavailable",
-            ))
+            ));
         }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
@@ -11172,7 +11829,7 @@ async fn build_managed_orchestrator_plan(
             return Err(saga_error(
                 ApplicationPhase::Ready,
                 "SQLite Saga backend is unavailable",
-            ))
+            ));
         }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
@@ -11373,7 +12030,9 @@ async fn build_managed_orchestrator_plan(
 
 /// 业务作用：只为 participant 角色建立本地 gate、command Inbox、result Outbox 与冻结命令信任投影。
 ///
-/// 参数说明：`application` 提供本地事务域，`settings` 只读取 participant 作用域。
+/// 参数说明：
+/// - `application`：`application` 提供本地事务域。
+/// - `settings`：`settings` 只读取 participant 作用域。
 ///
 /// 返回：本地 descriptor、handler 工厂与 schema 可用时返回只含 participant 的计划。
 async fn build_managed_participant_plan(
@@ -11498,6 +12157,15 @@ async fn build_managed_participant_plan(
     let mut datasources = std::collections::BTreeSet::new();
     for (binding, (datasource, descriptors)) in grouped {
         let mut trusts = BTreeMap::new();
+        #[cfg(any(
+            feature = "web",
+            feature = "saga-kafka",
+            feature = "saga-kafka-pgsql",
+            feature = "saga-redis-stream",
+            feature = "saga-redis-stream-pgsql",
+            feature = "saga-grpc",
+            feature = "saga-grpc-pgsql"
+        ))]
         let mut expected = std::collections::BTreeSet::new();
         for descriptor in descriptors {
             let workflow = nasaga_runtime::__private::core::WorkflowName::new(descriptor.workflow)
@@ -11525,6 +12193,15 @@ async fn build_managed_participant_plan(
                     anyhow::anyhow!(error.code()),
                 )
             })?;
+            #[cfg(any(
+                feature = "web",
+                feature = "saga-kafka",
+                feature = "saga-kafka-pgsql",
+                feature = "saga-redis-stream",
+                feature = "saga-redis-stream-pgsql",
+                feature = "saga-grpc",
+                feature = "saga-grpc-pgsql"
+            ))]
             expected.insert((
                 descriptor.workflow.to_owned(),
                 descriptor.definition_version,
@@ -11547,7 +12224,7 @@ async fn build_managed_participant_plan(
                 return Err(saga_error(
                     ApplicationPhase::Ready,
                     "SQLite Saga backend is unavailable",
-                ))
+                ));
             }
             natx_core::DatabaseDriver::MySql => {
                 #[cfg(feature = "saga")]
@@ -11577,10 +12254,28 @@ async fn build_managed_participant_plan(
                             )
                         })?,
                     );
+                    #[cfg(any(
+                        feature = "web",
+                        feature = "saga-kafka",
+                        feature = "saga-kafka-pgsql",
+                        feature = "saga-redis-stream",
+                        feature = "saga-redis-stream-pgsql",
+                        feature = "saga-grpc",
+                        feature = "saga-grpc-pgsql"
+                    ))]
                     let handlers =
                         build_mysql_managed_command_handlers(Arc::clone(&runtime), &expected)?;
                     plan.participants
                         .insert(binding.clone(), ManagedParticipant::MySql(runtime));
+                    #[cfg(any(
+                        feature = "web",
+                        feature = "saga-kafka",
+                        feature = "saga-kafka-pgsql",
+                        feature = "saga-redis-stream",
+                        feature = "saga-redis-stream-pgsql",
+                        feature = "saga-grpc",
+                        feature = "saga-grpc-pgsql"
+                    ))]
                     for (key, handler) in handlers {
                         if plan.command_handlers.insert(key, handler).is_some() {
                             return Err(saga_error(
@@ -11623,10 +12318,28 @@ async fn build_managed_participant_plan(
                             )
                         })?,
                     );
+                    #[cfg(any(
+                        feature = "web",
+                        feature = "saga-kafka",
+                        feature = "saga-kafka-pgsql",
+                        feature = "saga-redis-stream",
+                        feature = "saga-redis-stream-pgsql",
+                        feature = "saga-grpc",
+                        feature = "saga-grpc-pgsql"
+                    ))]
                     let handlers =
                         build_pgsql_managed_command_handlers(Arc::clone(&runtime), &expected)?;
                     plan.participants
                         .insert(binding.clone(), ManagedParticipant::PostgreSql(runtime));
+                    #[cfg(any(
+                        feature = "web",
+                        feature = "saga-kafka",
+                        feature = "saga-kafka-pgsql",
+                        feature = "saga-redis-stream",
+                        feature = "saga-redis-stream-pgsql",
+                        feature = "saga-grpc",
+                        feature = "saga-grpc-pgsql"
+                    ))]
                     for (key, handler) in handlers {
                         if plan.command_handlers.insert(key, handler).is_some() {
                             return Err(saga_error(
@@ -11697,7 +12410,9 @@ async fn build_managed_participant_plan(
 
 /// 业务作用：在 Kafka Ready 封口前登记参与方 command consumer，使业务无需接触 registry builder。
 ///
-/// 参数说明：`application` 提供受管 Kafka runtime，`settings` 提供 topic 前缀、身份与稳定 group。
+/// 参数说明：
+/// - `application`：`application` 提供受管 Kafka runtime。
+/// - `settings`：`settings` 提供 topic 前缀、身份与稳定 group。
 ///
 /// 返回：非 Kafka transport 幂等跳过；route 完整且登记成功时完成，否则拒绝 Ready。
 #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
@@ -11810,7 +12525,10 @@ fn register_managed_kafka_command_consumer(
 
 /// 业务作用：在 Kafka Ready 封口前登记 Orchestrator result consumer，并用 owner topic 作为身份权威。
 ///
-/// 参数说明：`application` 提供 Kafka runtime，`settings` 提供 result 前缀/group，`orchestrator` 是推进权威。
+/// 参数说明：
+/// - `application`：`application` 提供 Kafka runtime。
+/// - `settings`：`settings` 提供 result 前缀/group。
+/// - `orchestrator`：`orchestrator` 是推进权威。
 ///
 /// 返回：非 Kafka transport 幂等跳过；配置和 runtime 完整时登记成功，否则拒绝 Ready。
 #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
@@ -11900,7 +12618,11 @@ fn register_managed_kafka_result_consumer(
 
 /// 业务作用：把配置中的逻辑服务到 mTLS leaf 指纹映射冻结为反向认证表。
 ///
-/// 参数说明：`configured` 的 key 是 ServiceIdentity，value 是 nagrpc 发布的 SHA-256 principal。
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `configured`：`configured` 的 key 是 ServiceIdentity。
+///
+/// 共同约束：value 是 nagrpc 发布的 SHA-256 principal。
 ///
 /// 返回：身份与指纹均合法且一一对应时返回映射；空表、重复指纹或非法值拒绝 Start。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -11936,7 +12658,9 @@ fn build_managed_grpc_peer_map(
 
 /// 业务作用：验证 principal 与 nagrpc TLS 扩展使用同一稳定证书指纹格式。
 ///
-/// 参数说明：`principal` 必须是 `sha256:` 加 64 个小写十六进制字符。
+/// 参数说明：
+/// - `principal`：`principal` 必须是 `sha256:` 加 64 个小写十六进制字符。
+/// - `phase`：用于标记拒绝结果的应用生命周期阶段。
 ///
 /// 返回：格式合法时成功；其它输入拒绝生命周期推进。
 fn validate_managed_grpc_principal(
@@ -11976,7 +12700,9 @@ fn validate_managed_grpc_principal(
 
 /// 业务作用：在 gRPC Prepare 封口前按 managed 角色自动登记 command/result generated service。
 ///
-/// 参数说明：`application` 提供唯一 service registry 与 Saga 状态，`settings` 冻结角色和 peer 映射。
+/// 参数说明：
+/// - `application`：`application` 提供唯一 service registry 与 Saga 状态。
+/// - `settings`：`settings` 冻结角色和 peer 映射。
 ///
 /// 返回：非 gRPC 数据面幂等跳过；角色允许的 service 全部登记成功时完成，冲突或安全缺口拒绝 Start。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -12041,7 +12767,9 @@ fn register_managed_grpc_transport_services(
 
 /// 业务作用：把 gRPC API caller 配置冻结为 principal 到最小权限快照的反向认证表。
 ///
-/// 参数说明：`api` 声明证书 principal、逻辑主体、租户、权限与高权限暴露面。
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `api`：`api` 声明证书 principal、逻辑主体、租户、权限与高权限暴露面。
 ///
 /// 返回：全部映射合法且 principal 唯一时返回；空安全表、非法身份或空权限拒绝 Start。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -12097,9 +12825,13 @@ fn build_managed_grpc_api_callers(
 
 /// 业务作用：从 SecretSnapshot 冻结 definition 发布验签公钥，避免注册入口信任请求自带密钥。
 ///
-/// 参数说明：`application` 提供脱离普通配置树的 secret material，`configured` 把稳定 key id 映射到 secret reference。
+/// 参数说明：
+/// - `application`：`application` 提供脱离普通配置树的 secret material。
+/// - `configured`：`configured` 把稳定 key id 映射到 secret reference。
+/// - `phase`：用于标记拒绝结果的应用生命周期阶段。
 ///
 /// 返回：每个引用都解析为无空白的 Ed25519 SPKI Base64 公钥时返回只读映射；空表、重复或缺失材料拒绝 Start。
+#[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 fn load_managed_definition_signing_keys(
     application: &Application,
     configured: &BTreeMap<String, String>,
@@ -12138,9 +12870,13 @@ fn load_managed_definition_signing_keys(
 
 /// 业务作用：从共享 secret 派生跨副本稳定的分页签名密钥，使 token 在滚动发布和故障转移后仍可验证。
 ///
-/// 参数说明：`application` 提供 secret 快照，`credential_ref` 是独立密钥引用，`phase` 标记构造阶段。
+/// 参数说明：
+/// - `application`：`application` 提供 secret 快照。
+/// - `credential_ref`：`credential_ref` 是独立密钥引用。
+/// - `phase`：`phase` 标记构造阶段。
 ///
 /// 返回：非空且不少于三十二字节的材料派生为固定 SHA-256 密钥；缺失或过短时拒绝开放查询 API。
+#[cfg(any(feature = "web", feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 fn load_managed_page_token_key(
     application: &Application,
     credential_ref: &str,
@@ -12161,7 +12897,11 @@ fn load_managed_page_token_key(
 
 /// 业务作用：在 gRPC Prepare 前按 exposure 策略自动登记公开 Orchestrator 与管理 service。
 ///
-/// 参数说明：Application 提供 registry/runtime，settings 固定 exposure、RBAC 和 Orchestrator 角色。
+/// 参数说明：
+/// - `application`：提供当前应用的受管资源、配置与身份。
+/// - `settings`：settings 固定 exposure、RBAC 和 Orchestrator 角色。
+///
+/// 共同约束：Application 提供 registry/runtime
 ///
 /// 返回：未启用幂等跳过；服务名、权限和角色完整时登记成功，否则拒绝 Start。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -12248,7 +12988,10 @@ fn register_managed_grpc_api_services(
 
 /// 业务作用：按当前数据面为本地步骤生成可续租的完整 capability 路由合同。
 ///
-/// 参数说明：`application` 提供 Web 实际 context，`settings` 冻结数据面，`owner` 是认证服务身份。
+/// 参数说明：
+/// - `application`：`application` 提供 Web 实际 context。
+/// - `settings`：`settings` 冻结数据面。
+/// - `owner`：`owner` 是认证服务身份。
 ///
 /// 返回：每个链接步骤都能得到唯一实例路由时返回 descriptor；端点或组件缺失时拒绝 Ready。
 #[cfg(any(
@@ -12527,6 +13270,7 @@ fn build_managed_local_capabilities(
                     descriptor.definition_version,
                     descriptor.step,
                 )?,
+                #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
                 SagaTransportKind::RedisStream => managed_redis_step_stream(
                     &endpoint,
                     owner.as_str(),
@@ -12588,7 +13332,10 @@ fn build_managed_local_capabilities(
 
 /// 业务作用：允许纯数据库应用编译，仅在实际请求发布受管能力时拒绝缺失的数据面。
 ///
-/// 参数说明：`_application`、`_settings`、`_owner` 保留受管能力构建合同。
+/// 参数说明：
+/// - `_application`：调用方的应用上下文；此编译分支不读取配置或发布应用能力。
+/// - `_settings`：原本用于选择传输与路由的 Saga 配置；缺少已编译传输时不据此声明可用性。
+/// - `_owner`：本地步骤所属的逻辑服务身份；此分支不为其建立任何 capability。
 ///
 /// 返回：未编译任何 command/result transport 时返回明确的 Ready 阶段错误。
 #[cfg(not(any(
@@ -12614,7 +13361,8 @@ fn build_managed_local_capabilities(
 
 /// 业务作用：从独立控制面配置选择 capability registry 协议，并为存量 HTTP/gRPC 数据面保留明确兼容路径。
 ///
-/// 参数说明：`settings` 是已封闭的 Saga 配置。
+/// 参数说明：
+/// - `settings`：`settings` 是已封闭的 Saga 配置。
 ///
 /// 返回：显式 registry client 优先；未配置时仅 HTTP/gRPC 数据面可以复用同协议控制端点。
 fn managed_registry_protocol(settings: &SagaSettings) -> Option<SagaClientProtocol> {
@@ -12639,7 +13387,8 @@ fn managed_registry_protocol(settings: &SagaSettings) -> Option<SagaClientProtoc
 
 /// 业务作用：读取当前数据面的 owner route 是否以动态 capability 为唯一权威。
 ///
-/// 参数说明：`settings` 是已封闭的 Saga 配置。
+/// 参数说明：
+/// - `settings`：`settings` 是已封闭的 Saga 配置。
 ///
 /// 返回：选中协议的 `routing.mode` 为 `capability-registry` 时返回真。
 fn managed_uses_capability_registry(settings: &SagaSettings) -> bool {
@@ -12660,7 +13409,10 @@ fn managed_uses_capability_registry(settings: &SagaSettings) -> bool {
 
 /// 业务作用：从本地步骤合同、实例身份与 Web 路径构造受管 capability 续租计划。
 ///
-/// 参数说明：`application` 提供凭据与 context path，`settings` 提供受信协议地址，`owner` 是本地步骤逻辑主体。
+/// 参数说明：
+/// - `application`：`application` 提供凭据与 context path。
+/// - `settings`：`settings` 提供受信协议地址。
+/// - `owner`：`owner` 是本地步骤逻辑主体。
 ///
 /// 返回：全部 descriptor 与签名目标合法时返回计划；无本地步骤、凭据或路由不完整时拒绝 Ready。
 fn build_managed_capability_publish_plan(
@@ -12735,7 +13487,10 @@ fn build_managed_capability_publish_plan(
 
 /// 业务作用：从本地步骤合同和 gRPC mTLS 控制面构造自动 capability 续租计划。
 ///
-/// 参数说明：`application` 提供 client secret，`settings` 固定 Orchestrator 与本副本公开端点，`owner` 是认证逻辑服务。
+/// 参数说明：
+/// - `application`：`application` 提供 client secret。
+/// - `settings`：`settings` 固定 Orchestrator 与本副本公开端点。
+/// - `owner`：`owner` 是认证逻辑服务。
 ///
 /// 返回：发现地址、公开 HTTPS 端点、凭据和 descriptor 完整时返回计划；任一安全边界缺失时拒绝 Ready。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -12793,7 +13548,10 @@ fn build_managed_grpc_capability_publish_plan(
 
 /// 业务作用：让 custom 计划与 managed 计划共用相同的角色 schema 门禁，禁止高级入口绕过建表和最终复验。
 ///
-/// 参数说明：`datasource` 是计划的单一事务域，`driver` 来自冻结 catalog，`role` 决定允许建立的表集。
+/// 参数说明：
+/// - `datasource`：`datasource` 是计划的单一事务域。
+/// - `driver`：`driver` 来自冻结 catalog。
+/// - `role`：`role` 决定允许建立的表集。
 ///
 /// 返回：角色所需结构全部可用时成功；任一后端操作失败则拒绝 Ready。
 async fn ensure_custom_role_schema(
@@ -12806,7 +13564,7 @@ async fn ensure_custom_role_schema(
             return Err(saga_error(
                 ApplicationPhase::Ready,
                 "SQLite Saga backend is unavailable",
-            ))
+            ));
         }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
@@ -12881,7 +13639,7 @@ impl ApplicationComponent for SagaComponent {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：`ComponentId::Saga`。
+    /// 返回：固定的 Saga 组件标识，供依赖排序与生命周期定位使用。
     fn id(&self) -> ComponentId {
         ComponentId::Saga
     }
@@ -13191,7 +13949,7 @@ impl ApplicationComponent for SagaComponent {
                         return Err(saga_error(
                             ApplicationPhase::Ready,
                             "SQLite Saga backend is unavailable",
-                        ))
+                        ));
                     }
                     natx_core::DatabaseDriver::MySql => {
                         #[cfg(feature = "saga")]
@@ -13255,9 +14013,9 @@ impl ApplicationComponent for SagaComponent {
                     != configured_datasource_name
                 {
                     return Err(saga_error(
-                    ApplicationPhase::Ready,
-                    "saga.datasource_ref must match outbox.datasource_ref for the atomic event chain",
-                ));
+                        ApplicationPhase::Ready,
+                        "saga.datasource_ref must match outbox.datasource_ref for the atomic event chain",
+                    ));
                 }
             }
             // Redis transport 属组件生命周期所有权,不随计划进入只读能力发布;必须在
@@ -13593,8 +14351,9 @@ impl StreamRuntime {
     /// 参数说明：
     /// - `stream`: 源 stream 名(冻结标签值)。
     /// - `group`: consumer group 名(冻结标签值)。
+    /// - `consumer`：该组内本实例的消费者名称，用于限定待确认积压的观测归属。
     ///
-    /// 返回：全零计数、初始健康的状态。
+    /// 返回：全零计数与初始健康标记；仅创建观测状态，不连接 Redis，也不证明 stream 已可消费。
     fn new(stream: &str, group: &str, consumer: &str) -> Self {
         Self {
             stream: stream.to_string(),
@@ -13824,7 +14583,8 @@ fn stream_metric_sample(
 pub(crate) fn render_stream_metrics(state: &SagaRuntimeState) -> String {
     /// 业务作用：转义 Prometheus label 值，阻止冻结配置中的特殊字符破坏 exposition 边界。
     ///
-    /// 参数说明：`value` 是已经过配置门禁的 stream、group 或 consumer 标签值。
+    /// 参数说明：
+    /// - `value`：`value` 是已经过配置门禁的 stream、group 或 consumer 标签值。
     ///
     /// 返回：反斜线、引号与换行均已转义的标签文本。
     fn escape_label(value: &str) -> String {
@@ -13882,7 +14642,10 @@ pub(crate) fn render_stream_metrics(state: &SagaRuntimeState) -> String {
 
 /// 业务作用：持续重试 workflow owner 的不可变定义，直到全部取得匹配收据与所需生命周期。
 ///
-/// 参数说明：`application` 提供停机状态，`plan` 冻结签名产物和协议，`contributor` 控制 owner 接流。
+/// 参数说明：
+/// - `application`：`application` 提供停机状态。
+/// - `plan`：`plan` 冻结签名产物和协议。
+/// - `contributor`：`contributor` 控制 owner 接流。
 ///
 /// 返回：全部产物一旦获得持久收据便保持 Ready 至停机；暂时失败会摘流并保留原始 seal 重报。
 async fn run_definition_publish_loop(
@@ -13910,13 +14673,14 @@ async fn run_definition_publish_loop(
         let mut accepted = true;
         for artifact in &plan.artifacts {
             let result = match &plan.transport {
-                ManagedDefinitionPublishTransport::Http { client, target } => {
-                    post_managed_http_definition(client, target, &plan.producer, artifact).await
-                }
+                ManagedDefinitionPublishTransport::Http {
+                    client,
+                    target,
+                } => post_managed_http_definition(client, target, &plan.producer, artifact).await,
                 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
-                ManagedDefinitionPublishTransport::Grpc { target } => {
-                    post_managed_grpc_definition(target, artifact).await
-                }
+                ManagedDefinitionPublishTransport::Grpc {
+                    target,
+                } => post_managed_grpc_definition(target, artifact).await,
             };
             match result {
                 Ok(active) if active || !plan.require_active => {}
@@ -13943,7 +14707,11 @@ async fn run_definition_publish_loop(
 
 /// 业务作用：通过 HMAC 认证的 HTTP 控制面提交一份 Ed25519 签名 definition，并复验持久记录。
 ///
-/// 参数说明：client/target 固定地址与凭据，`producer` 是 workflow owner，`artifact` 是签名原文。
+/// 参数说明：
+/// - `client`：复用连接及传输设置的 HTTP 客户端，本次请求使用目标解析后的剩余超时。
+/// - `target`：定义发布入口的解析与认证合同，决定实际地址、签名路径和 HMAC 材料。
+/// - `producer`：`producer` 是 workflow owner。
+/// - `artifact`：`artifact` 是签名原文。
 ///
 /// 返回：收据 key 与 seal 匹配时返回是否 Active；网络、权限、冲突或畸形收据返回可重报错误。
 async fn post_managed_http_definition(
@@ -14031,7 +14799,9 @@ async fn post_managed_http_definition(
 
 /// 业务作用：通过 generated gRPC Registry client 提交签名 definition，并复验 disposition、key 与 seal。
 ///
-/// 参数说明：`target` 固定 mTLS channel，`artifact` 保留 canonical document 与 detached signature。
+/// 参数说明：
+/// - `target`：`target` 固定 mTLS channel。
+/// - `artifact`：`artifact` 保留 canonical document 与 detached signature。
 ///
 /// 返回：Committed/Duplicate 且记录匹配时返回是否 Active；其它 status 或收据均拒绝前移。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -14112,8 +14882,10 @@ async fn post_managed_grpc_definition(
 
 /// 业务作用：在 listener 地址发布后为 HTTP/gRPC 控制面统一封闭本地能力的完整数据面路由。
 ///
-/// 参数说明：`application` 提供生命周期与监听地址，`descriptors` 是待发布能力，
-/// `advertised_endpoint` 可指定 HTTP 数据面的对外 origin。
+/// 参数说明：
+/// - `application`：`application` 提供生命周期与监听地址。
+/// - `descriptors`：`descriptors` 是待发布能力。
+/// - `advertised_endpoint`：`advertised_endpoint` 可指定 HTTP 数据面的对外 origin。
 ///
 /// 返回：完整路由校验通过返回 true；应用先行停机返回 false，非法合同返回错误。
 async fn prepare_managed_capability_routes(
@@ -14164,7 +14936,10 @@ async fn prepare_managed_capability_routes(
 
 /// 业务作用：在 Web listener 取得真实端点后持续登记本副本步骤能力，租约中断时立即摘除 Saga Ready。
 ///
-/// 参数说明：`application` 提供生命周期与真实监听地址，`plan` 是冻结发布合同，`contributor` 控制参与方摘流。
+/// 参数说明：
+/// - `application`：`application` 提供生命周期与真实监听地址。
+/// - `plan`：`plan` 是冻结发布合同。
+/// - `contributor`：`contributor` 控制参与方摘流。
 ///
 /// 返回：应用停机时正常退出；可恢复的网络或控制面失败在循环内摘流并退避。
 async fn run_capability_publish_loop(
@@ -14251,7 +15026,10 @@ async fn run_capability_publish_loop(
 
 /// 业务作用：持续通过 generated gRPC Registry client 登记本副本能力，租约中断时立即撤销 Saga Ready。
 ///
-/// 参数说明：`application` 提供生命周期，`plan` 冻结 mTLS channel、租户和 descriptor，`contributor` 控制摘流。
+/// 参数说明：
+/// - `application`：`application` 提供生命周期。
+/// - `plan`：`plan` 冻结 mTLS channel、租户和 descriptor。
+/// - `contributor`：`contributor` 控制摘流。
 ///
 /// 返回：应用停机时正常退出；暂时网络或收据异常在循环内摘流并按固定上限退避。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -14344,7 +15122,10 @@ async fn run_grpc_capability_publish_loop(
 
 /// 业务作用：把服务端租约收据转为本地单调截止时间，约束响应延迟与时钟回拨后的就绪时长。
 ///
-/// 参数说明：`receipt` 是已提交的收据，`descriptor` 提供租约预算，`started` 是请求开始时刻。
+/// 参数说明：
+/// - `receipt`：`receipt` 是已提交的收据。
+/// - `descriptor`：`descriptor` 提供租约预算。
+/// - `started`：`started` 是请求开始时刻。
 ///
 /// 返回：绝对期限与请求预算中更早的截止时间；过期、零代际或时钟异常均拒绝收据。
 fn managed_capability_receipt_deadline(
@@ -14375,7 +15156,9 @@ fn managed_capability_receipt_deadline(
 
 /// 业务作用：向受信 gRPC Definition Registry 发送一个 canonical capability 并校验持久租约收据。
 ///
-/// 参数说明：`plan` 固定 mTLS channel 与租约，`descriptor` 包含授权租户和本副本完整能力。
+/// 参数说明：
+/// - `plan`：`plan` 固定 mTLS channel 与租约。
+/// - `descriptor`：`descriptor` 包含授权租户和本副本完整能力。
 ///
 /// 返回：服务端明确提交租约时返回协议无关收据；网络、status 或字段异常均保留下一轮重报。
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -14459,7 +15242,9 @@ async fn post_managed_grpc_capability(
 
 /// 业务作用：把显式广播 origin 或 Web 真实监听地址规范化为 capability 中唯一的实例 origin。
 ///
-/// 参数说明：`application` 提供已绑定地址，`advertised_endpoint` 可显式指定受信对外地址。
+/// 参数说明：
+/// - `application`：`application` 提供已绑定地址。
+/// - `advertised_endpoint`：`advertised_endpoint` 可显式指定受信对外地址。
 ///
 /// 返回：不含路径、凭据、query 或 fragment 的 HTTP(S) origin；地址尚未发布或形态不安全时返回错误。
 fn resolve_managed_capability_endpoint(
@@ -14490,7 +15275,9 @@ fn resolve_managed_capability_endpoint(
 
 /// 业务作用：统一规范化显式广播地址与 listener 地址，拒绝会改变签名路由边界的 URL 成分。
 ///
-/// 参数说明：`candidate` 是待验证地址，`phase` 指定失败所属生命周期阶段。
+/// 参数说明：
+/// - `candidate`：`candidate` 是待验证地址。
+/// - `phase`：`phase` 指定失败所属生命周期阶段。
 ///
 /// 返回：规范化 HTTP(S) origin；路径、凭据、query、fragment 或非法地址导致失败。
 fn normalize_managed_capability_endpoint(
@@ -14518,7 +15305,9 @@ fn normalize_managed_capability_endpoint(
 
 /// 业务作用：使用与 command/result 相同的原始字节签名合同提交单个 capability descriptor。
 ///
-/// 参数说明：`plan` 固定目标、主体和凭据，`descriptor` 是待登记的逐实例能力。
+/// 参数说明：
+/// - `plan`：`plan` 固定目标、主体和凭据。
+/// - `descriptor`：`descriptor` 是待登记的逐实例能力。
 ///
 /// 返回：服务端明确接受并返回持久租约收据时成功；网络、状态或收据异常时返回脱敏错误。
 async fn post_managed_capability(
@@ -14589,7 +15378,10 @@ async fn post_managed_capability(
 /// 新 definition 在 route 可用前不会进入 start 快照；deprecated definition 仍保留在 registry。
 /// 结果接收可独立复验已发布定义，但不能替代 command 路由与副本确认对执行资格的约束。
 ///
-/// 参数说明：`application` 提供停机状态，`watch` 是冻结控制面计划，`contributor` 控制摘流。
+/// 参数说明：
+/// - `application`：`application` 提供停机状态。
+/// - `watch`：`watch` 是冻结控制面计划。
+/// - `contributor`：`contributor` 控制摘流。
 ///
 /// 返回：应用停机时正常退出；循环内可恢复读取失败只摘流并退避，不丢失当前安全快照。
 async fn run_catalog_watch_loop(
@@ -14934,7 +15726,9 @@ async fn run_catalog_watch_loop(
 
 /// 业务作用：使用对应数据库权威持久确认本副本已复验的完整 Catalog 快照。
 ///
-/// 参数说明：`watch` 固定副本身份与 datasource，`snapshot` 是待发布的同代内容。
+/// 参数说明：
+/// - `watch`：`watch` 固定副本身份与 datasource。
+/// - `snapshot`：`snapshot` 是待发布的同代内容。
 ///
 /// 返回：确认已提交且期限仍有效时返回单调截止时刻；代际竞争、过期或数据库失败返回运行期错误。
 async fn acknowledge_managed_catalog_snapshot(
@@ -14955,7 +15749,7 @@ async fn acknowledge_managed_catalog_snapshot(
             return Err(saga_error(
                 ApplicationPhase::Running,
                 "SQLite Saga backend is unavailable",
-            ))
+            ));
         }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
@@ -15024,7 +15818,8 @@ async fn acknowledge_managed_catalog_snapshot(
 
 /// 业务作用：在退出 watcher 前撤销当前副本的 Catalog Ready 租约，避免排空实例继续阻塞激活。
 ///
-/// 参数说明：`watch` 提供精确数据库与副本身份。
+/// 参数说明：
+/// - `watch`：`watch` 提供精确数据库与副本身份。
 ///
 /// 返回：无返回值；停机路径只记录数据库失败并依赖既有租约自然到期。
 async fn retire_managed_catalog_replica(watch: &ManagedCatalogWatchPlan) {
@@ -15066,7 +15861,8 @@ async fn retire_managed_catalog_replica(watch: &ManagedCatalogWatchPlan) {
 
 /// 业务作用：幂等发布当前 workflow owner 链接的完整定义，激活统一由同代快照门禁裁决。
 ///
-/// 参数说明：`watch` 同时固定数据源、发布主体、产物集合与激活策略。
+/// 参数说明：
+/// - `watch`：`watch` 同时固定数据源、发布主体、产物集合与激活策略。
 ///
 /// 返回：全部定义已首次写入或幂等命中时成功；任一发布裁决不明时返回错误。
 async fn publish_managed_local_definitions(
@@ -15081,7 +15877,7 @@ async fn publish_managed_local_definitions(
                 return Err(saga_error(
                     ApplicationPhase::Running,
                     "SQLite Saga backend is unavailable",
-                ))
+                ));
             }
             natx_core::DatabaseDriver::MySql => {
                 #[cfg(feature = "saga")]
@@ -15134,8 +15930,9 @@ async fn publish_managed_local_definitions(
 
 /// 业务作用：从刚被本副本确认的快照中选取一个能力完整候选定义并原子激活。
 ///
-/// 参数说明：`watch` 固定 Orchestrator 身份、transport 与后端，`snapshot` 同时
-/// 携带 candidate、有效 capability 和全副本确认所需的摘要。
+/// 参数说明：
+/// - `watch`：`watch` 固定 Orchestrator 身份、transport 与后端。
+/// - `snapshot`：`snapshot` 同时携带 candidate、有效 capability 和全副本确认所需的摘要。
 ///
 /// 返回：已推进 generation 时返回真；策略不自动激活、能力未齐或副本未闭合时返回假；
 /// 数据库裁决不明时返回运行期错误。
@@ -15195,7 +15992,7 @@ async fn activate_managed_validated_candidate(
             return Err(saga_error(
                 ApplicationPhase::Running,
                 "SQLite Saga backend is unavailable",
-            ))
+            ));
         }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
@@ -15253,8 +16050,10 @@ async fn activate_managed_validated_candidate(
 
 /// 业务作用：用与实际 publisher 一致的语义确认 candidate 的每个步骤已有可发布路由。
 ///
-/// 参数说明：`watch` 固定 transport 和地址政策，`snapshot` 提供当前有效租约，
-/// `artifact` 提供已封签的 owner 与步骤语义。
+/// 参数说明：
+/// - `watch`：`watch` 固定 transport 和地址政策。
+/// - `snapshot`：`snapshot` 提供当前有效租约。
+/// - `artifact`：`artifact` 提供已封签的 owner 与步骤语义。
 ///
 /// 返回：HTTP 每步至少一个合法实例，或其他 transport 每步恰有一个合法端点时为真；
 /// 缺失、歧义、语义漂移或越过地址政策时为假。
@@ -15273,8 +16072,11 @@ fn managed_candidate_capabilities_are_routable(
 
 /// 业务作用：按指定 transport 与地址政策复验一个候选定义的完整可路由性。
 ///
-/// 参数说明：`activation` 冻结当前数据面、Redis 同槽配置、result 凭据或后端、地址政策和接收身份，
-/// `snapshot` 提供有效 capability，`artifact` 提供已封签流程，`phase` 标记调用阶段。
+/// 参数说明：
+/// - `activation`：`activation` 冻结当前数据面、Redis 同槽配置、result 凭据或后端、地址政策和接收身份。
+/// - `snapshot`：`snapshot` 提供有效 capability。
+/// - `artifact`：`artifact` 提供已封签流程。
+/// - `phase`：`phase` 标记调用阶段。
 ///
 /// 返回：HTTP 每步至少一个合法实例，或其他 transport 每步恰有一个合法端点时为真；
 /// 定义无效时返回阶段错误，其他路由缺口返回假。
@@ -15349,7 +16151,9 @@ fn candidate_capabilities_are_routable(
 
 /// 业务作用：在自动激活 candidate 前证明全部有效 Ready 副本确认指定同代同摘要快照。
 ///
-/// 参数说明：`watch` 固定逻辑服务与数据库后端，`snapshot` 提供本轮刚确认的代际和摘要。
+/// 参数说明：
+/// - `watch`：`watch` 固定逻辑服务与数据库后端。
+/// - `snapshot`：`snapshot` 提供本轮刚确认的代际和摘要。
 ///
 /// 返回：集群确认闭合时返回真；查询失败返回运行期错误。
 async fn managed_catalog_generation_is_acknowledged(
@@ -15364,12 +16168,10 @@ async fn managed_catalog_generation_is_acknowledged(
         ApplicationPhase::Running,
     )?;
     match watch.driver {
-        natx_core::DatabaseDriver::Sqlite => {
-            return Err(saga_error(
-                ApplicationPhase::Running,
-                "SQLite Saga backend is unavailable",
-            ))
-        }
+        natx_core::DatabaseDriver::Sqlite => Err(saga_error(
+            ApplicationPhase::Running,
+            "SQLite Saga backend is unavailable",
+        )),
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             return nasaga_runtime::catalog_generation_fully_acknowledged_for(
@@ -15638,7 +16440,7 @@ fn read_saga_settings(
             return Err(saga_error(
                 phase,
                 "declaring the saga component requires a saga configuration section",
-            ))
+            ));
         }
     };
     validate_settings(&settings, phase)?;
@@ -15955,7 +16757,9 @@ fn validate_managed_role_settings(
 
 /// 业务作用：校验远程 capability/definition 控制面只有一套完整地址、凭据与可选签名身份。
 ///
-/// 参数说明：`settings` 是完整 Saga 配置，`phase` 标记拒绝发生的生命周期阶段。
+/// 参数说明：
+/// - `settings`：`settings` 是完整 Saga 配置。
+/// - `phase`：`phase` 标记拒绝发生的生命周期阶段。
 ///
 /// 返回：未配置或全部必填字段完整时成功；半配置协议或私钥引用时拒绝启动。
 fn validate_registry_client_settings(
@@ -15988,7 +16792,10 @@ fn validate_registry_client_settings(
 
 /// 业务作用：把 command/result 协议选择与唯一专属配置块绑定，防止残留的第二协议成为暗中权威。
 ///
-/// 参数说明：`settings` 是完整 Saga 配置，`role` 决定入站与出站必需字段，`phase` 用于错误归属。
+/// 参数说明：
+/// - `settings`：`settings` 是完整 Saga 配置。
+/// - `role`：`role` 决定入站与出站必需字段。
+/// - `phase`：`phase` 用于错误归属。
 ///
 /// 返回：协议配置单一且角色合同完整时成功；缺失、混配或无界预算时拒绝。
 fn validate_managed_transport_settings(
@@ -16209,7 +17016,10 @@ fn validate_managed_transport_settings(
 
 /// 业务作用：校验 owner route 只使用 capability registry 或显式静态开发路由中的一种权威。
 ///
-/// 参数说明：`routing` 是待冻结的 route 段，`role` 决定是否需要 owner 地址集，`phase` 用于错误归属。
+/// 参数说明：
+/// - `routing`：`routing` 是待冻结的 route 段。
+/// - `role`：`role` 决定是否需要 owner 地址集。
+/// - `phase`：`phase` 用于错误归属。
 ///
 /// 返回：模式封闭且必需政策完整时成功；双重或空路由权威时拒绝。
 fn validate_routing_settings(
@@ -16254,8 +17064,11 @@ fn validate_routing_settings(
 
 /// 业务作用：解析 capability-registry route 引用的唯一受信地址政策。
 ///
-/// 参数说明：`settings` 保存受信政策表，`routing` 保存稳定引用，`kind` 选择
-/// 必须非空的协议边界，`phase` 标记拒绝阶段。
+/// 参数说明：
+/// - `settings`：`settings` 保存受信政策表。
+/// - `routing`：`routing` 保存稳定引用。
+/// - `kind`：`kind` 选择必须非空的协议边界。
+/// - `phase`：`phase` 标记拒绝阶段。
 ///
 /// 返回：引用存在且协议边界完整时返回冻结政策；缺失或宽泛配置拒绝启动。
 fn resolve_managed_address_policy<'a>(
@@ -16281,7 +17094,10 @@ fn resolve_managed_address_policy<'a>(
 
 /// 业务作用：确认地址政策只开放当前 transport 所需的明确协议与命名空间。
 ///
-/// 参数说明：`policy` 是配置候选，`kind` 是当前唯一数据面，`phase` 标记拒绝阶段。
+/// 参数说明：
+/// - `policy`：`policy` 是配置候选。
+/// - `kind`：`kind` 是当前唯一数据面。
+/// - `phase`：`phase` 标记拒绝阶段。
 ///
 /// 返回：所选协议具有非空且规范的 allowlist 时成功；空边界、通配或非法名称拒绝。
 fn validate_managed_address_policy(
@@ -16361,8 +17177,10 @@ fn validate_managed_address_policy(
 
 /// 业务作用：在 capability 进入激活或路由快照前复验其目标仍位于受信范围。
 ///
-/// 参数说明：`policy` 是 Ready 时冻结的 allowlist，`descriptor` 是目录内不可信路由，
-/// `phase` 标记首次构造或运行期切代。
+/// 参数说明：
+/// - `policy`：`policy` 是 Ready 时冻结的 allowlist。
+/// - `descriptor`：`descriptor` 是目录内不可信路由。
+/// - `phase`：`phase` 标记首次构造或运行期切代。
 ///
 /// 返回：协议、主机、可选端口或命名空间全部命中时成功；任一越界目标拒绝。
 fn validate_capability_address(
@@ -16425,7 +17243,10 @@ fn validate_capability_address(
 
 /// 业务作用：校验可选 transport 往返预算始终为正且有界。
 ///
-/// 参数说明：`value` 是毫秒预算，`kind` 是稳定字段类别，`phase` 用于错误归属。
+/// 参数说明：
+/// - `value`：`value` 是毫秒预算。
+/// - `kind`：`kind` 是稳定字段类别。
+/// - `phase`：`phase` 用于错误归属。
 ///
 /// 返回：未覆盖或位于十毫秒到一分钟时成功；其它值拒绝。
 fn validate_optional_transport_budget(
@@ -16445,7 +17266,9 @@ fn validate_optional_transport_budget(
 
 /// 业务作用：在服务注册前完整校验 gRPC API 的 mTLS 主体与最小权限闭包。
 ///
-/// 参数说明：`api` 是 gRPC API 暴露与 caller 配置，`phase` 用于错误归属。
+/// 参数说明：
+/// - `api`：`api` 是 gRPC API 暴露与 caller 配置。
+/// - `phase`：`phase` 用于错误归属。
 ///
 /// 返回：启用面具备合法 principal、身份、租户和所需高权限 grant 时成功；闲置或不完整配置拒绝。
 fn validate_managed_grpc_api_settings(
@@ -16543,7 +17366,10 @@ fn validate_managed_grpc_api_settings(
 
 /// 业务作用：校验标准 API 只由 Orchestrator 角色暴露，且每个已启用协议都有独立授权政策。
 ///
-/// 参数说明：`settings` 含 API 与 HTTP 保留路径，`role` 是当前部署角色，`phase` 用于错误归属。
+/// 参数说明：
+/// - `settings`：`settings` 含 API 与 HTTP 保留路径。
+/// - `role`：`role` 是当前部署角色。
+/// - `phase`：`phase` 用于错误归属。
 ///
 /// 返回：暴露面与角色、授权和路径权威一致时成功；越权或闲置路径配置时拒绝。
 fn validate_managed_api_settings(
@@ -16692,7 +17518,9 @@ fn validate_managed_api_settings(
 
 /// 业务作用：校验动态 Catalog 不依赖匿名发布、未命名 capability 或无界 watch。
 ///
-/// 参数说明：`settings` 是完整 Saga 配置，`phase` 是错误归属阶段。
+/// 参数说明：
+/// - `settings`：`settings` 是完整 Saga 配置。
+/// - `phase`：`phase` 是错误归属阶段。
 ///
 /// 返回：静态模式直接成功；动态模式所需引用与预算完整时成功。
 fn validate_catalog_settings(
@@ -16764,7 +17592,9 @@ fn validate_catalog_settings(
 
 /// 业务作用：验证 Saga HTTP 子路径已经是唯一、无歧义的规范形式。
 ///
-/// 参数说明：`path` 是 context 内相对保留路径，`phase` 是错误归属阶段。
+/// 参数说明：
+/// - `path`：`path` 是 context 内相对保留路径。
+/// - `phase`：`phase` 是错误归属阶段。
 ///
 /// 返回：路径可安全逐段拼接时成功；根路径、尾斜杠、编码或特殊段拒绝。
 fn validate_saga_base_path(path: &str, phase: ApplicationPhase) -> ApplicationResult<()> {

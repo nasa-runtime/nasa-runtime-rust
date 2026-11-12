@@ -23,7 +23,7 @@ nafana-macro = { version = "2.0.0" }
 # axum: handler 与 middleware 类型(Request/Next/Response/IntoResponse);经 __private 桥暴露给宏展开
 axum = "0.8"
 # tokio: bulkhead 信号量、单请求超时、周期请求汇总任务
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 # serde: IsolationRule 让业务 yml 直接反序列化
 serde = { version = "1", features = ["derive"] }
 # serde_json: 自定义降级 JSON 的解析与响应壳拼装
@@ -48,6 +48,7 @@ naml = { version = "2.0.2" }
 config-boot = { version = "2.0.0" }
 nanacos = { version = "2.0.0", default-features = false, optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+libc = "0.2"
 
 [features]
 # 独立 controller 读取配置中心时显式编入真实传输，业务指标出口不要求此能力。

@@ -29,7 +29,9 @@ pub(super) struct KeyCompletions {
 impl KeyCompletions {
     /// 业务作用：发布按键调用和保留证据的即时容量快照，不在 owner 上调用外部观察器。
     ///
-    /// 参数说明：`health` 为当前槽健康状态。
+    /// 参数说明：
+    /// - `health`：`health` 为当前槽健康状态。
+    ///
     /// 返回：只更新数量和字节快照，不改变 Ready、暂停原因或提交资格。
     pub(super) fn publish_load(&self, health: &Arc<RwLock<GroupHealth>>) {
         let mut snapshot = health
@@ -48,7 +50,9 @@ impl KeyCompletions {
 
     /// 业务作用：提交已经越过压缩空洞后回收无需再次 fetch 的完成证据。
     ///
-    /// 参数说明：`progress` 为只在 broker 确认后推进的分区账本。
+    /// 参数说明：
+    /// - `progress`：`progress` 为只在 broker 确认后推进的分区账本。
+    ///
     /// 返回：保留尚未确认的记录；不会按本地 fetch position 提前释放结果。
     pub(super) fn prune_committed(&mut self, progress: &GroupOffsetState) {
         self.entries.retain(|(tp, offset), _| {
@@ -62,6 +66,7 @@ impl KeyCompletions {
     /// 业务作用：失权或人工定位时作废全部旧完成证据。
     ///
     /// 参数说明：无。
+    ///
     /// 返回：清除完成证据并永久撤销旧调用；实际调用的输入和名额仍保留到退出。
     pub(super) fn clear(&mut self) {
         for worker in &mut self.workers {
@@ -73,7 +78,10 @@ impl KeyCompletions {
     }
 
     /// 业务作用：人工定位只作废目标分区的完成证据，避免其它分区重复执行业务。
-    /// 参数说明：tp 为显式定位目标。
+    ///
+    /// 参数说明：
+    /// - `tp`：tp 为显式定位目标。
+    ///
     /// 返回：仅回收该分区的记录和字节额度，其它空洞后的已完成结果继续保留。
     pub(super) fn clear_partition(&mut self, tp: &Tp) {
         self.entries.retain(|(partition, _), _| partition != tp);
@@ -82,8 +90,11 @@ impl KeyCompletions {
 
     /// 业务作用：查询已实际退出的调用结果，允许进度容量不足时保留原证据。
     ///
-    /// 参数说明：`tp`、`offset` 为当前交付记录的分区与坐标。
-    /// 返回：已完成结果的副本；未执行的记录返回 None。
+    /// 参数说明：
+    /// - `tp`：当前交付记录所属分区，仅查询该分区完成证据。
+    /// - `offset`：本次实际调用首条记录的真实坐标。
+    ///
+    /// 返回：仍保留的完成结果副本；尚未完成、已经接管或已作废的证据均返回 None，不重新调用业务。
     pub(super) fn outcome(&self, tp: &Tp, offset: i64) -> Option<InvocationOutcome> {
         self.entries
             .get(&(tp.clone(), offset))
@@ -92,7 +103,10 @@ impl KeyCompletions {
 
     /// 业务作用：结果进入提交或失败治理状态机后释放其独立完成额度。
     ///
-    /// 参数说明：`tp`、`offset` 为已经被 owner 接管的责任身份。
+    /// 参数说明：
+    /// - `tp`：已由 owner 接管处理结果的分区。
+    /// - `offset`：待移除完成证据对应的调用首条坐标。
+    ///
     /// 返回：移除对应证据；不存在时不改变其它额度。
     pub(super) fn remove(&mut self, tp: &Tp, offset: i64) {
         if let Some(entry) = self.entries.remove(&(tp.clone(), offset)) {
@@ -102,7 +116,13 @@ impl KeyCompletions {
 
     /// 业务作用：在额度已经预留后发布实际退出的调用结果。
     ///
-    /// 参数说明：`identity` 为记录身份；`bytes` 为预留额度；`outcome` 为业务结论；keyed 区分执行模式；count 固定本次实际批次边界。
+    /// 参数说明：
+    /// - `identity`：`identity` 为记录身份。
+    /// - `bytes`：`bytes` 为预留额度。
+    /// - `outcome`：`outcome` 为业务结论。
+    /// - `keyed`：keyed 区分执行模式。
+    /// - `count`：count 固定本次实际批次边界。
+    ///
     /// 返回：保留一份有界证据，直到 owner 接管或 assignment 作废。
     fn insert(
         &mut self,
@@ -150,12 +170,16 @@ struct Worker {
 
 /// 业务作用：把可保留的失败说明限制为最多 1024 字节，同时保留 DLT、延后和致命语义。
 ///
-/// 参数说明：`outcome` 为业务调用的原始结论。
+/// 参数说明：
+/// - `outcome`：`outcome` 为业务调用的原始结论。
+///
 /// 返回：可以进入有界完成证据的结果；不会把错误改成成功。
 fn bounded_outcome(outcome: InvocationOutcome) -> InvocationOutcome {
     /// 业务作用：按 UTF-8 边界收缩保留的诊断，避免业务错误文本突破完成队列预算。
     ///
-    /// 参数说明：`value` 为待保留的失败说明。
+    /// 参数说明：
+    /// - `value`：`value` 为待保留的失败说明。
+    ///
     /// 返回：最多 1024 字节且仍合法的 UTF-8 文本。
     fn bounded(mut value: String) -> String {
         let mut end = value.len().min(1024);
@@ -167,7 +191,9 @@ fn bounded_outcome(outcome: InvocationOutcome) -> InvocationOutcome {
         value
     }
     match outcome {
-        InvocationOutcome::DecodeFailed { failures } => InvocationOutcome::DecodeFailed {
+        InvocationOutcome::DecodeFailed {
+            failures,
+        } => InvocationOutcome::DecodeFailed {
             failures: failures
                 .into_iter()
                 .map(|(offset, reason)| (offset, bounded(reason)))
@@ -191,7 +217,13 @@ fn bounded_outcome(outcome: InvocationOutcome) -> InvocationOutcome {
 
 impl KeyCompletions {
     /// 业务作用：在主循环收割真实完成并即时撤销过期调用，不等待慢分区退出。
-    /// 参数说明：consumer/epoch 为当前分配事实；stopping 为停止准入；health 为本槽观测。
+    ///
+    /// 参数说明：
+    /// - `consumer`：当前原生消费者，用于复验 rebalance 与分配丢失状态。
+    /// - `epoch`：本轮当前分配代次，旧代次调用只能退出而不能发布有效业务结果。
+    /// - `stopping`：stopping 为停止准入。
+    /// - `health`：health 为本槽观测。
+    ///
     /// 返回：仅有效代次的结论进入待裁决表；旧调用仍持有资源直到实际完成。
     pub(super) fn collect_finished(
         &mut self,
@@ -234,14 +266,18 @@ impl KeyCompletions {
     }
 
     /// 业务作用：识别停止和定位必须继续等待的真实业务责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仍有实际调用时为true，不把超时或确认权撤销当作完成。
     pub(super) fn has_active(&self) -> bool {
         !self.workers.is_empty()
     }
 
     /// 业务作用：在 owner 进入本地等待前复验实际完成，避免已经退出的调用继续承担 poll 等待。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：至少一个业务调用已实际结束时为 true；不提前收回责任或授权提交。
     pub(super) fn has_finished(&self) -> bool {
         self.workers
@@ -250,7 +286,9 @@ impl KeyCompletions {
     }
 
     /// 业务作用：立即发现已经实际退出的框架致命结论，禁止继续派发其它顺序域。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：存在致命结论时给出有界原因；业务失败、未确认和普通超时不触发全槽停止。
     pub(super) fn fatal_error(&self) -> Option<String> {
         self.entries
@@ -262,14 +300,21 @@ impl KeyCompletions {
     }
 
     /// 业务作用：让失败回退等待本分区实际调用，避免同坐标重读与旧副本重叠。
-    /// 参数说明：tp为需要回退或定位的分区。
+    ///
+    /// 参数说明：
+    /// - `tp`：tp为需要回退或定位的分区。
+    ///
     /// 返回：该分区仍有真实调用时为true，其它分区不受影响。
     pub(super) fn active_partition(&self, tp: &Tp) -> bool {
         self.workers.iter().any(|worker| worker.identity.0 == *tp)
     }
 
     /// 业务作用：固定已执行批次的真实边界，后续poll不能把新输入并入旧业务结果。
-    /// 参数说明：tp/offset为已执行单元的首坐标。
+    ///
+    /// 参数说明：
+    /// - `tp`：已执行单元所属分区，不能从其它分区借用完成结论。
+    /// - `offset`：该单元首条记录的真实 offset，用于固定原始批次边界。
+    ///
     /// 返回：已完成单元的原记录数；尚无结果为None。
     pub(super) fn completed_count(&self, tp: &Tp, offset: i64) -> Option<usize> {
         self.entries
@@ -278,8 +323,12 @@ impl KeyCompletions {
     }
 
     /// 业务作用：在失败分区的旧调用全部退出后解除执行保护，其它暂停原因仍独立生效。
-    /// 参数说明：consumer/health为当前native归属与暂停事实。
-    /// 返回：只恢复没有实际调用的分区，不改变任何来源位点。
+    ///
+    /// 参数说明：
+    /// - `consumer`：当前原生消费者，用于对允许恢复的目标发起 resume。
+    /// - `health`：保存各分区暂停原因的本地健康快照。
+    ///
+    /// 返回：清除已无实际调用分区的 HandlerInFlight 原因，并尝试恢复无其它保护的目标；原生恢复错误不在此上抛，不改变来源位点。
     pub(super) fn resume_idle(&self, consumer: &ConsumerClient, health: &Arc<RwLock<GroupHealth>>) {
         let targets = health
             .read()
@@ -296,7 +345,11 @@ impl KeyCompletions {
     }
 
     /// 业务作用：判定本地重读坐标是否已有实际调用，防止对同一输入重复派发。
-    /// 参数说明：tp/offset为输入身份。
+    ///
+    /// 参数说明：
+    /// - `tp`：待重新派发的输入分区。
+    /// - `offset`：待重新派发单元的首条 offset，用于匹配仍承担退出责任的调用。
+    ///
     /// 返回：仍有对应调用时为true，包括正在失权收尾的调用。
     pub(super) fn active_at(&self, tp: &Tp, offset: i64) -> bool {
         self.workers
@@ -305,8 +358,13 @@ impl KeyCompletions {
     }
 
     /// 业务作用：让一个分区的single/batch调用进入持久执行集合，主循环立即回到其它分区。
-    /// 参数说明：runtime/route为冻结执行资源；records为连续输入。
-    /// 返回：true表示已启动，false表示等待额度；启动失败交回明确框架结论。
+    ///
+    /// 参数说明：
+    /// - `runtime`：当前 owner 的共享执行池、停止门及遥测资源。
+    /// - `route`：该分区连续输入共用的冻结单条或批消费者。
+    /// - `records`：派发方已保证同分区同路由的非空连续交付输入，空集合违反内部约束并 panic。
+    ///
+    /// 返回：true 表示已登记实际调用；源停止、同坐标已有调用或额度不足时为 false；提交执行失败返回框架结论。
     pub(super) fn start_partition(
         &mut self,
         runtime: &Arc<OwnerRuntime>,
@@ -371,7 +429,14 @@ impl KeyCompletions {
     }
 
     /// 业务作用：为一个分区派发至多一个可执行key，轮转让其它分区取得新归还的调用额度。
-    /// 参数说明：runtime/attempts为冻结资源与可信次数；prepared为保序输入；health用于复验用户暂停；retry_offset 为尚在退避的失败前缀。
+    ///
+    /// 参数说明：
+    /// - `runtime`：当前 owner 的冻结配置、执行池及永久停止门。
+    /// - `attempts`：按分区及 offset 保存的可信尝试次数，派发时写入本次调用上下文。
+    /// - `prepared`：prepared为保序输入。
+    /// - `health`：health用于复验用户暂停。
+    /// - `retry_offset`：retry_offset 为尚在退避的失败前缀。
+    ///
     /// 返回：只创建有额度且不跨越同key或null屏障的调用，未执行输入继续留在队列。
     pub(super) fn launch_round(
         &mut self,
@@ -408,9 +473,17 @@ impl KeyCompletions {
 
 /// 业务作用：复用已经退出的 worker 名额，让慢 key 之外的同 key 后继继续推进。
 ///
-/// 参数说明：`runtime` 为冻结运行资源；`attempts` 为可信尝试表；`prepared` 为待派发记录；
-/// `completed` 为保留证据；`first_identity` 为本次必须预留容量的最早责任；`workers` 为实际调用集合；
-/// retry_offset 为仍在退避的失败前缀，其 key 在本轮保持关闭。
+/// 参数说明：
+/// - `runtime`：`runtime` 为冻结运行资源。
+/// - `attempts`：`attempts` 为可信尝试表。
+/// - `prepared`：`prepared` 为待派发记录。
+/// - `completed`：`completed` 为保留证据。
+/// - `first_identity`：`first_identity` 为本次必须预留容量的最早责任。
+/// - `workers`：`workers` 为实际调用集合。
+/// - `retry_offset`：retry_offset 为仍在退避的失败前缀。
+///
+/// 共同约束：其 key 在本轮保持关闭。
+///
 /// 返回：在数量、字节、顺序和 null 屏障均允许时启动调用，否则保留记录等待 owner 裁决。
 fn launch_available(
     runtime: &Arc<OwnerRuntime>,
@@ -439,7 +512,11 @@ fn launch_available(
         .saturating_add(workers.iter().map(|worker| worker.bytes).sum::<usize>());
     let reserved_records = completed.entries.len() + workers.len();
     for item in prepared.iter_mut() {
-        let PreparedTypedItem::Routed { source, route } = item else {
+        let PreparedTypedItem::Routed {
+            source,
+            route,
+        } = item
+        else {
             break;
         };
         let identity = (source.ctx.topic_partition(), source.ctx.offset);

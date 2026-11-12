@@ -70,14 +70,14 @@ pub enum Cond {
         /// 词项前缀。
         prefix: String,
     },
-    /// 全文**后缀**：`@f:(*term)`，字段必须启用 WITHSUFFIXTRIE。
+    /// 后缀匹配：TEXT 使用 `@f:(*term)`，TAG 使用 `@f:{*value}`；字段须启用 WITHSUFFIXTRIE。
     TextSuffix {
         /// 字段别名或字段名。
         field: String,
         /// 词项后缀。
         suffix: String,
     },
-    /// 全文**包含/中缀**：`@f:(*term*)`，字段必须启用 WITHSUFFIXTRIE。
+    /// 包含匹配：TEXT 使用 `@f:(*term*)`，TAG 使用 `@f:{*value*}`；字段须启用 WITHSUFFIXTRIE。
     TextContains {
         /// 字段别名或字段名。
         field: String,
@@ -131,9 +131,11 @@ pub enum GeoUnit {
 }
 
 impl GeoUnit {
-    /// 业务作用：返回 RediSearch GEO 半径参数使用的单位字符串。
+    /// 业务作用：将地理半径单位转换为 RediSearch 查询接受的参数词。
     ///
-    /// 该值会直接拼进 `FT.SEARCH`/`FT.AGGREGATE` 的 GEO 过滤表达式。
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 m、km、mi 或 ft 的静态字符串，不做单位换算。
     fn as_str(&self) -> &'static str {
         match self {
             GeoUnit::M => "m",
@@ -145,10 +147,10 @@ impl GeoUnit {
 }
 
 /// 支持 AND 组合、单字段排序与分页的查询。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Query {
     conds: Vec<Cond>,
-    sort: Option<(String, bool)>, // (alias, desc)
+    sort: Option<(String, bool)>, // 字段别名与是否降序。
     offset: usize,
     limit: usize,
     /// 调用方是否显式设置过 limit——ARRAY 模式(JSONPath filter)不支持分页,
@@ -156,8 +158,23 @@ pub struct Query {
     limit_explicit: bool,
 }
 
+impl Default for Query {
+    /// 业务作用：让通用 Default 构造与显式 new 使用同一查询窗口和未分页状态。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无过滤、无排序、offset=0、limit=10 且没有显式分页标记的查询，不访问 Redis。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Query {
-    /// 业务作用：创建不含过滤条件、使用默认分页上限的查询构造器。
+    /// 业务作用：建立无过滤条件且尚未显式分页的查询。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回 offset=0、limit=10 且无排序的查询；构造不访问 Redis。
     pub fn new() -> Self {
         Self {
             conds: Vec::new(),
@@ -168,11 +185,13 @@ impl Query {
         }
     }
 
-    /// 业务作用：追加一个 TAG 精确匹配条件,用于状态、枚举、业务 ID 等离散值查询。
+    /// 业务作用：追加离散 TAG 值的精确匹配条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的字段别名或字段名,渲染时会校验它必须是 TAG 字段。
-    /// - `value`: 要匹配的单个 tag 字面值,渲染时按 RediSearch TAG 语法转义。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `value`：待匹配的 TAG 字面值。
+    ///
+    /// 返回：返回保存条件的查询；字段和类型校验以及字面量处理发生在渲染时。
     pub fn tag_eq(mut self, field: &str, value: &str) -> Self {
         self.conds.push(Cond::TagEq {
             field: field.into(),
@@ -181,11 +200,13 @@ impl Query {
         self
     }
 
-    /// 业务作用：追加一个 TAG 多选一条件,等价于同一字段的离散值 OR。
+    /// 业务作用：追加同一 TAG 字段的多选一条件，并与已有条件按 AND 组合。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的字段别名或字段名,渲染时会校验它必须是 TAG 字段。
-    /// - `values`: 可接受的 tag 字面值列表,每个值都会按 TAG 语法转义后用 `|` 连接。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `values`：任一命中即可的 TAG 字面值集合；此处原样保存，包括空集合。
+    ///
+    /// 返回：返回追加条件的查询，不访问 Redis；空集合在 FT 渲染时成为空集哨兵，在 ARRAY 渲染时成为零宽切片。
     pub fn tag_in(mut self, field: &str, values: &[&str]) -> Self {
         self.conds.push(Cond::TagIn {
             field: field.into(),
@@ -194,12 +215,14 @@ impl Query {
         self
     }
 
-    /// 业务作用：追加一个数值闭区间条件,用于价格、数量、时间戳等范围查询。
+    /// 业务作用：追加包含两端的数值区间条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的字段别名或字段名,渲染时会校验它必须是 NUMERIC 字段。
-    /// - `min`: 区间下界,包含该值,必须是有限数。
-    /// - `max`: 区间上界,包含该值,必须是有限数且不小于 `min`。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `min`：闭区间下界，渲染时必须有限且不大于 max。
+    /// - `max`：闭区间上界，渲染时必须有限。
+    ///
+    /// 返回：返回保存边界的查询；非法数值在渲染时返回错误。
     pub fn between(mut self, field: &str, min: f64, max: f64) -> Self {
         self.conds.push(Cond::NumBetween {
             field: field.into(),
@@ -209,13 +232,14 @@ impl Query {
         self
     }
 
-    /// 业务作用：数值开区间比较：`gt/gte/lt/lte/eq`；FT 使用 `±inf` sentinel，
-    /// 无界一侧使用 `+inf` 或 `-inf`，有限浮点边界不能表达真正的无界范围。
+    /// 业务作用：保存数值比较条件，供 FT 区间与 JSONPath 比较两种渲染使用。
     ///
-    /// # 参数
-    /// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
-    /// - `op`: 当前要执行的 Redis 或配置操作。
-    /// - `value`: 需要与搜索字段比较的数值。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `op`：大于、大于等于、小于、小于等于或等于的比较关系。
+    /// - `value`：有限数值边界，渲染时校验。
+    ///
+    /// 返回：返回追加条件的查询；FT 的无界一侧使用 inf，不以有限极值模拟。
     fn num_cmp(mut self, field: &str, op: NumOp, value: f64) -> Self {
         self.conds.push(Cond::NumCmp {
             field: field.into(),
@@ -225,56 +249,68 @@ impl Query {
         self
     }
 
-    /// 业务作用：追加一个数值大于条件。
+    /// 业务作用：追加数值严格大于条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
-    /// - `value`: 开区间边界,查询只匹配大于该值的文档。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `value`：不包含在结果内的下界。
+    ///
+    /// 返回：返回包含开下界条件的查询，字段和有限性留给渲染校验。
     pub fn gt(self, field: &str, value: f64) -> Self {
         self.num_cmp(field, NumOp::Gt, value)
     }
 
-    /// 业务作用：追加一个数值大于等于条件。
+    /// 业务作用：追加数值大于或等于条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
-    /// - `value`: 闭区间边界,查询匹配大于等于该值的文档。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `value`：包含在结果内的下界。
+    ///
+    /// 返回：返回包含闭下界条件的查询，字段和有限性留给渲染校验。
     pub fn gte(self, field: &str, value: f64) -> Self {
         self.num_cmp(field, NumOp::Gte, value)
     }
 
-    /// 业务作用：追加一个数值小于条件。
+    /// 业务作用：追加数值严格小于条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
-    /// - `value`: 开区间边界,查询只匹配小于该值的文档。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `value`：不包含在结果内的上界。
+    ///
+    /// 返回：返回包含开上界条件的查询，字段和有限性留给渲染校验。
     pub fn lt(self, field: &str, value: f64) -> Self {
         self.num_cmp(field, NumOp::Lt, value)
     }
 
-    /// 业务作用：追加一个数值小于等于条件。
+    /// 业务作用：追加数值小于或等于条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
-    /// - `value`: 闭区间边界,查询匹配小于等于该值的文档。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `value`：包含在结果内的上界。
+    ///
+    /// 返回：返回包含闭上界条件的查询，字段和有限性留给渲染校验。
     pub fn lte(self, field: &str, value: f64) -> Self {
         self.num_cmp(field, NumOp::Lte, value)
     }
 
-    /// 业务作用：追加一个数值相等条件。
+    /// 业务作用：追加数值相等条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
-    /// - `value`: 要精确匹配的数值,必须是有限数。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `value`：需要精确比较的有限数值。
+    ///
+    /// 返回：返回包含相等条件的查询，渲染时按数值字段处理。
     pub fn num_eq(self, field: &str, value: f64) -> Self {
         self.num_cmp(field, NumOp::Eq, value)
     }
 
-    /// 业务作用：追加一个全文字面匹配条件,用于普通 TEXT 字段的分词检索。
+    /// 业务作用：追加 TEXT 词项条件，隔离 ASCII 查询结构字符并保留 Unicode 原文。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的字段别名或字段名,渲染时会校验它必须是 TEXT 字段。
-    /// - `text`: 要匹配的用户输入文本,会按字面量转义,不会被当作原始查询语法。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `text`：输入文本；渲染保留非 ASCII 字符以及 ASCII 字母数字、下划线和空格。
+    ///
+    /// 返回：返回保存文本的查询；其它 ASCII 字符在渲染时转为空格，不把输入当作原始查询语法。
     pub fn text_match(mut self, field: &str, text: &str) -> Self {
         self.conds.push(Cond::TextMatch {
             field: field.into(),
@@ -283,11 +319,13 @@ impl Query {
         self
     }
 
-    /// 业务作用：全文前缀匹配：`@f:(prefix*)`。
+    /// 业务作用：追加全文前缀条件，在归一化文本末尾附加通配符。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
-    /// - `prefix`: 词项前缀,会按字面量转义后再追加 `*` 前缀匹配语法。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `prefix`：待归一化的前缀文本，不直接作为查询表达式。
+    ///
+    /// 返回：返回保存条件的查询；空词项在 FT 渲染时产生匹配空集哨兵。
     pub fn text_prefix(mut self, field: &str, prefix: &str) -> Self {
         self.conds.push(Cond::TextPrefix {
             field: field.into(),
@@ -296,11 +334,13 @@ impl Query {
         self
     }
 
-    /// 业务作用：全文后缀匹配：`@f:(*suffix)`，字段建索引时必须启用 WITHSUFFIXTRIE。
+    /// 业务作用：追加后缀条件，在渲染阶段要求字段声明后缀索引能力。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 TEXT/TAG 字段别名或字段名,且必须启用 WITHSUFFIXTRIE。
-    /// - `suffix`: 词项后缀,会按字面量转义后拼成后缀查询。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `suffix`：TEXT 词项或完整 TAG 值需要匹配的后缀。
+    ///
+    /// 返回：返回保存条件的查询；FT 渲染要求 WITHSUFFIXTRIE，TEXT 按词项归一化，TAG 按完整字面值转义并使用花括号语法；ARRAY 渲染拒绝此条件。
     pub fn text_suffix(mut self, field: &str, suffix: &str) -> Self {
         self.conds.push(Cond::TextSuffix {
             field: field.into(),
@@ -309,11 +349,13 @@ impl Query {
         self
     }
 
-    /// 业务作用：全文包含或中缀匹配：`@f:(*infix*)`，字段建索引时必须启用 WITHSUFFIXTRIE。
+    /// 业务作用：追加包含条件，在渲染阶段要求字段声明后缀索引能力。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 TEXT/TAG 字段别名或字段名,且必须启用 WITHSUFFIXTRIE。
-    /// - `infix`: 词项中缀,会按字面量转义后拼成包含查询。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `infix`：TEXT 词项或完整 TAG 值需要包含的片段。
+    ///
+    /// 返回：返回保存条件的查询；FT 渲染要求 WITHSUFFIXTRIE，TEXT 按词项归一化，TAG 按完整字面值转义并使用花括号语法；ARRAY 渲染拒绝此条件。
     pub fn text_contains(mut self, field: &str, infix: &str) -> Self {
         self.conds.push(Cond::TextContains {
             field: field.into(),
@@ -322,12 +364,14 @@ impl Query {
         self
     }
 
-    /// 业务作用：全文模糊匹配，Levenshtein 距离限制为 1..=3，越界时收敛到有效范围。
+    /// 业务作用：追加全文模糊条件，并在渲染时约束 Levenshtein 距离。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
-    /// - `term`: 模糊匹配的词项,会按字面量转义。
-    /// - `distance`: Levenshtein 最大距离,渲染时限制在 1 到 3。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `term`：待归一化的词项。
+    /// - `distance`：期望编辑距离；渲染时收敛到 1 到 3。
+    ///
+    /// 返回：返回保存原输入的查询；渲染使用成对百分号表达有效距离。
     pub fn text_fuzzy(mut self, field: &str, term: &str, distance: u8) -> Self {
         self.conds.push(Cond::TextFuzzy {
             field: field.into(),
@@ -337,11 +381,13 @@ impl Query {
         self
     }
 
-    /// 业务作用：全文短语匹配：`@f:("a b c")`，词序必须精确。
+    /// 业务作用：追加保留词序的全文短语条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
-    /// - `phrase`: 要按词序匹配的短语,内部引号和反斜杠会被转义。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `phrase`：短语文本；渲染时转义双引号和反斜杠，保留其它字符。
+    ///
+    /// 返回：返回保存短语的查询；字段必须在 FT 渲染时通过 TEXT 类型核对。
     pub fn text_phrase(mut self, field: &str, phrase: &str) -> Self {
         self.conds.push(Cond::TextPhrase {
             field: field.into(),
@@ -350,14 +396,16 @@ impl Query {
         self
     }
 
-    /// 业务作用：查询 GEO 字段在指定圆心和半径内的文档。
+    /// 业务作用：追加圆形地理半径条件。
     ///
-    /// # 参数
-    /// - `field`: `DocMeta` 中声明的 GEO 字段别名或字段名。
-    /// - `lon`: 圆心经度,必须是有限数。
-    /// - `lat`: 圆心纬度,必须是有限数。
-    /// - `radius`: 搜索半径,必须是非负有限数。
-    /// - `unit`: 半径单位,控制渲染到 RediSearch 的 `m`/`km`/`mi`/`ft`。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    /// - `lon`：圆心经度，渲染时检查有限性。
+    /// - `lat`：圆心纬度，渲染时检查有限性。
+    /// - `radius`：半径，渲染时必须是非负有限数。
+    /// - `unit`：半径单位，不自动换算数值。
+    ///
+    /// 返回：返回保存条件的查询；当前构造不校验坐标地理范围，FT 渲染核对 GEO 类型与数值有限性。
     pub fn geo_within(
         mut self,
         field: &str,
@@ -376,38 +424,46 @@ impl Query {
         self
     }
 
-    /// 业务作用：原始表达式逃生舱(可信调用方;文档红线:默认路径必须走类型化 AST)。
+    /// 业务作用：接纳可信调用方提供的原始 FT 查询片段。
     ///
-    /// # 参数
-    /// - `expr`: 可信调用方提供的完整 FT 查询片段,会直接拼入查询表达式。
+    /// 参数说明：
+    /// - `expr`：完整查询片段，调用方负责语法和授权边界，不接受不可信原始输入。
+    ///
+    /// 返回：返回保存原文的查询；FT 渲染仅加外层括号，不校验或转义片段，ARRAY 渲染拒绝。
     pub fn raw(mut self, expr: &str) -> Self {
         self.conds.push(Cond::Raw(expr.into()));
         self
     }
 
-    /// 业务作用：单字段降序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE)。
+    /// 业务作用：设置 FT.SEARCH 的单字段降序规则。
     ///
-    /// # 参数
-    /// - `field`: 用于排序的 `DocMeta` 字段别名或字段名,渲染时必须声明为 SORTABLE。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    ///
+    /// 返回：返回更新排序的查询，替换此前排序；render_args 校验字段的 SORTABLE 声明。
     pub fn sort_desc(mut self, field: &str) -> Self {
         self.sort = Some((field.into(), true));
         self
     }
 
-    /// 业务作用：单字段升序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE)。
+    /// 业务作用：设置 FT.SEARCH 的单字段升序规则。
     ///
-    /// # 参数
-    /// - `field`: 用于排序的 `DocMeta` 字段别名或字段名,渲染时必须声明为 SORTABLE。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    ///
+    /// 返回：返回更新排序的查询，替换此前排序；render_args 校验字段的 SORTABLE 声明。
     pub fn sort_asc(mut self, field: &str) -> Self {
         self.sort = Some((field.into(), false));
         self
     }
 
-    /// 业务作用：设置 FT.SEARCH 查询窗口。
+    /// 业务作用：设置 FT.SEARCH 查询窗口，并记录调用方确实要求分页。
     ///
-    /// # 参数
-    /// - `offset`: 起始偏移量,对应 RediSearch `LIMIT offset limit` 的 offset。
-    /// - `limit`: 最大返回条数,同时标记调用方显式设置过分页。
+    /// 参数说明：
+    /// - `offset`：结果起始偏移。
+    /// - `limit`：本次最多返回的条数，零原样保留。
+    ///
+    /// 返回：返回保存窗口且分页标记为真的查询；ARRAY 渲染会拒绝显式分页。
     pub fn limit(mut self, offset: usize, limit: usize) -> Self {
         self.offset = offset;
         self.limit = limit;
@@ -415,29 +471,39 @@ impl Query {
         self
     }
 
-    /// 业务作用：调用方是否显式设置过 limit。
+    /// 业务作用：区分调用方明确设置分页与构造器保留的缺省窗口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回是否调用过 limit，供 ARRAY 拒绝分页及 find_keys 选择窗口策略。
     pub fn is_limit_explicit(&self) -> bool {
         self.limit_explicit
     }
 
-    /// 业务作用：有效 offset(默认 0)。
+    /// 业务作用：读取查询当前保存的分页偏移。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回构造或最后一次 limit 调用保存的 offset，不读取 Redis。
     pub fn effective_offset(&self) -> usize {
         self.offset
     }
 
-    /// 业务作用：有效 limit(默认 10;未显式设置时 `find_keys` 会改用大上限)。
+    /// 业务作用：读取查询当前保存的分页上限。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回当前 limit；未显式分页时 find_keys 使用其独立的窗口策略。
     pub fn effective_limit(&self) -> usize {
         self.limit
     }
 
-    /// 业务作用：渲染查询串(字段/类型强校验;meta 是唯一事实源)。
-    /// 渲染为 FT 查询串。**返回空串 `""` = MATCH_NONE 哨兵**:某个 TEXT 条件的值
-    /// 转义后为纯空白(纯标点/空串,如 `+++`/`...`)——无任何可匹配 token,整条 AND query 匹配空集。
-    /// 此时**绝不**发出 `@field:(   )`(FT 语法错误);调用方(find/count/aggregate)见 `""` 直接返回
-    /// 空结果/0,不打 FT.SEARCH。真·无条件用 `*`(见下),与 `""` 区分。
+    /// 业务作用：将过滤条件按 AND 组合为 FT 表达式，在各条件渲染时核对字段和可支持的输入。
     ///
-    /// # 参数
-    /// - `meta`: 当前文档类型的元数据,用于校验字段存在性、字段类型和查询能力。
+    /// 参数说明：
+    /// - `meta`：用于定位字段及核对类型、排序与后缀能力的文档元数据。
+    ///
+    /// 返回：无条件时返回 *；普通条件返回表达式，已遍历条件不合法时返回错误。空 TAG 候选集合或 TEXT 归一化后无词项会提前返回空串哨兵，执行器应按空集处理而不发 FT 查询。排序和分页由 render_args 单独校验；Raw 原文由调用方负责。
     pub fn render(&self, meta: &DocMeta) -> Result<String> {
         if self.conds.is_empty() {
             return Ok("*".into()); // 全量(配 limit 用)
@@ -445,18 +511,32 @@ impl Query {
         let mut parts = Vec::with_capacity(self.conds.len());
         for c in &self.conds {
             parts.push(match c {
-                Cond::TagEq { field, value } => {
+                Cond::TagEq {
+                    field,
+                    value,
+                } => {
                     let f = require_field(meta, field, "TagEq")?;
                     require_type(f, matches!(f.ftype, FieldType::Tag { .. }), "Tag")?;
                     format!("@{}:{{{}}}", f.alias_or_name(), escape_tag(value))
                 }
-                Cond::TagIn { field, values } => {
+                Cond::TagIn {
+                    field,
+                    values,
+                } => {
                     let f = require_field(meta, field, "TagIn")?;
                     require_type(f, matches!(f.ftype, FieldType::Tag { .. }), "Tag")?;
+                    // 空候选集合不可能命中；返回空集哨兵，不能把空花括号交给 FT 语法解析。
+                    if values.is_empty() {
+                        return Ok(String::new());
+                    }
                     let alts: Vec<String> = values.iter().map(|v| escape_tag(v)).collect();
                     format!("@{}:{{{}}}", f.alias_or_name(), alts.join("|"))
                 }
-                Cond::NumBetween { field, min, max } => {
+                Cond::NumBetween {
+                    field,
+                    min,
+                    max,
+                } => {
                     let f = require_field(meta, field, "NumBetween")?;
                     require_type(f, matches!(f.ftype, FieldType::Numeric { .. }), "Numeric")?;
                     //FT 路径与 JSONPath 路径统一——拒绝 NaN/Infinity 与 min>max
@@ -475,9 +555,14 @@ impl Query {
                     // 解析后的数值比较），故此处保留 Rust 格式；跨语言格式对齐只需在**存储**路径完成。
                     format!("@{}:[{} {}]", f.alias_or_name(), min, max)
                 }
-                Cond::NumCmp { field, op, value } => {
+                Cond::NumCmp {
+                    field,
+                    op,
+                    value,
+                } => {
                     let f = require_field(meta, field, "NumCmp")?;
                     require_type(f, matches!(f.ftype, FieldType::Numeric { .. }), "Numeric")?;
+                    // 非有限数不能作为数值边界交给查询语法解释。
                     if !value.is_finite() {
                         return Err(NasaRedisError::Config(format!(
                             "NumCmp 字段 \"{field}\" 的值必须有限(value={value})"
@@ -493,7 +578,10 @@ impl Query {
                     };
                     format!("@{}:{}", f.alias_or_name(), range)
                 }
-                Cond::TextMatch { field, text } => {
+                Cond::TextMatch {
+                    field,
+                    text,
+                } => {
                     let f = require_field(meta, field, "TextMatch")?;
                     require_type(f, matches!(f.ftype, FieldType::Text { .. }), "Text")?;
                     //调用者文本**必须转义**——未转义时空格/括号/`|-@*"`等会改变
@@ -505,7 +593,10 @@ impl Query {
                     }
                     format!("@{}:({})", f.alias_or_name(), esc)
                 }
-                Cond::TextPrefix { field, prefix } => {
+                Cond::TextPrefix {
+                    field,
+                    prefix,
+                } => {
                     let f = require_field(meta, field, "TextPrefix")?;
                     require_type(f, matches!(f.ftype, FieldType::Text { .. }), "Text")?;
                     let esc = escape_text(prefix);
@@ -515,23 +606,49 @@ impl Query {
                     // term 转义(限字面),`*` 作前缀语法附在转义后(不被转义)
                     format!("@{}:({}*)", f.alias_or_name(), esc)
                 }
-                Cond::TextSuffix { field, suffix } => {
+                Cond::TextSuffix {
+                    field,
+                    suffix,
+                } => {
                     let f = require_field(meta, field, "TextSuffix")?;
                     require_suffix_trie(f, "TextSuffix")?;
-                    let esc = escape_text(suffix);
+                    let is_tag = matches!(f.ftype, FieldType::Tag { .. });
+                    // TAG 使用独立语法并保留完整字面值，不能按全文分词改写标点或空格。
+                    let esc = if is_tag {
+                        escape_tag(suffix)
+                    } else {
+                        escape_text(suffix)
+                    };
                     if esc.trim().is_empty() {
                         return Ok(String::new());
                     }
-                    format!("@{}:(*{})", f.alias_or_name(), esc)
+                    if is_tag {
+                        format!("@{}:{{*{}}}", f.alias_or_name(), esc)
+                    } else {
+                        format!("@{}:(*{})", f.alias_or_name(), esc)
+                    }
                 }
-                Cond::TextContains { field, infix } => {
+                Cond::TextContains {
+                    field,
+                    infix,
+                } => {
                     let f = require_field(meta, field, "TextContains")?;
                     require_suffix_trie(f, "TextContains")?;
-                    let esc = escape_text(infix);
+                    let is_tag = matches!(f.ftype, FieldType::Tag { .. });
+                    // 通配符只由框架加在字面值两端，输入里的 TAG 语法字符仍须转义。
+                    let esc = if is_tag {
+                        escape_tag(infix)
+                    } else {
+                        escape_text(infix)
+                    };
                     if esc.trim().is_empty() {
                         return Ok(String::new());
                     }
-                    format!("@{}:(*{}*)", f.alias_or_name(), esc)
+                    if is_tag {
+                        format!("@{}:{{*{}*}}", f.alias_or_name(), esc)
+                    } else {
+                        format!("@{}:(*{}*)", f.alias_or_name(), esc)
+                    }
                 }
                 Cond::TextFuzzy {
                     field,
@@ -548,7 +665,10 @@ impl Query {
                     let pct = "%".repeat((*distance).clamp(1, 3) as usize);
                     format!("@{}:({}{}{})", f.alias_or_name(), pct, esc, pct)
                 }
-                Cond::TextPhrase { field, phrase } => {
+                Cond::TextPhrase {
+                    field,
+                    phrase,
+                } => {
                     let f = require_field(meta, field, "TextPhrase")?;
                     require_type(f, matches!(f.ftype, FieldType::Text { .. }), "Text")?;
                     // 短语:引号包裹,内部仅转义 `"`/`\`(空格作词分隔保留,使引擎按词序匹配)
@@ -571,6 +691,7 @@ impl Query {
                 } => {
                     let f = require_field(meta, field, "GeoWithin")?;
                     require_type(f, matches!(f.ftype, FieldType::Geo), "Geo")?;
+                    // 非有限坐标或负半径不能表达有效圆形区域，在生成命令前拒绝。
                     if !lon.is_finite() || !lat.is_finite() || !radius.is_finite() || *radius < 0.0
                     {
                         return Err(NasaRedisError::Config(format!(
@@ -586,26 +707,37 @@ impl Query {
                         unit.as_str()
                     )
                 }
+                // 此分支保留可信调用方的查询能力，不把原始片段当作已经转义的业务值。
                 Cond::Raw(expr) => format!("({expr})"),
             });
         }
         Ok(parts.join(" ")) // FT.SEARCH 空格 = AND
     }
 
-    /// 业务作用：排序/分页参数(actuator 组命令用;sortable 校验在此)。
+    /// 业务作用：生成 FT.SEARCH 的单字段排序与分页参数。
     ///
-    /// # 参数
-    /// - `meta`: 当前文档类型的元数据,用于校验排序字段存在且声明为 SORTABLE。
+    /// 参数说明：
+    /// - `meta`：用于定位字段及核对类型、排序与后缀能力的文档元数据。
+    ///
+    /// 返回：字段存在且可排序时返回 SORTBY 与 LIMIT 参数，无排序时只返回 LIMIT；排序字段不合法返回错误，不发送命令。
     pub fn render_args(&self, meta: &DocMeta) -> Result<Vec<String>> {
         let mut args = Vec::new();
         if let Some((field, desc)) = &self.sort {
             let f = require_field(meta, field, "sort")?;
             let sortable = matches!(
                 f.ftype,
-                FieldType::Tag { sortable: true, .. }
-                    | FieldType::Text { sortable: true, .. }
-                    | FieldType::Numeric { sortable: true, .. }
+                FieldType::Tag {
+                    sortable: true,
+                    ..
+                } | FieldType::Text {
+                    sortable: true,
+                    ..
+                } | FieldType::Numeric {
+                    sortable: true,
+                    ..
+                }
             );
+            // 不能把未声明可排序的字段当作有效排序键，避免查询结果顺序与调用意图不一致。
             if !sortable {
                 return Err(NasaRedisError::Config(format!(
                     "字段 \"{field}\" 未声明 SORTABLE,不能排序(metadata 构建期约束)"
@@ -626,13 +758,16 @@ impl Query {
     }
 }
 
-// Looks up a field and reports the current query context on failure.
+/// 业务作用：把查询别名绑定到文档声明，拒绝访问未声明字段。
 ///
-/// # 参数
-/// 业务作用：- `meta`: 搜索字段的元数据定义。
-/// - `alias`: 搜索查询中暴露给业务侧的字段别名。
-/// - `ctx`: 本次格式化、日志或运行阶段的上下文。
+/// 参数说明：
+/// - `meta`：提供字段定义的文档元数据。
+/// - `alias`：查询可见的字段别名，未设置别名时为字段名。
+/// - `ctx`：标识本次查询条件或管道阶段的错误上下文。
+///
+/// 返回：找到字段时返回借用的元数据，否则返回包含上下文及可用别名的配置错误。
 fn require_field<'a>(meta: &'a DocMeta, alias: &str, ctx: &str) -> Result<&'a super::FieldMeta> {
+    // 未声明的别名不能被当作自由字段表达式拼入查询，必须由当前元数据明确接纳。
     meta.field(alias).ok_or_else(|| {
         NasaRedisError::Config(format!(
             "{ctx}: 字段 \"{alias}\" 不在 DocMeta(可用: {:?})",
@@ -644,12 +779,13 @@ fn require_field<'a>(meta: &'a DocMeta, alias: &str, ctx: &str) -> Result<&'a su
     })
 }
 
-/// 业务作用：后缀与中缀查询要求字段是 Text/Tag **且** 建索引时启用 WITHSUFFIXTRIE；
-/// 否则引擎扫不出结果(静默空),提前 fail-fast 引导改 schema。
+/// 业务作用：在渲染后缀或中缀条件前核对元数据声明的后缀索引能力。
 ///
-/// # 参数
-/// - `f`: 需要校验后缀/中缀查询能力的搜索字段元数据。
-/// - `ctx`: 本次格式化、日志或运行阶段的上下文。
+/// 参数说明：
+/// - `f`：已定位的字段元数据。
+/// - `ctx`：用于说明拒绝来源的条件名称。
+///
+/// 返回：Text/Tag 且 with_suffix_trie 为真时成功，否则返回配置错误；不读取实际 Redis 索引。
 fn require_suffix_trie(f: &super::FieldMeta, ctx: &str) -> Result<()> {
     let ok = matches!(
         f.ftype,
@@ -661,6 +797,7 @@ fn require_suffix_trie(f: &super::FieldMeta, ctx: &str) -> Result<()> {
             ..
         }
     );
+    // 元数据未声明后缀能力时拒绝构造依赖该能力的查询，不能静默退化匹配语义。
     if !ok {
         return Err(NasaRedisError::Config(format!(
             "{ctx}: 字段 \"{}\" 需 Text/Tag 且建索引时 WITHSUFFIXTRIE(实际 {:?})",
@@ -671,13 +808,16 @@ fn require_suffix_trie(f: &super::FieldMeta, ctx: &str) -> Result<()> {
     Ok(())
 }
 
-// Checks that a field has the required query type.
+/// 业务作用：根据已计算的类型判定拒绝字段与查询条件不兼容的组合。
 ///
-/// # 参数
-/// 业务作用：- `f`: 需要校验查询类型兼容性的搜索字段元数据。
-/// - `ok`: 实际校验结果。
-/// - `want`: 断言期望的结果。
+/// 参数说明：
+/// - `f`：已定位的字段元数据，用于错误描述。
+/// - `ok`：调用方按条件类型计算的兼容性判定。
+/// - `want`：错误中展示的期望字段类型。
+///
+/// 返回：兼容时成功，否则返回包含字段及预期类型的配置错误。
 fn require_type(f: &super::FieldMeta, ok: bool, want: &str) -> Result<()> {
+    // 字段与条件的解释规则不兼容时拒绝，避免把数据值按另一种索引类型处理。
     if !ok {
         return Err(NasaRedisError::Config(format!(
             "字段 \"{}\" 类型 {:?} 与条件不符(需要 {want})",
@@ -689,27 +829,22 @@ fn require_type(f: &super::FieldMeta, ok: bool, want: &str) -> Result<()> {
 }
 
 impl Query {
-    /// 业务作用：为 ARRAY 文档查询渲染 RedisJSON JSONPath 条件，并拒绝不支持的查询选项。
-    /// 返回：过滤表达式；排序、显式分页或无法转换的条件返回错误。
+    /// 业务作用：为 ARRAY 文档生成 TAG 或数值 JSONPath 过滤器，并在本地拒绝不能表达的选项。
     ///
-    /// # 参数
-    /// - `meta`: 当前文档类型的元数据,用于校验字段类型并决定 JSON 字段别名。
+    /// 参数说明：
+    /// - `meta`：用于定位字段及核对类型、排序与后缀能力的文档元数据。
     ///
-    /// 约束:
-    ///   · 不支持 sort(子文档级排序 RedisJSON 不支持;要排序用 DataType::Json 单文档);
-    ///   · 不支持显式分页(limit_explicit;默认 limit 视为未分页);
-    ///   · TextMatch/Raw 无法翻译成 JSONPath(TEXT 是 FT 引擎语义;Raw 是 FT 语法)→ 拒绝;
-    ///   · 无条件 = `$[*]`(全量);
-    ///   · TagEq → `@.f=='v'`(单引号字面量);TagIn → `(@.f=='v1' || @.f=='v2')`;NumBetween →
-    ///     `(@.f>=min && @.f<=max)`;多条件空格语义换 ` && `(JSONPath AND)。
-    /// 字段引用用 alias(`@.alias`)——与 FT.SEARCH/JSON 文档字段名保持一致。
+    /// 返回：无条件返回 `$[*]`，空 TAG 候选集合返回不会选择子文档的 `$[0:0]`，其它可表达条件返回过滤路径；排序、显式分页、TEXT/GEO、Raw、非法字段/数值或不支持的字符串字面量返回错误。字段引用按存储 name 或显式 json_path 的单值路径定位，别名只用于查找定义；路径不合法时返回错误，不发送 Redis 命令。
+    /// 数值条件的参数为 f64，大整数可能在调用前已经舍入；生成路径沿用 RedisJSON 的数值比较，混合整数与浮点记录可能匹配相邻业务值。该路径也用于条件删除，精确身份定位应使用按 ID 入口或字符串字段。
     pub fn render_json_path_filter(&self, meta: &DocMeta) -> Result<String> {
+        // ARRAY 路径不能承诺子文档排序，拒绝选项比忽略排序更能保持调用合同。
         if self.sort.is_some() {
             return Err(NasaRedisError::Config(
                 "ARRAY 模式不支持 sort(子文档级排序 RedisJSON 不支持;需排序用 DataType::Json)"
                     .into(),
             ));
         }
+        // JSONPath 过滤没有这里的分页能力，显式窗口不能被悄悄丢弃。
         if self.limit_explicit {
             return Err(NasaRedisError::Config(
                 "ARRAY 模式不支持分页(子文档级 limit 不支持;需分页用 DataType::Json 或业务层补救)"
@@ -725,15 +860,20 @@ impl Query {
                 Cond::TagEq { field, value } => {
                     let f = require_field(meta, field, "TagEq")?;
                     require_type(f, matches!(f.ftype, FieldType::Tag { .. }), "Tag")?;
-                    format!("@.{}=={}", f.alias_or_name(), json_path_literal(value)?)
+                    // 查询别名只用于找到定义，实际读取必须绑定存储来源。
+                    format!("{}=={}", json_path_field(f)?, json_path_literal(value)?)
                 }
                 Cond::TagIn { field, values } => {
                     let f = require_field(meta, field, "TagIn")?;
                     require_type(f, matches!(f.ftype, FieldType::Tag { .. }), "Tag")?;
-                    let alias = f.alias_or_name();
+                    // ARRAY 查询和删除都需要有效的空路径；零宽切片不会误选任何子文档。
+                    if values.is_empty() {
+                        return Ok("$[0:0]".into());
+                    }
+                    let reference = json_path_field(f)?;
                     let alts: Vec<String> = values
                         .iter()
-                        .map(|v| Ok(format!("@.{alias}=={}", json_path_literal(v)?)))
+                        .map(|v| Ok(format!("{reference}=={}", json_path_literal(v)?)))
                         .collect::<Result<Vec<_>>>()?;
                     format!("({})", alts.join(" || "))
                 }
@@ -752,8 +892,8 @@ impl Query {
                             "NumBetween 字段 \"{field}\" min({min}) > max({max}),空区间"
                         )));
                     }
-                    let alias = f.alias_or_name();
-                    format!("(@.{alias}>={min} && @.{alias}<={max})")
+                    let reference = json_path_field(f)?;
+                    format!("({reference}>={min} && {reference}<={max})")
                 }
                 Cond::NumCmp { field, op, value } => {
                     let f = require_field(meta, field, "NumCmp")?;
@@ -763,13 +903,13 @@ impl Query {
                             "JSONPath 数值必须有限(NaN/Infinity 非法)".into(),
                         ));
                     }
-                    let alias = f.alias_or_name();
+                    let reference = json_path_field(f)?;
                     match op {
-                        NumOp::Gt => format!("(@.{alias}>{value})"),
-                        NumOp::Gte => format!("(@.{alias}>={value})"),
-                        NumOp::Lt => format!("(@.{alias}<{value})"),
-                        NumOp::Lte => format!("(@.{alias}<={value})"),
-                        NumOp::Eq => format!("(@.{alias}=={value})"),
+                        NumOp::Gt => format!("({reference}>{value})"),
+                        NumOp::Gte => format!("({reference}>={value})"),
+                        NumOp::Lt => format!("({reference}<{value})"),
+                        NumOp::Lte => format!("({reference}<={value})"),
+                        NumOp::Eq => format!("({reference}=={value})"),
                     }
                 }
                 Cond::TextMatch { .. }
@@ -792,6 +932,106 @@ impl Query {
         }
         Ok(format!("$[?({})]", parts.join(" && ")))
     }
+}
+
+/// 业务作用：将实际 JSON 属性名编码成单个括号选择器，隔离名称中的路径语法。
+///
+/// 参数说明：
+/// - `name`：需要原样定位的 JSON 对象属性名，不是查询别名或路径表达式。
+///
+/// 返回：返回带双引号的单属性选择器，反斜杠与双引号按属性名语法转义；含 U+0020 以下控制字符时返回配置错误，不生成可能错配的路径。
+pub(super) fn json_path_property(name: &str) -> Result<String> {
+    // 控制字符的 JSON 文本转义不等同于路径中的属性名，不能让它静默选择另一个成员。
+    if name.chars().any(|ch| ch < '\u{20}') {
+        return Err(NasaRedisError::Config(
+            "ARRAY JSONPath 属性名不能含控制字符".into(),
+        ));
+    }
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("[\"{escaped}\"]"))
+}
+
+/// 业务作用：将文档字段的存储来源转换为当前子文档内的单值引用，避免查询别名改变被查询或删除的对象。
+///
+/// 参数说明：
+/// - `field`：已按查询别名定位的字段定义，name 为默认属性名，json_path 为可选显式存储路径。
+///
+/// 返回：无显式路径时按完整 name 定位属性；显式路径须从 `$` 开始，仅支持点号属性、引号括号属性和有符号 64 位数组下标，返回以 `@` 开始的规范化引用。拒绝多值选择、过滤表达式、控制字符、非法转义及越界下标，不发送 Redis 命令。
+fn json_path_field(field: &super::FieldMeta) -> Result<String> {
+    let Some(path) = &field.json_path else {
+        return Ok(format!("@{}", json_path_property(&field.name)?));
+    };
+    let invalid = || {
+        NasaRedisError::Config(
+            "ARRAY 字段 json_path 仅支持从 $ 开始的单值属性或数组下标路径".into(),
+        )
+    };
+    // ARRAY 过滤以子文档为边界，根引用与多值表达式不能直接拼接进删除条件。
+    let mut rest = path.strip_prefix('$').ok_or_else(invalid)?;
+    if rest.is_empty() || rest.chars().any(|ch| ch < '\u{20}') {
+        return Err(invalid());
+    }
+    let mut reference = String::from("@");
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix('.') {
+            rest = tail;
+            if rest.starts_with('[') {
+                continue;
+            }
+            let length = rest
+                .char_indices()
+                .take_while(|(_, ch)| ch.is_alphanumeric() || "-_`~+#%$^/:".contains(*ch))
+                .map(|(offset, ch)| offset + ch.len_utf8())
+                .last()
+                .unwrap_or(0);
+            if length == 0 {
+                return Err(invalid());
+            }
+            reference.push_str(&json_path_property(&rest[..length])?);
+            rest = &rest[length..];
+        } else if let Some(tail) = rest.strip_prefix('[') {
+            rest = tail;
+            if let Some(quote @ ('\'' | '"')) = rest.chars().next() {
+                let mut chars = rest[quote.len_utf8()..].char_indices();
+                let mut name = String::new();
+                let end = loop {
+                    let (offset, ch) = chars.next().ok_or_else(invalid)?;
+                    if ch == quote {
+                        break quote.len_utf8() + offset + ch.len_utf8();
+                    }
+                    if ch == '\\' {
+                        let (_, escaped) = chars.next().ok_or_else(invalid)?;
+                        // 属性名只接受当前包裹引号与反斜杠转义；其它转义不能猜测成不同的属性。
+                        if escaped != quote && escaped != '\\' {
+                            return Err(invalid());
+                        }
+                        name.push(escaped);
+                    } else {
+                        name.push(ch);
+                    }
+                };
+                rest = rest[end..].strip_prefix(']').ok_or_else(invalid)?;
+                reference.push_str(&json_path_property(&name)?);
+            } else {
+                let end = rest.find(']').ok_or_else(invalid)?;
+                let raw = &rest[..end];
+                let digits = raw.strip_prefix('-').unwrap_or(raw);
+                // 只接纳单一下标，不能把逗号、切片或溢出数字变成隐含的多对象选择。
+                if digits.is_empty()
+                    || !digits.bytes().all(|ch| ch.is_ascii_digit())
+                    || (digits.len() > 1 && digits.starts_with('0'))
+                {
+                    return Err(invalid());
+                }
+                let index = raw.parse::<i64>().map_err(|_| invalid())?;
+                reference.push_str(&format!("[{index}]"));
+                rest = &rest[end + 1..];
+            }
+        } else {
+            return Err(invalid());
+        }
+    }
+    Ok(reference)
 }
 
 // ───────────────────────── FT.AGGREGATE(最小封装)─────────────────────────
@@ -836,93 +1076,112 @@ pub struct Aggregate {
 }
 
 impl Aggregate {
-    /// 业务作用：创建空的聚合管道构造器。
+    /// 业务作用：建立没有任何聚合管道阶段的构造器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：返回空 LOAD/GROUPBY/REDUCE/APPLY/FILTER/SORTBY 且未指定 LIMIT 的聚合定义。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 业务作用：从文档加载字段进入聚合管道，供 APPLY/FILTER/SORTBY 使用。
+    /// 业务作用：追加从文档加载到聚合管道的字段。
     ///
-    /// # 参数
-    /// - `fields`: 需要加载到聚合管道的 `DocMeta` 字段别名列表。
+    /// 参数说明：
+    /// - `fields`：DocMeta 公开的字段别名列表，追加顺序保留。
+    ///
+    /// 返回：返回保存 LOAD 列表的聚合定义，字段存在性在渲染时校验。
     pub fn load(mut self, fields: &[&str]) -> Self {
         self.load.extend(fields.iter().map(|s| s.to_string()));
         self
     }
 
-    /// 业务作用：计算 APPLY 表达式并命名为输出列（例如 `apply("@sum / @n", "avg")`）。**表达式由可信调用方
-    /// 提供**(RediSearch 表达式语法,绕过转义;同 Raw 的信任边界)。
+    /// 业务作用：追加由可信调用方定义的聚合计算列。
     ///
-    /// # 参数
-    /// - `expr`: RediSearch 聚合表达式,由可信调用方负责保证语法和注入边界。
-    /// - `as_alias`: 表达式输出列名,后续 FILTER/SORTBY 或结果读取会使用该别名。
+    /// 参数说明：
+    /// - `expr`：原样发送的 RediSearch 表达式，调用方负责语法与输入信任边界。
+    /// - `as_alias`：计算结果的输出列名。
+    ///
+    /// 返回：返回保存 APPLY 的定义；渲染拒绝空表达式或空别名，不转义表达式。
     pub fn apply(mut self, expr: &str, as_alias: &str) -> Self {
         self.applies.push((expr.into(), as_alias.into()));
         self
     }
 
-    /// 业务作用：按 FILTER 表达式过滤聚合行（例如 `filter("@count > 10")`）。**表达式由可信调用方提供**。
+    /// 业务作用：追加由可信调用方定义的聚合行过滤表达式。
     ///
-    /// # 参数
-    /// - `expr`: RediSearch 聚合过滤表达式,直接拼入 FT.AGGREGATE 参数。
+    /// 参数说明：
+    /// - `expr`：原样发送的聚合过滤表达式，调用方负责语法与输入信任边界。
+    ///
+    /// 返回：返回保存 FILTER 的定义；渲染拒绝空表达式，不改写原文。
     pub fn filter(mut self, expr: &str) -> Self {
         self.filters.push(expr.into());
         self
     }
 
-    /// 业务作用：GROUPBY 字段(meta 别名;render 时校验存在)。可多次调用。
+    /// 业务作用：追加聚合分组字段并保留字段调用顺序。
     ///
-    /// # 参数
-    /// - `field`: 用作分组键的 `DocMeta` 字段别名或字段名。
+    /// 参数说明：
+    /// - `field`：DocMeta 公开的字段别名；未设置别名时使用字段名。
+    ///
+    /// 返回：返回保存 GROUPBY 字段的定义，渲染时核对字段存在性。
     pub fn group_by(mut self, field: &str) -> Self {
         self.group_by.push(field.into());
         self
     }
 
-    /// 业务作用：REDUCE + 输出别名(查询结果行里的列名)。
+    /// 业务作用：追加聚合计算器及其输出列名。
     ///
-    /// # 参数
-    /// - `r`: 聚合 reducer,定义 COUNT/SUM/AVG 等聚合动作及其输入字段。
-    /// - `as_alias`: reducer 输出列名,查询结果和后续 SORTBY 会使用该别名。
+    /// 参数说明：
+    /// - `r`：聚合动作、输入字段和可选分位数参数。
+    /// - `as_alias`：该计算器在结果行中的输出名称。
+    ///
+    /// 返回：返回保存计算器的定义；无分组字段时渲染 GROUPBY 0，字段引用与分位数范围在渲染时校验。
     pub fn reduce(mut self, r: Reducer, as_alias: &str) -> Self {
         self.reducers.push((r, as_alias.into()));
         self
     }
 
-    /// 业务作用：聚合结果降序排序(别名 = GROUPBY 字段 / reducer 输出 / APPLY 输出)。**可多次调用 = 多字段 SORTBY**
-    /// (按调用顺序 `@f1 DIR1 @f2 DIR2 ...`)。
+    /// 业务作用：向聚合结果追加一个降序键，保留多字段优先级。
     ///
-    /// # 参数
-    /// - `alias`: GROUPBY 字段、reducer 输出或 APPLY 输出的列名。
+    /// 参数说明：
+    /// - `alias`：LOAD/GROUPBY、计算器或 APPLY 提供的输出列名。
+    ///
+    /// 返回：返回追加排序的聚合定义，不替换已有键；渲染时校验列名来源。
     pub fn sort_desc(mut self, alias: &str) -> Self {
         self.sort_by.push((alias.into(), true));
         self
     }
 
-    /// 业务作用：聚合结果升序排序(别名 = GROUPBY 字段 / reducer 输出 / APPLY 输出)。
+    /// 业务作用：向聚合结果追加一个升序键，保留多字段优先级。
     ///
-    /// # 参数
-    /// - `alias`: GROUPBY 字段、reducer 输出或 APPLY 输出的列名。
+    /// 参数说明：
+    /// - `alias`：LOAD/GROUPBY、计算器或 APPLY 提供的输出列名。
+    ///
+    /// 返回：返回追加排序的聚合定义，不替换已有键；渲染时校验列名来源。
     pub fn sort_asc(mut self, alias: &str) -> Self {
         self.sort_by.push((alias.into(), false));
         self
     }
 
-    /// 业务作用：设置 FT.AGGREGATE 输出窗口。
+    /// 业务作用：设置聚合管道末端的输出窗口。
     ///
-    /// # 参数
-    /// - `offset`: 聚合结果起始偏移量。
-    /// - `limit`: 聚合结果最大返回行数。
+    /// 参数说明：
+    /// - `offset`：输出结果起始偏移。
+    /// - `limit`：最多返回的行数，零原样保留。
+    ///
+    /// 返回：返回保存 LIMIT 的聚合定义，替换先前窗口，不改变前面阶段的计算范围。
     pub fn limit(mut self, offset: usize, limit: usize) -> Self {
         self.limit = Some((offset, limit));
         self
     }
 
-    /// 业务作用：渲染 FT.AGGREGATE 的管道参数(index 与查询表达式由 actuator 拼前缀)。
-    /// GROUPBY/REDUCE 引用的字段经 meta 校验(输出别名除外)。
+    /// 业务作用：按固定阶段顺序生成聚合参数，并核对字段引用、分位数和输出列来源。
     ///
-    /// # 参数
-    /// - `meta`: 当前文档类型的元数据,用于校验 LOAD/GROUPBY/REDUCE 引用的字段。
+    /// 参数说明：
+    /// - `meta`：用于核对 LOAD/GROUPBY/REDUCE 字段的元数据。
+    ///
+    /// 返回：成功返回 LOAD、GROUPBY/REDUCE、APPLY、FILTER、SORTBY、LIMIT 的有序参数；不合法引用、分位数或空表达式返回错误。可信表达式原样保留，不发送命令。
     pub fn render_args(&self, meta: &DocMeta) -> Result<Vec<String>> {
         let mut args = Vec::new();
         // LOAD 必须最先把文档字段载入管道；字段经 meta 校验后渲染为 `@alias`。
@@ -952,6 +1211,7 @@ impl Aggregate {
                     }
                     // QUANTILE:2 参(@field + q)
                     Reducer::Quantile(field, q) => {
+                        // 分位值必须处于闭区间，范围判断同时拒绝 NaN，避免下发无定义的计算。
                         if !(0.0..=1.0).contains(q) {
                             return Err(NasaRedisError::Config(format!(
                                 "QUANTILE q 必须 ∈ [0,1],得到 {q}"
@@ -1010,8 +1270,7 @@ impl Aggregate {
             args.push(expr.clone());
         }
         if !self.sort_by.is_empty() {
-            //校验每个 sort alias ∈ {GROUPBY 输出列} ∪ {reducer 输出} ∪ {APPLY 输出}——
-            // 拼错的 alias 在部分 RediSearch 版本**静默丢序**(违规范3),提前 Err 暴露。
+            // 排序只能引用本管道声明的输出列，避免把拼写错误交给 Redis 解释。
             let mut valid: Vec<String> = self.reducers.iter().map(|(_, a)| a.clone()).collect();
             valid.extend(self.applies.iter().map(|(_, a)| a.clone()));
             for g in &self.group_by {
@@ -1049,46 +1308,50 @@ impl Aggregate {
     }
 }
 
-/// 业务作用：JSONPath 字符串字面量:**按内容选包裹引号**。
+/// 业务作用：编码 ARRAY 条件和子文档 ID 的字符串比较值，拒绝不能保持字面身份的字符组合。
 ///
-/// RedisJSON JSONPath **不处理包裹引号内的 `\` 转义**(`\"` 不认、`\'` 同样不认)——所以不能靠转义引号,
-/// 只能选一个**值里不出现的**引号来包裹:
-///   · 值不含 `'` → **单引号**包裹(默认);
-///   · 含 `'` 不含 `"` → **双引号**包裹，例如 `@.cat=="it's"`;
-///   · 两者都含 → 引号字面量无法表达 → **fail-fast**(引导改 FT 索引模式或避免该值);
-/// 包裹引号选定后值里必不含它,故**值原样写入、不做任何 `\` 转义**。控制字符(<0x20)会让 parser 报
-/// "unknown error" 且无法转义嵌入 → 一并 fail-fast。
+/// 参数说明：
+/// - `s`：需要精确匹配的业务字符串或子文档标识，不是属性名。
+///
+/// 返回：选择原值中不存在的包裹引号并转义反斜杠；同时含两类引号、反斜杠紧接引号或 U+0020 以下控制字符时返回配置错误，不生成可能错配的比较条件。
 pub(crate) fn json_path_literal(s: &str) -> Result<String> {
-    if let Some(c) = s.chars().find(|c| (*c as u32) < 0x20) {
-        return Err(NasaRedisError::Config(format!(
-            "ARRAY JSONPath 值含控制字符 U+{:04X},无法在 JSONPath 引号字面量中表达(改用 FT 索引模式)",
-            c as u32
-        )));
+    // 控制字符不能按当前比较值合同安全编码，必须在发出查询或删除前拒绝。
+    if s.chars().any(|ch| ch < '\u{20}') {
+        return Err(NasaRedisError::Config(
+            "ARRAY JSONPath 比较值不能含控制字符".into(),
+        ));
     }
     let quote = match (s.contains('\''), s.contains('"')) {
+        // 比较值与属性名采用不同的解码路径，不能用属性名转义来表达两类引号。
         (true, true) => {
             return Err(NasaRedisError::Config(
-                "ARRAY JSONPath 值同时含 ' 和 \":RedisJSON 不认引号内 `\\` 转义,无法用引号字面量表达——改 FT 索引模式或避免该值".into(),
-            ))
+                "ARRAY JSONPath 比较值不支持同时包含单引号和双引号".into(),
+            ));
         }
-        (true, false) => '"', // 含单引号 → 双引号包裹
-        _ => '\'',            // 否则单引号
+        (true, false) => '"',
+        _ => '\'',
     };
-    Ok(format!("{quote}{s}{quote}"))
+    // 反斜杠紧邻引号可能在服务端再次被解码，必须拒绝以免匹配、覆盖或删除到不同身份。
+    if s.contains("\\'") || s.contains("\\\"") {
+        return Err(NasaRedisError::Config(
+            "ARRAY JSONPath 比较值不支持反斜杠紧接引号".into(),
+        ));
+    }
+    let escaped = s.replace('\\', "\\\\");
+    Ok(format!("{quote}{escaped}{quote}"))
 }
 
-/// 业务作用：Tag 值转义:RediSearch 的 tag 语法字符(,.<>{}[]"':;!@#$%^&*()-+=~| 与空格)
-/// 一律反斜杠转义——值来自业务数据,不转义会破坏查询语法/被注入。
+/// 业务作用：把 TAG 数据值与查询结构隔开，在非保留字符前添加反斜杠。
 ///
-/// # 参数
-/// - `v`: 待转换的值。
+/// 参数说明：
+/// - `v`：需要按字面值匹配的 TAG 内容。
+///
+/// 返回：非 ASCII 字符、ASCII 字母数字与下划线原样保留，其余 ASCII 字符加反斜杠；空输入返回空串。此函数不解释索引分隔符或校验服务端支持范围。
 fn escape_tag(v: &str) -> String {
     let mut out = String::with_capacity(v.len() + 4);
     for ch in v.chars() {
-        // 仅 ASCII 字母、数字、下划线和 U+4E00..=U+9FA5 汉字原样保留。
-        // 其它字符统一加反斜杠，包括控制字符与其它 Unicode 字符，避免业务值进入查询语法。
-        let keep =
-            ch.is_ascii_alphanumeric() || ch == '_' || ('\u{4e00}'..='\u{9fa5}').contains(&ch);
+        // TAG 结构符属于 ASCII；非 ASCII 字符原样保留，不能用反斜杠拆开 UTF-8 字面值。
+        let keep = !ch.is_ascii() || ch.is_ascii_alphanumeric() || ch == '_';
         if !keep {
             out.push('\\');
         }
@@ -1097,23 +1360,17 @@ fn escape_tag(v: &str) -> String {
     out
 }
 
-/// 业务作用：TEXT 字面量"转义"。
+/// 业务作用：隔离全文输入中的 ASCII 查询算子，同时保留非 ASCII 文字与组合序列。
 ///
-/// **关键:标点/结构符一律转成空格,而非反斜杠转义。** 因为 RediSearch 默认分词把标点当**分隔符剥离**
-/// (`(beta)` 索引成 token `beta`、`C++` 索引成 `c`),若把标点反斜杠转义查**字面** token(`\(beta\)`、
-/// `C\+\+`)会寻找索引中不存在的字面 token。转空格既对齐"标点=词边界"的默认分词语义，又防止注入
-/// (空格不构成任何查询算子,无法越出 `@field:(...)` 组)。保留:`[A-Za-z0-9_]` + CJK + 空格原样
-/// (`_`/CJK 是 RediSearch 默认词字符,不分隔)。短语精确匹配走 text_phrase;TAG 仍用 escape_tag(空格是值的一部分)。
+/// 参数说明：
+/// - `v`：待归一化的文本。
 ///
-/// # 参数
-/// - `v`: 待转换的值。
+/// 返回：保留非 ASCII 原文以及 ASCII 字母数字、下划线和空格；其余 ASCII 字符转为空格。不做 Unicode 归一化或词干处理，只有空白的结果由调用方按空集处理。
 fn escape_text(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     for ch in v.chars() {
-        let keep = ch == ' '
-            || ch.is_ascii_alphanumeric()
-            || ch == '_'
-            || ('\u{4e00}'..='\u{9fa5}').contains(&ch);
+        // 查询结构由 ASCII 符号组成；保留其它 Unicode 原文，避免丢失组合符、文字或词内符号。
+        let keep = !ch.is_ascii() || ch == ' ' || ch.is_ascii_alphanumeric() || ch == '_';
         out.push(if keep {
             ch
         } else {

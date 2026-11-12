@@ -41,7 +41,8 @@ impl SagaStoreError {
 
     /// 业务作用：构造连接尚未取得的失败，供独立写安全选择重试。
     ///
-    /// 参数说明：`reason` 是不含连接信息的稳定摘要。
+    /// 参数说明：
+    /// - `reason`：是不含连接信息的稳定摘要。
     ///
     /// 返回：带连接阶段分类的脱敏错误。
     fn connection_unavailable(reason: impl Into<String>) -> Self {
@@ -53,7 +54,8 @@ impl SagaStoreError {
 
     /// 业务作用：构造数据库操作失败，保留 ambient 与 autocommit 的不同裁决空间。
     ///
-    /// 参数说明：`reason` 是不含 SQL 与参数的稳定摘要。
+    /// 参数说明：
+    /// - `reason`：是不含 SQL 与参数的稳定摘要。
     ///
     /// 返回：带数据库操作阶段分类的脱敏错误。
     fn database_operation(reason: impl Into<String>) -> Self {
@@ -65,7 +67,8 @@ impl SagaStoreError {
 
     /// 业务作用：构造唯一业务身份与既有事实冲突的确定性错误。
     ///
-    /// 参数说明：`reason` 是不含业务身份值的稳定摘要。
+    /// 参数说明：
+    /// - `reason`：是不含业务身份值的稳定摘要。
     ///
     /// 返回：可由 backend adapter 精确映射为 `Conflict` 的错误。
     pub(crate) fn conflict(reason: impl Into<String>) -> Self {
@@ -146,7 +149,8 @@ pub(crate) fn corrupt(column: &'static str) -> SagaStoreError {
 
 /// 业务作用：把业务非负计数收窄为 PostgreSQL `BIGINT` bind 值。
 ///
-/// 参数说明：`value` 是已通过业务类型校验的计数或版本。
+/// 参数说明：
+/// - `value`：是已通过业务类型校验的计数或版本。
 ///
 /// 返回：可表示时返回 `i64`；超出 PostgreSQL `BIGINT` 正数域时在 SQL 前拒绝。
 pub(crate) fn pg_u64(value: u64) -> Result<i64, SagaStoreError> {
@@ -155,7 +159,9 @@ pub(crate) fn pg_u64(value: u64) -> Result<i64, SagaStoreError> {
 
 /// 业务作用：把 PostgreSQL `BIGINT` 行值解码为业务 `u64`。
 ///
-/// 参数说明：`row` 是查询行，`column` 是固定列名。
+/// 参数说明：
+/// - `row`：是查询行
+/// - `column`：是固定列名。
 ///
 /// 返回：非负值返回 `u64`；类型或数值非法时返回脱敏损坏错误。
 pub(crate) fn row_u64(
@@ -169,7 +175,9 @@ pub(crate) fn row_u64(
 
 /// 业务作用：把 PostgreSQL `BIGINT` 行值解码为业务 `u32`。
 ///
-/// 参数说明：`row` 是查询行，`column` 是固定列名。
+/// 参数说明：
+/// - `row`：是查询行
+/// - `column`：是固定列名。
 ///
 /// 返回：数值位于 `u32` 域时返回结果；否则返回脱敏损坏错误。
 pub(crate) fn row_u32(
@@ -182,7 +190,9 @@ pub(crate) fn row_u32(
 
 /// 业务作用：解码可空 PostgreSQL `BIGINT` 为可选业务 `u32`。
 ///
-/// 参数说明：`row` 是查询行，`column` 是固定列名。
+/// 参数说明：
+/// - `row`：是查询行
+/// - `column`：是固定列名。
 ///
 /// 返回：NULL 返回 `None`，合法非负值返回 `Some`，其它返回损坏错误。
 pub(crate) fn row_optional_u32(

@@ -15,6 +15,7 @@ use crate::{
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct WsConfigRoot {
+    /// 与 HTTP server 配置独立的长连接配置段。
     ws: WsConfig,
 }
 
@@ -25,10 +26,14 @@ struct WsConfigRoot {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct WsConfig {
+    /// 关闭时不构造监听、发送器或集群消费资源；默认开启以保持已有配置语义。
+    enabled: bool,
     /// TCP 长连接监听地址；`host:port`，端口 0 表示由系统分配。
     addr: String,
     /// 可选 WebSocket 监听地址；缺省表示只跑 TCP 接入。
     ws_addr: Option<String>,
+    /// 由同一个 naws listener 接收原生 TCP 与 WebSocket。
+    multiplex: bool,
     /// 连接建立后等待鉴权帧的上限，毫秒。
     auth_timeout_ms: u64,
     /// 鉴权成功后允许的最长心跳静默，毫秒。
@@ -58,13 +63,15 @@ struct WsConfig {
 impl Default for WsConfig {
     /// 业务作用：返回只监听本机回环、不启用 WebSocket 端口的安全缺省配置。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；未显式配置的限额沿用底层框架默认值。
+    /// 返回：启用监听，未显式配置的限额沿用底层框架默认值。
     fn default() -> Self {
         Self {
+            enabled: true,
             addr: "127.0.0.1:9090".to_owned(),
             ws_addr: None,
+            multiplex: false,
             auth_timeout_ms: 5_000,
             heartbeat_timeout_ms: 60_000,
             max_frame_bytes: None,
@@ -84,10 +91,24 @@ impl Default for WsConfig {
 impl WsConfig {
     /// 业务作用：校验监听地址与各项限额。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `phase`：配置被校验时所属的生命周期阶段。
+    ///
+    /// 返回：监听与限额满足共同约束时成功；配置歧义在建立监听前拒绝。
     fn validate(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
+        // 共享入口只允许唯一监听地址和无歧义帧前缀，不等到 Ready 后才拒绝。
+        if self.multiplex
+            && (self.ws_addr.is_some()
+                || self
+                    .max_frame_bytes
+                    .is_some_and(|value| value > 64 * 1024 * 1024))
+        {
+            return Err(ws_error(
+                phase,
+                "ws.multiplex requires no ws_addr and max_frame_bytes <= 64 MiB",
+            ));
+        }
         if self.addr.trim().is_empty() {
             return Err(ws_error(phase, "ws.addr cannot be empty"));
         }
@@ -143,12 +164,15 @@ impl WsConfig {
     ///
     /// 只覆盖配置显式给出的项，其余保持底层默认值，避免框架把"没配"翻译成"配了个默认数"。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `builder`：尚未接收业务定制的初始 builder。
+    ///
+    /// 返回：携带显式配置的构建器；不绑定端口，最终准入仍由组件生命周期控制。
     fn apply(&self, mut builder: ServerBuilder) -> ServerBuilder {
         builder = builder
             .addr(self.addr.clone())
+            .multiplex(self.multiplex)
             .auth_timeout(Duration::from_millis(self.auth_timeout_ms))
             .heartbeat_timeout(Duration::from_millis(self.heartbeat_timeout_ms))
             .cluster_degraded(self.cluster_degraded);
@@ -188,17 +212,20 @@ impl WsConfig {
 /// 与 Web 组件同构地分两段：可失败的配置解析发生在没有网络副作用的 Start，真正的 bind 发生在
 /// 业务资源封存之后的 Ready——因此 UserHook 失败时进程从未对外接受过一条长连接。
 pub(crate) struct WsComponent {
+    /// Start 阶段读取并校验后冻结的配置。
     config: Option<WsConfig>,
+    /// 绑定后等待交给 Runner 的准入与健康观测任务。
     task: Option<ApplicationFuture<'static>>,
+    /// Start 登记并在 Ready 移交给健康任务的就绪贡献者。
     health: Option<crate::ReadinessContributor>,
 }
 
 impl WsComponent {
     /// 业务作用：创建尚未读取配置的长连接组件。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；监听器在 Ready 阶段才创建。
+    /// 返回：未保存配置、关键任务和就绪贡献者的组件，不建立监听；监听器在 Ready 阶段装配。
     pub(crate) fn new() -> Self {
         Self {
             config: None,
@@ -211,22 +238,27 @@ impl WsComponent {
 impl ApplicationComponent for WsComponent {
     /// 业务作用：返回长连接组件稳定身份。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；Runner 用它归类长连接相关错误。
+    /// 返回：固定的 Ws 组件身份，供 Runner 分类错误与生命周期动作；不表示监听已开放。
     fn id(&self) -> ComponentId {
         ComponentId::Ws
     }
 
     /// 业务作用：从最终配置读取并冻结长连接设置。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `context`：提供最终配置树的 Start 上下文。
+    ///
+    /// 返回：启用时登记就绪贡献；禁用时只保存配置，不分配网络资源。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let config = read_ws_config(context.application())?;
             config.validate(ApplicationPhase::Start)?;
+            if !config.enabled {
+                self.config = Some(config);
+                return Ok(());
+            }
             self.health = Some(context.application().register_readiness(
                 ComponentId::Ws,
                 Arc::<str>::from("ws:listener"),
@@ -248,9 +280,10 @@ impl ApplicationComponent for WsComponent {
     /// 因此可以覆盖声明式取值，也能注入配置无法表达的鉴权回调与 endpoint 事件表；
     /// `Sender` 在 bind 之前发布到晚绑定运行态；监听器准入在全应用 Ready 后由受监督任务开放。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `context`：提供 Application、组件资源登记入口和 active stack 的 Ready 上下文。
+    ///
+    /// 返回：启用时登记监听和关闭责任；禁用时不发布发送器或地址。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let config = self.config.clone().ok_or_else(|| {
@@ -259,6 +292,9 @@ impl ApplicationComponent for WsComponent {
                     "ws configuration was not prepared during start",
                 )
             })?;
+            if !config.enabled {
+                return Ok(());
+            }
             let application = context.application().clone();
 
             let mut builder = config.apply(Server::builder());
@@ -288,7 +324,7 @@ impl ApplicationComponent for WsComponent {
             })?;
 
             // Sender 是 Ready 才存在的晚绑定状态：资源容器此刻已封存，只能进 RuntimeState。
-            // 发布必须早于 bind：bind 之后 handler 随时可能被触发，广播能力必须预先就绪。
+            // 发送器先于挂起绑定准备；监听尚不接流，实际准入由全应用 Ready 后的受管任务开放。
             application.set_ws_sender(server.sender().clone())?;
 
             let running = server.bind_suspended().await.map_err(|error| {
@@ -329,7 +365,7 @@ impl ApplicationComponent for WsComponent {
                         _ = cancel.cancelled() => {
                             running.shutdown();
                             return Ok(());
-                        },
+                        }
                         _ = interval.tick() => {
                             #[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
                             let healthy = match &cluster {
@@ -351,7 +387,7 @@ impl ApplicationComponent for WsComponent {
                                 },
                                 std::time::Instant::now(),
                             );
-                        },
+                        }
                     }
                 }
             }));
@@ -360,7 +396,9 @@ impl ApplicationComponent for WsComponent {
     }
 
     /// 业务作用：将监听准入与运行期健康观测交给宿主监督器。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仅首次调用返回等待 Ready 的关键任务；之后为空。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.task.take().map(|task| ("ws-listener", task))
@@ -369,17 +407,20 @@ impl ApplicationComponent for WsComponent {
 
 /// 停机时取消 accept 并在预算内 join 全部连接任务的可逆 action。
 struct WsShutdown {
+    /// 待排干的监听所有者，首次执行清理时取走。
     server: Option<Arc<RunningServer>>,
+    /// 配置给出的清理上限，执行时还要受全局剩余预算约束。
     budget: Duration,
+    /// 同时关闭准入激活任务和健康观测循环的通知源。
     cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ShutdownAction for WsShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；名称不含监听地址或会话信息。
+    /// 返回：固定的 ws-active 清理动作名，不包含监听地址或会话身份。
     fn label(&self) -> &'static str {
         "ws-active"
     }
@@ -389,9 +430,11 @@ impl ShutdownAction for WsShutdown {
     /// 未排空必须报告失败：底层已通知取消，但未取得全部退出证明，
     /// 不把"到点仍有连接在跑"静默说成优雅停机。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：提供全局剩余停机预算的清理上下文。
+    ///
+    /// 返回：调用时即通知健康任务退出；返回的异步动作接管监听并在子预算内排干。无剩余监听或排干成功时完成，超时返回 Stopping 错误；监听一经取走，后续调用不会再次等待同一实例。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         // SIGTERM、启动回滚和主动关闭都经过同一 owner，健康循环不能依赖某一种停机来源。
         self.cancel.cancel();
@@ -414,7 +457,9 @@ impl ShutdownAction for WsShutdown {
 
 impl Drop for WsShutdown {
     /// 业务作用：停机动作被取消或启动回滚时同步撤销监听健康任务。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：通知任务退出；监听与连接仍由 RunningServer 的 owner 收尾。
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -423,9 +468,11 @@ impl Drop for WsShutdown {
 
 /// 业务作用：从最终配置读取 `ws` 段；段缺失时使用回环缺省配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：提供当前不可变配置快照的共享上下文。
+///
+/// 返回：当前快照反序列化出的长连接配置，缺段使用默认值；结构非法时返回 Start 错误，地址与限额的取值校验由调用方执行。
 fn read_ws_config(application: &Application) -> ApplicationResult<WsConfig> {
     let snapshot = application.config();
     let root: WsConfigRoot =
@@ -442,10 +489,12 @@ fn read_ws_config(application: &Application) -> ApplicationResult<WsConfig> {
 
 /// 业务作用：在不创建监听器的前提下校验候选配置树中的 `ws` 段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：合并、插值完成但尚未发布的候选配置树。
 /// - `phase`：本次无副作用校验所属的生命周期阶段。
+///
+/// 返回：缺段或配置结构与本地限额约束满足时成功；非法配置返回指定阶段错误。禁用配置也执行校验，不解析域名或尝试绑定端口。
 pub(crate) fn validate_ws_section(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
@@ -466,10 +515,12 @@ pub(crate) fn validate_ws_section(
 
 /// 业务作用：创建长连接组件的稳定生命周期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的生命周期阶段。
 /// - `message`：不含会话负载与鉴权信息的稳定摘要。
+///
+/// 返回：归属 Ws、绑定指定生命周期阶段的应用错误，不建立连接或改变监听状态。
 fn ws_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Ws, phase, message)
 }

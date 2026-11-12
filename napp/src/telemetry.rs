@@ -297,7 +297,9 @@ impl TelemetryComponent {
     ///
     /// 返回：返回等待 Start 阶段按最终配置建立导出管道的组件。
     pub(crate) fn new() -> Self {
-        Self { config: None }
+        Self {
+            config: None,
+        }
     }
 }
 
@@ -922,11 +924,12 @@ fn resource_attributes_json(
             "value": { "stringValue": service_instance_id }
         }),
     ];
-    attributes.extend(
-        resource_attributes
-            .iter()
-            .map(|(key, value)| serde_json::json!({"key":key,"value":{"stringValue":value}})),
-    );
+    attributes.extend(resource_attributes.iter().map(|(key, value)| {
+        serde_json::json!({
+            "key": key,
+            "value": {"stringValue": value}
+        })
+    }));
     attributes
 }
 
@@ -1136,11 +1139,13 @@ fn put_packed_double(buffer: &mut Vec<u8>, field: u32, values: &[f64]) {
 
 /// 业务作用：写一个长度分隔字段(wire type 2):`bytes` / `string` / 嵌套消息。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `buffer`:输出缓冲。
 /// - `field`:字段号。
 /// - `bytes`:字段内容(字符串 UTF-8 字节 / 原始字节 / 已编码的子消息)。
+///
+/// 返回：向缓冲追加字段标签、varint 长度与原始内容；空内容仍写标签和零长度，不验证字段号或子消息结构。
 fn put_len_field(buffer: &mut Vec<u8>, field: u32, bytes: &[u8]) {
     put_tag(buffer, field, 2);
     put_varint(buffer, bytes.len() as u64);
@@ -1414,16 +1419,20 @@ fn otlp_metrics_protobuf(
     request
 }
 
-/// 业务作用：受管 drainer:批量把 span 送到 sink,直到被取消或所有生产者释放。
+/// 业务作用：在受管任务中批量导出 span，并将每批送出结果反馈给计数器与就绪贡献者。
 ///
-/// 批策略:攒满 `BATCH_SIZE` 或距上条 span `FLUSH_INTERVAL` 未再入队即 flush;取消后排空缓冲的
-/// 最后一批(超出全局停机预算由上层 action 的 timeout 兜底)。
+/// 正常接收达到 128 条或 200ms 周期到达时送出非空批次；周期不因新 span 到达而重置。
+/// 停止后的尾批收集当时可立即取出的全部记录，因此可能超过正常批大小。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `receiver`:span 接收端(drainer 独占)。
-/// - `cancel`:停机取消令牌;触发后排空缓冲并退出。
+/// - `cancel`:停机取消令牌；被观察后结束接收循环，尝试送出尾批。
 /// - `sink`:span 导出目的地(日志或 OTLP)。
+/// - `exporter`：记录成功导出或丢弃数量的共享出口。
+/// - `contributor`：按每批投递结果更新 Ready 或 Degraded 的就绪贡献者。
+///
+/// 返回：取消或接收端结束后，尝试排取现有记录并送出尾批；失败记录为丢弃而不重试。正在等待的送出不由取消分支中断，整体截止由上层停机动作控制。
 async fn drain_spans(
     mut receiver: tokio::sync::mpsc::Receiver<SpanRecord>,
     cancel: CancellationToken,
@@ -1462,7 +1471,7 @@ async fn drain_spans(
                         batch.clear();
                     }
                 }
-                None => break, // 所有 exporter 已释放
+                None => break, // 接收端已结束，当前批仍需在循环外尝试送出。
             },
             _ = ticker.tick() => {
                 if !batch.is_empty() {

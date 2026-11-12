@@ -50,7 +50,11 @@ pub(crate) struct EffectiveProducerLane {
 }
 
 /// 业务作用：合并源默认producer与一个lane的显式覆盖，先验证可靠发送及有界容量合同。
-/// 参数说明：config为冻结的源配置；lane为default或已声明名称，命名lane只继承源默认值。
+///
+/// 参数说明：
+/// - `config`：冻结的源配置。
+/// - `lane`：default 或已声明名称，命名 lane 只继承源默认值。
+///
 /// 返回：合法的独立有效配置；未知lane、非法容量/时限及幂等顺序冲突返回错误，不创建原生资源。
 pub(crate) fn effective_producer_lane(
     config: &KafkaConfig,
@@ -178,10 +182,12 @@ pub(crate) fn effective_producer_lane(
 
 /// 业务作用：构建并原生校验指定 producer lane 配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `config`: 冻结后的顶层配置。
 /// - `lane`: 物理 lane 名称。
+///
+/// 返回：按公共、producer、lane 透传层及强类型约束合并且经原生解析的配置；非法声明返回错误，不创建 producer 或证明 broker 可达。
 ///
 /// # 错误
 ///
@@ -192,6 +198,7 @@ pub(crate) fn producer_config(config: &KafkaConfig, lane: &str) -> Result<Client
     let mut native = common_config(config, &role);
     apply_properties(&mut native, &config.producer.properties);
     apply_properties(&mut native, &effective.properties);
+    // 透传层不能覆盖已声明的身份、安全与可靠发送合同；必须最后写入这些权威字段。
     apply_identity_and_security(&mut native, config, &role);
     native
         .set("acks", &effective.acks)
@@ -230,7 +237,11 @@ pub(crate) fn producer_config(config: &KafkaConfig, lane: &str) -> Result<Client
 }
 
 /// 业务作用：构建订阅消费者配置，并在原生客户端创建前复验实际组身份。
-/// 参数说明：config 为冻结源配置；group 为最终原文 group.id。
+///
+/// 参数说明：
+/// - `config`：冻结来源配置，none 表示缺失位点时拒绝自动定位。
+/// - `group`：最终原文 group.id。
+///
 /// 返回：满足组身份边界并经原生配置解析的配置；非法组或原生拒绝键值时为 Config，不建立消费会话。
 pub(crate) fn consumer_config(config: &KafkaConfig, group: &str) -> Result<ClientConfig> {
     // subscribe、assign 和临时位点查询使用同一 native 配置入口，不能绕过组身份边界。
@@ -256,7 +267,15 @@ pub(crate) fn consumer_config(config: &KafkaConfig, group: &str) -> Result<Clien
             "max.poll.interval.ms",
             consumer.max_poll_interval_ms.to_string(),
         )
-        .set("auto.offset.reset", &consumer.auto_offset_reset)
+        // 公共 none 合同映射为原生 error，缺失或越界位点必须留给显式恢复，不能回退到末尾。
+        .set(
+            "auto.offset.reset",
+            if consumer.auto_offset_reset == "none" {
+                "error"
+            } else {
+                &consumer.auto_offset_reset
+            },
+        )
         .set("fetch.min.bytes", consumer.fetch_min_bytes.to_string())
         .set("fetch.wait.max.ms", consumer.fetch_wait_max_ms.to_string())
         .set(
@@ -269,9 +288,11 @@ pub(crate) fn consumer_config(config: &KafkaConfig, group: &str) -> Result<Clien
 
 /// 业务作用：构建并原生校验管理端配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `config`: 冻结后的顶层配置。
+///
+/// 返回：管理端透传值与已声明安全字段合并后的有效配置；解析失败返回 Config，不发起管理请求或校验远端授权。
 ///
 /// # 错误
 ///
@@ -289,17 +310,15 @@ pub(crate) fn admin_config(config: &KafkaConfig) -> Result<ClientConfig> {
 
 /// 业务作用：由 resolved group 派生 consumer 的 client.id 角色后缀。
 ///
-/// 为什么要带上 group：同一进程可以同时跑多个 group（socket-center 的 control/data 就是如此），
+/// 同一进程可以同时装配多个独立消费组，client.id 必须保留可区分的组身份。
 /// 若所有 consumer 共用一个 client.id，broker 指标与 `kafka-consumer-groups --members`
 /// 都无法区分成员来源。producer 侧已经用 lane 名做了同样的事。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `group`: 已解析的最终 group.id。
 ///
-/// # 返回
-///
-/// 清洗并截断到固定上限的角色后缀，保证 client.id 长度有界且字符集稳定。
+/// 返回：清洗并截断到固定上限的角色后缀，保证 client.id 长度有界且字符集稳定。
 fn consumer_role(group: &str) -> String {
     /// 诊断用 client.id 后缀最多保留64个组名字符；实际 group.id 原文不受此显示长度影响。
     const MAX_GROUP_CHARS: usize = 64;
@@ -317,12 +336,14 @@ fn consumer_role(group: &str) -> String {
     format!("consumer-{sanitized}")
 }
 
-/// 业务作用：构建共同连接、安全和 client.id 配置。
+/// 业务作用：构建公共透传配置底座，供各角色继续合并专属属性。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `config`: 冻结后的顶层配置。
-/// - `role`: client.id 的稳定角色后缀。
+/// - `_role`: 调用角色，本阶段不使用；身份字段由后续安全注入步骤写入。
+///
+/// 返回：仅包含公共 properties 的原生配置对象，尚未应用角色、安全和框架不变量，也未执行原生解析。
 fn common_config(config: &KafkaConfig, _role: &str) -> ClientConfig {
     let mut native = ClientConfig::new();
     apply_properties(&mut native, &config.properties);
@@ -336,11 +357,13 @@ fn common_config(config: &KafkaConfig, _role: &str) -> ClientConfig {
 /// `security.protocol=PLAINTEXT` 就能把强类型声明的 `SASL_SSL` 静默降级（凭据以明文协议发出），
 /// 而启动校验只看强类型值，完全发现不了；`bootstrap.servers` 与派生 `client.id` 同理。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `native`: 已应用完全部 raw 层的原生配置。
 /// - `config`: 冻结后的顶层配置。
 /// - `role`: client.id 的稳定角色后缀。
+///
+/// 返回：覆盖 broker 地址和派生 client.id，并写入已声明的安全字段；未声明的可选值保留既有配置，原生有效性由后续步骤验证。
 fn apply_identity_and_security(native: &mut ClientConfig, config: &KafkaConfig, role: &str) {
     native.set("bootstrap.servers", &config.bootstrap_servers);
     let prefix = config.client_id_prefix.as_deref().unwrap_or("nafka");
@@ -365,10 +388,12 @@ fn apply_identity_and_security(native: &mut ClientConfig, config: &KafkaConfig, 
 
 /// 业务作用：按稳定顺序应用一组原生透传属性。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `native`: 待写入的原生配置。
 /// - `properties`: 已经启动校验的键值表。
+///
+/// 返回：按键排序依次覆盖原生配置中的同名项；不解析值，也不阻止后续强类型字段再次覆盖。
 fn apply_properties(native: &mut ClientConfig, properties: &BTreeMap<String, String>) {
     for (key, value) in properties {
         native.set(key, value);
@@ -377,11 +402,13 @@ fn apply_properties(native: &mut ClientConfig, properties: &BTreeMap<String, Str
 
 /// 业务作用：可选字符串存在时写入原生配置。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `native`: 待写入的原生配置。
 /// - `key`: 原生键。
 /// - `value`: 可选配置值。
+///
+/// 返回：Some 时原样覆盖该键，包括空字符串；None 时保留已有值，不删除透传层的设置。
 fn set_optional(native: &mut ClientConfig, key: &str, value: &Option<String>) {
     if let Some(value) = value {
         native.set(key, value);
@@ -390,10 +417,12 @@ fn set_optional(native: &mut ClientConfig, key: &str, value: &Option<String>) {
 
 /// 业务作用：让底层配置解析器在启动期检查键名和值。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `native`: 已合并的原生配置。
 /// - `scope`: 脱敏后的配置归属。
+///
+/// 返回：原生配置解析成功时丢弃临时配置并返回 Ok；失败返回经过 redact 分类的 Config，不建立网络连接或验证凭据有效性。
 ///
 /// # 错误
 ///
@@ -411,7 +440,9 @@ fn validate_native(native: &ClientConfig, scope: &str) -> Result<()> {
 /// librdkafka 的 desc 形如 `Invalid value "<VALUE>" for configuration property "<KEY>"`，
 /// value 内嵌在 desc 开头，任何"砍尾巴"式脱敏都会把凭据明文原样留下。
 ///
-/// 参数说明：error 为底层返回的错误；其 Display 可能同时在 desc 与尾部回显被拒的值。
+/// 参数说明：
+/// - `error`：底层返回的错误；其 Display 可能同时在 desc 与尾部回显被拒的值。
+///
 /// 返回：配置错误仅含属性名及固定类别，构造错误不保留原文，避免公开错误链输出认证材料。
 pub(crate) fn redact(error: &KafkaError) -> String {
     match error {

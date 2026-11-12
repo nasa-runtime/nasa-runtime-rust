@@ -6,9 +6,10 @@ use sha2::Sha256;
 
 /// 业务作用：按 PBKDF2-HMAC-SHA256 从口令与盐派生密钥，输出小写十六进制。
 /// 口令和盐均按 UTF-8 输入；跨语言互通必须使用相同字节、轮数与长度，不能只比较显示文本。
+///
 /// 返回：`key_bits / 8` 字节密钥的编码；轮数或位数为零时返回错误。非八倍数位数向下取整。
 ///
-/// # 参数
+/// 参数说明：
 /// - `password`: 派生密钥使用的口令文本,当前实现按 UTF-8 字节输入 PBKDF2。
 /// - `salt`: 派生密钥使用的盐文本,当前实现按 UTF-8 字节输入 PBKDF2。
 /// - `iterations`: PBKDF2 迭代次数,必须大于 0。
@@ -25,11 +26,13 @@ pub fn pbkdf2(password: &str, salt: &str, iterations: u32, key_bits: u32) -> Res
     Ok(hex_lower(&out))
 }
 
-/// 业务作用: PBKDF2 默认(100000 次迭代,256 位密钥)。
+/// 业务作用：使用固定迭代次数和长度派生口令密钥。
 ///
-/// # 参数
-/// - `password`: 派生密钥使用的口令文本。
-/// - `salt`: 派生密钥使用的盐文本。
+/// 参数说明：
+/// - `password`：按 UTF-8 字节输入的口令。
+/// - `salt`：按 UTF-8 字节输入的盐。
+///
+/// 返回：返回 PBKDF2-HMAC-SHA256、十万次迭代所得 32 字节密钥的小写 HEX；保留底层派生入口的错误返回类型。
 pub fn pbkdf2_default(password: &str, salt: &str) -> Result<String> {
     pbkdf2(password, salt, 100_000, 256)
 }

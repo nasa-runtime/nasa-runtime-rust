@@ -35,10 +35,12 @@ pub(crate) enum Classified {
     },
 }
 
-/// 业务作用：解析并归类一个字符串 URL。
+/// 业务作用：按 URL 语法区分显式负载均衡请求和普通 HTTP 请求。
 ///
-/// 只做语法归类:`http(s)` 一律返回 `Classified::Http`;是否命中服务名索引并走内部 LB,
-/// 由 `client.resolve_plan` 按 `heuristic_http` 与 `ServiceNameIndex` 决定(本函数不查索引)。
+/// 参数说明：
+/// - `raw`：待解析的原始 URL 文本。
+///
+/// 返回：lb 返回通过服务名检查的逻辑服务与路径，HTTP/HTTPS 保留原 URL 和主机供后续判定；非法 URL、缺 host 或其它 scheme 返回 InvalidUrl。不查询服务名索引或实例。
 pub(crate) fn classify(raw: &str) -> Result<Classified> {
     let parsed = Url::parse(raw).map_err(|e| RestDiscoveryError::InvalidUrl {
         url: raw.to_string(),
@@ -83,10 +85,12 @@ pub(crate) fn classify(raw: &str) -> Result<Classified> {
     }
 }
 
-/// 业务作用：从已解析 URL 取 `/path?query`(无 query 则仅 `/path`;空 path 归一为 `/`)。fragment 不带进 HTTP 请求。
+/// 业务作用：提取请求目标中的路径和非空查询串。
 ///
-/// # 参数
-/// - `u`: 需要分类的请求 URL。
+/// 参数说明：
+/// - `u`：已经解析的 URL。
+///
+/// 返回：返回以默认根路径补空的路径及可选查询串，不包含 fragment，保留 URL 库已经编码的文本。
 fn path_and_query(u: &Url) -> String {
     let path = u.path();
     let path = if path.is_empty() {
@@ -100,7 +104,12 @@ fn path_and_query(u: &Url) -> String {
     }
 }
 
-/// 业务作用：校验注册中心服务名:非空、不含 `/ ? #` 或空白。返回 `Err(reason)`。
+/// 业务作用：拒绝会破坏服务名在逻辑 URL 中表达的空值和分隔字符。
+///
+/// 参数说明：
+/// - `service`：待使用的逻辑服务名。
+///
+/// 返回：名称非空且不含空白、斜杠、问号或井号时成功，否则返回原因文本；不检查长度或后端是否存在。
 pub(crate) fn validate_service(service: &str) -> std::result::Result<(), String> {
     if service.is_empty() {
         return Err("service 不能为空".to_string());
@@ -114,7 +123,12 @@ pub(crate) fn validate_service(service: &str) -> std::result::Result<(), String>
     Ok(())
 }
 
-/// 业务作用：校验 `service_request` 的逻辑 path:必须以 `/` 开头,且不是完整 URL。返回 `Err(reason)`。
+/// 业务作用：检查内部服务调用提供的是绝对逻辑路径。
+///
+/// 参数说明：
+/// - `path`：调用方提供的路径及可选查询串。
+///
+/// 返回：以斜杠开头且不含 :// 时成功，否则返回原因；不做点段消解、百分号解码或完整 URI 安全校验。
 pub(crate) fn validate_logical_path(path: &str) -> std::result::Result<(), String> {
     if !path.starts_with('/') {
         return Err(format!("path 必须以 `/` 开头,当前 {path:?}"));

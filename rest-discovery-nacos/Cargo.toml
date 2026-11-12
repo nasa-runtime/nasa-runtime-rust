@@ -37,4 +37,4 @@ serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 tracing = "0.1"
 # init_with_discovery 失败时回滚 deregister 的超时能力(time)。
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1.54.1", features = ["time"] }

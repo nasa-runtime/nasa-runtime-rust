@@ -39,7 +39,10 @@ pub struct TransferStatus {
 }
 impl TransferStatus {
     /// 业务作用：区分任务取消请求与所有实际资源退出。
-    /// 参数说明：无。返回：实际 worker、native 交付和 lease 全部退出才为 true。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：实际 worker、native 交付和 lease 全部退出才为 true。
     pub fn drained(&self) -> bool {
         self.replay.drained()
     }
@@ -48,30 +51,44 @@ impl TransferStatus {
 /// 同时受来源和目标停机约束的转发控制句柄。
 #[derive(Clone)]
 pub struct TransferHandle {
+    /// 负责来源持久进度、暂停和实际排空的回放控制器。
     replay: ReplayHandle,
+    /// 保持目标交付责任与目标失败证据的处理器。
     processor: Arc<Processor>,
 }
 impl TransferHandle {
     /// 业务作用：暂停后续转发准入，保留已经接纳的实际交付。
-    /// 参数说明：无。返回：包含来源进度与目标确认数的即时快照。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：包含来源进度与目标确认数的即时快照。
     pub fn pause(&self) -> TransferStatus {
         self.replay.pause();
         self.status()
     }
     /// 业务作用：恢复未取消或失败的转发任务。
-    /// 参数说明：无。返回：终态与停止任务不会重新开放。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：终态与停止任务不会重新开放。
     pub fn resume(&self) -> TransferStatus {
         self.replay.resume();
         self.status()
     }
     /// 业务作用：关闭下一条转发准入，不撤销或遗弃在途 native 交付。
-    /// 参数说明：无。返回：停止状态，不能据此断言来源 lease 已释放。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：停止状态，不能据此断言来源 lease 已释放。
     pub fn cancel(&self) -> TransferStatus {
         self.replay.cancel();
         self.status()
     }
     /// 业务作用：无需网络读取两端执行和持久责任。
-    /// 参数说明：无。返回：脱敏即时快照，目标确认与持久进度可能不同。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：脱敏即时快照，目标确认与持久进度可能不同。
     pub fn status(&self) -> TransferStatus {
         TransferStatus {
             replay: self.replay.status(),
@@ -84,7 +101,11 @@ impl TransferHandle {
         }
     }
     /// 业务作用：等待实际转发退出，取消等待和超时均不改变后台责任。
-    /// 参数说明：timeout 为本次预算，零只查询。返回：实际退出为 true，否则继续保留双方登记与 lease。
+    ///
+    /// 参数说明：
+    /// - `timeout`：timeout 为本次预算。
+    ///
+    /// 返回：实际退出为 true，否则继续保留双方登记与 lease。
     pub async fn await_drained(&self, timeout: Duration) -> bool {
         self.replay.await_drained(timeout).await
     }
@@ -92,7 +113,15 @@ impl TransferHandle {
 
 impl KafkaProxy {
     /// 业务作用：按固定合同将有限来源范围原文转发到单一目标，目标成功后才推进来源 checkpoint。
-    /// 参数说明：plan 为共同计划，destination 为固定目标源，store 为独占持久后端，source_identity/destination_identity 为当前代次目录，registries 为 Confluent 策略的显式绑定。
+    ///
+    /// 参数说明：
+    /// - `plan`：plan 为共同计划。
+    /// - `destination`：destination 为固定目标源。
+    /// - `store`：store 为独占持久后端。
+    /// - `source_identity`：查询来源 topic 当前物理资源代次的目录。
+    /// - `destination_identity`：发送前复验目标 topic 当前物理资源代次的目录。
+    /// - `registries`：registries 为 Confluent 策略的显式绑定。
+    ///
     /// 返回：双方受管的控制句柄；不可靠 lane、错误绑定或已关闭来源在副作用前拒绝。
     pub fn transfer(
         &self,
@@ -147,25 +176,41 @@ impl KafkaProxy {
             }
         };
         dependency.bind(replay.clone());
-        Ok(TransferHandle { replay, processor })
+        Ok(TransferHandle {
+            replay,
+            processor,
+        })
     }
 }
 
+/// 将每条来源记录绑定到固定目标并保留交付诊断。
 struct Processor {
+    /// 不随运行中目标变化而重算的完整转发计划。
     plan: TransferPlan,
+    /// 负责目标复验及实际 broker 确认的交付器。
     delivery: Delivery,
+    /// 按来源分区查找的批准目标分区。
     routes: BTreeMap<Tp, Tp>,
+    /// 首个目标处理失败，供控制句柄读取。
     failure: Mutex<Option<TransferError>>,
+    /// 已获目标确认的记录数，可能领先于来源持久进度。
     delivered: AtomicU64,
 }
 impl ReplayProcessor for Processor {
     /// 业务作用：将固定目标成功合同绑定到来源持久任务。
-    /// 参数说明：无。返回：与计划中目的、策略和映射相同的共同指纹。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与计划中目的、策略和映射相同的共同指纹。
     fn fingerprint(&self) -> String {
         self.plan.replay.pipeline_fingerprint.clone()
     }
     /// 业务作用：同步完成一条真实转发，失败不允许推进来源进度。
-    /// 参数说明：record 为本次取得来源责任的原文。返回：只有真实目标确认才成功，失败独立保留目标类别。
+    ///
+    /// 参数说明：
+    /// - `record`：record 为本次取得来源责任的原文。
+    ///
+    /// 返回：只有真实目标确认才成功，失败独立保留目标类别。
     fn process(&self, record: ReplayRecord) -> ReplayResult<()> {
         match crate::replay::runtime::isolate(|| self.forward(record))
             .unwrap_or(Err(TransferError::ObservationFailed))
@@ -183,7 +228,11 @@ impl ReplayProcessor for Processor {
 }
 impl Processor {
     /// 业务作用：复验来源路径、schema 与目的资源，并持有同步责任直到 native 实际回执。
-    /// 参数说明：record 为原始来源。返回：目标交付成功后增加确认数；不自行写来源 checkpoint。
+    ///
+    /// 参数说明：
+    /// - `record`：record 为原始来源。
+    ///
+    /// 返回：目标交付成功后增加确认数；不自行写来源 checkpoint。
     fn forward(&self, record: ReplayRecord) -> TransferResult<()> {
         let destination = self
             .routes
@@ -205,11 +254,17 @@ impl Processor {
 /// 一项有限任务共用一个只读目标客户端；实际查询串行，实时证据不跨消息复用。
 #[derive(Default)]
 pub(crate) struct TargetInspection {
+    /// 复用但串行使用的查询连接，关闭时取走原生资源。
     consumer: Mutex<Option<rdkafka::consumer::BaseConsumer>>,
 }
 impl TargetInspection {
     /// 业务作用：在同一总期限内独占探测连接并重新取得目标完整证据。
-    /// 参数说明：config 为目标冻结配置，topics 为批准主题，deadline 包含等待连接使用权与全部查询。
+    ///
+    /// 参数说明：
+    /// - `config`：config 为目标冻结配置。
+    /// - `topics`：topics 为批准主题。
+    /// - `deadline`：deadline 包含等待连接使用权与全部查询。
+    ///
     /// 返回：实时物理身份、分区和LSO快照；超时、权限或不完整证据均拒绝本次发送。
     fn observe(
         &self,
@@ -242,7 +297,9 @@ impl TargetInspection {
     }
 
     /// 业务作用：在全部任务worker退出后销毁探测资源，与外部控制句柄寿命解耦。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：原生析构实际返回后才结束；重复关闭不创建或恢复连接。
     pub(crate) fn close(&self) {
         let client = self
@@ -256,20 +313,34 @@ impl TargetInspection {
 
 /// 共享目标交付责任，不持有来源checkpoint写权限。
 pub(crate) struct Delivery {
+    /// 每次发送前必须重新核对的固定目标合同。
     target: super::TransferTarget,
+    /// 已批准的正文保留或 schema 映射规则。
     policy: TransferPayloadPolicy,
+    /// 目标运行时的弱引用，防止交付器延长已关闭源的业务寿命。
     destination: Weak<KafkaProxyInner>,
+    /// 实际持有原生发布资源的目标通道。
     lane: ProducerLane,
+    /// 查询目标资源当前代次的外部目录。
     identity: Arc<dyn ReplayIdentityProvider>,
+    /// 让同步任务等待实际异步交付终态的运行时句柄。
     runtime: tokio::runtime::Handle,
     /// 只复用连接，不缓存物理身份或范围证据；任务实际退出前持有独立关闭责任。
     pub(crate) inspection: Arc<TargetInspection>,
+    /// 双端 Registry 显式绑定；本交付器不拥有客户端关闭权。
     #[cfg(feature = "schema-registry")]
     registries: Option<TransferRegistries>,
 }
 impl Delivery {
     /// 业务作用：固定可靠发布能力，在开放任务前拒绝目标或schema错绑。
-    /// 参数说明：target/policy为目标合同，destination为实际来源，identity为代次目录，registries为显式schema能力。
+    ///
+    /// 参数说明：
+    /// - `target`：固定的目标身份、分区集合与发布 lane。
+    /// - `policy`：原文保留或 Confluent schema 映射规则。
+    /// - `destination`：实际负责目标发布的 Kafka 运行时。
+    /// - `identity`：identity为代次目录。
+    /// - `registries`：registries为显式schema能力。
+    ///
     /// 返回：尚未发送的目标交付器；不可靠lane或缺失能力立即拒绝。
     pub(crate) fn new(
         target: super::TransferTarget,
@@ -320,7 +391,13 @@ impl Delivery {
         })
     }
     /// 业务作用：复验目标并等待实际交付，原文隔离不执行schema解释。
-    /// 参数说明：record为输入，destination为批准分区，headers为完整证据，map_payload选择schema映射。
+    ///
+    /// 参数说明：
+    /// - `record`：record为输入。
+    /// - `destination`：destination为批准分区。
+    /// - `headers`：headers为完整证据。
+    /// - `map_payload`：map_payload选择schema映射。
+    ///
     /// 返回：只有native真实成功才返回；不写来源checkpoint，取消等待不解除责任。
     pub(crate) fn send(
         &self,
@@ -370,16 +447,24 @@ impl Delivery {
             )
             .map_err(|error| match error {
                 NafkaError::Authorization => TransferError::Authorization,
-                NafkaError::OutcomeUnknown { .. } => TransferError::OutcomeUnknown,
+                NafkaError::OutcomeUnknown {
+                    ..
+                } => TransferError::OutcomeUnknown,
                 NafkaError::Lifecycle(_) => TransferError::Closed,
-                NafkaError::ProducerQueueFull { .. } => TransferError::Capacity,
+                NafkaError::ProducerQueueFull {
+                    ..
+                } => TransferError::Capacity,
                 _ => TransferError::DeliveryFailed,
             })?;
         Ok(())
     }
 
     /// 业务作用：原文模式保持字节，明确 Confluent 模式只替换批准且双端 schema 一致的 ID。
-    /// 参数说明：payload 为可空来源值，deadline 为 schema 与目的复验共用截止时间。
+    ///
+    /// 参数说明：
+    /// - `payload`：payload 为可空来源值。
+    /// - `deadline`：deadline 为 schema 与目的复验共用截止时间。
+    ///
     /// 返回：独立目标正文，tombstone 保持 None；不自动注册或推断 schema。
     fn payload(
         &self,
@@ -396,19 +481,33 @@ impl Delivery {
     }
 
     /// 业务作用：在未启用 Registry 能力的构建中拒绝解释 Confluent 原文。
-    /// 参数说明：payload/deadline 为已登记转发的输入与预算。返回：明确合同拒绝，不执行网络或发送。
+    ///
+    /// 参数说明：
+    /// - `_payload`：来源消息原文；当前构建缺少 Registry 能力，因此不读取内容。
+    /// - `_deadline`：该消息的共同复验期限；能力缺失时立即拒绝，不消耗查询预算。
+    ///
+    /// 返回：明确合同拒绝，不执行网络或发送。
     #[cfg(not(feature = "schema-registry"))]
     fn confluent(&self, _payload: &[u8], _deadline: Instant) -> TransferResult<Vec<u8>> {
         Err(TransferError::ContractMismatch)
     }
 
     /// 业务作用：用两个明确 Registry 的相同 schema 正文证明批准 ID 映射，保留 envelope 剩余字节。
-    /// 参数说明：payload 为 Confluent 原文，deadline 为本条总验证预算。返回：只替换四字节 ID 的正文或稳定拒绝。
+    ///
+    /// 参数说明：
+    /// - `payload`：payload 为 Confluent 原文。
+    /// - `deadline`：deadline 为本条总验证预算。
+    ///
+    /// 返回：只替换四字节 ID 的正文或稳定拒绝。
     #[cfg(feature = "schema-registry")]
     fn confluent(&self, payload: &[u8], deadline: Instant) -> TransferResult<Vec<u8>> {
         use crate::{RegistrySchemaType, SchemaId};
         use sha2::{Digest, Sha256};
-        let TransferPayloadPolicy::Confluent { schemas, .. } = &self.policy else {
+        let TransferPayloadPolicy::Confluent {
+            schemas,
+            ..
+        } = &self.policy
+        else {
             return Err(TransferError::ContractMismatch);
         };
         if payload.len() < 5 || payload[0] != 0 {
@@ -472,7 +571,11 @@ impl Delivery {
     }
 }
 /// 业务作用：使 schema 和目的目录共享一次有限验证预算。
-/// 参数说明：deadline 为单调截止时间。返回：正剩余预算，耗尽不再发起新操作。
+///
+/// 参数说明：
+/// - `deadline`：deadline 为单调截止时间。
+///
+/// 返回：正剩余预算，耗尽不再发起新操作。
 fn remaining(deadline: Instant) -> TransferResult<Duration> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -482,7 +585,11 @@ fn remaining(deadline: Instant) -> TransferResult<Duration> {
     }
 }
 /// 业务作用：把来源登记或目的查询失败归为稳定、脱敏的转发类别。
-/// 参数说明：error 为原始回放错误。返回：关闭、超时、容量和合同保留独立含义。
+///
+/// 参数说明：
+/// - `error`：error 为原始回放错误。
+///
+/// 返回：关闭、超时、容量和合同保留独立含义。
 pub(crate) fn replay_error(error: ReplayError) -> TransferError {
     match error {
         ReplayError::Timeout => TransferError::Timeout,
@@ -495,7 +602,11 @@ pub(crate) fn replay_error(error: ReplayError) -> TransferError {
     }
 }
 /// 业务作用：保留 Registry 不可观测与 schema 不一致的区别，避免网络故障冒充正文不匹配。
-/// 参数说明：error 为封闭 Registry 结局。返回：目标处理的稳定类别。
+///
+/// 参数说明：
+/// - `error`：error 为封闭 Registry 结局。
+///
+/// 返回：目标处理的稳定类别。
 #[cfg(feature = "schema-registry")]
 fn registry_error(error: crate::SchemaRegistryError) -> TransferError {
     match error {

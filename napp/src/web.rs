@@ -55,6 +55,7 @@ use crate::{
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct WebConfigRoot {
+    /// Web 组件负责绑定与验证的 server 配置段。
     server: ServerConfig,
 }
 
@@ -80,6 +81,10 @@ struct CorsConfig {
 
 impl Default for CorsConfig {
     /// 业务作用：返回默认关闭的安全缺省(启用需业务显式配置来源白名单)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：关闭跨域、无来源白名单且不携带凭据的策略；预检方法、头部和 600 秒缓存仅在显式启用后使用。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -109,6 +114,10 @@ struct CompressionConfig {
 
 impl Default for CompressionConfig {
     /// 业务作用：返回默认关闭的安全缺省(压缩需业务显式开启)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：关闭响应压缩并保留 1024 字节阈值；不会安装压缩中间件或改变响应体。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -135,6 +144,10 @@ struct RateLimitConfig {
 
 impl Default for RateLimitConfig {
     /// 业务作用：返回默认关闭的安全缺省(限流需业务显式开启)。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：关闭本地客户端限流、每秒 10 次和突发 20 次的配置；启用前不建立令牌桶或拒绝请求。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -186,11 +199,9 @@ struct Http2Config {
 impl Default for Http2Config {
     /// 业务作用：提供默认关闭 h2c、启用后连接与 stream 均有界的保守配置。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// 参数说明: 无。
-    ///
-    /// # 返回
     ///
     /// 返回：可直接通过启动校验的 HTTP/2 配置；开启前不会接受 h2c。
     fn default() -> Self {
@@ -217,11 +228,9 @@ impl Default for Http2Config {
 impl Http2Config {
     /// 业务作用：校验 Web 连接容量与 HTTP/2 transport 上界，阻止无界或底层不接受的配置进入监听阶段。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `phase`：配置校验所属的 Application 生命周期阶段。
-    ///
-    /// # 返回
     ///
     /// 返回：全部字段处于受管范围内时成功，否则返回稳定的 Web 配置错误。
     fn validate(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
@@ -336,6 +345,8 @@ impl Http2Config {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ServerConfig {
+    /// 是否装配 HTTP 监听与路由运行时；关闭时不占用端口，热更不会启动或关闭现有监听。
+    enabled: bool,
     host: String,
     port: u16,
     #[serde(alias = "context-path")]
@@ -379,15 +390,12 @@ struct ServerConfig {
 impl Default for ServerConfig {
     /// 业务作用：返回最小本地 Web 服务的安全缺省配置。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；监听范围只包含本机回环地址。
-    ///
-    /// # 返回
-    ///
-    /// 返回：HTTP/1 可直接启动、h2c 默认关闭且高级 transport 字段均有界的配置。
+    /// 返回：默认启用回环 HTTP/1，h2c 关闭且 transport 字段有界；显式 enabled=false 才跳过监听。
     fn default() -> Self {
         Self {
+            enabled: true,
             host: "127.0.0.1".to_owned(),
             port: 8080,
             context_path: String::new(),
@@ -412,11 +420,9 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// 业务作用：校验监听地址文本和可嵌套的统一路径前缀。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `phase`：配置被校验时所属的生命周期阶段。
-    ///
-    /// # 返回
     ///
     /// 返回：Web、治理与 HTTP transport 字段全部合法时成功，否则返回所属阶段的配置错误。
     fn validate(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
@@ -527,9 +533,13 @@ impl ServerConfig {
 ///
 /// Start 只冻结配置，Ready 才构造路由、绑定监听器并形成可逆网络副作用。
 pub(crate) struct WebComponent {
+    /// 提供静态端点声明，用于冲突、安全覆盖及文档投影。
     route_meta: WebRouteMetaFactory,
+    /// 接收完整构建上下文并创建业务路由的工厂。
     factory: WebRouterFactory,
+    /// Start 阶段通过校验后冻结的服务设置。
     config: Option<ServerConfig>,
+    /// 绑定后等待 Runner 接管的监听服务任务。
     critical_task: Option<ApplicationFuture<'static>>,
     /// Start 登记(封口前)、Ready observe 并交给 monitor 的 mapping/安全运行时就绪贡献句柄。
     mapping_contributor: Option<ReadinessContributor>,
@@ -538,9 +548,11 @@ pub(crate) struct WebComponent {
 impl WebComponent {
     /// 业务作用：从已完成运行时绑定校验的静态描述中取得两个 Web 工厂。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `spec`：属性入口生成并已通过同步预检的应用描述。
+    ///
+    /// 返回：两个工厂均存在时创建未启动组件；缺任一工厂则返回 Bootstrap 错误，不构建路由或绑定监听。
     pub(crate) fn from_spec(spec: &ApplicationSpec) -> ApplicationResult<Self> {
         let route_meta = spec.web_route_meta().ok_or_else(|| {
             web_error(
@@ -564,22 +576,28 @@ impl WebComponent {
 impl ApplicationComponent for WebComponent {
     /// 业务作用：返回 Web 组件稳定身份。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；Runner 使用该身份归类启动和停机错误。
+    /// 返回：固定的 Web 身份，供 Runner 关联生命周期动作和错误；不反映监听健康。
     fn id(&self) -> ComponentId {
         ComponentId::Web
     }
 
     /// 业务作用：从初始配置快照读取并冻结 Web 设置。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `context`：提供已经完成同步预检的 Application 配置视图。
+    ///
+    /// 返回：已冻结启用策略；禁用时不登记未启动路由的就绪贡献或任何监听资源。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let root: WebConfigRoot = context.application().config_as()?;
             root.server.validate(ApplicationPhase::Start)?;
+            if !root.server.enabled {
+                // 显式关闭的组件不能创建待就绪贡献，否则无监听部署会永久等待不存在的运行时。
+                self.config = Some(root.server);
+                return Ok(());
+            }
             context
                 .application()
                 .set_web_context_path(Arc::from(root.server.context_path.as_str()))?;
@@ -605,7 +623,8 @@ impl ApplicationComponent for WebComponent {
 
     /// 业务作用：在业务资源封存后构造路由、绑定端口并激活 Web 停机动作。
     ///
-    /// 参数说明：`context` 提供统一 Application 状态和 active stack 写入口的 Ready 上下文。
+    /// 参数说明：
+    /// - `context`：提供统一 Application 状态和 active stack 写入口的 Ready 上下文。
     ///
     /// 返回：路由互斥门禁通过且指标源、listener 与受监督 accept 任务成组建立后成功；任一步失败都阻止接流。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
@@ -616,6 +635,10 @@ impl ApplicationComponent for WebComponent {
                     "web configuration was not prepared during start",
                 )
             })?;
+            if !config.enabled {
+                // 启动时冻结的关闭决定优先于路由工厂，禁止关闭状态隐式绑定默认端口。
+                return Ok(());
+            }
             #[cfg(feature = "observability")]
             let metrics_path = {
                 let settings = nafana::observability::ObservabilityConfig::from_root(
@@ -679,7 +702,9 @@ impl ApplicationComponent for WebComponent {
                     {
                         return Err(web_error(
                             ApplicationPhase::Ready,
-                            format!("reserved Saga HTTP prefix conflicts with enabled framework route `{path}`"),
+                            format!(
+                                "reserved Saga HTTP prefix conflicts with enabled framework route `{path}`"
+                            ),
                         ));
                     }
                 }
@@ -767,7 +792,10 @@ impl ApplicationComponent for WebComponent {
                 let scope = registration.scope;
                 // 原始 Router 不提供可枚举路由合同，无法证明整个保留前缀的互斥性，必须拒绝接流。
                 if (reserved.is_some() || discovery_probe) && scope.is_none() {
-                    return Err(web_error(ApplicationPhase::Ready, "reserved framework endpoints require configure_router_scoped; unscoped Router transformations cannot prove prefix isolation"));
+                    return Err(web_error(
+                        ApplicationPhase::Ready,
+                        "reserved framework endpoints require configure_router_scoped; unscoped Router transformations cannot prove prefix isolation",
+                    ));
                 }
                 if let Some(prefix) = scope.as_deref() {
                     if discovery_probe
@@ -1294,16 +1322,18 @@ impl ApplicationComponent for WebComponent {
                 .await
             }));
             // 地址发布和任务构造均成功后再压栈；从这一点起任何退出路径都能先停止接收新请求。
-            context.activate(Box::new(WebShutdown { stop }));
+            context.activate(Box::new(WebShutdown {
+                stop,
+            }));
             Ok(())
         })
     }
 
     /// 业务作用：把已绑定监听器的服务 future 移交给 Runner 关键任务监督集合。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；任务只允许被取出一次，重复调用返回 `None`。
+    /// 返回：已构造任务首次被取出时附带固定名 web-accept；尚未构造或已取走时为 None，不自行启动该任务。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.critical_task.take().map(|task| ("web-accept", task))
     }
@@ -1311,24 +1341,27 @@ impl ApplicationComponent for WebComponent {
 
 /// 持有 Web graceful stop 令牌的可逆 active action。
 struct WebShutdown {
+    /// 通知监听任务停止接入并开始排干的共享令牌。
     stop: CancellationToken,
 }
 
 impl ShutdownAction for WebShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；名称不包含监听地址或配置值。
+    /// 返回：固定名 web-active，用于报告监听关闭动作，不包含配置或连接身份。
     fn label(&self) -> &'static str {
         "web-active"
     }
 
     /// 业务作用：通知服务停止接收新连接并开始等待在途请求完成。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `_context`：Runner 后续收割关键任务时使用的共享停机预算。
+    ///
+    /// 返回：调用时同步广播停止，异步返回值直接成功；不等待监听退出或请求排干，实际收取由 Runner 后续完成。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         self.stop.cancel();
         Box::pin(async { Ok(()) })
@@ -1340,18 +1373,19 @@ impl ShutdownAction for WebShutdown {
 ///
 /// `readiness_bound` 用启动期(mvc_router! 建路由时经 `audit_route_plans` 冻结)的 last-good 路由/interceptor
 /// 合同,对当前 last-good 快照重新审计路由(route audit)、校验 active 签名 key,并对声明 required replay 的路由
-/// 探测 replay 后端可用性。任一失败(路由审计漂移 / active key 缺失 / required replay 后端不可用)→ Degraded
-/// (last-good 快照仍在服务、`/readyz` 保持 200;非关键——不把可恢复的后端抖动升级成整实例摘流);成功→Ready。
+/// 探测 replay 后端可用性。成功发布 Ready；失败按 critical 选择 NotReady 或 Degraded，
+/// 探针最终状态仍由全应用就绪贡献共同决定，不能仅凭本项非关键就断言返回 200。
 /// 进入停机态即优雅退出。`readiness_bound` 只读 last-good、由 monitor 低频执行,绝不从 `/readyz` handler 直接
 /// 调远程后端。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`:读取全局生命周期状态与已发布 MappingRuntime。
 /// - `contributor`:mapping 就绪贡献句柄。
-/// - `critical`:失败是否升级为关键(`server.mapping_readiness_critical`):`true` → 重新校验失败 NotReady(→503),
-///   `false` → 重新校验失败 Degraded(last-good 仍服务、`/readyz` 保持 200)。
+/// - `critical`：重新校验失败是否发布 NotReady；false 时发布 Degraded，最终探针结果由全应用聚合。
 /// - `cancel`:停机取消令牌。
+///
+/// 返回：观察到取消或终止生命周期时发布 NotReady 并结束；其它情况每轮等待五秒后探测，失败更新贡献但继续运行。探测期间不并行轮询取消，超时与强制中止由外层负责。
 async fn run_mapping_monitor(
     application: Application,
     contributor: ReadinessContributor,
@@ -1382,8 +1416,7 @@ async fn run_mapping_monitor(
                 Ok(_audit) => {
                     contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
                 }
-                // 安全合同重新校验失败:last-good 仍服务。默认非关键 Degraded(不摘流);
-                // `mapping_readiness_critical` 时升级为 NotReady(affects_ready 关键 → `/readyz` 503)。
+                // 安全合同失败时保留当前服务快照，但降低对应就绪贡献；关键配置要求整应用停止报告就绪。
                 Err(_error) => {
                     let state = if critical {
                         DependencyState::NotReady
@@ -1412,18 +1445,20 @@ struct WebMappingMonitorShutdown {
 impl ShutdownAction for WebMappingMonitorShutdown {
     /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数;名称不含配置值。
+    /// 返回：固定名 web-mapping-monitor，用于区分监听关闭与映射健康监控的清理责任。
     fn label(&self) -> &'static str {
         "web-mapping-monitor"
     }
 
     /// 业务作用：取消 monitor 并在全局剩余停机预算内 join;超时不阻断其余清理(辅助任务)。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`:提供全局剩余停机预算的清理上下文。
+    ///
+    /// 返回：任务已结束或不存在时成功；等待超时后请求 abort 并继续等待取消完成，忽略任务退出错误。后一次等待未另设期限，外层仍须约束整个动作。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             self.cancel.cancel();
@@ -1449,7 +1484,11 @@ impl ShutdownAction for WebMappingMonitorShutdown {
 }
 
 impl Drop for WebMappingMonitorShutdown {
-    /// 业务作用：停机 future 被取消或 guard 提前释放时终止 mapping monitor，避免 detached task。
+    /// 业务作用：停机动作被丢弃时向仍持有的映射监控任务发出取消及中止请求。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：同步通知取消并取走句柄请求 abort，不等待任务退出；已移交到异步等待中的句柄不再由此处持有。
     fn drop(&mut self) {
         self.cancel.cancel();
         if let Some(monitor) = self.monitor.take() {
@@ -1460,7 +1499,7 @@ impl Drop for WebMappingMonitorShutdown {
 
 /// 业务作用：验证自动端点的保留路径、重复方法和结构路径冲突。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `routes`：业务二进制投影出的全部静态路由元数据。
 /// - `health_enabled`：是否需要为存活和就绪探针保留完整路径。
@@ -1550,7 +1589,7 @@ fn validate_routes(
 
 /// 业务作用：从预检后的静态元数据构造对外只读路由清单。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `routes`：已经按路径、方法和处理器稳定排序的业务路由元数据。
 /// - `health_enabled`：是否把存活和就绪探针加入清单。
@@ -1586,9 +1625,11 @@ fn build_route_manifest(
 
 /// 业务作用：补充底层路径树未覆盖的静态路由格式检查。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `route`：需要在构造 Router 前验证的单条自动端点元数据。
+///
+/// 返回：路径以斜线开头且各段不用旧式冒号或星号前缀时成功；否则返回 Ready 错误，完整模板语法仍由后续路由构建检查。
 fn validate_route_path(route: &RouteMeta) -> ApplicationResult<()> {
     if !route.path.starts_with('/') {
         return Err(web_error(
@@ -1615,18 +1656,20 @@ fn validate_route_path(route: &RouteMeta) -> ApplicationResult<()> {
 
 /// 业务作用：返回不依赖 Application 状态的存活探针结果。
 ///
-/// # 参数
+/// 参数说明: 无。
 ///
-/// 本函数无参数；监听器能处理请求即返回成功。
+/// 返回：固定 200；不检查业务依赖或全应用就绪，用于确认请求已到达存活处理器。
 async fn liveness() -> StatusCode {
     StatusCode::OK
 }
 
-/// 业务作用：根据公开生命周期状态返回就绪探针结果。
+/// 业务作用：按应用统一准入判断生成就绪探针响应。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：当前 Web Router 持有的统一 Application 状态。
+///
+/// 返回：Application::is_ready 为真时返回 200，否则为 503；本处理器不直接访问远端依赖，也不开放业务准入。
 async fn readiness(State(application): State<Application>) -> StatusCode {
     if application.is_ready() {
         StatusCode::OK
@@ -1637,9 +1680,11 @@ async fn readiness(State(application): State<Application>) -> StatusCode {
 
 /// 业务作用：把进程级统一指标 hub 的原生源与兼容源渲染为同一份 Prometheus 文本。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：当前 Web Router 持有的统一 Application 状态,经它取进程级 hub。
+///
+/// 返回：尝试刷新事实源后渲染 Prometheus 文本并返回 200；单源刷新失败不导致整个请求失败，源自身的失败与陈旧指标仍须供读者判断。
 #[cfg(not(feature = "observability"))]
 async fn metrics_endpoint(State(application): State<Application>) -> axum::response::Response {
     use axum::response::IntoResponse as _;
@@ -1659,7 +1704,13 @@ async fn metrics_endpoint(State(application): State<Application>) -> axum::respo
 }
 
 /// 业务作用：只让实际指标 GET/HEAD 走独立 bearer 校验，业务请求继续遵守 JWT 认证。
-/// 参数说明：`state` 为业务认证器及完整指标路径，`request/next` 为当前 HTTP 调用链。
+///
+/// 参数说明：
+/// - `authenticator`：当前业务请求使用的认证器。
+/// - `metrics_path`：交给独立 bearer 校验的完整指标路径。
+/// - `request`：当前 HTTP 请求。
+/// - `next`：认证通过后继续执行的调用链。
+///
 /// 返回：指标请求交给其专用认证；其它路径保留原业务认证结果。
 async fn authenticate_business_or_metrics(
     State((authenticator, metrics_path)): State<(
@@ -1684,13 +1735,11 @@ async fn authenticate_business_or_metrics(
 ///
 /// 守卫的析构路径覆盖 future 被取消的情况，确保摘流期间不会留下虚高的在途计数。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `runtime`：只包含 Web 元数据和原子计数器的共享运行时状态。
 /// - `request`：即将进入后续中间件和路由服务的请求。
 /// - `next`：当前中间件之后的完整请求处理链。
-///
-/// # 返回
 ///
 /// 返回：后续处理链生成的响应，并在形成响应前完成协议与状态会计。
 async fn observe_web_request(
@@ -1724,12 +1773,10 @@ struct RewindTcpStream {
 impl RewindTcpStream {
     /// 业务作用：把协议判定期间读取的前言与原 TCP stream 重新组合为无损字节流。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `stream`：已经建立、尚未交给 HTTP driver 的 TCP 连接。
     /// - `prefix`：协议判定期间按网络顺序读出的字节。
-    ///
-    /// # 返回
     ///
     /// 返回：先回放 `prefix`、再继续读取原连接的异步 I/O 对象。
     fn new(stream: TcpStream, prefix: Vec<u8>) -> Self {
@@ -1744,13 +1791,11 @@ impl RewindTcpStream {
 impl AsyncRead for RewindTcpStream {
     /// 业务作用：保证协议判定消耗的字节先于后续网络字节交给 HTTP driver。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `self`：当前回放位置与底层连接。
     /// - `context`：异步读取任务上下文。
     /// - `buffer`：接收字节的目标缓冲区。
-    ///
-    /// # 返回
     ///
     /// 返回：已有前言立即写入；前言耗尽后透传底层 TCP 读取结果。
     fn poll_read(
@@ -1772,13 +1817,11 @@ impl AsyncRead for RewindTcpStream {
 impl AsyncWrite for RewindTcpStream {
     /// 业务作用：把 HTTP driver 的响应字节直接写入原 TCP 连接。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `self`：持有底层连接的回放对象。
     /// - `context`：异步写入任务上下文。
     /// - `buffer`：待发送的响应字节。
-    ///
-    /// # 返回
     ///
     /// 返回：底层 TCP 写入的进度或 I/O 错误。
     fn poll_write(
@@ -1791,12 +1834,10 @@ impl AsyncWrite for RewindTcpStream {
 
     /// 业务作用：把 HTTP driver 的刷新要求传递给原 TCP 连接。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `self`：持有底层连接的回放对象。
     /// - `context`：异步刷新任务上下文。
-    ///
-    /// # 返回
     ///
     /// 返回：底层 TCP 刷新完成状态或 I/O 错误。
     fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -1805,12 +1846,10 @@ impl AsyncWrite for RewindTcpStream {
 
     /// 业务作用：在 HTTP driver 结束连接时关闭原 TCP 写方向。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `self`：持有底层连接的回放对象。
     /// - `context`：异步关闭任务上下文。
-    ///
-    /// # 返回
     ///
     /// 返回：底层 TCP 关闭完成状态或 I/O 错误。
     fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -1819,13 +1858,11 @@ impl AsyncWrite for RewindTcpStream {
 
     /// 业务作用：透传分段写入，保持 upgrade 与普通响应的写入语义一致。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `self`：持有底层连接的回放对象。
     /// - `context`：异步写入任务上下文。
     /// - `buffers`：按顺序发送的响应字节片段。
-    ///
-    /// # 返回
     ///
     /// 返回：底层 TCP 分段写入的进度或 I/O 错误。
     fn poll_write_vectored(
@@ -1838,11 +1875,9 @@ impl AsyncWrite for RewindTcpStream {
 
     /// 业务作用：报告底层 TCP 是否支持有效的分段写入。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// 参数说明: 无。
-    ///
-    /// # 返回
     ///
     /// 返回：底层连接对 vectored write 的能力标志。
     fn is_write_vectored(&self) -> bool {
@@ -1854,12 +1889,10 @@ impl AsyncWrite for RewindTcpStream {
 ///
 /// 逐字节比较可让普通 HTTP/1 请求在首个不匹配字节立即分流，避免为短请求等待完整前言。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `stream`：新接受且尚未交给 HTTP driver 的明文 TCP 连接。
 /// - `timeout`：慢速前言占用连接容量的最长时间。
-///
-/// # 返回
 ///
 /// 返回：可无损回放前言的连接及协议；超时或连接提前关闭时返回 I/O 错误。
 async fn detect_web_protocol(
@@ -1887,7 +1920,7 @@ async fn detect_web_protocol(
 
 /// 业务作用：运行受管 Web accept 循环，并把连接容量、停机信号和排空预算统一交给同一所有者。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `listener`：Ready 阶段已绑定并发布地址的 TCP listener。
 /// - `router`：已经封口且包含治理中间件的 Axum 路由图。
@@ -1895,8 +1928,6 @@ async fn detect_web_protocol(
 /// - `stop`：停止接收新连接并通知存量连接 graceful shutdown 的令牌。
 /// - `drain_budget`：摘流后等待连接结束的可选组件子预算。
 /// - `runtime`：Web 能力句柄和指标端点共用的原子观测状态。
-///
-/// # 返回
 ///
 /// 返回：收到停机信号并按预算完成或放弃排空后成功；单连接协议错误不会结束整个 listener。
 async fn run_web_listener(
@@ -1987,7 +2018,7 @@ async fn run_web_listener(
 
 /// 业务作用：为单条连接完成协议判定、注入直连对端身份并运行对应的受管 HTTP driver。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `stream`：accept 循环接纳的新 TCP 连接。
 /// - `peer_addr`：真实直连对端地址，供可信代理与客户端 IP 解析使用。
@@ -1996,8 +2027,6 @@ async fn run_web_listener(
 /// - `stop`：listener 级停机令牌。
 /// - `_permit`：连接容量所有权，函数结束时自动归还。
 /// - `runtime`：连接与请求观测使用的共享原子状态。
-///
-/// # 返回
 ///
 /// 返回：无；连接错误被记录并隔离，不传播为整个 Web listener 的退出。
 async fn drive_web_connection(
@@ -2046,15 +2075,13 @@ async fn drive_web_connection(
 
 /// 业务作用：运行保留 upgrade 能力的 HTTP/1 连接，并在停机或连接年龄到达时关闭 keep-alive。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `stream`：已判定为 HTTP/1 且可回放全部已读字节的连接。
 /// - `peer_addr`：写入 `ConnectInfo` 的直连对端地址。
 /// - `router`：本次 listener 冻结的路由服务图。
 /// - `config`：连接年龄配置。
 /// - `stop`：listener 级停机令牌。
-///
-/// # 返回
 ///
 /// 返回：连接正常结束或完成 graceful shutdown 时成功，协议或 I/O 失败时返回 hyper 错误。
 async fn drive_http1_connection(
@@ -2090,15 +2117,13 @@ async fn drive_http1_connection(
 
 /// 业务作用：按已校验限额运行 h2c 连接，并在停机或连接年龄到达时以 GOAWAY 收口新 stream。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `stream`：已确认带 HTTP/2 prior knowledge 前言且可回放全部已读字节的连接。
 /// - `peer_addr`：写入 `ConnectInfo` 的直连对端地址。
 /// - `router`：本次 listener 冻结的路由服务图。
 /// - `config`：已校验并冻结的 HTTP/2 transport 配置。
 /// - `stop`：listener 级停机令牌。
-///
-/// # 返回
 ///
 /// 返回：连接正常结束或完成 GOAWAY 排空时成功，协议或 I/O 失败时返回 hyper 错误。
 async fn drive_http2_connection(
@@ -2149,11 +2174,9 @@ async fn drive_http2_connection(
 
 /// 业务作用：把可选连接年龄转换为可参与 `select` 的单次到期信号。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `max_connection_age_ms`：主动轮转时长；`None` 表示永久等待外部停机或连接自行结束。
-///
-/// # 返回
 ///
 /// 返回：配置时长到达后完成；未配置时保持 pending。
 async fn wait_for_connection_age(max_connection_age_ms: Option<u64>) {
@@ -2167,10 +2190,12 @@ async fn wait_for_connection_age(max_connection_age_ms: Option<u64>) {
 ///
 /// 供配置热刷新在发布候选前使用：段非法时整帧候选不发布，运行中的监听器保持不变。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `tree`：合并、插值完成但尚未发布的候选配置树。
 /// - `phase`：本次无副作用校验所属的生命周期阶段。
+///
+/// 返回：严格绑定与服务配置约束均通过时成功，缺段采用默认配置；否则返回指定阶段错误，不替换配置或改动监听。
 pub(crate) fn validate_server_section(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
@@ -2188,10 +2213,12 @@ pub(crate) fn validate_server_section(
 
 /// 业务作用：创建 Web 组件的稳定生命周期错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `phase`：故障被观察到的 Web 生命周期阶段。
 /// - `message`：不包含请求体或配置秘密的诊断摘要。
+///
+/// 返回：归属 Web 且携带指定阶段与摘要的应用错误；不自动撤销已完成的装配副作用。
 fn web_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Web, phase, message)
 }
@@ -2201,14 +2228,12 @@ fn web_error(phase: ApplicationPhase, message: impl Into<String>) -> Application
 /// 两处同时配置且不一致时拒绝装配——该开关决定"漏配策略的路由放行还是拒绝",允许静默分歧
 /// 等于让部署无法从任何单一位置确认真实生效的安全缺省。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `application`：读取 UserHook 阶段注入值。
 /// - `config`：Ready 冻结的 server 配置(YAML `server.authz_unmatched_route`,已过词表校验)。
 ///
-/// # 返回
-///
-/// 唯一来源或双源一致时返回生效值(均未配置回落兼容缺省 permit)；双源冲突返回 Ready 错误。
+/// 返回：唯一来源或双源一致时返回生效值(均未配置回落兼容缺省 permit)；双源冲突返回 Ready 错误。
 fn resolve_unmatched_policy(
     application: &Application,
     config: &ServerConfig,
@@ -2250,18 +2275,15 @@ fn resolve_unmatched_policy(
 /// 漏配路由等价于永远 403 的死路由,部署期显形优于请求期拒绝。声明公开(auth_required=false)
 /// 的 route 属显式豁免,不进入未覆盖清点,运行期同样不受 observe/deny 收紧。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `policy_set`：Ready 冻结代次的策略快照。
+/// - `registry`：受管策略注册表；在其更新门禁内校验当前快照并安装后续重载必须遵守的路由覆盖合同。
 /// - `routes`：业务二进制投影出的全部静态路由元数据。
 /// - `dynamic_contracts`：`configure_router` 动态路由经显式登记的合同；与静态路由同等参与对账。
 /// - `context_path`：路由挂载前缀；运行期 `MatchedPath` 含该前缀，策略模板必须一致。
 /// - `unmatched`：未命中缺省，决定未覆盖面是警示还是阻断。
 ///
-/// # 返回
-///
-/// 对账通过返回 `Ok`；存在悬空策略、或缺省为 deny 且存在未覆盖鉴权 route 时返回 Ready 阶段
-/// 错误并阻断 Web 装配。
+/// 返回：覆盖合同安装成功后记录覆盖指标和未覆盖告警；存在悬空策略、deny 下未覆盖路由或其它安装错误时返回 Ready 错误，阻止 Web 装配继续。
 fn audit_authz_coverage(
     registry: &naauthz::PolicyRegistry,
     routes: &[RouteMeta],
@@ -2344,7 +2366,11 @@ fn audit_authz_coverage(
 }
 
 /// 业务作用：向注册中心健康检查提供独立本地业务资格，避免整体 readiness 的远端反馈循环。
-/// 参数说明：`application` 是同一宿主，`registration` 指向冻结的注册目标。
+///
+/// 参数说明：
+/// - `application`：持有本地接流状态的同一宿主。
+/// - `registration`：已经冻结的注册目标。
+///
 /// 返回：本地仍可接流为 HTTP 200，其余为 HTTP 503，不访问网络且不输出目标内容。
 #[cfg(feature = "discovery-runtime")]
 async fn discovery_eligibility(

@@ -38,7 +38,9 @@ pub struct DispatcherConfig {
 
 impl Default for DispatcherConfig {
     /// 业务作用：提供所有宿主共用的有限队列与投递预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：关闭无限等待和无限重试的稳定默认值。
     fn default() -> Self {
         Self {
@@ -55,7 +57,9 @@ impl Default for DispatcherConfig {
 
 impl DispatcherConfig {
     /// 业务作用：在分配队列或调用渠道前验证调度资源和时间上限。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：配置合法时成功，否则只返回静态字段名。
     pub fn validate(&self) -> Result<(), ConfigError> {
         for (valid, field) in [
@@ -102,7 +106,10 @@ pub struct ConfigError(pub &'static str);
 
 impl fmt::Display for ConfigError {
     /// 业务作用：报告失败字段而不显示配置材料。
-    /// 参数说明：`formatter` 接收脱敏诊断。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收脱敏诊断。
+    ///
     /// 返回：格式化成功或格式化器失败。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "invalid notification configuration: {}", self.0)
@@ -126,7 +133,9 @@ pub enum EventKind {
 
 impl EventKind {
     /// 业务作用：返回稳定事件名称供通知与指标共享。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不包含调用参数的静态名称。
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -167,7 +176,9 @@ pub struct NotificationIdentity {
 
 impl Severity {
     /// 业务作用：返回跨渠道一致的严重程度名称。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定的纯文本标识。
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -228,7 +239,10 @@ pub struct Notification(NotificationFields);
 
 impl Notification {
     /// 业务作用：在通知跨越异步队列前建立文本长度和控制字符边界。
-    /// 参数说明：`fields` 是仅在规则命中后构造的通知输入，不得包含凭据或绑定参数。
+    ///
+    /// 参数说明：
+    /// - `fields`：是仅在规则命中后构造的通知输入，不得包含凭据或绑定参数。
+    ///
     /// 返回：标识最多 128 字符、方法最多 512 字符、SQL 最多 4096 字符的只读通知。
     pub fn new(mut fields: NotificationFields) -> Self {
         for text in [
@@ -264,7 +278,9 @@ impl Notification {
     }
 
     /// 业务作用：允许 transport 读取已经通过边界约束的消息。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不可修改的通知内容，调用方不得写入普通日志。
     pub fn fields(&self) -> &NotificationFields {
         &self.0
@@ -272,7 +288,11 @@ impl Notification {
 }
 
 /// 业务作用：按 Unicode 边界限制长度并消除控制与方向覆盖字符，防止消息结构注入。
-/// 参数说明：`text` 为待投递内容，`max_chars` 为字符数硬上限。
+///
+/// 参数说明：
+/// - `text`：为待投递内容
+/// - `max_chars`：为字符数硬上限。
+///
 /// 返回：长度有界的纯文本；控制字符替换为空格，截断结尾以省略号标示。
 pub fn bounded_text(text: &str, max_chars: usize) -> String {
     if max_chars == 0 {
@@ -330,7 +350,9 @@ pub enum NotifyErrorKind {
 
 impl NotifyErrorKind {
     /// 业务作用：把渠道失败映射为低基数诊断名称。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：稳定的静态失败名称。
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -368,7 +390,10 @@ pub struct NotifyError {
 
 impl NotifyError {
     /// 业务作用：构造不能安全重发的通知失败。
-    /// 参数说明：`kind` 是不含原始响应的分类。
+    ///
+    /// 参数说明：
+    /// - `kind`：是不含原始响应的分类。
+    ///
     /// 返回：默认禁止重试的错误。
     pub const fn new(kind: NotifyErrorKind) -> Self {
         Self {
@@ -377,19 +402,28 @@ impl NotifyError {
         }
     }
     /// 业务作用：声明连接未发送或服务明确拒绝后的安全重试。
-    /// 参数说明：`kind` 为分类，`retry_after` 为服务要求的最小等待。
+    ///
+    /// 参数说明：
+    /// - `kind`：为分类
+    /// - `retry_after`：为服务要求的最小等待。
+    ///
     /// 返回：携带重试证据的错误，仍受宿主总预算限制。
     pub const fn retryable(kind: NotifyErrorKind, retry_after: Option<Duration>) -> Self {
         Self {
             kind,
-            retry: RetrySafety::Safe { retry_after },
+            retry: RetrySafety::Safe {
+                retry_after,
+            },
         }
     }
 }
 
 impl fmt::Display for NotifyError {
     /// 业务作用：避免渠道凭据或响应正文进入普通错误链。
-    /// 参数说明：`formatter` 接收稳定分类。
+    ///
+    /// 参数说明：
+    /// - `formatter`：接收稳定分类。
+    ///
     /// 返回：格式化器的写入结果。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.kind.as_str())
@@ -404,7 +438,10 @@ impl std::error::Error for NotifyError {}
 #[async_trait::async_trait]
 pub trait Notify: Send + Sync {
     /// 业务作用：投递一条已完成裁决和脱敏的通知，不参与业务事务。
-    /// 参数说明：`notification` 是只读有界消息。
+    ///
+    /// 参数说明：
+    /// - `notification`：是只读有界消息。
+    ///
     /// 返回：包含是否受理的回执或稳定失败；受理不表示最终用户收到，未知结果不得声明为安全重试。
     async fn notify(&self, notification: &Notification) -> Result<NotifyReceipt, NotifyError>;
 }

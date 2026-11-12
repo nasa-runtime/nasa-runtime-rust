@@ -42,6 +42,10 @@ pub struct PrometheusMetricSample {
 
 /// 业务作用：`/metrics` handler:业务把它挂到路由即可被 Prometheus 抓取。
 /// 是否鉴权由业务路由层自定(合同 安全边界);本组件不新增独立端口。
+///
+/// 参数说明: 无。
+///
+/// 返回：带 Prometheus 文本内容类型的 HTTP 200 响应；不进行鉴权，不清空累计指标。
 pub async fn metrics() -> impl IntoResponse {
     (
         [(
@@ -56,13 +60,9 @@ pub async fn metrics() -> impl IntoResponse {
 ///
 /// 注册表快照(排序、放锁)→ 逐命令 export → 按族输出。
 ///
-/// # 参数说明
-///
 /// 参数说明: 无。
 ///
-/// # 返回
-///
-/// 返回可与业务其它 Prometheus 指标安全拼接的 text exposition 片段。
+/// 返回：可与业务其它 Prometheus 指标安全拼接的 text exposition 片段。
 pub fn render_metrics() -> String {
     // registry::all() 已按 (group, command) 排序;export 逐命令锁各自滚动窗口一次。
     let exports: Vec<CommandExport> = registry::all().iter().map(|c| c.export()).collect();
@@ -326,12 +326,14 @@ fn non_cumulative_buckets(cumulative: &[u64], count: u64) -> Vec<u64> {
 
 /// 业务作用：输出一族只按 (command, group) 打标签的 counter。
 ///
-/// # 参数
+/// 参数说明：
 /// - `out`: 渲染缓冲。
 /// - `exports`: 全部命令导出视图。
 /// - `name`: 指标名。
 /// - `help`: HELP 文案。
 /// - `pick`: 从导出视图取值的闭包。
+///
+/// 返回：向 out 追加一份 counter 的 HELP、TYPE 和各命令样本；不改变导出视图。
 fn push_counter_family(
     out: &mut String,
     exports: &[CommandExport],
@@ -344,12 +346,14 @@ fn push_counter_family(
 
 /// 业务作用：输出一族只按 (command, group) 打标签的 gauge。
 ///
-/// # 参数
+/// 参数说明：
 /// - `out`: 渲染缓冲。
 /// - `exports`: 全部命令导出视图。
 /// - `name`: 指标名。
 /// - `help`: HELP 文案。
 /// - `pick`: 从导出视图取值的闭包。
+///
+/// 返回：向 out 追加一份 gauge 的 HELP、TYPE 和各命令样本；不改变导出视图。
 fn push_gauge_family(
     out: &mut String,
     exports: &[CommandExport],
@@ -362,13 +366,15 @@ fn push_gauge_family(
 
 /// 业务作用：counter/gauge 族的公共输出逻辑。
 ///
-/// # 参数
+/// 参数说明：
 /// - `out`: 渲染缓冲。
 /// - `exports`: 全部命令导出视图。
 /// - `name`: 指标名。
 /// - `help`: HELP 文案。
 /// - `kind`: TYPE 行的类型字面量。
 /// - `pick`: 从导出视图取值的闭包。
+///
+/// 返回：向 out 追加指定类型的指标族；每个命令按转义后的 command 与 group 标签输出一个值。
 fn push_family(
     out: &mut String,
     exports: &[CommandExport],
@@ -391,8 +397,10 @@ fn push_family(
 
 /// 业务作用：Prometheus label value 转义:`\` → `\\`、`"` → `\"`、换行 → `\n`(合同)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 原始 label 值。
+///
+/// 返回：可嵌入双引号标签的字符串；反斜线、引号和换行被转义，其余字符保持原样。
 fn escape_label(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -408,8 +416,10 @@ fn escape_label(value: &str) -> String {
 
 /// 业务作用：浮点渲染:整数值不带小数点尾巴、其余保留足够精度(sum 秒)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `v`: 待渲染浮点值。
+///
+/// 返回：绝对值小于 10 的 15 次方的整数输出整数文本，其余值按六位小数格式渲染。
 fn format_float(v: f64) -> String {
     if v == v.trunc() && v.abs() < 1e15 {
         format!("{}", v as i64)

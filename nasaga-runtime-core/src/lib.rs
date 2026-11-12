@@ -141,7 +141,8 @@ impl SagaCommandProcessingError {
 
     /// 业务作用：把未受信原因码收窄为封闭 command 错误。
     ///
-    /// 参数说明：`reason` 是 connector 收到的候选原因码。
+    /// 参数说明：
+    /// - `reason`：是 connector 收到的候选原因码。
     ///
     /// 返回：精确命中白名单时返回对应类型；未知文本返回 `None`。
     pub fn from_dead_letter_reason(reason: &str) -> Option<Self> {
@@ -158,7 +159,8 @@ impl SagaCommandProcessingError {
 impl std::fmt::Display for SagaCommandProcessingError {
     /// 业务作用：输出稳定、脱敏的 command 错误分类。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：分类文本写入成功返回 `Ok`；格式化失败返回对应错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -216,7 +218,8 @@ impl SagaResultProcessingError {
 impl std::fmt::Display for SagaResultProcessingError {
     /// 业务作用：输出稳定、脱敏的 result 错误分类。
     ///
-    /// 参数说明：`formatter` 是标准格式化目标。
+    /// 参数说明：
+    /// - `formatter`：是标准格式化目标。
     ///
     /// 返回：分类文本写入成功返回 `Ok`；格式化失败返回对应错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -257,14 +260,18 @@ impl Default for CommandDeliveryPolicy {
     ///
     /// 返回：最多允许十六次普通失败重投的策略。
     fn default() -> Self {
-        Self { max_retries: 16 }
+        Self {
+            max_retries: 16,
+        }
     }
 }
 
 impl CommandDeliveryPolicy {
     /// 业务作用：结合失败类别与本次普通重试序号裁决 command 投递动作。
     ///
-    /// 参数说明：`error` 是完整错误链，`retry_attempt` 是从一开始的普通失败序号。
+    /// 参数说明：
+    /// - `error`：是完整错误链
+    /// - `retry_attempt`：是从一开始的普通失败序号。
     ///
     /// 返回：确定性合同错误立即隔离，普通失败超预算后隔离，关键事务阶段持续保留。
     pub fn decide(self, error: &anyhow::Error, retry_attempt: u32) -> CommandDeliveryDisposition {
@@ -279,7 +286,8 @@ impl CommandDeliveryPolicy {
 
 /// 业务作用：从 command 错误链提取可安全跨 transport 传播的封闭 DLT 原因码。
 ///
-/// 参数说明：`error` 是 Participant 或入口门禁返回的完整错误链。
+/// 参数说明：
+/// - `error`：是 Participant 或入口门禁返回的完整错误链。
 ///
 /// 返回：命中类型化确定性错误时返回低基数原因码；其它失败返回 `None`。
 pub fn command_dead_letter_reason(error: &anyhow::Error) -> Option<&'static str> {
@@ -292,7 +300,8 @@ pub fn command_dead_letter_reason(error: &anyhow::Error) -> Option<&'static str>
 
 /// 业务作用：为 hosted command consumer 形成不依赖错误文本的重试与隔离分类。
 ///
-/// 参数说明：`error` 是 transport 身份门禁或 Participant 事务错误。
+/// 参数说明：
+/// - `error`：是 transport 身份门禁或 Participant 事务错误。
 ///
 /// 返回：合同错误隔离，事务关键阶段持续保留，其它失败有界重试。
 pub fn classify_command_delivery_error(error: &anyhow::Error) -> CommandDeliveryDisposition {
@@ -334,14 +343,18 @@ impl Default for ResultDeliveryPolicy {
     ///
     /// 返回：最多允许十六次普通失败重投的策略。
     fn default() -> Self {
-        Self { max_retries: 16 }
+        Self {
+            max_retries: 16,
+        }
     }
 }
 
 impl ResultDeliveryPolicy {
     /// 业务作用：结合失败类别与普通失败序号裁决 result 投递动作。
     ///
-    /// 参数说明：`error` 是完整错误链，`retry_attempt` 是从一开始的普通失败序号。
+    /// 参数说明：
+    /// - `error`：是完整错误链
+    /// - `retry_attempt`：是从一开始的普通失败序号。
     ///
     /// 返回：暂停、失权和事务不确定持续保留，普通失败超预算后隔离。
     pub fn decide(self, error: &anyhow::Error, retry_attempt: u32) -> ResultDeliveryDisposition {
@@ -356,7 +369,8 @@ impl ResultDeliveryPolicy {
 
 /// 业务作用：为 hosted result consumer 形成不依赖错误文本的重试、延后与隔离分类。
 ///
-/// 参数说明：`error` 是 Orchestrator 结果处理返回的完整错误链。
+/// 参数说明：
+/// - `error`：是 Orchestrator 结果处理返回的完整错误链。
 ///
 /// 返回：暂停、失权与事务关键阶段延后，确定性协议错误隔离，其它失败有界重试。
 pub fn classify_result_delivery_error(error: &anyhow::Error) -> ResultDeliveryDisposition {
@@ -463,7 +477,8 @@ pub fn collect_workflow_definitions() -> anyhow::Result<DefinitionRegistry> {
 
 /// 业务作用：在 Ready 前复验本地步骤合同唯一且与 definition 一致。
 ///
-/// 参数说明：`registry` 是启动期冻结的 workflow definition 集合。
+/// 参数说明：
+/// - `registry`：是启动期冻结的 workflow definition 集合。
 ///
 /// 返回：本地投影无重复且已注册 definition 不漂移时返回 `Ok`；否则拒绝 Ready。
 pub fn verify_descriptors(registry: &DefinitionRegistry) -> anyhow::Result<()> {
@@ -633,7 +648,8 @@ pub fn record_action_rate_rejection() {
 
 /// 业务作用：记录一次 Kafka Saga result handler 的单调耗时。
 ///
-/// 参数说明：`elapsed` 是从 transport 门禁到本地事务结束的单调耗时。
+/// 参数说明：
+/// - `elapsed`：是从 transport 门禁到本地事务结束的单调耗时。
 ///
 /// 返回：无；次数原子递增，耗时使用饱和累计。
 pub fn record_kafka_processing(elapsed: Duration) {
@@ -661,7 +677,8 @@ pub fn record_kafka_dlt_requested() {
 
 /// 业务作用：记录 Saga result 在本地提交后完成 ACK，并区分 Inbox 重复吸收。
 ///
-/// 参数说明：`duplicate` 表示本次是否未重复执行业务效果。
+/// 参数说明：
+/// - `duplicate`：表示本次是否未重复执行业务效果。
 ///
 /// 返回：无；ACK 与重复计数原子更新。
 pub fn record_kafka_ack(duplicate: bool) {
@@ -673,7 +690,8 @@ pub fn record_kafka_ack(duplicate: bool) {
 
 /// 业务作用：记录一次 Kafka Saga command handler 的单调耗时。
 ///
-/// 参数说明：`elapsed` 是从 transport 门禁到参与方事务结束的单调耗时。
+/// 参数说明：
+/// - `elapsed`：是从 transport 门禁到参与方事务结束的单调耗时。
 ///
 /// 返回：无；次数原子递增，耗时使用饱和累计。
 pub fn record_kafka_command_processing(elapsed: Duration) {
@@ -701,7 +719,8 @@ pub fn record_kafka_command_dlt_requested() {
 
 /// 业务作用：记录 Saga command 在参与方提交后完成 ACK，并区分 Inbox 重复吸收。
 ///
-/// 参数说明：`duplicate` 表示本次是否未重复执行业务效果。
+/// 参数说明：
+/// - `duplicate`：表示本次是否未重复执行业务效果。
 ///
 /// 返回：无；ACK 与重复计数原子更新。
 pub fn record_kafka_command_ack(duplicate: bool) {
@@ -713,7 +732,9 @@ pub fn record_kafka_command_ack(duplicate: bool) {
 
 /// 业务作用：把单次耗时以微秒饱和累加到进程计数器。
 ///
-/// 参数说明：`target` 是目标原子计数，`elapsed` 是单调耗时。
+/// 参数说明：
+/// - `target`：是目标原子计数
+/// - `elapsed`：是单调耗时。
 ///
 /// 返回：无；溢出时保持 `u64::MAX`，不允许回绕成较小值。
 fn saturating_add_duration(target: &AtomicU64, elapsed: Duration) {

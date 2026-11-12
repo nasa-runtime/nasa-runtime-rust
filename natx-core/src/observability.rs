@@ -39,7 +39,9 @@ pub enum ConnectionPurpose {
 
 impl ConnectionPurpose {
     /// 业务作用：返回连接用途对应的固定指标值。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不会包含业务输入的静态标识。
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -70,7 +72,9 @@ pub enum AcquireOutcome {
 
 impl AcquireOutcome {
     /// 业务作用：把详细完成分类投影到延迟分布的固定状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：成功、失败或调用方取消的数组位置。
     const fn status(self) -> usize {
         match self {
@@ -145,7 +149,9 @@ pub struct AcquireAlertPolicy {
 
 impl Default for WaitObservationPolicy {
     /// 业务作用：为连接等待提供默认关闭日志的稳定策略。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：250 毫秒阈值与 60 秒冷却，基础统计仍全量记录。
     fn default() -> Self {
         Self {
@@ -165,7 +171,9 @@ struct WaitCells {
 
 impl WaitCells {
     /// 业务作用：预分配等待路径的全部计数与分布。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：零值单元；后续完成路径无需动态构造指标。
     const fn new() -> Self {
         Self {
@@ -192,8 +200,12 @@ pub struct ConnectionSlot {
 
 impl ConnectionSlot {
     /// 业务作用：在启动期建立一个 datasource 的固定容量观测槽。
-    /// 参数说明：`driver` 和 `datasource` 为冻结的连接身份。
-    /// 返回：未写入任何调用事实的原子单元。
+    ///
+    /// 参数说明：
+    /// - `driver`：已验证连接配置对应的数据库 driver。
+    /// - `datasource`：用于固定观测身份的具名数据源名称。
+    ///
+    /// 返回：返回调用、等待、拒绝与通知计数均为零且策略尚未安装的观测槽，不登记全局目录或访问数据库。
     fn new(driver: DatabaseDriver, datasource: &str) -> Self {
         Self {
             driver,
@@ -210,21 +222,29 @@ impl ConnectionSlot {
     }
 
     /// 业务作用：记录连接发放之前的安全门禁拒绝。
-    /// 参数说明：`reason` 是由连接权威判定的固定分类。
+    ///
+    /// 参数说明：
+    /// - `reason`：是由连接权威判定的固定分类。
+    ///
     /// 返回：无；不产生数据库 operation 或连接等待样本。
     pub fn reject(&self, reason: ConnectionRejection) {
         add(&self.rejections[reason as usize], 1);
     }
 
     /// 业务作用：开始观察普通 Pool 获取，保证取消时回收 in-flight。
-    /// 参数说明：`purpose` 是调用方明确声明的连接用途。
+    ///
+    /// 参数说明：
+    /// - `purpose`：是调用方明确声明的连接用途。
+    ///
     /// 返回：持有进程静态统计槽的等待守卫。
     pub fn acquire(&'static self, purpose: ConnectionPurpose) -> WaitGuard {
         WaitGuard::new(self, purpose, false)
     }
 
     /// 业务作用：开始观察 ambient transaction 的连接槽等待。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：与 Pool acquire 独立计时的取消安全守卫。
     pub fn transaction_slot(&'static self) -> WaitGuard {
         WaitGuard::new(self, ConnectionPurpose::Direct, true)
@@ -240,8 +260,12 @@ static UNKNOWN_SQLITE: OnceLock<ConnectionSlot> = OnceLock::new();
 static CLOCK: OnceLock<Instant> = OnceLock::new();
 
 /// 业务作用：在启动期为已知 datasource 预分配槽，不允许运行时名称扩大指标基数。
-/// 参数说明：`driver` 与 `datasource` 来自已验证的连接配置。
-/// 返回：首次或同名重复注册返回固定槽；名称或总量越界返回错误。
+///
+/// 参数说明：
+/// - `driver`：已验证连接配置对应的数据库 driver。
+/// - `datasource`：用于固定观测身份的具名数据源名称。
+///
+/// 返回：名称合法且容量可用时返回进程静态槽，同 driver 同名称重复调用复用原槽；非法名称或总槽位耗尽返回错误，不允许动态指标名无限增长。
 pub fn register_datasource(
     driver: DatabaseDriver,
     datasource: &str,
@@ -263,8 +287,14 @@ pub fn register_datasource(
 }
 
 /// 业务作用：冻结 datasource 的等待日志策略，拒绝运行期静默替换。
-/// 参数说明：`driver`、`datasource` 定位槽；`acquire` 和 `slot` 分别控制两种等待。
-/// 返回：首次安装或相同策略重复安装成功；策略变化要求重启进程。
+///
+/// 参数说明：
+/// - `driver`：已验证连接配置对应的数据库 driver。
+/// - `datasource`：用于固定观测身份的具名数据源名称。
+/// - `acquire`：调用方已验证的池获取等待观测策略。
+/// - `slot`：调用方已验证的事务连接槽等待观测策略。
+///
+/// 返回：首次冻结或传入值与已冻结策略完全相同则成功，策略变化返回错误。不重新验证策略内部数值，失败前可能已经登记该数据源的观测槽。
 pub fn configure_datasource(
     driver: DatabaseDriver,
     datasource: &str,
@@ -281,8 +311,13 @@ pub fn configure_datasource(
 }
 
 /// 业务作用：将已验证的通知引用绑定到固定 datasource 槽。
-/// 参数说明：`driver` 与 `datasource` 指定槽；`policy` 包含具体队列、冷却与实例身份。
-/// 返回：首次安装成功；用途为空、重复或已安装时拒绝，不进行网络操作。
+///
+/// 参数说明：
+/// - `driver`：已验证连接配置对应的数据库 driver。
+/// - `datasource`：用于固定观测身份的具名数据源名称。
+/// - `policy`：包含用途、队列、冷却和实例身份的通知策略。
+///
+/// 返回：用途集合非空、至多四项、无重复且此前未安装通知时绑定策略；否则返回错误，不发网络请求。失败前可能已登记观测槽，具体通知队列等前置校验由调用方负责。
 pub fn configure_acquire_alert(
     driver: DatabaseDriver,
     datasource: &str,
@@ -304,15 +339,23 @@ pub fn configure_acquire_alert(
 }
 
 /// 业务作用：查询已预分配槽，未知名称只归入固定回退身份。
-/// 参数说明：`driver` 和 `datasource` 是本次连接请求的身份。
-/// 返回：进程静态槽；不会注册动态名称。
+///
+/// 参数说明：
+/// - `driver`：已验证连接配置对应的数据库 driver。
+/// - `datasource`：用于固定观测身份的具名数据源名称。
+///
+/// 返回：返回已注册静态槽，未知身份归入该 driver 的固定回退槽；不登记动态 datasource 标签。
 pub fn connection_slot(driver: DatabaseDriver, datasource: &str) -> &'static ConnectionSlot {
     known_slot(driver, datasource).unwrap_or_else(|| fallback(driver))
 }
 
 /// 业务作用：在固定目录中查找连接槽，不获取全局锁。
-/// 参数说明：`driver` 与 `datasource` 为候选身份。
-/// 返回：已登记身份的静态单元或空值。
+///
+/// 参数说明：
+/// - `driver`：已验证连接配置对应的数据库 driver。
+/// - `datasource`：用于固定观测身份的具名数据源名称。
+///
+/// 返回：找到同 driver 同名称的已登记槽时返回静态借用，否则返回 None，不分配槽或取得全局注册锁。
 fn known_slot(driver: DatabaseDriver, datasource: &str) -> Option<&'static ConnectionSlot> {
     SLOTS
         .iter()
@@ -321,7 +364,10 @@ fn known_slot(driver: DatabaseDriver, datasource: &str) -> Option<&'static Conne
 }
 
 /// 业务作用：把未知 datasource 的拒绝归入固定低基数槽。
-/// 参数说明：`driver` 指定后端。
+///
+/// 参数说明：
+/// - `driver`：指定后端。
+///
 /// 返回：不会包含用户输入名称的静态槽。
 fn fallback(driver: DatabaseDriver) -> &'static ConnectionSlot {
     match driver {
@@ -343,7 +389,12 @@ pub struct WaitGuard {
 
 impl WaitGuard {
     /// 业务作用：进入等待状态并增加对应的在途数量。
-    /// 参数说明：`slot` 为固定身份；`purpose` 为用途；`transaction` 区分事务槽。
+    ///
+    /// 参数说明：
+    /// - `slot`：为固定身份
+    /// - `purpose`：为用途
+    /// - `transaction`：区分事务槽。
+    ///
     /// 返回：尚未裁决的等待守卫。
     fn new(slot: &'static ConnectionSlot, purpose: ConnectionPurpose, transaction: bool) -> Self {
         let guard = Self {
@@ -358,7 +409,9 @@ impl WaitGuard {
     }
 
     /// 业务作用：选取当前等待语义的固定原子单元。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：Pool 用途单元或事务连接槽单元。
     fn cells(&self) -> &WaitCells {
         if self.transaction {
@@ -369,7 +422,10 @@ impl WaitGuard {
     }
 
     /// 业务作用：记录连接等待的唯一终态，日志不会改写连接结果。
-    /// 参数说明：`outcome` 必须在驱动错误类型被擦除前确定。
+    ///
+    /// 参数说明：
+    /// - `outcome`：必须在驱动错误类型被擦除前确定。
+    ///
     /// 返回：无；重复完成不会重复计数。
     pub fn finish(&mut self, outcome: AcquireOutcome) {
         if self.finished {
@@ -390,7 +446,10 @@ impl WaitGuard {
     }
 
     /// 业务作用：仅在超时规则与原子冷却均命中后构造一个有界通知。
-    /// 参数说明：`elapsed` 是本次连接获取时长。
+    ///
+    /// 参数说明：
+    /// - `elapsed`：是本次连接获取时长。
+    ///
     /// 返回：无；入队拥塞和停机只影响通知自己的指标，不能改变连接错误。
     fn notify_timeout(&self, elapsed: Duration) {
         let Some(policy) = self.slot.acquire_alert.get() else {
@@ -457,7 +516,10 @@ impl WaitGuard {
     }
 
     /// 业务作用：只为成功且超阈值的等待输出有冷却的结构化日志。
-    /// 参数说明：`elapsed` 是单调时钟测得的完整等待时长。
+    ///
+    /// 参数说明：
+    /// - `elapsed`：是单调时钟测得的完整等待时长。
+    ///
     /// 返回：无；默认不输出，且不携带 SQL、参数或错误原文。
     fn log_wait(&self, elapsed: Duration) {
         let Some(policies) = self.slot.policies.get() else {
@@ -519,7 +581,9 @@ impl WaitGuard {
 
 impl Drop for WaitGuard {
     /// 业务作用：在 Future 取消或展开时回收在途计数并记录取消。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：无；已完成守卫不再产生样本。
     fn drop(&mut self) {
         self.finish(AcquireOutcome::Cancelled);
@@ -527,7 +591,10 @@ impl Drop for WaitGuard {
 }
 
 /// 业务作用：返回数据库后端的固定指标身份。
-/// 参数说明：`driver` 是已解析的后端枚举。
+///
+/// 参数说明：
+/// - `driver`：是已解析的后端枚举。
+///
 /// 返回：与配置 driver 一致的固定字符串。
 fn driver_name(driver: DatabaseDriver) -> &'static str {
     match driver {
@@ -647,7 +714,10 @@ pub struct ConnectionMetricsSource {
 
 impl ConnectionMetricsSource {
     /// 业务作用：在指标源注册前冻结指定后端的槽目录，后续注册不扩大已预留的系列预算。
-    /// 参数说明：`driver` 限定该源拥有的已登记槽及固定未知身份槽。
+    ///
+    /// 参数说明：
+    /// - `driver`：限定该源拥有的已登记槽及固定未知身份槽。
+    ///
     /// 返回：不创建后台 worker 的指标源；原子值持续更新，目录不再变化。
     pub fn new(driver: DatabaseDriver) -> Self {
         // 与槽登记共用门禁形成一致的目录边界，预算与所有后续快照必须消费同一组静态引用。
@@ -661,11 +731,15 @@ impl ConnectionMetricsSource {
             .chain(std::iter::once(fallback(driver)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { slots }
+        Self {
+            slots,
+        }
     }
 
     /// 业务作用：计算当前冻结 datasource 目录的最坏 Prometheus 系列预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：包含固定未知身份和全部 counter、gauge、桶、sum、count 的系列数。
     pub fn series_budget(&self) -> usize {
         self.slots.len() * (5 * (6 + 3 * (LATENCY_SECONDS.len() + 3) + 1) + 7)
@@ -674,14 +748,18 @@ impl ConnectionMetricsSource {
 
 impl LegacyMetricsSource for ConnectionMetricsSource {
     /// 业务作用：发布等待与门禁族的统一描述符。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定且与结构化快照一致的目录。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         CONNECTION_DESCRIPTORS
     }
 
     /// 业务作用：在出口侧读取原子单元并构造低基数样本。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：冻结目录内的实时 counter、gauge 和非累积 Histogram 快照，不包含源创建后登记的槽。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         let mut samples = Vec::new();
@@ -724,14 +802,25 @@ impl LegacyMetricsSource for ConnectionMetricsSource {
     }
 
     /// 业务作用：由 MetricHub 统一渲染结构化快照，避免重复文本系列。
-    /// 参数说明：`_output` 为兼容文本缓冲区。
+    ///
+    /// 参数说明：
+    /// - `_output`：为兼容文本缓冲区。
+    ///
     /// 返回：无；该源不使用旧文本回退路径。
     fn render_prometheus(&self, _output: &mut String) {}
 }
 
 /// 业务作用：把一种等待路径的全部固定单元投影为出口样本。
-/// 参数说明：`samples` 接收样本；`cells` 为原子槽；`labels` 为冻结身份；其余参数为对应描述符。
-/// 返回：无；分配只发生在快照侧。
+///
+/// 参数说明：
+/// - `samples`：接收观测出口样本的追加序列。
+/// - `cells`：一种等待路径已经固定的计数、分布与在途原子单元。
+/// - `labels`：driver、datasource、用途等由调用方冻结的基础标签。
+/// - `counter`：各等待结局累计计数的指标描述符。
+/// - `histogram`：各状态等待时长分布的指标描述符。
+/// - `gauge`：当前在途等待数的指标描述符。
+///
+/// 返回：向 samples 追加各固定结局计数、状态时长分布与当前在途 gauge；分别读取原子值，不保证全部样本属于同一时刻，不修改原计数。
 fn snapshot_wait(
     samples: &mut Vec<MetricSample>,
     cells: &WaitCells,
@@ -778,7 +867,9 @@ pub struct PoolState {
 /// 后端只在抓取时提供连接池状态，不参与业务热路径。
 pub trait PoolSnapshot: Send + Sync {
     /// 业务作用：读取连接池当前规模与配置上限。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：允许并发变化的近似瞬时状态。
     fn snapshot(&self) -> PoolState;
 }
@@ -791,7 +882,11 @@ pub struct PoolMetricsSource {
 
 impl PoolMetricsSource {
     /// 业务作用：从启动期连接目录建立 Pool 状态出口。
-    /// 参数说明：`driver` 指定后端；`pools` 为固定名称与只读句柄。
+    ///
+    /// 参数说明：
+    /// - `driver`：指定后端
+    /// - `pools`：为固定名称与只读句柄。
+    ///
     /// 返回：名称合法且不重复时返回源，未创建任何采样线程。
     pub fn new(
         driver: DatabaseDriver,
@@ -806,11 +901,16 @@ impl PoolMetricsSource {
             crate::validate_datasource_name(name)?;
             anyhow::ensure!(names.insert(name), "duplicate pool observation datasource");
         }
-        Ok(Self { driver, pools })
+        Ok(Self {
+            driver,
+            pools,
+        })
     }
 
     /// 业务作用：预留每个 Pool 的固定 gauge 系列预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：total、idle、in_use 和上限的系列总数。
     pub fn series_budget(&self) -> usize {
         self.pools.len() * 4
@@ -819,14 +919,18 @@ impl PoolMetricsSource {
 
 impl LegacyMetricsSource for PoolMetricsSource {
     /// 业务作用：发布后端中立的 Pool gauge 描述符。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：状态规模和配置上限两个固定族。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         POOL_DESCRIPTORS
     }
 
     /// 业务作用：抓取时读取 Pool 并用饱和差值计算使用数。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不因 total 与 idle 并发变化而下溢的近似快照。
     fn snapshot(&self) -> Option<Vec<MetricSample>> {
         let mut samples = Vec::with_capacity(self.series_budget());
@@ -859,7 +963,10 @@ impl LegacyMetricsSource for PoolMetricsSource {
     }
 
     /// 业务作用：保持所有出口统一消费结构化 Pool 样本。
-    /// 参数说明：`_output` 为旧文本回退缓冲区。
+    ///
+    /// 参数说明：
+    /// - `_output`：为旧文本回退缓冲区。
+    ///
     /// 返回：无；由 MetricHub 完成文本编码。
     fn render_prometheus(&self, _output: &mut String) {}
 }

@@ -51,11 +51,15 @@ pub mod request_client {
     {
         pub fn new(inner: T) -> Self {
             let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
+            Self {
+                inner,
+            }
         }
         pub fn with_origin(inner: T, origin: Uri) -> Self {
             let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
+            Self {
+                inner,
+            }
         }
         pub fn with_interceptor<F>(
             inner: T,
@@ -158,11 +162,15 @@ pub mod bi_request_stream_client {
     {
         pub fn new(inner: T) -> Self {
             let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
+            Self {
+                inner,
+            }
         }
         pub fn with_origin(inner: T, origin: Uri) -> Self {
             let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
+            Self {
+                inner,
+            }
         }
         pub fn with_interceptor<F>(
             inner: T,

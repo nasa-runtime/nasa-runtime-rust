@@ -128,7 +128,8 @@ pub struct DataSourceRegistry {
 impl DataSourceRegistry {
     /// 业务作用：从启动期已建立的 pool 一次性构造冻结命名表。
     ///
-    /// 参数说明：`pools` 为 qualifier 与已受管连接池的集合。
+    /// 参数说明：
+    /// - `pools`：为 qualifier 与已受管连接池的集合。
     ///
     /// 返回：名称全部合法、不重复且数量有界时返回 registry；失败时不发布部分表。
     pub fn try_new(pools: impl IntoIterator<Item = (String, MySqlPool)>) -> anyhow::Result<Self> {
@@ -181,7 +182,8 @@ impl DataSourceRegistry {
 
     /// 业务作用：在 registry 尚未停机时选择指定连接池。
     ///
-    /// 参数说明：`datasource` 是已校验或配置边界传入的 qualifier。
+    /// 参数说明：
+    /// - `datasource`：是已校验或配置边界传入的 qualifier。
     ///
     /// 返回：运行期内命中时返回同一 pool 的 clone；停机或名称缺失时失败且不回退默认库。
     pub fn pool(&self, datasource: &str) -> anyhow::Result<MySqlPool> {
@@ -210,7 +212,8 @@ impl DataSourceRegistry {
 
     /// 业务作用：确认命名 datasource 是否属于该冻结表。
     ///
-    /// 参数说明：`datasource` 是待复验的 qualifier。
+    /// 参数说明：
+    /// - `datasource`：是待复验的 qualifier。
     ///
     /// 返回：registry 尚开放且名称存在时返回真。
     pub fn contains(&self, datasource: &str) -> bool {
@@ -242,7 +245,8 @@ impl DataSourceRegistry {
 
     /// 业务作用：在 catalog 完成同 owner 发布后开放本 typed registry。
     ///
-    /// 参数说明：`token` 必须属于构造该 registry 的 Application。
+    /// 参数说明：
+    /// - `token`：必须属于构造该 registry 的 Application。
     ///
     /// 返回：owner 匹配时开放连接选择；错配时保持关闭。
     pub fn start_accepting(&self, token: &ManagedInstallationToken) -> anyhow::Result<()> {
@@ -317,7 +321,8 @@ impl DataSourceRegistry {
 
     /// 业务作用：把 MySQL typed registry 绑定到唯一 Application owner，阻止跨实例复用资源表。
     ///
-    /// 参数说明：`owner` 是构造 catalog 与其它 typed registry 共同使用的身份。
+    /// 参数说明：
+    /// - `owner`：是构造 catalog 与其它 typed registry 共同使用的身份。
     ///
     /// 返回：首次绑定或同身份重复绑定成功；另一 owner 已占用时保持原身份并失败。
     fn bind_owner(&self, owner: &ManagedRegistryOwner) -> anyhow::Result<()> {
@@ -505,7 +510,8 @@ fn validate_datasource_name(name: &str) -> anyhow::Result<()> {
 
 /// 业务作用：发布当前 Application 拥有的唯一 datasource registry。
 ///
-/// 参数说明：`registry` 是 DB 组件在全部数据源建立成功后冻结的命名表。
+/// 参数说明：
+/// - `registry`：是 DB 组件在全部数据源建立成功后冻结的命名表。
 ///
 /// 返回：当前进程没有独立注册表且没有其它 live Application 时成功；冲突时保留原权威并失败。
 pub fn install_managed_registry(registry: &Arc<DataSourceRegistry>) -> anyhow::Result<()> {
@@ -561,9 +567,10 @@ pub fn install_managed_registry(registry: &Arc<DataSourceRegistry>) -> anyhow::R
 
 /// 业务作用：为 napp 领取受管 datasource owner 与安装 token，但不创建或开放连接池。
 ///
-/// 参数说明：`kind` 区分配置建池与 UserHook 延后 default。
+/// 参数说明：
+/// - `kind`：由配置建池或延后接管默认来源的受管引导模式。
 ///
-/// 返回：进程入口为空时进入 Bootstrapping；已有 standalone 或 managed 权威时失败。
+/// 返回：进程入口允许受管引导时返回 owner 与安装 token，并进入 Bootstrapping；已有不相容控制权威时返回错误，不创建或开放连接池。
 #[doc(hidden)]
 pub fn begin_managed_bootstrap(
     kind: BootstrapKind,
@@ -628,9 +635,10 @@ pub fn open_managed_registry(
 
 /// 业务作用：在 catalog 封口后按 registry Arc 身份撤销 MySQL typed 槽。
 ///
-/// 参数说明：`registry` 是正在停机或启动失败清理的资源表。
+/// 参数说明：
+/// - `registry`：正在停止或启动失败清理的 MySQL 资源表。
 ///
-/// 返回：无；旧实例不命中当前槽时不修改新实例。
+/// 返回：先关闭传入 registry 的准入，再仅在 Arc 身份命中当前槽时撤下入口；旧 registry 不覆盖后来安装的实例，本方法不关闭池。
 #[doc(hidden)]
 pub fn clear_managed_registry_slot(registry: &Arc<DataSourceRegistry>) {
     natx_core::coordinate(|_| {
@@ -711,9 +719,10 @@ pub fn adopt_standalone_default_registry() -> anyhow::Result<Arc<DataSourceRegis
 
 /// 业务作用：把 UserHook 安装的 MySQL default 转入同 owner 的关闭态 registry。
 ///
-/// 参数说明：`token` 是 Start 阶段领取的 DeferredDefault 安装 token。
+/// 参数说明：
+/// - `token`：本轮 DeferredDefault 引导取得且仍有效的安装 token。
 ///
-/// 返回：只存在 MySQL default 且 owner/driver 匹配时返回关闭态 registry；失败保留 standalone。
+/// 返回：token、模式与 driver 匹配且只有默认池时，返回已安装但准入仍关闭的 registry；非法条件返回错误，构造或安装失败时把取走的池句柄放回原槽。不在此处开放业务路由。
 #[doc(hidden)]
 pub fn adopt_standalone_default_registry_closed(
     token: &ManagedInstallationToken,
@@ -801,9 +810,10 @@ pub fn take_standalone_datasources_for_managed_shutdown() -> anyhow::Result<Vec<
 
 /// 业务作用：在 DeferredDefault 启动失败时按 owner token 取回 MySQL standalone pool。
 ///
-/// 参数说明：`token` 是本轮 Application 安装 token。
+/// 参数说明：
+/// - `token`：本轮受管引导的安装 token，用于阻止旧实例取走后来资源。
 ///
-/// 返回：owner 与 deferred driver 匹配时撤销并返回有序 pool；错配时不触碰全局入口。
+/// 返回：验证本轮 token 与 deferred driver 后取走本地 standalone 池，并清除 core 归属记录，返回需调用方关闭的具名池列表；权威错配时拒绝，不关闭池。
 #[doc(hidden)]
 pub fn take_deferred_standalone_for_managed_shutdown(
     token: &ManagedInstallationToken,
@@ -822,9 +832,10 @@ pub fn take_deferred_standalone_for_managed_shutdown(
 
 /// 业务作用：关闭态 adopt 后若后续 staging 失败，清除 core 中已接管的 MySQL deferred driver 记录。
 ///
-/// 参数说明：`token` 是本轮 DeferredDefault owner token；调用方必须先撤销 typed 槽并关闭 pool。
+/// 参数说明：
+/// - `token`：仍属于本轮 DeferredDefault 引导的安装 token。
 ///
-/// 返回：owner 与 driver 匹配时清除记录；错配时保留模式，防止越权释放。
+/// 返回：core 接受本轮 token 和 MySQL 归属时清除 deferred driver 记录，否则返回错误；不撤 typed 槽或关闭池，这些必须由调用方先完成。
 #[doc(hidden)]
 pub fn clear_adopted_deferred_driver(token: &ManagedInstallationToken) -> anyhow::Result<()> {
     natx_core::coordinate(|coordinator| {
@@ -836,7 +847,8 @@ pub fn clear_adopted_deferred_driver(token: &ManagedInstallationToken) -> anyhow
 
 /// 业务作用：在全局数据源协调锁内发布唯一受管 registry。
 ///
-/// 参数说明：`registry` 是已冻结且由 Application 持有的资源表。
+/// 参数说明：
+/// - `registry`：是已冻结且由 Application 持有的资源表。
 ///
 /// 返回：独立入口为空且无其它 live registry 时成功；冲突时不改变全局槽。
 fn install_managed_slot_locked(registry: &Arc<DataSourceRegistry>) -> anyhow::Result<()> {
@@ -851,7 +863,8 @@ fn install_managed_slot_locked(registry: &Arc<DataSourceRegistry>) -> anyhow::Re
 
 /// 业务作用：按 Arc 身份清除 MySQL typed registry 弱槽，防止旧实例撤销新实例。
 ///
-/// 参数说明：`registry` 是正在失败清理或停机的 registry。
+/// 参数说明：
+/// - `registry`：是正在失败清理或停机的 registry。
 ///
 /// 返回：无；槽为空或身份不匹配时保持当前状态。
 fn clear_managed_slot_locked(registry: &Arc<DataSourceRegistry>) {
@@ -869,7 +882,8 @@ fn clear_managed_slot_locked(registry: &Arc<DataSourceRegistry>) {
 
 /// 业务作用：仅在全局槽仍指向目标 Application registry 时封口并撤销发布。
 ///
-/// 参数说明：`registry` 是正在进入逆序停机的资源表。
+/// 参数说明：
+/// - `registry`：是正在进入逆序停机的资源表。
 ///
 /// 返回：无；指针复验防止旧 Application 误清理后续实例的槽位。
 pub fn clear_managed_registry(registry: &Arc<DataSourceRegistry>) {
@@ -947,16 +961,17 @@ fn pool_for(datasource: &str) -> anyhow::Result<MySqlPool> {
     match pool_for_checked(datasource) {
         Ok(pool) => Ok(pool),
         // 兼容入口继续保留 1.x 的未初始化文本；新增 checked 入口仍提供结构化 NotFound。
-        Err(DataSourceLookupError::NotFound { datasource }) => {
-            Err(anyhow::anyhow!("datasource `{datasource}` 未初始化"))
-        }
+        Err(DataSourceLookupError::NotFound {
+            datasource,
+        }) => Err(anyhow::anyhow!("datasource `{datasource}` 未初始化")),
         Err(error) => Err(anyhow::Error::new(error)),
     }
 }
 
 /// 业务作用：解析 MySQL pool 并保留 datasource 查找的结构化失败，供加法 checked 事务入口使用。
 ///
-/// 参数说明：`datasource` 是业务声明的 datasource 名称。
+/// 参数说明：
+/// - `datasource`：是业务声明的 datasource 名称。
 ///
 /// 返回：命中 typed pool 时返回 clone；名称、driver、生命周期或缺失状态返回封闭 lookup 分类。
 fn pool_for_checked(datasource: &str) -> Result<MySqlPool, DataSourceLookupError> {
@@ -1089,7 +1104,8 @@ where
 
 /// 业务作用：在默认 MySQL datasource 执行显式裁决，并保留 datasource 查找的结构化错误。
 ///
-/// 参数说明：`body` 返回提交或回滚裁决。
+/// 参数说明：
+/// - `body`：返回提交或回滚裁决。
 ///
 /// 返回：查找失败经 [`TxEntryError::Lookup`] 返回；事务开始后的失败经 [`TxEntryError::Run`] 返回。
 pub async fn run_decided_checked<T, E, F>(body: F) -> Result<T, TxEntryError<E>>
@@ -1184,23 +1200,36 @@ where
     match run_decision_kernel(datasource, decision, |error| format!("{error:#}")).await {
         Ok(value) => Ok(value),
         Err(TxRunError::Rollback(error)) => Err(error),
-        Err(TxRunError::RollbackOnly { reason }) => {
-            Err(anyhow::Error::new(RollbackOnly { reason }))
-        }
-        Err(TxRunError::RollbackFailed { cause, reason }) => {
+        Err(TxRunError::RollbackOnly {
+            reason,
+        }) => Err(anyhow::Error::new(RollbackOnly {
+            reason,
+        })),
+        Err(TxRunError::RollbackFailed {
+            cause,
+            reason,
+        }) => {
             // 兼容 API 仍返回原业务错误/RollbackOnly，但物理回滚失败必须留下可观测证据；
             // 只有显式 API 暴露完整 RollbackFailed 分类。
             tracing::error!(component = "tx", event = "rollback_failed", reason = %reason, "事务回滚失败");
             match cause {
                 TxRollbackCause::Decision(error) => Err(error),
-                TxRollbackCause::RollbackOnly { reason } => {
-                    Err(anyhow::Error::new(RollbackOnly { reason }))
-                }
+                TxRollbackCause::RollbackOnly {
+                    reason,
+                } => Err(anyhow::Error::new(RollbackOnly {
+                    reason,
+                })),
             }
         }
-        Err(TxRunError::CommitRejected { reason })
-        | Err(TxRunError::CommitUncertain { reason })
-        | Err(TxRunError::Infrastructure { reason }) => Err(anyhow::anyhow!(reason)),
+        Err(TxRunError::CommitRejected {
+            reason,
+        })
+        | Err(TxRunError::CommitUncertain {
+            reason,
+        })
+        | Err(TxRunError::Infrastructure {
+            reason,
+        }) => Err(anyhow::anyhow!(reason)),
     }
 }
 
@@ -1328,9 +1357,13 @@ where
                 .unwrap_or_else(|| "nested transaction requested rollback".to_string());
             // rollback-only 是提交前最后门禁；物理回滚未确认时不能返回普通 RollbackOnly。
             match transaction.rollback().await {
-                Ok(()) => Err(TxRunError::RollbackOnly { reason }),
+                Ok(()) => Err(TxRunError::RollbackOnly {
+                    reason,
+                }),
                 Err(_) => Err(TxRunError::RollbackFailed {
-                    cause: TxRollbackCause::RollbackOnly { reason },
+                    cause: TxRollbackCause::RollbackOnly {
+                        reason,
+                    },
                     reason: "database transaction rollback failed".to_string(),
                 }),
             }
@@ -1511,7 +1544,10 @@ pub async fn never_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn>
 }
 
 /// 业务作用：为 Mapper 获取连接并明确标记连接用途。
-/// 参数说明：`datasource` 是静态 Mapper 绑定的数据源。
+///
+/// 参数说明：
+/// - `datasource`：是静态 Mapper 绑定的数据源。
+///
 /// 返回：同源事务连接或池连接；拒绝和等待保持原有事务语义。
 pub async fn mapper_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
     observed_conn_for(
@@ -1523,7 +1559,10 @@ pub async fn mapper_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn
 }
 
 /// 业务作用：为关键 Mapper 写强制取得同源事务连接。
-/// 参数说明：`datasource` 是 Mapper 的数据源。
+///
+/// 参数说明：
+/// - `datasource`：是 Mapper 的数据源。
+///
 /// 返回：事务存在且同源时返回连接；不会回落到 autocommit。
 pub async fn mapper_mandatory_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
     observed_conn_for(
@@ -1535,7 +1574,10 @@ pub async fn mapper_mandatory_conn_for(datasource: impl AsRef<str>) -> anyhow::R
 }
 
 /// 业务作用：为不允许进入事务的 Mapper 获取池连接。
-/// 参数说明：`datasource` 是 Mapper 的数据源。
+///
+/// 参数说明：
+/// - `datasource`：是 Mapper 的数据源。
+///
 /// 返回：没有 ambient transaction 时返回池连接；存在事务时拒绝。
 pub async fn mapper_never_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
     observed_conn_for(
@@ -1547,7 +1589,11 @@ pub async fn mapper_never_conn_for(datasource: impl AsRef<str>) -> anyhow::Resul
 }
 
 /// 业务作用：允许框架调用方显式区分迁移、探测和直接连接用途。
-/// 参数说明：`datasource` 指定库；`purpose` 是固定用途。
+///
+/// 参数说明：
+/// - `datasource`：指定库
+/// - `purpose`：是固定用途。
+///
 /// 返回：沿用同源 ambient 事务选择规则的受观测连接。
 pub async fn conn_for_with_purpose(
     datasource: impl AsRef<str>,
@@ -1564,7 +1610,12 @@ enum ConnectionMode {
 }
 
 /// 业务作用：在连接权威边界统一门禁、池等待与事务槽等待。
-/// 参数说明：`datasource` 是目标库；`purpose` 是用途；`mode` 固定事务要求。
+///
+/// 参数说明：
+/// - `datasource`：是目标库
+/// - `purpose`：是用途
+/// - `mode`：固定事务要求。
+///
 /// 返回：只在全部门禁通过后取得连接，失败不会伪装成数据库执行错误。
 async fn observed_conn_for(
     datasource: &str,
@@ -1617,10 +1668,13 @@ async fn observed_conn_for(
             }
             let pool = pool_for_checked(datasource).map_err(|error| {
                 observation.reject(match error {
-                    DataSourceLookupError::DriverMismatch { .. } => Rejection::CrossDriver,
-                    DataSourceLookupError::InvalidName | DataSourceLookupError::NotFound { .. } => {
-                        Rejection::UnknownDatasource
-                    }
+                    DataSourceLookupError::DriverMismatch {
+                        ..
+                    } => Rejection::CrossDriver,
+                    DataSourceLookupError::InvalidName
+                    | DataSourceLookupError::NotFound {
+                        ..
+                    } => Rejection::UnknownDatasource,
                     _ => Rejection::RegistryUnavailable,
                 });
                 anyhow::Error::new(error)
@@ -1633,8 +1687,13 @@ async fn observed_conn_for(
 }
 
 /// 业务作用：只计量 Pool 获取阶段，避免把 SQL 执行时间混入等待。
-/// 参数说明：`datasource` 与 `purpose` 是固定身份；`pool` 是已通过门禁的池。
-/// 返回：成功时交出池连接；失败在类型擦除前记录稳定分类。此入口不加入 ambient 事务，调用方负责池的控制权威。
+///
+/// 参数说明：
+/// - `datasource`：已冻结并用于观测标签的具名数据源身份。
+/// - `purpose`：连接请求的固定用途分类。
+/// - `pool`：已由调用方通过准入门禁的 MySQL 池。
+///
+/// 返回：池获取成功时返回借用连接，失败保留 sqlx 错误并记录稳定分类；只计量获取阶段，不加入 ambient 事务，也不重新验证池的生命周期权威。
 pub async fn observed_pool_acquire(
     datasource: &str,
     purpose: observability::ConnectionPurpose,
@@ -1651,7 +1710,10 @@ pub async fn observed_pool_acquire(
 }
 
 /// 业务作用：把连接获取错误映射为不依赖错误原文的稳定分类。
-/// 参数说明：`error` 是 SQLx 获取阶段的类型化错误。
+///
+/// 参数说明：
+/// - `error`：是 SQLx 获取阶段的类型化错误。
+///
 /// 返回：超时、关闭、worker 或其它固定分类。
 pub fn classify_acquire_error(error: &sqlx::Error) -> observability::AcquireOutcome {
     use observability::AcquireOutcome;
@@ -1664,7 +1726,10 @@ pub fn classify_acquire_error(error: &sqlx::Error) -> observability::AcquireOutc
 }
 
 /// 业务作用：为已冻结的 MySQL Pool 目录建立抓取侧状态源。
-/// 参数说明：`pools` 为数据源名称与对应池句柄。
+///
+/// 参数说明：
+/// - `pools`：为数据源名称与对应池句柄。
+///
 /// 返回：身份全部合法时返回近似 Pool 快照源，不创建采样 worker。
 pub fn pool_metrics_source(
     pools: impl IntoIterator<Item = (String, MySqlPool)>,
@@ -1672,7 +1737,9 @@ pub fn pool_metrics_source(
     struct PoolReader(MySqlPool);
     impl observability::PoolSnapshot for PoolReader {
         /// 业务作用：读取 MySQL Pool 的近似当前状态。
+        ///
         /// 参数说明：无。
+        ///
         /// 返回：连接总量、空闲量和配置上限。
         fn snapshot(&self) -> observability::PoolState {
             observability::PoolState {
@@ -1739,8 +1806,8 @@ impl Conn {
     #[allow(clippy::should_implement_trait)]
     pub fn as_mut(&mut self) -> &mut MySqlConnection {
         match self {
-            Conn::Tx(guard) => guard.as_mut().expect("事务已被取走"), // &mut Transaction → &mut MySqlConnection
-            Conn::Pool(c) => c, // &mut PoolConnection → &mut MySqlConnection
+            Conn::Tx(guard) => guard.as_mut().expect("事务已被取走"), // 借用事务当前持有的底层连接。
+            Conn::Pool(c) => c, // 复用连接池借用所持有的底层连接。
         }
     }
 }
@@ -1749,7 +1816,11 @@ impl Conn {
 pub use natx_macro::transactional;
 
 /// 业务作用：让连接池等待或当前事务连接的互斥等待服从调用链预算。
-/// 参数说明：`datasource` 为已注册来源；`budget` 为共享绝对预算。
+///
+/// 参数说明：
+/// - `datasource`：为已注册来源
+/// - `budget`：为共享绝对预算。
+///
 /// 返回：成功取得连接守卫；已取消或到期时停止等待，不提交、回滚或重试业务事务。
 pub async fn conn_for_budget(
     datasource: impl AsRef<str>,
@@ -1759,7 +1830,11 @@ pub async fn conn_for_budget(
 }
 
 /// 业务作用：显式约束调用方确认无业务写入副作用的读取等待。
-/// 参数说明：`budget` 为共享预算；`read` 为已确认只读的查询 future。
+///
+/// 参数说明：
+/// - `budget`：为共享预算
+/// - `read`：为已确认只读的查询 future。
+///
 /// 返回：保留查询结果或预算错误；取消会丢弃当前 future，不承诺数据库从未执行。
 /// 本方法不解析 SQL、不根据 SELECT 前缀推断安全性；有副作用的函数、锁定读和事务写不得使用。
 /// COMMIT、事务提交结果和业务重试继续由事务入口裁决。

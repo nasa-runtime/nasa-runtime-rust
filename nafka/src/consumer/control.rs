@@ -15,7 +15,11 @@ use crate::KafkaProxy;
 
 impl KafkaProxy {
     /// 业务作用：执行逐分区控制并保留部分成功证据，不自动重路由或重试未知结果。
-    /// 参数说明：group 为最终组名；actions 为非空、显式的目标与操作映射。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为最终组名。
+    /// - `actions`：actions 为非空、显式的目标与操作映射。
+    ///
     /// 返回：总控制预算内的独立报告；非法声明、组不存在或生命周期拒绝返回错误。
     pub async fn control_partitions(
         &self,
@@ -54,7 +58,7 @@ impl KafkaProxy {
 
     /// 业务作用：以独占 group 固定消费指定分区。
     ///
-    /// # 参数说明
+    /// 参数说明：
     ///
     /// - `group`: 与 subscribe/其他 assign 共用命名空间及共同输入边界的精确 group id。
     /// - `partitions`: 固定 topic-partition 集合。
@@ -64,6 +68,7 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// group 冲突、分区非法或 owner 本地构造失败时返回错误。
+    ///
     /// 返回：绑定本次 owner 的句柄；broker 分配及起点解析通过 Ready 与 health 继续观测。
     pub async fn assign<C: SingleConsumer>(
         &self,
@@ -83,7 +88,12 @@ impl KafkaProxy {
 
     /// 业务作用：以独占 group 对固定分区执行连续批消费，确认与停止边界与单条消费一致。
     ///
-    /// 参数说明：group 为独占组名，partitions 为固定分区，start 为起点，consumer 为批处理器。
+    /// 参数说明：
+    /// - `group`：group 为独占组名。
+    /// - `partitions`：partitions 为固定分区。
+    /// - `start`：start 为起点。
+    /// - `consumer`：consumer 为批处理器。
+    ///
     /// 返回：绑定该 owner 的句柄；声明冲突或初始化失败时返回错误且不开放消费。
     pub async fn assign_batch<C: BatchConsumer>(
         &self,
@@ -103,7 +113,12 @@ impl KafkaProxy {
 
     /// 业务作用：统一验证固定分区声明并在资源登记之后开放 owner。
     ///
-    /// 参数说明：group 为独占组名，partitions 为分区，start 为起点，route 为冻结处理器。
+    /// 参数说明：
+    /// - `group`：group 为独占组名。
+    /// - `partitions`：partitions 为分区。
+    /// - `start`：start 为起点。
+    /// - `route`：route 为冻结处理器。
+    ///
     /// 返回：当前 owner 的句柄；非法组以 Config 拒绝且不创建资源，其它失败关闭本次创建的资源。
     async fn assign_route(
         &self,
@@ -252,7 +267,9 @@ impl KafkaProxy {
 
     /// 业务作用：停止当前注册的消费组，并且只注销本次捕获的 owner。
     ///
-    /// 参数说明：group 为已运行组名。
+    /// 参数说明：
+    /// - `group`：group 为已运行组名。
+    ///
     /// 返回：不存在或退出完成时成功；期限内未退出时保留所有权并返回错误。
     pub async fn stop_group(&self, group: &str) -> Result<()> {
         let handle = match self.group_handle(group) {
@@ -265,7 +282,10 @@ impl KafkaProxy {
 
     /// 业务作用：保护停止动作的实例身份，旧句柄不得停止或删除后来重建的同名组。
     ///
-    /// 参数说明：group 为组名，handle 为创建时捕获的 owner。
+    /// 参数说明：
+    /// - `group`：group 为组名。
+    /// - `handle`：handle 为创建时捕获的 owner。
+    ///
     /// 返回：本实例退出或已被替换时成功；仍未退出时保留登记并返回错误。
     pub(crate) async fn stop_group_instance(
         &self,
@@ -306,7 +326,7 @@ impl KafkaProxy {
 
     /// 业务作用：将一个分区定位到显式 offset，并清理该分区本地 progress/retry 状态。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
     /// - `tp`: 目标分区。
@@ -315,6 +335,7 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// group 不存在、命令未执行、结果未知或底层 seek 失败时返回错误。
+    ///
     /// 返回：owner 完成定位时成功；结果未知时应重新查询实际位置。
     pub async fn seek(&self, group: &str, tp: Tp, offset: i64) -> Result<()> {
         self.seek_offsets(group, BTreeMap::from([(tp, offset)]))
@@ -322,7 +343,11 @@ impl KafkaProxy {
     }
 
     /// 业务作用：在同一 owner 命令中定位多个分区；不承诺多个 native seek 的原子性。
-    /// 参数说明：group 为消费组，offsets 为各分区的非负目标。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为消费组。
+    /// - `offsets`：offsets 为各分区的非负目标。
+    ///
     /// 返回：全部定位成功才成功；失败或超时需查询实际位置，不能推定全部未执行。
     pub async fn seek_offsets(&self, group: &str, offsets: BTreeMap<Tp, i64>) -> Result<()> {
         if offsets.is_empty() || offsets.values().any(|offset| *offset < 0) {
@@ -332,14 +357,16 @@ impl KafkaProxy {
         }
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::Seek { offsets })
+                .command(OwnerCommandKind::Seek {
+                    offsets,
+                })
                 .await?,
         )
     }
 
     /// 业务作用：将分区集合定位到最早可用 offset。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
     /// - `tps`: 目标分区集合。
@@ -347,17 +374,21 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// 命令未执行、结果未知或任一 seek 失败时返回错误。
+    ///
+    /// 返回：所有目标完成最早位置定位时成功；定位可能部分生效，结果未知时须查询位置再决定后续操作。
     pub async fn seek_to_beginning(&self, group: &str, tps: Vec<Tp>) -> Result<()> {
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::SeekBeginning { tps })
+                .command(OwnerCommandKind::SeekBeginning {
+                    tps,
+                })
                 .await?,
         )
     }
 
     /// 业务作用：将分区集合定位到当前末尾 offset。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
     /// - `tps`: 目标分区集合。
@@ -365,17 +396,21 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// 命令未执行、结果未知或任一 seek 失败时返回错误。
+    ///
+    /// 返回：全部目标定位到执行时查询的末尾绝对位置后成功；部分失败不回滚已定位分区，也不提交消费位点。
     pub async fn seek_to_end(&self, group: &str, tps: Vec<Tp>) -> Result<()> {
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::SeekEnd { tps })
+                .command(OwnerCommandKind::SeekEnd {
+                    tps,
+                })
                 .await?,
         )
     }
 
     /// 业务作用：按分区查询并定位到首条时间戳不小于目标值的记录。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
     /// - `times`: 每分区目标 Unix epoch 毫秒。
@@ -383,17 +418,21 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// offset 查询、命令执行或任一 seek 失败时返回错误。
+    ///
+    /// 返回：查询到的位置完成定位时成功；无匹配位置的分区使用当前末尾，失败不撤销其它分区已生效的定位。
     pub async fn seek_to_timestamp(&self, group: &str, times: BTreeMap<Tp, i64>) -> Result<()> {
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::SeekTimestamp { times })
+                .command(OwnerCommandKind::SeekTimestamp {
+                    times,
+                })
                 .await?,
         )
     }
 
     /// 业务作用：将分区集合定位到 group 已提交位点。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
     /// - `tps`: 目标分区集合。
@@ -401,90 +440,110 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// committed 查询、命令执行或任一 seek 失败时返回错误。
+    ///
+    /// 返回：全部目标定位到 broker 提交位置后成功；任一目标缺少提交时，其 owner 的整批定位拒绝执行，不回退到 earliest 或 latest。
     pub async fn seek_to_committed(&self, group: &str, tps: Vec<Tp>) -> Result<()> {
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::SeekCommitted { tps })
+                .command(OwnerCommandKind::SeekCommitted {
+                    tps,
+                })
                 .await?,
         )
     }
 
     /// 业务作用：为指定分区增加业务 `User` 暂停原因。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
-    /// - `tps`: 待暂停分区。
+    /// - `tps`：待暂停分区；空列表作用于各 owner 执行时的全部 assignment。
     ///
     /// # 错误
     ///
     /// 命令未执行、结果未知或底层暂停失败时返回错误。
+    ///
+    /// 返回：底层接受暂停并记录 User 原因后成功；跨 owner 失败可能已有部分暂停，不能视为整组均未生效。
     pub async fn pause(&self, group: &str, tps: Vec<Tp>) -> Result<()> {
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::Pause { tps })
+                .command(OwnerCommandKind::Pause {
+                    tps,
+                })
                 .await?,
         )
     }
 
     /// 业务作用：只移除指定分区的业务 `User` 暂停原因。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
-    /// - `tps`: 待恢复分区。
+    /// - `tps`：待撤销业务暂停的分区；空列表作用于各 owner 的当前 assignment。
     ///
     /// # 错误
     ///
     /// 命令未执行、结果未知或底层恢复失败时返回错误。
+    ///
+    /// 返回：User 原因撤销且允许恢复的底层目标处理完成时成功；其它保护原因继续生效，成功不保证已经恢复派发。
     pub async fn resume(&self, group: &str, tps: Vec<Tp>) -> Result<()> {
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::Resume { tps })
+                .command(OwnerCommandKind::Resume {
+                    tps,
+                })
                 .await?,
         )
     }
 
     /// 业务作用：为当前 assignment 全部分区增加业务暂停原因。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
     ///
     /// # 错误
     ///
     /// group 不存在或命令执行失败时返回错误。
+    ///
+    /// 返回：各 owner 执行时的全部分区暂停完成后成功；不冻结未来 assignment，控制失败可能已在部分 owner 生效。
     pub async fn pause_all(&self, group: &str) -> Result<()> {
         self.pause(group, Vec::new()).await
     }
 
     /// 业务作用：只移除当前 assignment 全部分区的业务暂停原因。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
     ///
     /// # 错误
     ///
     /// group 不存在或命令执行失败时返回错误。
+    ///
+    /// 返回：各 owner 当前分区的 User 原因已撤销时成功；重试、背压等保护不会被解除，失败时需重新观察各槽状态。
     pub async fn resume_all(&self, group: &str) -> Result<()> {
         self.resume(group, Vec::new()).await
     }
 
     /// 业务作用：查询 owner 当前消费位置。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
-    /// - `tps`: 待查询分区。
+    /// - `tps`：待查询分区；空列表查询各 owner 当前底层位置集合。
     ///
     /// # 错误
     ///
     /// group 不存在、命令结果未知或底层查询失败时返回错误。
+    ///
+    /// 返回：分区到下一消费位置的映射，尚无有效绝对位置时为 None；查询或回复类型异常时返回错误，不代表已提交水位。
     pub async fn position(&self, group: &str, tps: Vec<Tp>) -> Result<BTreeMap<Tp, Option<i64>>> {
         match self
             .control_group_handle(group)?
-            .command(OwnerCommandKind::Position { tps })
+            .command(OwnerCommandKind::Position {
+                tps,
+            })
             .await?
         {
             CommandReply::Positions(values) => Ok(values),
@@ -496,13 +555,15 @@ impl KafkaProxy {
 
     /// 业务作用：查询 group 当前 assignment 快照。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 group。
     ///
     /// # 错误
     ///
     /// group 不存在、命令未执行或结果未知时返回错误。
+    ///
+    /// 返回：各 owner 当前分配的合并快照；重复归属、查询失败或回复类型异常时返回错误，成功不锁定后续分配权威。
     pub async fn assignment(&self, group: &str) -> Result<Vec<Tp>> {
         match self
             .control_group_handle(group)?
@@ -518,19 +579,24 @@ impl KafkaProxy {
 
     /// 业务作用：查询 group 当前健康快照。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已注册或运行 group。
     ///
     /// # 错误
     ///
     /// group 不存在时返回错误。
+    ///
+    /// 返回：已登记组的本地聚合健康快照；未登记返回 NoSuchGroup，不发送 broker 探测或等待组就绪。
     pub async fn group_health(&self, group: &str) -> Result<GroupHealth> {
         Ok(self.group_handle(group)?.health())
     }
 
     /// 业务作用：查询组内全部 owner，区分空闲槽、慢调用与异常成员。
-    /// 参数说明：group 为最终消费组名称。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为最终消费组名称。
+    ///
     /// 返回：按固定槽号排列的健康快照；组未注册时返回 NoSuchGroup。
     pub async fn group_slots_health(&self, group: &str) -> Result<Vec<GroupHealth>> {
         Ok(self.group_handle(group)?.slots_health())
@@ -538,13 +604,15 @@ impl KafkaProxy {
 
     /// 业务作用：重建处于允许恢复状态的 group owner。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: `Crashed` 或 `Degraded` group。
     ///
     /// # 错误
     ///
     /// 状态不允许、group 不存在或重建失败时返回错误。
+    ///
+    /// 返回：允许重建的 owner 已处理重建命令时成功；分配与就绪仍需观察健康状态，失败不保证其它 owner 未开始重建。
     pub async fn restart_group(&self, group: &str) -> Result<()> {
         expect_unit(
             self.control_group_handle(group)?
@@ -557,7 +625,7 @@ impl KafkaProxy {
     ///
     /// route 表仍保持启动时冻结；新 topic 上未匹配 event 的记录按 unmatched policy 处理。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 subscribe group。
     /// - `topics`: 新的非空 topic 集合。
@@ -565,6 +633,8 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// topic 非法、group 不存在或 owner 拒绝订阅时返回错误。
+    ///
+    /// 返回：各 owner 接受新订阅声明后成功；变更集合会撤销旧 Ready，成功不表示新分配完成，失败可能已有部分 owner 生效。
     pub async fn subscribe_group(&self, group: &str, mut topics: Vec<String>) -> Result<()> {
         topics.sort();
         if topics.is_empty()
@@ -586,7 +656,11 @@ impl KafkaProxy {
     }
 
     /// 业务作用：明确替换订阅集合；空集合清空订阅并保留 owner。
-    /// 参数说明：group 为已运行组，topics 为新集合。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为已运行组。
+    /// - `topics`：topics 为新集合。
+    ///
     /// 返回：owner 已应用或返回控制失败，不改变冻结路由表。
     pub async fn replace_subscriptions(&self, group: &str, topics: Vec<String>) -> Result<()> {
         if topics.is_empty() {
@@ -597,7 +671,11 @@ impl KafkaProxy {
     }
 
     /// 业务作用：原子追加订阅，避免多个调用通过读改写互相覆盖。
-    /// 参数说明：group 为已运行组，topics 为待增加集合。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为已运行组。
+    /// - `topics`：topics 为待增加集合。
+    ///
     /// 返回：owner 已应用新集合或返回控制错误。
     pub async fn add_subscriptions(&self, group: &str, topics: Vec<String>) -> Result<()> {
         self.change_subscriptions(group, topics, super::supervisor::SubscriptionChange::Add)
@@ -605,7 +683,11 @@ impl KafkaProxy {
     }
 
     /// 业务作用：只退订指定 topic，其它订阅继续保留。
-    /// 参数说明：group 为已运行组，topics 为待删除集合。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为已运行组。
+    /// - `topics`：topics 为待删除集合。
+    ///
     /// 返回：owner 已应用；删空时保留可再次订阅的 owner。
     pub async fn remove_subscriptions(&self, group: &str, topics: Vec<String>) -> Result<()> {
         self.change_subscriptions(group, topics, super::supervisor::SubscriptionChange::Remove)
@@ -613,7 +695,12 @@ impl KafkaProxy {
     }
 
     /// 业务作用：在进入有界控制队列前验证订阅修改的完整声明。
-    /// 参数说明：group 为组名，topics 为修改集，change 为追加或删除。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为组名。
+    /// - `topics`：topics 为修改集。
+    /// - `change`：change 为追加或删除。
+    ///
     /// 返回：命令实际终态，非法声明不入队。
     async fn change_subscriptions(
         &self,
@@ -632,13 +719,19 @@ impl KafkaProxy {
         }
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::Subscribe { topics, change })
+                .command(OwnerCommandKind::Subscribe {
+                    topics,
+                    change,
+                })
                 .await?,
         )
     }
 
     /// 业务作用：清空订阅且保留 owner，供后续重新订阅。
-    /// 参数说明：group 为已运行组。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为已运行组。
+    ///
     /// 返回：owner 已取消订阅或返回控制错误。
     pub async fn clear_subscriptions(&self, group: &str) -> Result<()> {
         self.unsubscribe_group(group).await
@@ -646,13 +739,15 @@ impl KafkaProxy {
 
     /// 业务作用：取消一个 subscribe group 的当前订阅但保留 owner 与控制句柄。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 已运行 subscribe group。
     ///
     /// # 错误
     ///
     /// group 不存在或命令执行失败时返回错误。
+    ///
+    /// 返回：各 owner 清空本地订阅和重试状态并撤销旧 Ready 后成功；固定分配模式拒绝，失败不推定所有槽仍保持原订阅。
     pub async fn unsubscribe_group(&self, group: &str) -> Result<()> {
         expect_unit(
             self.control_group_handle(group)?
@@ -661,19 +756,20 @@ impl KafkaProxy {
         )
     }
 
-    /// 业务作用：在线性化的生命周期门禁内取得外部控制命令目标。
+    /// 业务作用：在共享组表读锁下检查生命周期并取得外部控制命令目标。
     ///
-    /// shutdown 使用同一张 group 表的写锁切换 `ShuttingDown`；因此本方法要么在切换前
-    /// 取得句柄并完成 admission，要么在切换后稳定返回生命周期错误，不会把新命令塞进
-    /// 已经开始收尾的 owner 邮箱。
+    /// shutdown 使用同一张组表的写锁切换 ShuttingDown；该锁只覆盖查询，不跨越后续命令入队。
+    /// 取得句柄后生命周期仍可能变化，命令执行权由 owner 的停止与状态门禁再次裁决。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 最终 group.id。
     ///
     /// # 错误
     ///
     /// 运行时不在 Running，或 group 不存在时返回错误。
+    ///
+    /// 返回：查询时处于 Running 且组已登记时返回句柄；Created 或缺组返回 NoSuchGroup，关闭中或已停止返回 Lifecycle。
     fn control_group_handle(&self, group: &str) -> Result<Arc<GroupHandle>> {
         let groups = self
             .inner
@@ -702,13 +798,15 @@ impl KafkaProxy {
 
     /// 业务作用：从共享 owner 表读取 group 句柄，不跨 await 持有锁。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `group`: 最终 group.id。
     ///
     /// # 错误
     ///
     /// group 不存在时返回错误。
+    ///
+    /// 返回：已登记 owner 的共享句柄，缺组返回 NoSuchGroup；不检查生命周期，因此可用于关闭期间的观察和停止。
     pub(crate) fn group_handle(&self, group: &str) -> Result<Arc<GroupHandle>> {
         self.inner
             .groups
@@ -722,13 +820,15 @@ impl KafkaProxy {
 
 /// 业务作用：校验无返回值命令没有发生内部 reply 类型错配。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `reply`: owner 命令结果。
 ///
 /// # 错误
 ///
 /// reply 不是 Unit 时返回生命周期错误。
+///
+/// 返回：Unit 回复转换为成功；其它变体返回 Lifecycle，拒绝把内部回复错配报告为控制成功。
 fn expect_unit(reply: CommandReply) -> Result<()> {
     if matches!(reply, CommandReply::Unit) {
         Ok(())

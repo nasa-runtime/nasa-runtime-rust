@@ -25,7 +25,10 @@ impl DltQuarantineTrace {
     /// 唯一规范字段名，保留原始无效证据时追加一次。
     pub const HEADER: &'static str = "x-nasa-dlt-replay-failure";
     /// 业务作用：复验隔离来源与确定拒绝，不以错误记录自报位置替代实际来源。
-    /// 参数说明：无。返回：合法坐标、原因与事件ID才通过，不认证写入者。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：合法坐标、原因与事件ID才通过，不认证写入者。
     pub fn validate(&self) -> Result<()> {
         self.origin.validate().map_err(|_| Error::HeaderInvalid)?;
         if self.partition < 0
@@ -39,7 +42,11 @@ impl DltQuarantineTrace {
         Ok(())
     }
     /// 业务作用：读取隔离处置所需的完整来源事实，不覆盖原始错误字段。
-    /// 参数说明：headers为完整有序头。返回：无证据时None，重复、别名或损坏拒绝。
+    ///
+    /// 参数说明：
+    /// - `headers`：headers为完整有序头。
+    ///
+    /// 返回：无证据时None，重复、别名或损坏拒绝。
     pub fn read(headers: &KafkaHeaders) -> Result<Option<Self>> {
         check_headers(headers)?;
         let mut encoded = None;
@@ -55,7 +62,11 @@ impl DltQuarantineTrace {
         encoded.map(Self::decode).transpose()
     }
     /// 业务作用：限定原文隔离可以承接的确定输入拒绝。
-    /// 参数说明：reason为失败类别。返回：网络、schema或交付未知不能作为隔离成功。
+    ///
+    /// 参数说明：
+    /// - `reason`：reason为失败类别。
+    ///
+    /// 返回：网络、schema或交付未知不能作为隔离成功。
     pub(super) fn eligible(reason: Error) -> bool {
         matches!(
             reason,
@@ -63,7 +74,13 @@ impl DltQuarantineTrace {
         )
     }
     /// 业务作用：完整保留原始输入并追加唯一隔离事实。
-    /// 参数说明：plan为冻结合同，record为实际输入，reason为确定拒绝。返回：有界新头；已有标记或容量不足则停止。
+    ///
+    /// 参数说明：
+    /// - `plan`：plan为冻结合同。
+    /// - `record`：record为实际输入。
+    /// - `reason`：reason为确定拒绝。
+    ///
+    /// 返回：有界新头；已有标记或容量不足则停止。
     pub(super) fn append(
         plan: &DltReplayPlan,
         record: &ReplayRecord,
@@ -107,7 +124,10 @@ impl DltQuarantineTrace {
         Ok(headers)
     }
     /// 业务作用：生成共同隔离字节，不编码新目标offset。
-    /// 参数说明：无。返回：NSKDQH01正文及完整性摘要，不提供认证。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：NSKDQH01正文及完整性摘要，不提供认证。
     fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
         let mut bytes = b"NSKDQH01".to_vec();
@@ -132,7 +152,11 @@ impl DltQuarantineTrace {
         Ok(bytes)
     }
     /// 业务作用：验证完整隔离证据，不接受尾部、截断或非规范内容。
-    /// 参数说明：encoded为头值。返回：合法实际坐标及确定拒绝原因。
+    ///
+    /// 参数说明：
+    /// - `encoded`：encoded为头值。
+    ///
+    /// 返回：合法实际坐标及确定拒绝原因。
     fn decode(encoded: &[u8]) -> Result<Self> {
         if !(80..=DltEvidence::MAX_HEADER_BYTES).contains(&encoded.len()) {
             return Err(Error::HeaderInvalid);

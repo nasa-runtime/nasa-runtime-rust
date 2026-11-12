@@ -260,7 +260,9 @@ impl<F> FnTranslateEngine<F> {
     ///
     /// 返回: 持有所给闭包的翻译引擎。
     pub fn new(inner: F) -> Self {
-        Self { inner }
+        Self {
+            inner,
+        }
     }
 }
 

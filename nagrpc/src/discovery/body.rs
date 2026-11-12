@@ -10,7 +10,9 @@ use tokio::sync::mpsc;
 pub(super) struct AbortOnDrop(pub tokio::task::AbortHandle);
 impl Drop for AbortOnDrop {
     /// 业务作用：响应被丢弃或发送提前结束时终止对应正文泵。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：任务仍由 discovery owner 回收。
     fn drop(&mut self) {
         self.0.abort();
@@ -27,7 +29,10 @@ impl HttpBody for Frames {
     type Data = Bytes;
     type Error = Status;
     /// 业务作用：将有界帧通道提供给 tonic，预算终止不能伪装为正常 EOF。
-    /// 参数说明：`cx` 提供当前正文读取任务的唤醒器。
+    ///
+    /// 参数说明：
+    /// - `cx`：提供当前正文读取任务的唤醒器。
+    ///
     /// 返回：数据或 trailers 帧、真实 EOF，或固定期限/关闭错误。
     fn poll_frame(
         mut self: Pin<&mut Self>,
@@ -64,7 +69,12 @@ impl HttpBody for Frames {
 }
 
 /// 业务作用：将请求流交给有限正文泵，不将完整客户端流缓存在内存中。
-/// 参数说明：`shared` 提供 owner 容量，`body` 是 tonic 请求正文，`budget` 延续原调用期限。
+///
+/// 参数说明：
+/// - `shared`：提供 owner 容量
+/// - `body`：是 tonic 请求正文
+/// - `budget`：延续原调用期限。
+///
 /// 返回：给 HTTP/2 的正文与由 RPC scope 持有的终止句柄。
 pub(super) fn pump_request(
     shared: &Shared,
@@ -85,7 +95,13 @@ pub(super) fn pump_request(
 }
 
 /// 业务作用：持续监督响应流，即使业务从未读取响应也会按期限终止并释放容量。
-/// 参数说明：`shared` 提供 owner，`body` 是网络正文，`budget` 是原期限，`resources` 持有 RPC 归还责任。
+///
+/// 参数说明：
+/// - `shared`：提供 owner
+/// - `body`：是网络正文
+/// - `budget`：是原期限
+/// - `resources`：持有 RPC 归还责任。
+///
 /// 返回：可由所有 tonic 调用类型消费的受管正文。
 pub(super) fn pump_response(
     shared: &Shared,
@@ -110,7 +126,13 @@ type PumpResources = (
 );
 
 /// 业务作用：在 owner 下运行仅一个 frame 缓冲的正文转发，正常 EOF 与关闭分别记录。
-/// 参数说明：`shared` 是容量来源，`body` 是输入帧，`budget` 控制全过程，`resources` 随任务结束释放。
+///
+/// 参数说明：
+/// - `shared`：是容量来源
+/// - `body`：是输入帧
+/// - `budget`：控制全过程
+/// - `resources`：随任务结束释放。
+///
 /// 返回：有界帧接收端与任务终止句柄。
 fn pump<B>(
     shared: &Shared,

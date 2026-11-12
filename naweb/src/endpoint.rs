@@ -84,15 +84,13 @@ type EndpointDeadline = ();
 impl EndpointLayerState {
     /// 业务作用：建立一条 route layer 独占的安全状态。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `runtime`: 应用启动期完成审计并共享给全部路由的运行时。
     /// - `policy`: 过程宏为当前方法和路径生成的静态合同。
     /// - `auth_interceptor`: 外层是否由业务 interceptor 负责建立 AuthContext。
     ///
-    /// # 返回
-    ///
-    /// 返回可交给 Axum `from_fn_with_state` 的轻量状态。
+    /// 返回：返回可交给 Axum `from_fn_with_state` 的轻量状态。
     pub fn new(runtime: Arc<MappingRuntime>, policy: RoutePolicy, auth_interceptor: bool) -> Self {
         let metrics = runtime.metrics().route(policy);
         Self {
@@ -106,15 +104,13 @@ impl EndpointLayerState {
 
 /// 业务作用：执行固定安全顺序的 Axum route middleware。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `state`: 当前路由绑定的运行时与静态策略。
 /// - `request`: 尚未被 extractor 消费的完整请求；body 只在 crypto request 方向读取一次。
 /// - `next`: 媒体类型层、业务 extractor 与 handler 组成的后续链。
 ///
-/// # 返回
-///
-/// 返回 handler 响应、受控短路响应或统一安全错误；密码 route 使用单一总 deadline。
+/// 返回：返回 handler 响应、受控短路响应或统一安全错误；密码 route 使用单一总 deadline。
 pub async fn endpoint_middleware(
     State(state): State<EndpointLayerState>,
     request: Request,
@@ -183,7 +179,7 @@ pub async fn endpoint_middleware(
 
 /// 业务作用：在一次固定 snapshot 上执行完整端点安全流水线，防止请求处理中途观察到配置换代。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `snapshot`: 请求开始时原子读取并持续持有的 last-good 快照。
 /// - `policy`: 当前已匹配路由的静态合同。
@@ -194,7 +190,7 @@ pub async fn endpoint_middleware(
 /// - `timeout_state`: 认证解密成功后发布的响应加密上下文，供外层总超时使用。
 /// - `metrics`: 当前静态 route 的低基数原子指标，不保存任何请求输入。
 ///
-/// # 返回
+/// 返回：
 ///
 /// 返回最终 HTTP 响应；任一安全阶段错误都关闭请求且不执行后续阶段。
 // 参数逐一对应不可交换的安全流水线输入；合并成无语义 tuple 会降低 auth-before-decrypt 审读性。
@@ -645,14 +641,12 @@ struct CryptoStageMetricGuard {
 impl CryptoStageMetricGuard {
     /// 业务作用：建立带方向安全默认值的密码阶段守卫。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `metrics`: 当前 route 的固定指标槽位。
     /// - `request_direction`: `true` 表示请求解密，`false` 表示响应加密。
     ///
-    /// # 返回
-    ///
-    /// 返回在 drop 时必定记录一次结果和耗时的守卫；请求协议前置失败默认为拒绝，响应封装失败
+    /// 返回：返回在 drop 时必定记录一次结果和耗时的守卫；请求协议前置失败默认为拒绝，响应封装失败
     /// 默认为服务故障。
     fn new(metrics: Arc<RouteSecurityMetrics>, request_direction: bool) -> Self {
         Self {
@@ -669,9 +663,10 @@ impl CryptoStageMetricGuard {
 
     /// 业务作用：在成功、后端故障或超时已知时替换默认结果。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `outcome`：composer 收敛后的有限结果类别。
     ///
-    /// - `outcome`: composer 收敛后的有限结果类别。
+    /// 返回：无返回值；替换 guard 的待记录结果，阶段耗时与计数到 guard 销毁时才登记。
     fn set_outcome(&mut self, outcome: SecurityMetricOutcome) {
         self.outcome = outcome;
     }
@@ -680,6 +675,10 @@ impl CryptoStageMetricGuard {
 #[cfg(feature = "crypto")]
 impl Drop for CryptoStageMetricGuard {
     /// 业务作用：在任意提前返回或正常结束时记录且只记录一次密码阶段观测。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；销毁时登记当前结果与累计阶段耗时，不执行密码操作或改变响应。
     fn drop(&mut self) {
         self.metrics
             .record_crypto(self.request_direction, self.outcome, self.started.elapsed());
@@ -688,13 +687,11 @@ impl Drop for CryptoStageMetricGuard {
 
 /// 业务作用：把内部密码错误映射为不暴露细节的有限指标结果。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `error`: 不携带 secret 的内部稳定错误类别。
 ///
-/// # 返回
-///
-/// 输入、key、tag、时间窗和重放冲突归为拒绝；资源、后端和内部故障归为失败；明确预算超时
+/// 返回：输入、key、tag、时间窗和重放冲突归为拒绝；资源、后端和内部故障归为失败；明确预算超时
 /// 单独归为 timeout。
 #[cfg(feature = "crypto")]
 fn metric_outcome_for_crypto_error(error: &CryptoError) -> SecurityMetricOutcome {
@@ -716,13 +713,11 @@ fn metric_outcome_for_crypto_error(error: &CryptoError) -> SecurityMetricOutcome
 
 /// 业务作用：读取安全短路写入的内部指标结果，普通业务响应再按 HTTP 状态收敛。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `response`: 即将返回客户端的最终响应；extensions 不会被序列化到网络。
 ///
-/// # 返回
-///
-/// 返回内部稳定结果；这能避免兼容 profile 用 HTTP 200 表达身份失败时被误记为成功。
+/// 返回：返回内部稳定结果；这能避免兼容 profile 用 HTTP 200 表达身份失败时被误记为成功。
 fn response_metric_outcome(response: &Response) -> SecurityMetricOutcome {
     response
         .extensions()
@@ -733,14 +728,12 @@ fn response_metric_outcome(response: &Response) -> SecurityMetricOutcome {
 
 /// 业务作用：把内部指标结果写入不会发送到网络的响应扩展。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `response`: 安全错误或受控故障响应。
 /// - `outcome`: 不含请求数据的有限结果类别。
 ///
-/// # 返回
-///
-/// 返回带内部标记的同一响应；后续响应加密拆装 parts 时仍会保留该标记。
+/// 返回：返回带内部标记的同一响应；后续响应加密拆装 parts 时仍会保留该标记。
 fn mark_metric_outcome(mut response: Response, outcome: SecurityMetricOutcome) -> Response {
     response.extensions_mut().insert(outcome);
     response
@@ -748,16 +741,14 @@ fn mark_metric_outcome(mut response: Response, outcome: SecurityMetricOutcome) -
 
 /// 业务作用：在独立异步任务中执行 extractor 与业务 handler，并收敛 panic 和总 deadline。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `request`: 已完成身份和可选解密改写的请求，所有权随任务结束或取消而释放。
 /// - `next`: Axum 后续 extractor 与 handler 链。
 /// - `deadline`: 安全路由从进入 composer 起计算的绝对截止时刻；普通路由省略。
 /// - `memory_permit`: 解密请求明文的全进程预算，必须与 handler 任务共同存活。
 ///
-/// # 返回
-///
-/// 正常完成返回业务响应；panic 或超时返回稳定 503 结构。调用方随后仍按静态响应策略加密该
+/// 返回：正常完成返回业务响应；panic 或超时返回稳定 503 结构。调用方随后仍按静态响应策略加密该
 /// 结构，因此已经认证解密的请求不会因业务故障退化为明文错误。超时任务会先中止并等待释放
 /// request，再归还请求明文内存预算。
 #[cfg(feature = "crypto")]
@@ -796,6 +787,10 @@ struct HandlerAbortGuard(tokio::task::AbortHandle);
 #[cfg(feature = "crypto")]
 impl Drop for HandlerAbortGuard {
     /// 业务作用：中止尚未完成的业务任务，使 request 和明文预算最终随任务销毁。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；请求中止后台任务但不等待其完成，request 与许可在任务实际销毁时释放，不保证返回前已释放。
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -803,13 +798,11 @@ impl Drop for HandlerAbortGuard {
 
 /// 业务作用：在总 deadline 后尽力使用请求固定上下文加密稳定 503。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `timeout_state`: endpoint 在认证解密完成后发布的不可变协议、key/provider 与限制。
 ///
-/// # 返回
-///
-/// 已建立响应密码上下文时返回加密错误信封；超时发生在认证前或补偿加密本身失败时返回统一明文
+/// 返回：已建立响应密码上下文时返回加密错误信封；超时发生在认证前或补偿加密本身失败时返回统一明文
 /// 安全错误，绝不透传 handler 的部分响应或明文业务数据。
 #[cfg(feature = "crypto")]
 async fn encrypted_timeout_response(timeout_state: EndpointTimeoutState) -> Response {
@@ -857,7 +850,9 @@ async fn encrypted_timeout_response(timeout_state: EndpointTimeoutState) -> Resp
 
 /// 业务作用：建立业务 panic 或总 deadline 使用的稳定禁缓存响应，避免泄露处理细节。
 ///
-/// # 返回
+/// 参数说明: 无。
+///
+/// 返回：
 ///
 /// 返回不含 panic、handler 或请求详情的 503 JSON；若路由声明响应加密，外层流程会继续封装。
 // 仅在 crypto 数据面被 run_crypto_handler 调用；auth-only 构建不会实例化，故按 feature 收敛避免死代码告警。
@@ -880,13 +875,11 @@ fn handler_failure_response() -> Response {
 
 /// 业务作用：判断请求 Content-Encoding 是否为空或 identity。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `request`: 尚未读取 body 的完整 HTTP 请求。
 ///
-/// # 返回
-///
-/// 仅缺失或大小写不敏感的 `identity` 返回 `true`。
+/// 返回：仅缺失或大小写不敏感的 `identity` 返回 `true`。
 #[cfg(feature = "crypto")]
 fn valid_content_encoding(request: &Request) -> bool {
     request
@@ -898,14 +891,12 @@ fn valid_content_encoding(request: &Request) -> bool {
 
 /// 业务作用：精确检查路由协议要求的外层 Content-Type。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `request`: 尚未读取 body 的请求。
 /// - `expected`: 已注册协议提供的静态媒体类型。
 ///
-/// # 返回
-///
-/// modern-v2 要求完整精确匹配；legacy JSON 允许常见 charset 参数。
+/// 返回：modern-v2 要求完整精确匹配；legacy JSON 允许常见 charset 参数。
 #[cfg(feature = "crypto")]
 fn content_type_matches(request: &Request, expected: &str) -> bool {
     let Some(actual) = request
@@ -927,14 +918,12 @@ fn content_type_matches(request: &Request, expected: &str) -> bool {
 
 /// 业务作用：在读取 body 前利用公开 Content-Length 快速拒绝明显超限请求。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `request`: 尚未读取 body 的请求。
 /// - `maximum`: route protocol 的外层信封字节上限。
 ///
-/// # 返回
-///
-/// 只有合法数字且超过上限时返回 `true`；缺失或伪小值仍由实际读取硬限制兜底。
+/// 返回：只有合法数字且超过上限时返回 `true`；缺失或伪小值仍由实际读取硬限制兜底。
 #[cfg(feature = "crypto")]
 fn content_length_exceeds(request: &Request, maximum: usize) -> bool {
     request
@@ -947,9 +936,10 @@ fn content_length_exceeds(request: &Request, maximum: usize) -> bool {
 
 /// 业务作用：移除基于旧明文实体计算或会触发压缩的响应头。
 ///
-/// # 参数
+/// 参数说明：
+/// - `headers`：handler 返回、即将改写 body 的响应头集合。
 ///
-/// - `headers`: handler 返回、即将改写 body 的响应头集合。
+/// 返回：无返回值；移除 Content-Length、Content-Encoding、ETag 与三种摘要头，保留其余响应头；不自行重建密文实体头。
 #[cfg(feature = "crypto")]
 fn clear_entity_headers(headers: &mut axum::http::HeaderMap) {
     headers.remove(CONTENT_LENGTH);
@@ -962,13 +952,11 @@ fn clear_entity_headers(headers: &mut axum::http::HeaderMap) {
 
 /// 业务作用：为安全边界错误生成固定结构和禁缓存响应。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `error`: 已收敛且不含敏感详情的密码错误。
 ///
-/// # 返回
-///
-/// 返回稳定状态和公开类别，不暴露 kid、tag、padding 与后端信息。
+/// 返回：返回稳定状态和公开类别，不暴露 kid、tag、padding 与后端信息。
 #[cfg(feature = "crypto")]
 fn crypto_error_response(error: &CryptoError) -> Response {
     let body = axum::Json(serde_json::json!({
@@ -983,14 +971,12 @@ fn crypto_error_response(error: &CryptoError) -> Response {
 
 /// 业务作用：为标准或 Fore 兼容 profile 生成结构化身份错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `error`: 不含凭证和后端详情的身份错误。
 /// - `profile`: route policy 静态绑定的错误 profile。
 ///
-/// # 返回
-///
-/// 返回禁缓存响应；Fore 兼容 profile 保持旧 HTTP 200 业务码，其它 profile 使用 401/403/503。
+/// 返回：返回禁缓存响应；Fore 兼容 profile 保持旧 HTTP 200 业务码，其它 profile 使用 401/403/503。
 #[cfg(feature = "auth")]
 pub(crate) fn auth_error_response(error: &AuthError, profile: &str) -> Response {
     let (status, code, message) = if profile == "fore-rest-legacy" {
@@ -1025,13 +1011,11 @@ pub(crate) fn auth_error_response(error: &AuthError, profile: &str) -> Response 
 
 /// 业务作用：为所有安全响应强制添加 `Cache-Control: no-store`。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `response`: 身份短路或安全错误响应。
 ///
-/// # 返回
-///
-/// 返回写入禁缓存头后的同一响应。
+/// 返回：返回写入禁缓存头后的同一响应。
 pub(crate) fn ensure_no_store(mut response: Response) -> Response {
     response
         .headers_mut()
@@ -1041,9 +1025,9 @@ pub(crate) fn ensure_no_store(mut response: Response) -> Response {
 
 /// 业务作用：返回不支持加密实体压缩的稳定 415 响应。
 ///
-/// # 返回
+/// 参数说明: 无。
 ///
-/// 返回禁缓存且不包含请求数据的结构化错误。
+/// 返回：返回 HTTP 415 JSON 与禁缓存头，不包含请求实体或原始编码值。
 #[cfg(feature = "crypto")]
 fn unsupported_encoding_response() -> Response {
     ensure_no_store(
@@ -1060,13 +1044,11 @@ fn unsupported_encoding_response() -> Response {
 
 /// 业务作用：返回协议 Content-Type 不匹配的稳定 415 响应。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `expected`: route 静态协议要求的公开媒体类型。
 ///
-/// # 返回
-///
-/// 返回禁缓存响应；只回显服务端静态值，不回显客户端输入。
+/// 返回：返回禁缓存响应；只回显服务端静态值，不回显客户端输入。
 #[cfg(feature = "crypto")]
 fn unsupported_media_type_response(expected: &'static str) -> Response {
     ensure_no_store(

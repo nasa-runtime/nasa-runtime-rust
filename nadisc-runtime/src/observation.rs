@@ -41,7 +41,9 @@ struct Data {
 
 impl Drop for Data {
     /// 业务作用：最后一个受管引用释放时归还旧快照占用的配额。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：慢消费者持有的旧代在释放前持续计入总容量。
     fn drop(&mut self) {
         let mut quota = lock(&self.quota);
@@ -72,21 +74,27 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// 业务作用：读取后端完整实例事实，包括不承载流量的实例。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：共享只读列表；该切片本身不构成持续发送许可。
     pub fn instances(&self) -> &[Instance] {
         &self.data.instances
     }
 
     /// 业务作用：提供与完整实例列表逐项绑定的后端身份，供诊断和自定义协议保留所有权边界。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前连接及服务作用域内的稳定键，不能用作无界指标标签。
     pub fn identities(&self) -> &[String] {
         &self.data.identities
     }
 
     /// 业务作用：区分地址解析、静态配置与后端健康证据。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：该快照真实采用的证据等级。
     pub fn evidence(&self) -> EvidenceKind {
         self.data.evidence
@@ -110,7 +118,9 @@ pub struct Observation {
 
 impl Clone for Observation {
     /// 业务作用：增加当前目标的观察需求，共享已有后端查询。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：独立通知游标，不启动第二个轮询。
     fn clone(&self) -> Self {
         Self {
@@ -124,7 +134,11 @@ impl Clone for Observation {
 
 impl DiscoveryHandle {
     /// 业务作用：取得连接内服务的共享观察，首个等待者取消不影响其他需求。
-    /// 参数说明：`service` 是后端名或明确绑定别名，`deadline` 是调用方总期限。
+    ///
+    /// 参数说明：
+    /// - `service`：是后端名或明确绑定别名
+    /// - `deadline`：是调用方总期限。
+    ///
     /// 返回：总期限内取得共享证据后返回凭据；过期调用不取得缓存或创建需求，失败、容量不足和关闭返回错误。
     pub async fn observe(&self, service: &str, deadline: Instant) -> Result<Observation> {
         // 调用方已经失去等待预算时不能触碰缓存或占用观察额度，也不能派生无需求的查询。
@@ -215,7 +229,9 @@ impl DiscoveryHandle {
     }
 
     /// 业务作用：显示连接的精确名称，避免跨环境猜测默认目标。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：构造时冻结的连接名。
     pub fn name(&self) -> &str {
         &self.connection.name
@@ -224,7 +240,10 @@ impl DiscoveryHandle {
 
 impl Observation {
     /// 业务作用：按当前资格读取完整快照，严格调用可拒绝任何最近一次查询错误。
-    /// 参数说明：`strict` 为 true 时不接受异常宽限。
+    ///
+    /// 参数说明：
+    /// - `strict`：为 true 时不接受异常宽限。
+    ///
     /// 返回：有效证据快照；关闭、超龄或撤权不返回旧路由。
     pub fn snapshot(&self, strict: bool) -> Result<Snapshot> {
         let core = self.core.upgrade().ok_or_else(closed)?;
@@ -247,7 +266,10 @@ impl Observation {
     }
 
     /// 业务作用：等待证据变化或有效期结束，避免无变化时永久保留旧值。
-    /// 参数说明：`deadline` 是本次等待上限。
+    ///
+    /// 参数说明：
+    /// - `deadline`：是本次等待上限。
+    ///
     /// 返回：收到通知或真实证据期限到达时成功，调用方须重新读取 snapshot；关闭或仅调用方等待超时返回错误，静态证据没有到期期限。
     pub async fn changed(&mut self, deadline: Instant) -> Result<()> {
         let core = self.core.upgrade().ok_or_else(closed)?;
@@ -262,7 +284,11 @@ impl Observation {
     }
 
     /// 业务作用：在撤权共用的同步保护范围内提交一次传输。
-    /// 参数说明：`instance` 必须仍是当前健康实例；`submit` 不得阻塞或重入发现接口。
+    ///
+    /// 参数说明：
+    /// - `instance`：必须仍是当前健康实例
+    /// - `submit`：不得阻塞或重入发现接口。
+    ///
     /// 返回：资格仍成立时执行回调；否则不提交。
     pub fn submit_if_current<T>(
         &self,
@@ -273,7 +299,11 @@ impl Observation {
     }
 
     /// 业务作用：在强一致业务提交处同时拒绝最新查询失败和候选撤销，不使用异常宽限。
-    /// 参数说明：`instance` 是此前选中的完整实例，`submit` 是不阻塞且不重入的同步提交。
+    ///
+    /// 参数说明：
+    /// - `instance`：是此前选中的完整实例
+    /// - `submit`：是不阻塞且不重入的同步提交。
+    ///
     /// 返回：当前完整证据允许该候选才执行动作。
     pub fn submit_if_current_strict<T>(
         &self,
@@ -284,7 +314,12 @@ impl Observation {
     }
 
     /// 业务作用：在同一保护范围执行严格或普通提交裁决。
-    /// 参数说明：`instance` 是完整候选，`strict` 禁止异常宽限，`submit` 只能同步提交。
+    ///
+    /// 参数说明：
+    /// - `instance`：是完整候选
+    /// - `strict`：禁止异常宽限
+    /// - `submit`：只能同步提交。
+    ///
     /// 返回：失权时不调用动作，成功不代表远端已执行。
     fn submit<T>(
         &self,
@@ -315,7 +350,12 @@ impl Observation {
 }
 
 /// 业务作用：统一检查数据代次、错误宽限和固定截止点。
-/// 参数说明：`connection` 提供当前身份代次，`state` 是锁定的证据槽，`strict` 禁用宽限。
+///
+/// 参数说明：
+/// - `connection`：提供当前身份代次
+/// - `state`：是锁定的证据槽
+/// - `strict`：禁用宽限。
+///
 /// 返回：只有仍可用于调用的证据通过；读取不会刷新时间。
 pub(crate) fn check(connection: &Connection, state: &State, strict: bool) -> Result<()> {
     if state.epoch != connection.epoch.load(Ordering::Acquire)
@@ -348,7 +388,12 @@ pub(crate) fn check(connection: &Connection, state: &State, strict: bool) -> Res
 }
 
 /// 业务作用：让轮询和 watch 失败使用相同的证据裁决，重复失败只能缩短既有发送期限。
-/// 参数说明：`connection` 提供冻结的年龄与宽限，`state` 是当前证据槽，`error` 区分同步不完整和明确撤权事实。
+///
+/// 参数说明：
+/// - `connection`：提供冻结的年龄与宽限
+/// - `state`：是当前证据槽
+/// - `error`：区分同步不完整和明确撤权事实。
+///
 /// 返回：保存错误供严格读取拒绝；普通读取最多沿用最后一次成功时刻起的较短宽限，不恢复已经失效的路由。
 fn record_failure(connection: &Connection, state: &mut State, error: &DiscoveryError) {
     let grace = if error.revokes_evidence() {
@@ -372,7 +417,12 @@ fn record_failure(connection: &Connection, state: &mut State, error: &DiscoveryE
 }
 
 /// 业务作用：执行一个服务的唯一完整查询序列并在无人使用后回收。
-/// 参数说明：`core` 接管任务，`connection` 提供作用域，`slot` 保存固定有效性槽。
+///
+/// 参数说明：
+/// - `core`：接管任务
+/// - `connection`：提供作用域
+/// - `slot`：保存固定有效性槽。
+///
 /// 返回：关闭或空闲回收后终止，不在内部启动其他轮询。
 async fn observe_loop(core: Arc<Core>, connection: Arc<Connection>, slot: Arc<Slot>) {
     let mut backoff = connection.policy.initial_backoff_ms;
@@ -528,7 +578,14 @@ async fn observe_loop(core: Arc<Core>, connection: Arc<Connection>, slot: Arc<Sl
 }
 
 /// 业务作用：在发布前核对实例内容并计入包括旧代在内的全局配额。
-/// 参数说明：`core` 提供限额，`connection` 定义后端实例身份，`instances` 为完整候选，`evidence` 是证据等级，`previous` 是当前完整旧代。
+///
+/// 参数说明：
+/// - `core`：提供限额
+/// - `connection`：定义后端实例身份
+/// - `instances`：为完整候选
+/// - `evidence`：是证据等级
+/// - `previous`：是当前完整旧代。
+///
 /// 返回：验证和配额均通过才替换旧代；失败保留其数据与计费，不发布部分集合。无消费者持有的旧代可原位替换以复用额度。
 fn allocate(
     core: &Core,
@@ -616,15 +673,22 @@ fn allocate(
 #[async_trait::async_trait]
 impl DiscoveryClient for DiscoveryHandle {
     /// 业务作用：要求兼容调用方逐次检查发送许可。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：受管连接始终需要提交门禁。
     fn requires_admission(&self) -> bool {
         true
     }
 
     /// 业务作用：使旧发现接口的发送路径服从统一观察门禁。
-    /// 参数说明：`service`、`instance` 是本次候选，`submit` 是同步提交动作。
-    /// 返回：当前目标已存在且仍有效时才提交。
+    ///
+    /// 参数说明：
+    /// - `service`：需要在当前连接已登记 slot 中查找的服务名。
+    /// - `instance`：本次发送绑定的完整候选实例。
+    /// - `submit`：只有候选仍有效时才同步调用的提交动作。
+    ///
+    /// 返回：服务 slot 存在且观察门禁允许候选时同步执行 submit，门禁或 slot 缺失返回错误；不把取得观察句柄视为持续有效的发送权。
     fn submit_if_current(
         &self,
         service: &str,
@@ -645,7 +709,9 @@ impl DiscoveryClient for DiscoveryHandle {
     }
 
     /// 业务作用：列出当前连接明确允许枚举的服务。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不支持枚举时失败，不扩大后端权限范围。
     async fn list_services(&self) -> anyhow::Result<Vec<String>> {
         let core = self.core.upgrade().ok_or_else(closed)?;
@@ -658,7 +724,10 @@ impl DiscoveryClient for DiscoveryHandle {
     }
 
     /// 业务作用：为兼容调用方返回仍有效的可接流实例。
-    /// 参数说明：`service` 是明确服务目标。
+    ///
+    /// 参数说明：
+    /// - `service`：是明确服务目标。
+    ///
     /// 返回：过滤后的业务自有数组；后续提交仍须复验。
     async fn discover(&self, service: &str) -> anyhow::Result<Vec<Instance>> {
         Ok(self
@@ -670,7 +739,10 @@ impl DiscoveryClient for DiscoveryHandle {
     }
 
     /// 业务作用：通过共享观察提供完整实例，不另起每请求轮询。
-    /// 参数说明：`service` 是明确服务目标。
+    ///
+    /// 参数说明：
+    /// - `service`：是明确服务目标。
+    ///
     /// 返回：有效完整快照的副本，副本不计入受管快照配额。
     async fn discover_all(&self, service: &str) -> anyhow::Result<Vec<Instance>> {
         let observation = self
@@ -683,7 +755,11 @@ impl DiscoveryClient for DiscoveryHandle {
     }
 
     /// 业务作用：桥接旧 Vec watch，在失效时关闭 channel 而非伪造成功空集合。
-    /// 参数说明：`service` 是目标，`options` 不得要求快于冻结观察周期的校正。
+    ///
+    /// 参数说明：
+    /// - `service`：是目标
+    /// - `options`：不得要求快于冻结观察周期的校正。
+    ///
     /// 返回：共享观察的兼容订阅，guard 释放即停止桥接任务。
     async fn watch_with_options(
         &self,
@@ -755,7 +831,9 @@ impl DiscoveryClient for DiscoveryHandle {
 struct BridgeGuard(CancellationToken);
 impl Drop for BridgeGuard {
     /// 业务作用：释放兼容订阅时停止本消费者桥接。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：共享后端观察仍由其他需求维持。
     fn drop(&mut self) {
         self.0.cancel();
@@ -764,7 +842,9 @@ impl Drop for BridgeGuard {
 #[async_trait::async_trait]
 impl ServiceWatchGuard for BridgeGuard {
     /// 业务作用：显式解除本消费者订阅。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：桥接任务收到取消，不关闭共享连接。
     async fn unsubscribe(self: Box<Self>) -> anyhow::Result<()> {
         self.0.cancel();

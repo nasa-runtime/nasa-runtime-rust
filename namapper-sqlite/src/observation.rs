@@ -3,8 +3,10 @@
 use namapper_core::observability::{CallOutcome, DbOutcome};
 
 /// 业务作用：分类实际数据库结果，不使缺失可选行变成数据库错误。
+///
 /// 参数说明：
-/// - `result` 为 SQLx 原始结果。
+/// - `result`：SQLx 原始结果。
+///
 /// 返回：成功或固定错误分类，不修改返回值。
 pub fn classify_sqlx_result<T>(result: &Result<T, sqlx::Error>) -> DbOutcome {
     match result {
@@ -14,8 +16,10 @@ pub fn classify_sqlx_result<T>(result: &Result<T, sqlx::Error>) -> DbOutcome {
 }
 
 /// 业务作用：收口 Mapper 逻辑结果，保持数据库与缓存失败的独立计量。
+///
 /// 参数说明：
-/// - `result` 为逻辑方法的最终结果。
+/// - `result`：逻辑方法的最终结果。
+///
 /// 返回：未找到、成功或错误；取消由守卫记录。
 pub fn classify_method_result<T>(result: &anyhow::Result<T>) -> CallOutcome {
     match result {
@@ -33,8 +37,10 @@ pub fn classify_method_result<T>(result: &anyhow::Result<T>) -> CallOutcome {
 }
 
 /// 业务作用：只根据 SQLx 变体和结构化约束类别判断数据库失败。
+///
 /// 参数说明：
-/// - `error` 为未擦除的底层错误。
+/// - `error`：未擦除的底层错误。
+///
 /// 返回：与 MySQL 一致的固定词表，不包含服务端错误原文。
 pub(crate) fn classify_error(error: &sqlx::Error) -> DbOutcome {
     use sqlx::Error::*;

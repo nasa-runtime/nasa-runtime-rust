@@ -22,13 +22,11 @@ pub struct MappingBuildError {
 impl MappingBuildError {
     /// 业务作用：建立不包含敏感配置值的启动错误。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `message`: 面向维护者的安全诊断文本，不得包含密钥、token、明文或完整密文。
     ///
-    /// # 返回
-    ///
-    /// 返回可由应用启动入口上抛的构建错误。
+    /// 返回：返回可由应用启动入口上抛的构建错误。
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -39,13 +37,11 @@ impl MappingBuildError {
 impl fmt::Display for MappingBuildError {
     /// 业务作用：把安全诊断写入标准格式化器。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 错误链提供的输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
     }
@@ -73,13 +69,11 @@ pub struct MappingRuntimeSnapshot {
 impl fmt::Debug for MappingRuntimeSnapshot {
     /// 业务作用：输出不包含身份缓存、密钥或 provider 内部状态的快照摘要。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回标准格式化结果。
+    /// 返回：返回标准格式化结果。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MappingRuntimeSnapshot")
@@ -113,9 +107,9 @@ pub struct MappingRuntime {
 impl MappingRuntime {
     /// 业务作用：构造只允许无安全策略路由的空运行时。
     ///
-    /// # 返回
+    /// 返回：返回 generation 为零且不要求显式身份策略的运行时。
     ///
-    /// 返回 generation 为零且不要求显式身份策略的运行时。
+    /// 参数说明: 无。
     pub fn empty() -> Self {
         Self::from_snapshot(MappingRuntimeSnapshot {
             generation: 0,
@@ -130,13 +124,11 @@ impl MappingRuntime {
 
     /// 业务作用：从已经完整校验的快照创建运行时。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `snapshot`: 启动构建器生成的不可变完整快照。
     ///
-    /// # 返回
-    ///
-    /// 返回可克隆并注入多个 Router 的运行时句柄。
+    /// 返回：返回可克隆并注入多个 Router 的运行时句柄。
     pub fn from_snapshot(snapshot: MappingRuntimeSnapshot) -> Self {
         #[cfg(any(feature = "auth", feature = "crypto"))]
         let metrics = Arc::new(crate::SecurityMetrics::new(snapshot.generation));
@@ -156,23 +148,21 @@ impl MappingRuntime {
 
     /// 业务作用：获取当前请求应固定持有的完整快照。
     ///
-    /// # 返回
+    /// 返回：返回当前 `Arc`；调用方必须在一次请求内持续持有它，避免跨代读取。
     ///
-    /// 返回当前 `Arc`；调用方必须在一次请求内持续持有它，避免跨代读取。
+    /// 参数说明: 无。
     pub fn snapshot(&self) -> Arc<MappingRuntimeSnapshot> {
         self.current.load_full()
     }
 
     /// 业务作用：原子发布一个更高代次的完整 last-good 快照。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `snapshot`: 已完成配置合并和组件自检的新快照；本方法会针对启动时冻结的完整路由
     ///   合同再次执行 route audit。
     ///
-    /// # 返回
-    ///
-    /// 替换成功返回空值；旧请求继续持有旧 `Arc`。
+    /// 返回：替换成功返回空值；旧请求继续持有旧 `Arc`。
     ///
     /// # 错误
     ///
@@ -234,12 +224,11 @@ impl MappingRuntime {
         Ok(())
     }
 
-    /// 业务作用：记录一次未发布、已保留 last-good 的热刷新失败。
+    /// 业务作用：记录由调用方判定的热刷新失败时间，不接收错误文本，避免健康状态携带 secret 来源或后端详情。
     ///
-    /// # 语义
+    /// 参数说明: 无。
     ///
-    /// 本方法只记录低敏感时间状态，不接收错误文本，因此不会把 secret 来源或后端详情带入健康
-    /// 输出。调用方应在配置解析、组件构建或路由审计失败时调用。
+    /// 返回：无返回值；记录当前毫秒时间，启用 auth/crypto 时另记失败指标，不回滚或替换快照。
     pub fn record_reload_failure(&self) {
         self.last_reload_failure_epoch_ms
             .store(current_epoch_millis(), Ordering::Release);
@@ -247,11 +236,11 @@ impl MappingRuntime {
         self.metrics.record_reload(false);
     }
 
-    /// 业务作用：清除最近一次热刷新失败标志。
+    /// 业务作用：清除最近热刷新失败时间；调用方必须先完成新快照发布，replace 成功路径会自动调用。
     ///
-    /// # 语义
+    /// 参数说明: 无。
     ///
-    /// 只有新快照已经原子发布后才应调用；[`Self::replace`] 成功时会自动执行。
+    /// 返回：无返回值；把失败时间清为零，不验证新快照是否已发布，也不清除累计失败计数。
     pub fn clear_reload_failure(&self) {
         self.last_reload_failure_epoch_ms
             .store(0, Ordering::Release);
@@ -259,9 +248,9 @@ impl MappingRuntime {
 
     /// 业务作用：返回不含路由、密钥和后端详情的健康摘要。
     ///
-    /// # 返回
+    /// 返回：返回当前代次、配置年龄和最近未恢复刷新失败的年龄，供管理端 health body 与指标使用。
     ///
-    /// 返回当前代次、配置年龄和最近未恢复刷新失败的年龄，供管理端 health body 与指标使用。
+    /// 参数说明: 无。
     pub fn health(&self) -> MappingRuntimeHealth {
         let snapshot = self.snapshot();
         let now = SystemTime::now();
@@ -277,9 +266,9 @@ impl MappingRuntime {
 
     /// 业务作用：返回跨热更新持续存在的安全指标注册表。
     ///
-    /// # 返回
+    /// 参数说明: 无。
     ///
-    /// 返回共享句柄；注册表只接受编译期 route policy，不接受 raw path、token、kid 或明文。
+    /// 返回：返回同一安全指标注册表的共享句柄；该注册表跨快照更新持续存在，不是独立指标快照。
     #[cfg(any(feature = "auth", feature = "crypto"))]
     pub fn metrics(&self) -> Arc<crate::SecurityMetrics> {
         self.metrics.clone()
@@ -287,13 +276,11 @@ impl MappingRuntime {
 
     /// 业务作用：在端口监听前审计完整路由集合。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `routes`: linkme 收集并由调用方转成的静态路由策略切片。
     ///
-    /// # 返回
-    ///
-    /// 全部路由可安全服务时返回稳定审计结果。
+    /// 返回：全部路由可安全服务时返回稳定审计结果。
     ///
     /// # 错误
     ///
@@ -311,10 +298,12 @@ impl MappingRuntime {
         self.audit_route_plans(&plans)
     }
 
-    /// 业务作用：审计已经合并 effective interceptor plan 的完整路由合同。
+    /// 业务作用：审计已经合并 effective interceptor plan 的完整路由合同。 auth-stage interceptor 可以替代旧 AuthRuntime provider，但请求期仍必须通过 AuthContext gate。本方法只确认不可变挂载合同，不信任任何请求输入。
     ///
-    /// auth-stage interceptor 可以替代旧 AuthRuntime provider，但请求期仍必须通过
-    /// AuthContext gate。本方法只确认不可变挂载合同，不信任任何请求输入。
+    /// 参数说明：
+    /// - `routes`：已合并 effective interceptor plan 的完整静态路由安全合同。
+    ///
+    /// 返回：当前快照审计通过且静态路由合同首次绑定或与既有合同相等时返回审计结果；依赖、重复、合同变化或锁错误时失败。首次成功会冻结合同，不发布新配置快照。
     pub fn audit_route_plans(
         &self,
         routes: &[RouteSecurityPlan],
@@ -327,13 +316,11 @@ impl MappingRuntime {
 
     /// 业务作用：在同一个固定快照上执行路由审计与远程依赖就绪探测。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `routes`: 当前二进制收集的完整静态路由集合。
     ///
-    /// # 返回
-    ///
-    /// route/key/provider 审计和 required replay 后端探测均成功时返回同一快照的审计结果；失败
+    /// 返回：route/key/provider 审计和 required replay 后端探测均成功时返回同一快照的审计结果；失败
     /// 时调用方应返回 not-ready，但继续保留 last-good 供在途请求完成。
     pub async fn readiness(&self, routes: &[RoutePolicy]) -> Result<RouteAudit, MappingBuildError> {
         let plans = routes
@@ -360,9 +347,9 @@ impl MappingRuntime {
     /// 普通 [`Self::readiness`] 适合尚未引入 interceptor plan 的旧应用；新式应用必须
     /// 保留 `auth_interceptor/auth_runtime` 位，否则管理端会用另一份合同误判健康。
     ///
-    /// # 返回
+    /// 返回：当前 last-good 快照仍满足冻结合同且 required replay 后端可用时返回审计摘要。
     ///
-    /// 当前 last-good 快照仍满足冻结合同且 required replay 后端可用时返回审计摘要。
+    /// 参数说明: 无。
     pub async fn readiness_bound(&self) -> Result<RouteAudit, MappingBuildError> {
         let contract = self
             .route_contract
@@ -384,11 +371,13 @@ impl MappingRuntime {
         Ok(audit)
     }
 
-    /// 业务作用：查询启动期冻结合同中的某条路由是否启用了请求或响应加密。
+    /// 业务作用：查询启动期冻结合同中的某条路由是否启用了请求或响应加密。 该入口只暴露静态、非敏感的路由能力位，供外层治理层在**执行 handler 之前**拒绝无法安全 组合的能力（例如当前 HTTP 幂等中间件尚不能缓存 plaintext 后再逐请求重新加密）。路径必须是 宏登记的模板路径，不含 Application context path。
     ///
-    /// 该入口只暴露静态、非敏感的路由能力位，供外层治理层在**执行 handler 之前**拒绝无法安全
-    /// 组合的能力（例如当前 HTTP 幂等中间件尚不能缓存 plaintext 后再逐请求重新加密）。路径必须是
-    /// 宏登记的模板路径，不含 Application context path。
+    /// 参数说明：
+    /// - `method`：与登记值精确匹配的 HTTP 方法原文。
+    /// - `path_template`：不含 Application context path 的宏登记模板路径。
+    ///
+    /// 返回：合同锁不可用或尚未冻结时返回错误；已冻结合同中精确匹配且声明密码方向时返回 true，否则 false，未登记路由也返回 false。
     pub fn route_has_crypto(
         &self,
         method: &str,
@@ -409,6 +398,12 @@ impl MappingRuntime {
     }
 
     /// 业务作用：冻结首次成功审计的静态路由集合，并拒绝同一运行时随后改用另一份合同。
+    ///
+    /// 参数说明：
+    /// - `routes`：本次已审计的完整静态路由集合。
+    /// - `audit`：同次审计生成的指纹与状态信息。
+    ///
+    /// 返回：首次绑定保存规范化路由及指纹，相同路由集合重复调用成功；锁不可用或已冻结集合不同返回错误。指纹来自传入 audit，本方法不重新计算或验证。
     fn bind_route_contract(
         &self,
         routes: &[RouteSecurityPlan],
@@ -437,14 +432,12 @@ impl MappingRuntime {
 
     /// 业务作用：对调用方已经固定的快照执行纯内存路由审计。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `snapshot`: 一次 readiness 或启动审计期间不得替换的不可变快照。
     /// - `routes`: 当前二进制收集的完整静态路由集合。
     ///
-    /// # 返回
-    ///
-    /// 返回该快照对应的稳定指纹、代次与高风险项；任何合同不完整都会 fail closed。
+    /// 返回：返回该快照对应的稳定指纹、代次与高风险项；任何合同不完整都会 fail closed。
     fn audit_snapshot(
         &self,
         snapshot: &MappingRuntimeSnapshot,
@@ -581,9 +574,9 @@ pub struct MappingRuntimeHealth {
 impl Default for MappingRuntime {
     /// 业务作用：建立兼容无安全路由的默认运行时。
     ///
-    /// # 返回
+    /// 返回：返回与 [`MappingRuntime::empty`] 相同的值。
     ///
-    /// 返回与 [`MappingRuntime::empty`] 相同的值。
+    /// 参数说明: 无。
     fn default() -> Self {
         Self::empty()
     }
@@ -602,11 +595,12 @@ pub struct RouteAudit {
     pub generation: u64,
 }
 
-/// 业务作用：按稳定字段计算路由集合指纹。
+/// 业务作用：按稳定字段计算路由集合指纹。 - `routes`: 已完成重复检查的静态路由集合；函数内部排序，不依赖链接器收集顺序。 返回小写 SHA-256 十六进制文本，不包含任何运行时 secret。
 ///
-/// - `routes`: 已完成重复检查的静态路由集合；函数内部排序，不依赖链接器收集顺序。
+/// 参数说明：
+/// - `routes`：需要计算指纹的静态路由及拦截器能力集合。
 ///
-/// 返回小写 SHA-256 十六进制文本，不包含任何运行时 secret。
+/// 返回：返回规范化排序后的路由 Debug 表示与换行组成的 SHA-256 小写十六进制文本；不自行检查重复，也不形成跨实现版本的固定序列化协议。
 fn compute_route_fingerprint(routes: &[RouteSecurityPlan]) -> String {
     let sorted = canonical_routes(routes);
     let mut digest = Sha256::new();
@@ -617,6 +611,11 @@ fn compute_route_fingerprint(routes: &[RouteSecurityPlan]) -> String {
 }
 
 /// 业务作用：返回与链接器收集顺序无关的规范化路由集合。
+///
+/// 参数说明：
+/// - `routes`：需要消除链接收集顺序差异的路由合同。
+///
+/// 返回：返回按 method、path_template、handler 排序的副本，保留所有项与重复项，不执行安全审计。
 fn canonical_routes(routes: &[RouteSecurityPlan]) -> Vec<RouteSecurityPlan> {
     let mut sorted = routes.to_vec();
     sorted.sort_by_key(|route| {
@@ -631,9 +630,9 @@ fn canonical_routes(routes: &[RouteSecurityPlan]) -> Vec<RouteSecurityPlan> {
 
 /// 业务作用：返回适合原子健康状态记录的 Unix epoch 毫秒。
 ///
-/// # 返回
+/// 返回：正常系统时钟返回非零毫秒；时钟早于 epoch 或超出 `u64` 时返回一，保留“存在失败”语义。
 ///
-/// 正常系统时钟返回非零毫秒；时钟早于 epoch 或超出 `u64` 时返回一，保留“存在失败”语义。
+/// 参数说明: 无。
 fn current_epoch_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

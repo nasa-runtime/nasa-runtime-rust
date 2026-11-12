@@ -82,7 +82,8 @@ pub enum SagaInstanceQueryParameterError {
 impl std::fmt::Display for SagaInstanceQueryParameterError {
     /// 业务作用：把类型化参数错误转换为不含业务数据的稳定诊断文本。
     ///
-    /// 参数说明：`formatter` 接收标准格式化输出目标。
+    /// 参数说明：
+    /// - `formatter`：接收标准格式化输出目标。
     ///
     /// 返回：写入对应公共约束的稳定文本；格式化目标失败时返回格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -99,7 +100,8 @@ impl std::error::Error for SagaInstanceQueryParameterError {}
 
 /// 业务作用：在进入任一数据库前验证实例检索的公共页大小、时间范围与复合游标合同。
 ///
-/// 参数说明：`query` 是协议层或内部调用方组装的完整检索条件。
+/// 参数说明：
+/// - `query`：是协议层或内部调用方组装的完整检索条件。
 ///
 /// 返回：参数在全部受支持数据库上语义一致时成功；否则返回可映射为客户端错误的类型化原因。
 pub fn validate_saga_instance_query(

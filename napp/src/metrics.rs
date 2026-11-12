@@ -43,7 +43,10 @@ static NAFKA_DESCRIPTORS: std::sync::LazyLock<Vec<MetricDescriptor>> =
     });
 
 /// 业务作用：启动期把 nafka 的 descriptor 注册进 hub 并做冲突审计。
-/// 参数说明：hub 为受管应用的进程级指标目录。
+///
+/// 参数说明：
+/// - `hub`：hub 为受管应用的进程级指标目录。
+///
 /// 返回：全部登记成功或遇到第一个定义冲突；调用方须在开放业务前处理失败。
 ///
 /// # 错误
@@ -58,7 +61,10 @@ pub fn register_nafka_descriptors(hub: &MetricHub) -> Result<(), MetricConflict>
 }
 
 /// 业务作用：按 name 查找 nafka descriptor。
-/// 参数说明：name 为 runtime 发出的固定逻辑指标名。
+///
+/// 参数说明：
+/// - `name`：name 为 runtime 发出的固定逻辑指标名。
+///
 /// 返回：已声明定义；未知名称不创建动态 family。
 #[cfg(feature = "kafka")]
 fn nafka_descriptor(name: &str) -> Option<&'static MetricDescriptor> {
@@ -68,7 +74,11 @@ fn nafka_descriptor(name: &str) -> Option<&'static MetricDescriptor> {
 }
 
 /// 业务作用：按目录顺序提取完整且唯一的标签，避免缺失源身份造成不同数据源合流。
-/// 参数说明：descriptor 为固定定义；labels 为异步出口携带的完整标签集。
+///
+/// 参数说明：
+/// - `descriptor`：descriptor 为固定定义。
+/// - `labels`：labels 为异步出口携带的完整标签集。
+///
 /// 返回：标签形状正确时返回有序值；缺失、重复或多余标签均拒绝当前样本。
 #[cfg(feature = "kafka")]
 fn label_values(
@@ -104,17 +114,27 @@ pub struct NafkaMetricSinkAdapter {
 #[cfg(feature = "kafka")]
 impl NafkaMetricSinkAdapter {
     /// 业务作用：用给定的进程级 hub 创建适配器。
-    /// 参数说明：hub 为已经登记 nafka 定义的应用指标目录。
+    ///
+    /// 参数说明：
+    /// - `hub`：hub 为已经登记 nafka 定义的应用指标目录。
+    ///
     /// 返回：共享该目录的适配器，不自行创建后台线程。
     pub fn new(hub: Arc<MetricHub>) -> Self {
-        Self { hub }
+        Self {
+            hub,
+        }
     }
 }
 
 #[cfg(feature = "kafka")]
 impl nafka::MetricsSink for NafkaMetricSinkAdapter {
     /// 业务作用：将 nafka counter 名称映射到静态 descriptor，并按声明顺序记录 labels。
-    /// 参数说明：name 为固定名称；delta 为非负增量；labels 为包含 source 的完整标签。
+    ///
+    /// 参数说明：
+    /// - `name`：name 为固定名称。
+    /// - `delta`：delta 为非负增量。
+    /// - `labels`：labels 为包含 source 的完整标签。
+    ///
     /// 返回：已知 counter 且标签有效时累计；其它样本忽略，不影响消息交付。
     fn counter(&self, name: &'static str, delta: u64, labels: nafka::MetricLabels<'_>) {
         use nametrics_core::MetricRecorder;
@@ -132,7 +152,12 @@ impl nafka::MetricsSink for NafkaMetricSinkAdapter {
     }
 
     /// 业务作用：将 nafka gauge 名称映射到静态 descriptor，并把整数值写入统一 hub。
-    /// 参数说明：name 为固定名称；value 为瞬时值；labels 为包含 source 的完整标签。
+    ///
+    /// 参数说明：
+    /// - `name`：name 为固定名称。
+    /// - `value`：value 为瞬时值。
+    /// - `labels`：labels 为包含 source 的完整标签。
+    ///
     /// 返回：已知 gauge 且标签有效时更新；其它样本忽略，不影响消息交付。
     fn gauge(&self, name: &'static str, value: i64, labels: nafka::MetricLabels<'_>) {
         use nametrics_core::MetricRecorder;
@@ -265,7 +290,9 @@ impl NawebMetricsSource {
     ///
     /// 返回：可登记到统一指标 hub 的兼容源。
     pub fn new(metrics: Arc<naweb::SecurityMetrics>) -> Self {
-        Self { metrics }
+        Self {
+            metrics,
+        }
     }
 }
 

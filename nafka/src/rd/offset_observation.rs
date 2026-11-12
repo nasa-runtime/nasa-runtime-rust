@@ -24,7 +24,10 @@ struct WaitGuard(Arc<Mutex<Progress>>);
 
 impl Drop for WaitGuard {
     /// 业务作用：等待取消只封闭后继查询，已接纳原生调用仍由其任务持有。
-    /// 参数说明：无。返回：报告不再接受新证据，不取消其它源或消费组。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：报告不再接受新证据，不取消其它源或消费组。
     fn drop(&mut self) {
         self.0
             .lock()
@@ -43,7 +46,16 @@ enum Field {
 }
 
 /// 业务作用：启动不加入组的有界只读查询，返回截止前已取得的逐字段证据。
-/// 参数说明：owner 为源级原生资源责任，config 为冻结配置，group 为可选组，tps 为有效目标，isolation 为隔离级别，timestamp 为可选时间，deadline 为总期限。
+///
+/// 参数说明：
+/// - `owner`：owner 为源级原生资源责任。
+/// - `config`：config 为冻结配置。
+/// - `group`：group 为可选组。
+/// - `tps`：tps 为有效目标。
+/// - `isolation`：isolation 为隔离级别。
+/// - `timestamp`：timestamp 为可选时间。
+/// - `deadline`：deadline 为总期限。
+///
 /// 返回：不可变报告；调用取消或期限耗尽后，实际原生客户端仍随任务持有 owner 到析构完成。
 pub(crate) async fn observe(
     owner: Arc<AdminHandle>,
@@ -153,7 +165,11 @@ pub(crate) async fn observe(
 }
 
 /// 业务作用：在共同期限和等待者权威仍有效时给下一原生查询分配剩余预算。
-/// 参数说明：state 为本轮报告，deadline 为固定截止时刻。
+///
+/// 参数说明：
+/// - `state`：state 为本轮报告。
+/// - `deadline`：deadline 为固定截止时刻。
+///
 /// 返回：可查询时为正预算；取消或超时不再发出后继请求。
 fn remaining(state: &Mutex<Progress>, deadline: Instant) -> Option<Duration> {
     if !state
@@ -168,7 +184,14 @@ fn remaining(state: &Mutex<Progress>, deadline: Instant) -> Option<Duration> {
 }
 
 /// 业务作用：只在本轮仍有权发布时保存一个字段，晚到结果不能改变已交付报告。
-/// 参数说明：state 为报告，index 为目标下标，field 为维度，value 为证据，deadline 为总期限。
+///
+/// 参数说明：
+/// - `state`：state 为报告。
+/// - `index`：index 为目标下标。
+/// - `field`：field 为维度。
+/// - `value`：value 为证据。
+/// - `deadline`：deadline 为总期限。
+///
 /// 返回：期限内有效报告被更新；取消或封存后丢弃本地结果，原生责任仍独立收口。
 fn publish(
     state: &Mutex<Progress>,
@@ -193,7 +216,10 @@ fn publish(
 }
 
 /// 业务作用：封存已获得证据并计算同一报告内的位置距离，拒绝矛盾保留范围。
-/// 参数说明：state 为正在收集的报告。
+///
+/// 参数说明：
+/// - `state`：state 为正在收集的报告。
+///
 /// 返回：独立报告副本；未请求或缺失维度不被填成零。
 fn seal(state: &Mutex<Progress>) -> OffsetObservation {
     let mut progress = state
@@ -232,7 +258,15 @@ fn seal(state: &Mutex<Progress>) -> OffsetObservation {
 }
 
 /// 业务作用：逐目标核实存在性，再读取隔离水位及可选提交和时间证据。
-/// 参数说明：consumer 为未订阅客户端，state 为报告，tps 为有界目标，group 表示请求提交，timestamp 为时间条件，deadline 为共同期限。
+///
+/// 参数说明：
+/// - `consumer`：consumer 为未订阅客户端。
+/// - `state`：state 为报告。
+/// - `tps`：tps 为有界目标。
+/// - `group`：group 表示请求提交。
+/// - `timestamp`：timestamp 为时间条件。
+/// - `deadline`：deadline 为共同期限。
+///
 /// 返回：已取得字段写入报告；失败只影响相应证据，不修改 broker 或消费组。
 fn inspect(
     consumer: &BaseConsumer,
@@ -377,7 +411,14 @@ fn inspect(
 }
 
 /// 业务作用：在同一总预算内处理组协调器发现和逐分区提交证据，不加入消费组。
-/// 参数说明：consumer 为查询客户端，state 为报告，tps/valid 为本轮有存在证据的目标，deadline 为总期限。
+///
+/// 参数说明：
+/// - `consumer`：consumer 为查询客户端。
+/// - `state`：state 为报告。
+/// - `tps`：完整请求目标列表，索引与报告中的分区对应。
+/// - `valid`：列表中已经取得存在证据、允许查询提交位点的索引集合。
+/// - `deadline`：deadline 为总期限。
+///
 /// 返回：确认无历史、有效位置和查询失败分别记录，不把权限拒绝变成 None。
 fn committed(
     consumer: &BaseConsumer,
@@ -420,7 +461,15 @@ fn committed(
 }
 
 /// 业务作用：把原生列表中的每个目标独立转换成位置或缺失证据。
-/// 参数说明：state 为报告，tps/valid 为请求目标，result 为原生完整列表或调用错误，field 为提交或时间维度，deadline 为总期限。
+///
+/// 参数说明：
+/// - `state`：state 为报告。
+/// - `tps`：与报告索引一致的完整目标分区列表。
+/// - `valid`：本次查询涉及的目标索引，仅为这些分区发布对应维度的证据。
+/// - `result`：result 为原生完整列表或调用错误。
+/// - `field`：field 为提交或时间维度。
+/// - `deadline`：deadline 为总期限。
+///
 /// 返回：缺项和资源级失败不覆盖其它目标的有效值，负哨兵按维度区分。
 fn offsets_result(
     state: &Mutex<Progress>,
@@ -455,7 +504,10 @@ fn offsets_result(
 }
 
 /// 业务作用：只按原生固定错误码区分只读失败，不输出远端正文。
-/// 参数说明：error 为当前查询或资源级错误。
+///
+/// 参数说明：
+/// - `error`：error 为当前查询或资源级错误。
+///
 /// 返回：确定权限、资源缺失、期限或不可观测；本地 UnknownPartition 不冒充 broker 缺失证据。
 fn classify(error: &KafkaError) -> OffsetMissing {
     match super::errors::code(error) {

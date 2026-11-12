@@ -44,11 +44,12 @@ const SELECT_INSTANCE_BY_BUSINESS_SQL: &str = "SELECT saga_id, tenant_id, workfl
 
 /// 业务作用：向实例管理查询追加与过滤和排序完全对齐的 MySQL keyset SELECT 分支。
 ///
-/// 参数说明：`statement` 汇集语句与绑定参数，`query` 提供租户、workflow、时间边界与游标，
-/// `status` 固定单个封闭业务状态。
+/// 参数说明：
+/// - `statement`：接收本分支 SQL 与绑定参数的 MySQL 查询构造器。
+/// - `query`：租户、工作流、时间窗口、游标与页大小合同。
+/// - `status`：本分支可选的单个封闭业务状态。
 ///
-/// 返回：分支只使用绑定参数；指定状态时强制使用 tenant/status 前导复合索引，使读取工作量
-/// 受页大小约束。
+/// 返回：无返回值；向构造器追加 SELECT、固定索引选择、绑定过滤、keyset 顺序与 LIMIT，不执行 SQL。具体扫描工作量仍取决于数据分布和索引，不由 LIMIT 单独保证。
 fn push_instance_list_select(
     statement: &mut sqlx::QueryBuilder<sqlx::MySql>,
     query: &SagaInstanceQuery<'_>,
@@ -608,7 +609,9 @@ impl MySqlSagaStore {
                     drop(connection);
                     self.release_tenant_quota(saga_id).await?;
                 }
-                Ok(CasOutcome::Applied { new_version })
+                Ok(CasOutcome::Applied {
+                    new_version,
+                })
             }
             Err(error) if is_unique_violation(&error) => Ok(CasOutcome::DuplicateTrigger),
             Err(error) => Err(map_database(error)),

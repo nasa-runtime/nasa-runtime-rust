@@ -33,7 +33,10 @@ struct CommandPlan {
 }
 
 /// 业务作用：在工作负载前安装唯一命令 owner，预装配显式命令并接管周期任务。
-/// 参数说明：`context` 为配置、资源发布及回滚责任上下文。
+///
+/// 参数说明：
+/// - `context`：`context` 为配置、资源发布及回滚责任上下文。
+///
 /// 返回：未启用或 Batch 不创建宿主监控；Service 返回受监督的健康任务。
 pub(crate) async fn prepare(
     context: &mut PrepareContext<'_>,
@@ -114,7 +117,11 @@ pub(crate) async fn prepare(
                 ));
             }
             health.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
-            tokio::select! {biased;_=state.changed()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            tokio::select! {
+                biased;
+                _ = state.changed() => {},
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+            }
         }
     })))
 }
@@ -124,13 +131,18 @@ struct HystrixShutdown {
 }
 impl ShutdownAction for HystrixShutdown {
     /// 业务作用：标识当前应用的隔离命令关闭责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：固定清理名称。
     fn label(&self) -> &'static str {
         "hystrix"
     }
     /// 业务作用：业务收尾后关闭新调用，并在共享预算内等待全局引用撤销。
-    /// 参数说明：`context` 为宿主最终关闭截止时间。
+    ///
+    /// 参数说明：
+    /// - `context`：`context` 为宿主最终关闭截止时间。
+    ///
     /// 返回：全部在途调用和周期任务退出时成功，否则明确报告未完成。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         self.runtime.begin_shutdown();
@@ -156,7 +168,9 @@ impl ShutdownAction for HystrixShutdown {
 }
 impl Drop for HystrixShutdown {
     /// 业务作用：回滚或等待取消后保留独立收尾 owner，同时永久关闭准入。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：实际在途责任结束后才允许下一代安装。
     fn drop(&mut self) {
         self.runtime.begin_shutdown();
@@ -164,7 +178,10 @@ impl Drop for HystrixShutdown {
     }
 }
 /// 业务作用：输出不包含业务路由材料的固定装配失败。
-/// 参数说明：`message` 为静态原因。
+///
+/// 参数说明：
+/// - `message`：`message` 为静态原因。
+///
 /// 返回：宿主准备错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Application, ApplicationPhase::Prepare, message)

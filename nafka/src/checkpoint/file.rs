@@ -30,7 +30,10 @@ pub struct FileCheckpointStore {
 
 impl FileCheckpointStore {
     /// 业务作用：固定受控本地根目录，缺失时以当前用户独占权限创建。
-    /// 参数说明：root 为本地任务存储根，不允许借此承诺共享网络文件系统语义。
+    ///
+    /// 参数说明：
+    /// - `root`：root 为本地任务存储根。
+    ///
     /// 返回：规范化目录的存储；目录不可用时拒绝，不开放任务推进。
     pub fn new(root: impl AsRef<Path>) -> CheckpointResult<Self> {
         let root = root.as_ref();
@@ -49,7 +52,10 @@ impl FileCheckpointStore {
     }
 
     /// 业务作用：按完整正文、原子替换、目录同步的顺序持久化进度。
-    /// 参数说明：checkpoint 为下一不可变快照。
+    ///
+    /// 参数说明：
+    /// - `checkpoint`：checkpoint 为下一不可变快照。
+    ///
     /// 返回：同步完成后成功；失败均为未知写入，不允许用旧内存状态继续推进。
     fn persist(&self, checkpoint: &ReplayCheckpoint) -> CheckpointResult<()> {
         let key = wire::key(&checkpoint.task_id)?;
@@ -90,7 +96,10 @@ impl FileCheckpointStore {
 
 impl CheckpointStore for FileCheckpointStore {
     /// 业务作用：只读加载完整进度，不触碰持有所有权的锁文件 descriptor。
-    /// 参数说明：task_id 为稳定任务名。
+    ///
+    /// 参数说明：
+    /// - `task_id`：task_id 为稳定任务名。
+    ///
     /// 返回：不存在为空；损坏、错误任务身份或未激活代次拒绝。
     fn load(&self, task_id: &str) -> CheckpointResult<Option<ReplayCheckpoint>> {
         let file = self
@@ -117,7 +126,10 @@ impl CheckpointStore for FileCheckpointStore {
     }
 
     /// 业务作用：在独占任务且新代次已经落盘后交付 lease。
-    /// 参数说明：initial 为尚未推进的冻结声明，恢复时完整核对原合同。
+    ///
+    /// 参数说明：
+    /// - `initial`：initial 为尚未推进的冻结声明。
+    ///
     /// 返回：单一活动所有者；进程崩溃释放锁后从既有进度接续，不重新计算移动边界。
     fn claim(&self, initial: &ReplayCheckpoint) -> CheckpointResult<Box<dyn CheckpointLease>> {
         initial.validate()?;
@@ -175,7 +187,10 @@ struct TaskLock {
 
 impl TaskLock {
     /// 业务作用：先阻止同进程重复打开，再非阻塞取得整个锁文件的跨进程权限。
-    /// 参数说明：path 为规范化根下的精确任务锁路径。
+    ///
+    /// 参数说明：
+    /// - `path`：path 为规范化根下的精确任务锁路径。
+    ///
     /// 返回：唯一锁责任；现有所有者或活动任务容量耗尽时拒绝。
     fn acquire(path: PathBuf) -> CheckpointResult<Self> {
         {
@@ -216,7 +231,9 @@ impl TaskLock {
     }
 
     /// 业务作用：先释放原生锁并关闭 descriptor，再允许同进程新所有者登记。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：清理完成或固定 IO 分类；重复调用不影响后续已经取得的所有权。
     fn release(&mut self) -> CheckpointResult<()> {
         if !self.registered {
@@ -243,7 +260,9 @@ impl TaskLock {
 
 impl Drop for TaskLock {
     /// 业务作用：在 claim 拒绝、任务退出或展开时归还锁责任。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：关闭 descriptor 后移除本进程登记，不产生新的持久化或业务副作用。
     fn drop(&mut self) {
         let _ = self.release();
@@ -260,14 +279,19 @@ struct FileLease {
 
 impl CheckpointLease for FileLease {
     /// 业务作用：读取此 lease 最后确认的完整持久化事实。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：独立快照，不能通过修改结果改变内部推进权限。
     fn checkpoint(&self) -> ReplayCheckpoint {
         self.current.clone()
     }
 
     /// 业务作用：在新业务调用前复验本地独占责任与完整磁盘快照，失权后禁止旧代次继续写入。
-    /// 参数说明：无。返回：独占责任和持久证据仍成立时成功；失败永久保护当前 lease。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：独占责任和持久证据仍成立时成功；失败永久保护当前 lease。
     fn verify(&mut self) -> CheckpointResult<()> {
         if self.task_lock.is_none() {
             return Err(CheckpointError::Closed);
@@ -290,7 +314,11 @@ impl CheckpointLease for FileLease {
     }
 
     /// 业务作用：复验条件序号和磁盘证据后推进单调进度，禁止旧代次覆盖新责任。
-    /// 参数说明：expected_revision 为已观察序号，positions 为原范围内的完整新进度。
+    ///
+    /// 参数说明：
+    /// - `expected_revision`：expected_revision 为已观察序号。
+    /// - `positions`：positions 为原范围内的完整新进度。
+    ///
     /// 返回：持久化成功后才更新内部快照；读写未知或证据改变后永久保护当前 lease。
     fn advance(
         &mut self,
@@ -340,7 +368,9 @@ impl CheckpointLease for FileLease {
     }
 
     /// 业务作用：永久关闭本 lease 后归还独占任务锁。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：资源实际退出或固定 IO 分类，不撤销已经完成的目标写入。
     fn close(&mut self) -> CheckpointResult<()> {
         match self.task_lock.take() {
@@ -351,7 +381,9 @@ impl CheckpointLease for FileLease {
 }
 
 /// 业务作用：集中维护同一进程内所有任务的打开门禁，恢复锁中毒时仍保留已有登记。
+///
 /// 参数说明：无。
+///
 /// 返回：短时持有的登记守卫，不能跨磁盘写入或业务调用持有。
 fn owned() -> std::sync::MutexGuard<'static, HashSet<PathBuf>> {
     OWNED

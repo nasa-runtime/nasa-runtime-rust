@@ -9,7 +9,7 @@ use super::props::ClientProps;
 
 const DEFAULT_CLUSTER_NAME: &str = "DEFAULT";
 
-/// ServiceInstance for api.
+/// 注册与发现接口共享的服务实例声明。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceInstance {
@@ -46,84 +46,109 @@ pub struct ServiceInstance {
 
 impl ServiceInstance {
     /// 业务作用：供业务读取服务端分配的可选实例标识。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的服务端分配的可选实例标识，不触发网络查询。
     pub fn instance_id(&self) -> Option<&String> {
         self.instance_id.as_ref()
     }
 
     /// 业务作用：供业务读取实例的网络地址。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的实例的网络地址，不触发网络查询。
     pub fn ip(&self) -> &str {
         &self.ip
     }
 
     /// 业务作用：供业务读取实例监听端口。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的实例监听端口，不触发网络查询。
     pub fn port(&self) -> i32 {
         self.port
     }
 
     /// 业务作用：供业务读取实例选择权重。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的实例选择权重，不触发网络查询。
     pub fn weight(&self) -> f64 {
         self.weight
     }
 
     /// 业务作用：供业务读取后端报告的健康标志。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的后端报告的健康标志，不触发网络查询。
     pub fn healthy(&self) -> bool {
         self.healthy
     }
 
     /// 业务作用：供业务读取实例是否启用的标志。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的实例是否启用的标志，不触发网络查询。
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
     /// 业务作用：供业务读取实例是否为临时实例的标志。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的实例是否为临时实例的标志，不触发网络查询。
     pub fn ephemeral(&self) -> bool {
         self.ephemeral
     }
 
     /// 业务作用：供业务读取实例所属的可选集群。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的实例所属的可选集群，不触发网络查询。
     pub fn cluster_name(&self) -> Option<&String> {
         self.cluster_name.as_ref()
     }
 
     /// 业务作用：供业务读取实例所属的可选服务名。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的实例所属的可选服务名，不触发网络查询。
     pub fn service_name(&self) -> Option<&String> {
         self.service_name.as_ref()
     }
 
     /// 业务作用：供业务读取实例的扩展属性映射。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回当前记录中的实例的扩展属性映射，不触发网络查询。
     pub fn metadata(&self) -> &HashMap<String, String> {
         &self.metadata
     }
 
     /// 业务作用：生成实例地址和端口的展示文本。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回以冒号拼接的文本，不额外校验地址或执行解析。
     pub fn ip_and_port(&self) -> String {
         format!("{}:{}", self.ip, self.port)
     }
 
     /// 业务作用：判断两个实例记录的全部可见属性是否一致。
-    /// 参数说明：`other` 为待比较的实例。
+    ///
+    /// 参数说明：
+    /// - `other`：待比较的实例。
+    ///
     /// 返回：所有实例属性及 metadata 一致时为 true，不仅比较地址。
     pub fn is_same_instance(&self, other: &ServiceInstance) -> bool {
         self.instance_id == other.instance_id
@@ -140,6 +165,11 @@ impl ServiceInstance {
 }
 
 impl Default for ServiceInstance {
+    /// 业务作用：生成可由业务补齐地址的临时服务实例声明。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：权重为 1、健康且启用的临时实例，使用默认集群；空地址和端口尚不能代表已注册实例。
     fn default() -> Self {
         Self {
             instance_id: Default::default(),
@@ -156,7 +186,7 @@ impl Default for ServiceInstance {
     }
 }
 
-/// NamingChangeEvent when Instance change.
+/// 指定服务及集群的实例集合变化通知。
 #[derive(Clone, Debug)]
 pub struct NamingChangeEvent {
     /// 实例或事件所属的服务名称。
@@ -172,29 +202,34 @@ pub struct NamingChangeEvent {
 /// 从候选实例中选择单个调用目标的扩展契约。
 pub trait InstanceChooser {
     /// 业务作用：从候选集合选择一个实例供调用方使用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：有合适候选时返回实例；没有候选时返回 None。
     fn choose(self) -> Option<ServiceInstance>;
 }
 
-/// The NamingEventListener receive an event of [`NamingChangeEvent`].
+/// 接收 [`NamingChangeEvent`] 实例变更通知的业务监听器。
 pub trait NamingEventListener: Send + Sync + 'static {
     /// 业务作用：向业务监听器交付实例集合变化。
-    /// 参数说明：`event` 为共享的服务与实例变化数据。
+    ///
+    /// 参数说明：
+    /// - `event`：共享的服务与实例变化。
+    ///
     /// 返回：监听器处理通知；回调没有返回值。
     fn event(&self, event: Arc<NamingChangeEvent>);
 }
 
-/// Api [`NamingService`].
+/// 共享 Nacos 命名连接的服务注册与发现入口。
 ///
-/// # Examples
+/// # 示例
 ///
 /// ```no_run
 /// # async fn run() -> nacos_sdk::api::error::Result<()> {
 /// let naming_service = nacos_sdk::api::naming::NamingServiceBuilder::new(
 ///       nacos_sdk::api::props::ClientProps::new()
 ///          .server_addr("127.0.0.1:8848")
-///          // Attention! "public" is "", it is recommended to customize the namespace with clear meaning.
+///          // public 命名空间使用空字符串；独立环境应配置各自的命名空间 ID。
 ///          .namespace("")
 ///          .app_name("todo-your-app-name"),
 ///  )
@@ -206,12 +241,18 @@ pub trait NamingEventListener: Send + Sync + 'static {
 #[doc(alias("naming", "sdk", "api"))]
 #[derive(Clone, Debug)]
 pub struct NamingService {
+    /// 克隆句柄共享同一个命名客户端、订阅和连接生命周期。
     inner: Arc<NacosNamingService>,
 }
 
 impl NamingService {
     /// 业务作用：向指定 Nacos 服务发布单个实例。
-    /// 参数说明：`service_name` 为服务名，`group_name` 为可选分组，`service_instance` 为实例属性。
+    ///
+    /// 参数说明：
+    /// - `service_name`：目标服务名称。
+    /// - `group_name`：可选服务分组。
+    /// - `service_instance`：目标实例及属性。
+    ///
     /// 返回：服务端接受注册时成功；非法名称、认证或传输失败返回错误。
     pub async fn register_instance(
         &self,
@@ -226,7 +267,12 @@ impl NamingService {
     }
 
     /// 业务作用：从指定 Nacos 服务注销实例。
-    /// 参数说明：`service_name` 为服务名，`group_name` 为可选分组，`service_instance` 标识目标实例。
+    ///
+    /// 参数说明：
+    /// - `service_name`：目标服务名称。
+    /// - `group_name`：可选服务分组。
+    /// - `service_instance`：目标实例及属性。
+    ///
     /// 返回：服务端接受注销时成功；非法名称或远端操作失败返回错误。
     pub async fn deregister_instance(
         &self,
@@ -241,7 +287,12 @@ impl NamingService {
     }
 
     /// 业务作用：向同一 Nacos 服务批量发布实例。
-    /// 参数说明：`service_name` 为服务名，`group_name` 为可选分组，`service_instances` 为发布列表。
+    ///
+    /// 参数说明：
+    /// - `service_name`：目标服务名称。
+    /// - `group_name`：可选服务分组。
+    /// - `service_instances`：需要发布的实例列表。
+    ///
     /// 返回：服务端接受请求时成功；校验或远端操作失败返回错误。
     pub async fn batch_register_instance(
         &self,
@@ -256,7 +307,13 @@ impl NamingService {
     }
 
     /// 业务作用：读取指定服务及集群范围中的实例。
-    /// 参数说明：`service_name` 与 `group_name` 定位服务，`clusters` 限定集群，`subscribe` 控制是否订阅变化。
+    ///
+    /// 参数说明：
+    /// - `service_name`：目标服务名称。
+    /// - `group_name`：可选服务分组。
+    /// - `clusters`：限定查询或订阅的集群集合。
+    /// - `subscribe`：是否订阅后续变化。
+    ///
     /// 返回：返回该范围的实例集合；参数或后端访问失败返回错误。
     pub async fn get_all_instances(
         &self,
@@ -272,7 +329,14 @@ impl NamingService {
     }
 
     /// 业务作用：按健康状态筛选指定服务实例。
-    /// 参数说明：`service_name` 与 `group_name` 定位服务，`clusters` 限定集群，`subscribe` 控制订阅，`healthy` 指定健康状态。
+    ///
+    /// 参数说明：
+    /// - `service_name`：目标服务名称。
+    /// - `group_name`：可选服务分组。
+    /// - `clusters`：限定查询或订阅的集群集合。
+    /// - `subscribe`：是否订阅后续变化。
+    /// - `healthy`：筛选健康或非健康实例。
+    ///
     /// 返回：返回符合状态的实例集合；参数或后端访问失败返回错误。
     pub async fn select_instances(
         &self,
@@ -289,7 +353,13 @@ impl NamingService {
     }
 
     /// 业务作用：为一次业务调用选择健康实例。
-    /// 参数说明：`service_name` 与 `group_name` 定位服务，`clusters` 限定集群，`subscribe` 控制订阅。
+    ///
+    /// 参数说明：
+    /// - `service_name`：目标服务名称。
+    /// - `group_name`：可选服务分组。
+    /// - `clusters`：限定查询或订阅的集群集合。
+    /// - `subscribe`：是否订阅后续变化。
+    ///
     /// 返回：返回一个健康候选；没有候选或访问失败返回错误。
     pub async fn select_one_healthy_instance(
         &self,
@@ -305,7 +375,12 @@ impl NamingService {
     }
 
     /// 业务作用：分页读取指定分组的服务目录。
-    /// 参数说明：`page_no` 与 `page_size` 指定分页，`group_name` 为可选分组。
+    ///
+    /// 参数说明：
+    /// - `page_no`：分页查询的页码。
+    /// - `page_size`：每页最多返回的服务数量。
+    /// - `group_name`：可选服务分组。
+    ///
     /// 返回：返回服务名列表与服务总数；后端访问失败返回错误。
     pub async fn get_service_list(
         &self,
@@ -319,7 +394,13 @@ impl NamingService {
     }
 
     /// 业务作用：为指定服务范围登记实例变化监听器。
-    /// 参数说明：`service_name` 与 `group_name` 定位服务，`clusters` 限定集群，`event_listener` 接收变化。
+    ///
+    /// 参数说明：
+    /// - `service_name`：目标服务名称。
+    /// - `group_name`：可选服务分组。
+    /// - `clusters`：限定查询或订阅的集群集合。
+    /// - `event_listener`：接收变化的监听器；取消订阅时标识应移除的监听器。
+    ///
     /// 返回：成功后持续交付变化；非法名称或订阅失败返回错误。
     pub async fn subscribe(
         &self,
@@ -335,7 +416,13 @@ impl NamingService {
     }
 
     /// 业务作用：解除指定服务范围的实例变化监听器。
-    /// 参数说明：`service_name` 与 `group_name` 定位服务，`clusters` 限定集群，`event_listener` 标识要移除的监听器。
+    ///
+    /// 参数说明：
+    /// - `service_name`：目标服务名称。
+    /// - `group_name`：可选服务分组。
+    /// - `clusters`：限定查询或订阅的集群集合。
+    /// - `event_listener`：接收变化的监听器；取消订阅时标识应移除的监听器。
+    ///
     /// 返回：成功后不再通过该订阅交付变化；参数或取消失败返回错误。
     pub async fn unsubscribe(
         &self,
@@ -351,16 +438,16 @@ impl NamingService {
     }
 }
 
-/// Builder of api [`NamingService`].
+/// 冻结命名服务连接属性和认证插件的构建器。
 ///
-/// # Examples
+/// # 示例
 ///
 /// ```no_run
 /// # async fn run() -> nacos_sdk::api::error::Result<()> {
 /// let naming_service = nacos_sdk::api::naming::NamingServiceBuilder::new(
 ///       nacos_sdk::api::props::ClientProps::new()
 ///          .server_addr("127.0.0.1:8848")
-///          // Attention! "public" is "", it is recommended to customize the namespace with clear meaning.
+///          // public 命名空间使用空字符串；独立环境应配置各自的命名空间 ID。
 ///          .namespace("")
 ///          .app_name("todo-your-app-name"),
 ///  )
@@ -371,13 +458,18 @@ impl NamingService {
 /// ```
 #[doc(alias("naming", "builder"))]
 pub struct NamingServiceBuilder {
+    /// 建连时消费的服务端地址、命名空间和客户端属性。
     client_props: ClientProps,
+    /// 显式认证方式；未配置时使用 NoopAuthPlugin，不主动登录或签名。
     auth_plugin: Option<Arc<dyn plugin::AuthPlugin>>,
 }
 
 impl NamingServiceBuilder {
     /// 业务作用：使用显式连接属性创建 Nacos 客户端构建器。
-    /// 参数说明：`client_props` 为服务端地址、命名空间和客户端属性。
+    ///
+    /// 参数说明：
+    /// - `client_props`：服务端地址、命名空间和客户端属性。
+    ///
     /// 返回：返回尚未建立连接的构建器。
     pub fn new(client_props: ClientProps) -> Self {
         NamingServiceBuilder {
@@ -387,7 +479,9 @@ impl NamingServiceBuilder {
     }
 
     /// 业务作用：为客户端选择 Nacos HTTP 登录认证。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回已绑定 HTTP 认证插件的构建器，不立即登录。
     #[cfg(feature = "auth-by-http")]
     pub fn enable_auth_plugin_http(self) -> Self {
@@ -395,21 +489,30 @@ impl NamingServiceBuilder {
     }
 
     /// 业务作用：为客户端选择 Aliyun RAM 签名认证。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：返回已绑定 RAM 认证插件的构建器，不立即发起请求。
     #[cfg(feature = "auth-by-aliyun")]
     pub fn enable_auth_plugin_aliyun(self) -> Self {
         self.with_auth_plugin(Arc::new(plugin::AliyunRamAuthPlugin::default()))
     }
 
-    /// Set [`plugin::AuthPlugin`]
+    /// 业务作用：替换命名客户端后续请求使用的认证插件。
+    ///
+    /// 参数说明：
+    /// - `auth_plugin`：负责生成认证身份的共享插件，在 build 时移交连接运行时。
+    ///
+    /// 返回：携带新插件的构建器，覆盖此前选择；本方法不发起认证请求。
     pub fn with_auth_plugin(mut self, auth_plugin: Arc<dyn plugin::AuthPlugin>) -> Self {
         self.auth_plugin = Some(auth_plugin);
         self
     }
 
     /// 业务作用：按配置和认证插件建立 Nacos 命名客户端。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：成功返回持有后台连接的客户端；初始化失败返回错误。
     pub async fn build(self) -> Result<NamingService> {
         #[cfg(feature = "tracing-log")]
@@ -426,11 +529,18 @@ impl NamingServiceBuilder {
         };
         let inner = NacosNamingService::new(self.client_props, auth_plugin).await?;
         let inner = Arc::new(inner);
-        Ok(NamingService { inner })
+        Ok(NamingService {
+            inner,
+        })
     }
 }
 
 impl Default for NamingServiceBuilder {
+    /// 业务作用：提供尚未建连的默认命名服务构建器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：使用 ClientProps 默认属性且无显式认证插件的构建器；网络初始化留到 build。
     fn default() -> Self {
         NamingServiceBuilder {
             client_props: ClientProps::new(),

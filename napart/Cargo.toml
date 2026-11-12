@@ -21,7 +21,7 @@ documentation = "https://docs.rs/napart"
 name = "napart"
 [dependencies]
 # Tokio 提供监督任务、容量许可、唤醒与单调定时器。
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
 # 任务权威在提交时捕获环境 trace 上下文，业务 Future 执行期恢复同一链路。
 natelemetry = { version = "2.0.0" }

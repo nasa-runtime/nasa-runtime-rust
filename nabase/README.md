@@ -50,6 +50,17 @@ let id = generator.next_id();
 
 默认 `Snowflake` 是本地算法，不做 Redis workerId 分配；分布式 workerId 分配由 Redis 组件负责。
 
+ID 保留符号位为零，时间差上限为 `i64::MAX >> (worker_id_bits + seq_bits)` 毫秒。
+构造时当前相对时间已超过上限会返回 `SnowflakeError::TimeRange`。墙钟回退时继续递增逻辑时间，
+未来纪元从逻辑毫秒零开始；序列耗尽后推进逻辑毫秒，因此 ID 中的时间不能直接视为实际创建时间。
+时间位耗尽后停止发号，不回绕到历史编号。
+
+需要处理失败时使用 `try_generate()` 或 `try_generate_n(count)`：时间容量不足返回 `TimeRange`，
+状态锁中毒返回 `StateUnavailable`。批量申请只有全部成功才提交状态，失败不消耗部分序列。
+`generate()`、`generate_n()` 与 `IdGenerate::next_id()` 在这些错误下 panic。
+同一 worker 必须共享一个生成器；重启前须证明新实例的时间严格超过旧实例的逻辑时间上界，
+本地生成器不保存该上界，也不提供跨实例或跨重启的唯一性协调。
+
 ## 字符串和环境变量
 
 ```rust

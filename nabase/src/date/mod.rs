@@ -435,7 +435,7 @@ fn simple_match(re: &str, s: &str) -> bool {
     let (mut si, mut ri) = (0usize, 0usize);
     while ri < rb.len() {
         if rb[ri] == b'\\' && ri + 1 < rb.len() && rb[ri + 1] == b'd' {
-            // \d{n}
+            // 数字占位符只接受 ASCII 数字，避免日期自动识别放行其它 Unicode 数字字符。
             ri += 2;
             let mut n = 0usize;
             if ri < rb.len() && rb[ri] == b'{' {

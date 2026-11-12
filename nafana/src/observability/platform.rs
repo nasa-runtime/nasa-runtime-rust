@@ -45,19 +45,33 @@ pub struct PlatformBindings {
 
 /// 仅由控制面进程持有的 owner 权威和认证。
 pub struct PlatformController {
+    /// 经校验并绑定平台地址的资源策略。
     config: ObservabilityConfig,
+    /// 平台资源 UID 与归属标签的唯一部署身份来源。
     identity: Identity,
+    /// 管理员授予的端点、命名空间与本地文件边界。
     bindings: PlatformBindings,
+    /// 禁止重定向且设置请求超时的控制面 HTTP 客户端。
     client: Client,
+    /// Grafana API 使用的受限管理凭据。
     token: nasecret::SecretBytes,
+    /// Kubernetes API 使用的 ServiceAccount 材料；未配置时不附加 bearer。
     kube_token: Option<nasecret::SecretBytes>,
+    /// 本进程租约持有者标识，用于写入前复验控制权。
     holder: String,
+    /// 非 Kubernetes 模式的排他文件锁，持有期间阻止其它 controller 写入。
     _lock: Option<File>,
 }
 
 impl PlatformController {
     /// 业务作用：只为单 owner controller 构造受限 HTTP 客户端和控制面凭据。
-    /// 参数说明：`config/identity` 来自同一 YAML，`bindings` 为平台授权范围，`token` 为 Grafana secret 材料。
+    ///
+    /// 参数说明：
+    /// - `config`：平台资源启用项、调和周期、请求预算及数据源策略；必须启用 platform 模式，构造时校验。
+    /// - `identity`：从同一应用配置冻结的服务、环境和集群身份，决定资源 UID 和 owner 标签，不接受目标返回的身份替代。
+    /// - `bindings`：平台管理员授予的端点、命名空间、凭据引用及锁文件位置；只由 controller 持有，不能注入业务进程。
+    /// - `token`：已解析的 Grafana 管理令牌材料；必须为非空、有界 UTF-8，作为 bearer 发送且不进入错误正文。
+    ///
     /// 返回：可调和对象；业务出口不调用此入口，关闭 platform 时拒绝构造。
     pub fn new(
         mut config: ObservabilityConfig,
@@ -175,7 +189,10 @@ impl PlatformController {
     }
 
     /// 业务作用：循环调和本 owner 资源，平台失败不接触业务 readiness。
-    /// 参数说明：`stop` 为 controller 停机信号。
+    ///
+    /// 参数说明：
+    /// - `stop`：controller 的取消信号；取消后不再开始下一轮调和，不改变业务副本 readiness。
+    ///
     /// 返回：取消时成功；required 首次失败返回部署侧阻断。
     pub async fn run(&self, stop: CancellationToken) -> Result<(), String> {
         let mut tick = tokio::time::interval(Duration::from_millis(
@@ -183,12 +200,24 @@ impl PlatformController {
         ));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::select! {_=stop.cancelled()=>return Ok(()),_=tick.tick()=>{if let Err(error)=self.reconcile().await{tracing::warn!(target:"nafana::platform",event="platform_reconcile_failed",reason=%error,"平台观测资源尚未收敛");if self.config.provisioning.required{return Err(error);}}}}
+            tokio::select! {
+                _ = stop.cancelled() => return Ok(()),
+                _ = tick.tick() => {
+                    if let Err(error) = self.reconcile().await {
+                        tracing::warn!(target:"nafana::platform",event="platform_reconcile_failed",reason=%error,"平台观测资源尚未收敛");
+                        if self.config.provisioning.required {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
         }
     }
 
     /// 业务作用：在复验 owner 后依次调和逐实例采集、datasource、Dashboard 和规则。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：所有本轮资源已收敛时成功；未知归属资源始终保持原状。
     pub async fn reconcile(&self) -> Result<(), String> {
         self.acquire_lease().await?;
@@ -208,7 +237,18 @@ impl PlatformController {
             }) {
                 return Err("Grafana datasource belongs to another owner".into());
             }
-            let body = json!({"uid":ds_uid,"name":ds_uid,"type":"prometheus","access":"proxy","url":self.config.provisioning.grafana.datasource.prometheus_url,"isDefault":false,"jsonData":{"nasa_owner":owner,"httpMethod":"POST"}});
+            let body = json!({
+                "uid": ds_uid,
+                "name": ds_uid,
+                "type": "prometheus",
+                "access": "proxy",
+                "url": self.config.provisioning.grafana.datasource.prometheus_url,
+                "isDefault": false,
+                "jsonData": {
+                    "nasa_owner": owner,
+                    "httpMethod": "POST"
+                }
+            });
             self.grafana(
                 if existing.is_some() {
                     Method::PUT
@@ -250,7 +290,10 @@ impl PlatformController {
             self.grafana(
                 Method::POST,
                 "/api/folders",
-                Some(json!({"uid":folder_uid,"title":folder_title})),
+                Some(json!({
+                    "uid": folder_uid,
+                    "title": folder_title
+                })),
             )
             .await?;
         }
@@ -281,7 +324,11 @@ impl PlatformController {
             self.grafana(
                 Method::POST,
                 "/api/dashboards/db",
-                Some(json!({"dashboard":dashboard,"folderUid":folder_uid,"overwrite":false})),
+                Some(json!({
+                    "dashboard": dashboard,
+                    "folderUid": folder_uid,
+                    "overwrite": false
+                })),
             )
             .await?;
         }
@@ -311,18 +358,36 @@ impl PlatformController {
                     return Err("Grafana rule group belongs to another owner".into());
                 }
             }
-            let rules=rules["groups"][0]["rules"].as_array().into_iter().flatten().map(|rule|{
-                let name=rule["alert"].as_str().unwrap_or_default();
-                let mut labels=rule["labels"].clone();if labels.get("notification_policy_ref")==Some(&Value::Null){labels.as_object_mut().map(|v|v.remove("notification_policy_ref"));}
-                json!({"uid":owner_id(&self.identity,name),"title":name,"condition":"C","for":rule["for"],"noDataState":"NoData","execErrState":"Error","labels":labels,"annotations":rule["annotations"],"data":[{"refId":"A","relativeTimeRange":{"from":self.config.provisioning.grafana.alert_rules.evaluation_interval_ms/1000*2,"to":0},"datasourceUid":ds_uid,"model":{"refId":"A","expr":grafana_condition(name,rule["expr"].as_str().unwrap_or_default(),&self.config,&self.identity),"instant":true,"range":false}},{"refId":"C","relativeTimeRange":{"from":0,"to":0},"datasourceUid":"__expr__","model":{"refId":"C","type":"threshold","expression":"A","conditions":[{"evaluator":{"type":"gt","params":[0]},"operator":{"type":"and"},"reducer":{"type":"last","params":[]},"type":"query"}]}}]})
-            }).collect::<Vec<_>>();
-            self.grafana(Method::PUT,&path,Some(json!({"name":group_name,"folderUid":folder_uid,"interval":self.config.provisioning.grafana.alert_rules.evaluation_interval_ms/1000,"rules":rules}))).await?;
+            let rules = rules["groups"][0]["rules"]
+                .as_array()
+                .ok_or("generated alert rules must be an array")?
+                .iter()
+                .map(|rule| grafana_rule(rule, &self.config, &self.identity, &ds_uid))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.grafana(
+                Method::PUT,
+                &path,
+                Some(json!({
+                    "name": group_name,
+                    "folderUid": folder_uid,
+                    "interval": self.config.provisioning.grafana.alert_rules.evaluation_interval_ms / 1000,
+                    "rules": rules
+                })),
+            )
+            .await?;
         }
         Ok(())
     }
 
     /// 业务作用：向 Grafana 发出受预算约束的请求，每次写入前复验领导权。
-    /// 参数说明：`method/path/body` 由内建模板构造，不接受任意业务 URL。
+    ///
+    /// 参数说明：
+    /// - `method`：固定 Grafana API 的 HTTP 方法；GET 只读取，所有其它方法在发送前重新验证领导权。
+    /// - `path`：内建模板生成的 Grafana API 相对路径，只与已校验 endpoint 拼接，不接收业务提供的完整 URL。
+    /// - `body`：写操作对应的资源 JSON；读取时为 None，None 不发送正文，失败不读取或回显远端错误正文。
+    ///
+    /// 共同约束：不接受任意业务 URL。
+    ///
     /// 返回：404 为缺失；其它失败只返回稳定原因，不读取错误正文。
     async fn grafana(
         &self,
@@ -377,7 +442,9 @@ impl PlatformController {
     }
 
     /// 业务作用：使用 Kubernetes resourceVersion CAS 取得或续约单 owner 权威。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：当前持有有效租约时成功；其它持有者存在时不产生平台写入。
     async fn acquire_lease(&self) -> Result<(), String> {
         if self.bindings.kubernetes_api.is_none() {
@@ -403,7 +470,22 @@ impl PlatformController {
         }
         // 协议只接受整秒，向上覆盖已校验的毫秒窗口，避免其它 owner 早于配置承诺接管。
         let lease_seconds = self.config.provisioning.lease_duration_ms.div_ceil(1000);
-        let mut body = json!({"apiVersion":"coordination.k8s.io/v1","kind":"Lease","metadata":{"name":name,"namespace":namespace,"labels":{"nasa-runtime-owner":owner_id(&self.identity,"owner")}},"spec":{"holderIdentity":self.holder,"leaseDurationSeconds":lease_seconds,"renewTime":chrono::Utc::now().to_rfc3339()}});
+        let mut body = json!({
+            "apiVersion": "coordination.k8s.io/v1",
+            "kind": "Lease",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "labels": {
+                    "nasa-runtime-owner": owner_id(&self.identity, "owner")
+                }
+            },
+            "spec": {
+                "holderIdentity": self.holder,
+                "leaseDurationSeconds": lease_seconds,
+                "renewTime": chrono::Utc::now().to_rfc3339()
+            }
+        });
         if let Some(old) = &old {
             if old
                 .pointer("/metadata/labels/nasa-runtime-owner")
@@ -432,7 +514,9 @@ impl PlatformController {
     }
 
     /// 业务作用：在每次外部副作用前重新确认租约仍属于本进程且覆盖请求预算。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：失权、证据缺失或剩余时间不足时拒绝动作。
     async fn ensure_leader(&self) -> Result<(), String> {
         if self.bindings.kubernetes_api.is_none() {
@@ -470,7 +554,14 @@ impl PlatformController {
     }
 
     /// 业务作用：在平台授权命名空间内访问 Kubernetes API。
-    /// 参数说明：`method/path/body` 为固定资源 API，不包含原始错误正文。
+    ///
+    /// 参数说明：
+    /// - `method`：固定资源 API 的 HTTP 方法，GET 允许返回缺失；写操作的领导权与 resourceVersion 由调用方先验证。
+    /// - `path`：位于平台授权命名空间的 Lease 或 PodMonitor API 相对路径，由内部资源名称构造。
+    /// - `body`：创建或更新的资源 JSON；GET 使用 None，更新正文由调用方保留刚读取的 resourceVersion。
+    ///
+    /// 共同约束：不包含原始错误正文。
+    ///
     /// 返回：解析后的资源或稳定失败；不跟随认证重定向。
     async fn kubernetes(
         &self,
@@ -514,7 +605,9 @@ impl PlatformController {
     }
 
     /// 业务作用：根据平台 binding 调和逐 Pod 或逐容器采集，不写入业务 Pod 权限。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：采集资源已发布时成功；已有企业平台与 remote write 无采集写入。
     async fn reconcile_discovery(&self) -> Result<(), String> {
         let discovery = self.config.primary_discovery();
@@ -628,8 +721,107 @@ impl PlatformController {
     }
 }
 
+/// 业务作用：将内部告警规则转换为 Grafana 查询与阈值模型，并在发布前验证归属和标签类型。
+///
+/// 参数说明：
+/// - `rule`：由内建模板生成的单条 Prometheus 规则，必须包含名称、表达式和对象标签。
+/// - `config`：已校验的求值周期及发现策略，用于查询窗口和可用性基线。
+/// - `identity`：生成规则 UID 和验证 owner 标签的冻结部署身份。
+/// - `datasource_uid`：本轮已确认存在的 Prometheus datasource UID。
+///
+/// 返回：可直接加入 Grafana 规则组的完整规则；归属、必填字段或标签类型异常时拒绝整组发布。
+fn grafana_rule(
+    rule: &Value,
+    config: &ObservabilityConfig,
+    identity: &Identity,
+    datasource_uid: &str,
+) -> Result<Value, String> {
+    let name = rule["alert"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .ok_or("generated alert name is missing")?;
+    let expression = rule["expr"]
+        .as_str()
+        .filter(|expression| !expression.is_empty())
+        .ok_or("generated alert expression is missing")?;
+    let mut labels = rule["labels"]
+        .as_object()
+        .cloned()
+        .ok_or("generated alert labels must be an object")?;
+    // 归属证据必须来自本轮冻结身份；不能把畸形模板或其它 owner 的规则推送到当前资源组。
+    if labels.get("nasa_owner").and_then(Value::as_str) != Some(&owner_id(identity, "owner")) {
+        return Err("generated alert belongs to another owner".into());
+    }
+    // 未配置策略时不发送 null 标签；Grafana 的 label 值必须为字符串。
+    if labels.get("notification_policy_ref") == Some(&Value::Null) {
+        labels.remove("notification_policy_ref");
+    }
+    if labels.values().any(|value| !value.is_string()) {
+        return Err("generated alert labels must contain strings".into());
+    }
+    Ok(json!({
+        "uid": owner_id(identity, name),
+        "title": name,
+        "condition": "C",
+        "for": rule["for"],
+        "noDataState": "NoData",
+        "execErrState": "Error",
+        "labels": labels,
+        "annotations": rule["annotations"],
+        "data": [
+            {
+                "refId": "A",
+                "relativeTimeRange": {
+                    "from": config.provisioning.grafana.alert_rules.evaluation_interval_ms / 1000 * 2,
+                    "to": 0
+                },
+                "datasourceUid": datasource_uid,
+                "model": {
+                    "refId": "A",
+                    "expr": grafana_condition(name, expression, config, identity),
+                    "instant": true,
+                    "range": false
+                }
+            },
+            {
+                "refId": "C",
+                "relativeTimeRange": {
+                    "from": 0,
+                    "to": 0
+                },
+                "datasourceUid": "__expr__",
+                "model": {
+                    "refId": "C",
+                    "type": "threshold",
+                    "expression": "A",
+                    "conditions": [
+                        {
+                            "evaluator": {
+                                "type": "gt",
+                                "params": [0]
+                            },
+                            "operator": {
+                                "type": "and"
+                            },
+                            "reducer": {
+                                "type": "last",
+                                "params": []
+                            },
+                            "type": "query"
+                        }
+                    ]
+                }
+            }
+        ]
+    }))
+}
+
 /// 业务作用：确认租约证据覆盖后续一次外部请求的预算。
-/// 参数说明：`lease` 为控制面返回的资源，`margin_ms` 为请求所需剩余时间。
+///
+/// 参数说明：
+/// - `lease`：从 Kubernetes 读取的 Lease 资源，必须包含可解析的 renewTime 与 leaseDurationSeconds；缺项视为无效。
+/// - `margin_ms`：后续请求必须覆盖的剩余毫秒预算；租约到期时刻必须严格晚于当前时刻加此预算。
+///
 /// 返回：过期、字段缺失或非法时间均视为无权执行。
 fn lease_valid(lease: &Value, margin_ms: u64) -> bool {
     let Some(renew) = lease
@@ -654,7 +846,13 @@ fn lease_valid(lease: &Value, margin_ms: u64) -> bool {
 }
 
 /// 业务作用：把 Prometheus 告警过滤表达式转成 Grafana 有数据时的零/一条件。
-/// 参数说明：`name` 选择同域存在性基线，`expression` 是告警条件，`config/identity` 限定同一数据集合。
+///
+/// 参数说明：
+/// - `name`：`name` 选择同域存在性基线。
+/// - `expression`：已按阈值筛出的 PromQL 告警向量；异常转换为一，真实存在的健康基线转换为零。
+/// - `config`：发现方式及心跳窗口，用于选择抓取或 remote write 可用性基线，不能用缺失库存补零。
+/// - `identity`：服务、环境和集群的可信标签，约束告警与健康基线使用同一实例集合。
+///
 /// 返回：健康时仅从真实样本导出零；缺失样本仍为无数据，不伪造全局零值。
 fn grafana_condition(
     name: &str,
@@ -673,17 +871,43 @@ fn grafana_condition(
     let eligible = eligible_instances(&selector);
     let vector = |metric: &str| scoped(format!("{metric}{{{selector}}}"), &eligible);
     // 业务基线在聚合前复用告警的实例门禁，不能把被排除实例残留的样本转换成健康零值。
-    let baseline=match name{
-        "DatasourcePoolSaturation"=>format!("sum by (deployment_environment,cluster,service_name,driver,datasource) ({})", vector("natx_pool_max_connections")),
-        "DatasourceAcquireTimeout"=>format!("sum by (deployment_environment,cluster,service_name,driver,datasource) ({})", vector("natx_connection_acquires_total")),
-        "TransactionSlotWaitP99"=>format!("sum by ({group}) ({})", vector("natx_transaction_slot_waits_total")),
-        "MapperStreamCancellation"=>format!("sum by ({group}) ({})", vector("namapper_streams_total")),
-        "NotificationQueueSaturation"=>format!("sum by (deployment_environment,cluster,service_name) ({})", vector("nanotify_queue_capacity")),
-        "NotificationProviderFailureRate"=>format!("sum by (deployment_environment,cluster,service_name,provider) ({})", vector("nanotify_deliveries_total")),
+    let baseline = match name {
+        "DatasourcePoolSaturation" => format!(
+            "sum by (deployment_environment,cluster,service_name,driver,datasource) ({})",
+            vector("natx_pool_max_connections")
+        ),
+        "DatasourceAcquireTimeout" => format!(
+            "sum by (deployment_environment,cluster,service_name,driver,datasource) ({})",
+            vector("natx_connection_acquires_total")
+        ),
+        "TransactionSlotWaitP99" => format!(
+            "sum by ({group}) ({})",
+            vector("natx_transaction_slot_waits_total")
+        ),
+        "MapperStreamCancellation" => format!("sum by ({group}) ({})", vector("namapper_streams_total")),
+        "NotificationQueueSaturation" => format!(
+            "sum by (deployment_environment,cluster,service_name) ({})",
+            vector("nanotify_queue_capacity")
+        ),
+        "NotificationProviderFailureRate" => format!(
+            "sum by (deployment_environment,cluster,service_name,provider) ({})",
+            vector("nanotify_deliveries_total")
+        ),
         // 可用性与身份告警必须保留异常实例，不能套用会将其排除的业务门禁。
-        "ObservabilityInstanceDown"=>if config.primary_discovery()==Discovery::RemoteWrite { super::assets::availability_heartbeat(config,&selector) } else {format!("up{{{selector}}}")},
-        "ObservabilityIdentityCollision"=>format!("count by (deployment_environment,cluster,service_name,service_instance_id) (napp_instance_info{{{selector}}})"),
-        _=>format!("sum by ({group}) ({})", vector("namapper_db_client_operations_total")),
+        "ObservabilityInstanceDown" => {
+            if config.primary_discovery() == Discovery::RemoteWrite {
+                super::assets::availability_heartbeat(config, &selector)
+            } else {
+                format!("up{{{selector}}}")
+            }
+        }
+        "ObservabilityIdentityCollision" => format!(
+            "count by (deployment_environment,cluster,service_name,service_instance_id) (napp_instance_info{{{selector}}})"
+        ),
+        _ => format!(
+            "sum by ({group}) ({})",
+            vector("namapper_db_client_operations_total")
+        ),
     };
     format!("(({expression}) * 0 + 1) or (({baseline}) * 0)")
 }

@@ -5,13 +5,13 @@ pub mod error;
 /// 客户端连接、身份与配置属性。
 pub mod props;
 
-/// Plugin define.
+/// 客户端认证、配置过滤与加解密的扩展接口。
 pub mod plugin;
 
-/// Api of Config
+/// 配置查询、发布及监听的公开接口，仅在启用 config 时提供。
 #[cfg(feature = "config")]
 pub mod config;
 
-/// Api of Naming
+/// 服务实例注册、发现及订阅的公开接口，仅在启用 naming 时提供。
 #[cfg(feature = "naming")]
 pub mod naming;

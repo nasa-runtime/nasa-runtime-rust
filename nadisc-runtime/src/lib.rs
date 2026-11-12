@@ -92,7 +92,10 @@ pub(crate) struct Quota {
 }
 
 /// 业务作用：在内存状态锁被中断后仍允许执行撤权和清理。
-/// 参数说明：`mutex` 仅保护短时内存操作，不得跨网络 await 持有。
+///
+/// 参数说明：
+/// - `mutex`：仅保护短时内存操作，不得跨网络 await 持有。
+///
 /// 返回：状态保护锁；业务错误由显式状态字段表达。
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -101,14 +104,20 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// 业务作用：将有限毫秒配置转换为 Tokio 使用的持续时间。
-/// 参数说明：`value` 已经过策略预检。
+///
+/// 参数说明：
+/// - `value`：已经过策略预检。
+///
 /// 返回：对应持续时间。
 pub(crate) fn millis(value: u64) -> Duration {
     Duration::from_millis(value)
 }
 
 /// 业务作用：向所有状态等待者发布不携带配置内容的变更通知。
-/// 参数说明：`core` 是共享状态，不代表资源关闭权。
+///
+/// 参数说明：
+/// - `core`：是共享状态，不代表资源关闭权。
+///
 /// 返回：等待者可重新检查当前事实，不依赖中间通知逐条到达。
 pub(crate) fn changed(core: &Core) {
     core.changes
@@ -116,7 +125,12 @@ pub(crate) fn changed(core: &Core) {
 }
 
 /// 业务作用：限制单次操作的排队与执行总时间，并响应最终关闭。
-/// 参数说明：`core` 提供并发额度，`deadline` 是总截止点，`operation` 是一次后端操作。
+///
+/// 参数说明：
+/// - `core`：提供并发额度
+/// - `deadline`：是总截止点
+/// - `operation`：是一次后端操作。
+///
 /// 返回：额度等待和网络操作共享期限；关闭或超时返回稳定错误。
 pub(crate) async fn operation<T>(
     core: &Core,
@@ -142,7 +156,11 @@ pub(crate) async fn operation<T>(
 }
 
 /// 业务作用：在监督边界捕获后台任务异常并同步撤销所有发现资格。
-/// 参数说明：`core` 接管任务，`future` 必须服从 owner 取消和有限网络期限。
+///
+/// 参数说明：
+/// - `core`：接管任务
+/// - `future`：必须服从 owner 取消和有限网络期限。
+///
 /// 返回：任务归 owner 持有；异常不会留下仍被认为健康的观察。
 pub(crate) fn spawn_owned(
     core: &Arc<Core>,
@@ -152,7 +170,11 @@ pub(crate) fn spawn_owned(
 }
 
 /// 业务作用：登记会在摘流阶段单独停止的注册任务。
-/// 参数说明：`core` 接管任务，`future` 只处理本 owner 的注册记录。
+///
+/// 参数说明：
+/// - `core`：接管任务
+/// - `future`：只处理本 owner 的注册记录。
+///
 /// 返回：任务可在保留出站发现时被停止并回收。
 pub(crate) fn spawn_registration(
     core: &Arc<Core>,
@@ -162,7 +184,12 @@ pub(crate) fn spawn_registration(
 }
 
 /// 业务作用：按关闭阶段登记任务，并在异常退出时撤销共享健康事实。
-/// 参数说明：`core` 提供监督边界，`registration` 指定摘流阶段，`future` 是有界任务。
+///
+/// 参数说明：
+/// - `core`：提供监督边界
+/// - `registration`：指定摘流阶段
+/// - `future`：是有界任务。
+///
 /// 返回：任务持有共享状态，不持有控制 owner。
 fn spawn_task(
     core: &Arc<Core>,
@@ -199,21 +226,31 @@ fn spawn_task(
 }
 
 /// 业务作用：表达已经关闭或失去监督的资源不可继续接纳操作。
+///
 /// 参数说明：无。
+///
 /// 返回：不包含后端细节的稳定错误。
 pub(crate) fn closed() -> DiscoveryError {
     DiscoveryError::new(ErrorCode::OwnerClosed, "discovery owner is closed")
 }
 
 /// 业务作用：统一表示共享期限耗尽。
+///
 /// 参数说明：无。
+///
 /// 返回：可由上层识别的期限错误。
 pub(crate) fn timeout() -> DiscoveryError {
     DiscoveryError::new(ErrorCode::DeadlineExceeded, "discovery deadline elapsed")
 }
 
 /// 业务作用：错开不同进程和连接的恢复请求，同时保留有限退避上界。
-/// 参数说明：`core` 提供进程实例身份，`connection` 限定连接，`maximum_ms` 是当前指数上界，`attempt` 是本地尝试序号。
+///
+/// 参数说明：
+/// - `core`：提供进程实例身份
+/// - `connection`：限定连接
+/// - `maximum_ms`：是当前指数上界
+/// - `attempt`：是本地尝试序号。
+///
 /// 返回：位于上界一半到上界之间的毫秒时长，不读取业务数据或秘密。
 pub(crate) fn retry_delay(
     core: &Core,
@@ -229,7 +266,12 @@ pub(crate) fn retry_delay(
 }
 
 /// 业务作用：使同一连接的认证撤销同步影响发现与注册健康证据，并通知宿主更新就绪。
-/// 参数说明：`core` 提供状态通知，`gate` 必须是其已持有的门禁，`connection` 是发生身份撤销的连接。
+///
+/// 参数说明：
+/// - `core`：提供状态通知
+/// - `gate`：必须是其已持有的门禁
+/// - `connection`：是发生身份撤销的连接。
+///
 /// 返回：递增权限撤销计数并撤销已有资格；其他连接不受影响，旧代迟到结果不能恢复健康。
 pub(crate) fn revoke_connection(core: &Core, gate: &Gate, connection: &Connection) {
     connection.revocation.fetch_add(1, Ordering::AcqRel);

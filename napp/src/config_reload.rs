@@ -9,19 +9,32 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// 由单个配置来源驱动串行使用的候选准备和发布状态。
 pub(crate) struct CandidatePublisher {
+    /// 当前应用、取消信号与最终版本发布门禁的共享入口。
     application: Application,
+    /// 本驱动负责校验和跟踪的组件身份。
     components: Vec<ComponentId>,
+    /// 启动时固定的 application 原始段，在线变化只记录重启要求。
     pinned_application: Option<Value>,
+    /// 构造时冻结的组件热应用入口，不在每次发布时重新发现。
     appliers: HashMap<ComponentId, Arc<dyn ConfigApplier>>,
+    /// 各组件最后被标记成功的视图，用于检测仍未生效的差异。
     effective: HashMap<ComponentId, Arc<ConfigView>>,
+    /// 启动时视图，用于比较冻结的资源名称、配置和秘密材料。
     initial: Arc<ConfigView>,
 }
 
 impl CandidatePublisher {
     /// 业务作用：冻结已声明目标和实际初始配置，供一个来源驱动串行处理后续候选。
-    /// 参数说明：`application` 为宿主；`components` 为目标集合；`pinned_application` 为引导配置。
-    /// 返回：未创建后台任务的候选发布器，实际投影与期望快照分别保存。
+    ///
+    /// 参数说明：
+    /// - `application`：提供当前视图、热应用入口和最终发布门禁的宿主句柄。
+    /// - `components`：本驱动负责的已声明组件，用于段校验、变化检测和目标状态登记。
+    /// - `pinned_application`：启动时固定的 application 原始段，用于识别只能重启生效的变更。
+    ///
+    /// 返回：以一次当前视图初始化各组件有效配置，并冻结 applier 映射与初始材料的发布器；不创建任务或改变配置。
+    /// 该映射不会因后续登记自动更新，调用方应在启动配置已固定后构造并串行驱动。
     pub(crate) fn new(
         application: Application,
         components: Vec<ComponentId>,
@@ -48,6 +61,7 @@ impl CandidatePublisher {
     }
 
     /// 业务作用：完成有界候选的材料准备后，在既有发布门禁内安装并发布最终状态。
+    ///
     /// 参数说明：
     /// - `merged`：尚未脱敏的完整合并候选，编码结果不得超过 1 MiB，声明组件与受管资源段须先通过校验。
     /// - `sources`：本次候选的远端配置文档来源，随准备后的快照保存。
@@ -62,6 +76,7 @@ impl CandidatePublisher {
         sources: Vec<ConfigSource>,
         cancel: &CancellationToken,
     ) -> ApplicationResult<Option<u64>> {
+        // 候选过大时不进入资源准备；上限检查发生在序列化之后，不保证此前树及编码的峰值内存。
         if serde_json::to_vec(&merged).map_or(true, |bytes| {
             zeroize::Zeroizing::new(bytes).len() > 1024 * 1024
         }) {
@@ -124,6 +139,7 @@ impl CandidatePublisher {
         if crate::secret::candidate_fingerprint(&merged) == current.candidate_fingerprint()
             && secret_changes.is_empty()
         {
+            // 来源已复验且内容、秘密均未变化，不推进期望版本，也不重复安装组件。
             return Ok(None);
         }
         let next_version = prepared.snapshot.version();
@@ -226,6 +242,7 @@ impl CandidatePublisher {
     }
 
     /// 业务作用：在准备与安装前确定整批配置是否支持热应用，并构造成功提交后使用的状态表。
+    ///
     /// 参数说明：
     /// - `current`：安装前的已发布视图，用于保留目标最后成功版本。
     /// - `candidate`：已通过校验的原始候选，供比对固定引导段及受管资源设置。
@@ -289,9 +306,8 @@ impl CandidatePublisher {
 
         for component in &self.components {
             let target = ReloadTarget::Component(*component);
-            let status = if !changed.contains(component) {
-                ReloadStatus::applied(next_version)
-            } else if self.appliers.contains_key(component) {
+            // 无变化或存在当前构建可用的应用器才允许接纳候选，否则必须要求重启，避免假报生效。
+            let status = if !changed.contains(component) || self.appliers.contains_key(component) {
                 ReloadStatus::applied(next_version)
             } else {
                 ReloadStatus::restart_required(
@@ -306,7 +322,9 @@ impl CandidatePublisher {
 }
 
 /// 业务作用：将停机期间的候选准备标为拒绝，避免来源驱动把取消误认成同值成功并更新观察。
+///
 /// 参数说明：无。
+///
 /// 返回：不包含来源正文的配置取消错误，当前配置及观察保持有效。
 fn cancelled() -> crate::ApplicationError {
     crate::ApplicationError::new(
@@ -317,6 +335,7 @@ fn cancelled() -> crate::ApplicationError {
 }
 
 /// 业务作用：提取显式启用的资源名称，供调用方识别热刷新是否改变已冻结的命名目录。
+///
 /// 参数说明：
 /// - `value`：配置中按名称索引的资源计划段，可能缺失或不为对象。
 ///
@@ -332,8 +351,13 @@ fn enabled_names(value: Option<&Value>) -> std::collections::BTreeSet<String> {
 }
 
 /// 业务作用：判断固定装配的子能力是否引用了已改变的 secret 身份。
-/// 参数说明：`value` 为脱敏配置结构；`changed` 为材料变化集合。
-/// 返回：存在依赖时要求重启，避免把未轮换客户端标成已生效。
+///
+/// 参数说明：
+/// - `value`：待检查的配置值树，递归查看字符串、数组元素和对象的值，不检查对象键。
+/// - `changed`：相对固定初始材料发生变化的秘密 ID 集合。
+///
+/// 返回：任一字符串以 secret:// 开头且剩余部分精确命中变化 ID 时为 true；否则为 false，不解析或读取秘密。
+/// 仅提供依赖事实，是否要求重启由调用方写入目标状态。
 fn references_changed_secret(
     value: &Value,
     changed: &std::collections::BTreeSet<Arc<str>>,
@@ -356,10 +380,12 @@ fn references_changed_secret(
 ///
 /// 未出现在当前状态表中的目标按初始版本 1 处理，保证 `RestartRequired` 一定携带可比较的版本号。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `current`：当前已发布的同版本配置视图。
 /// - `target`：需要查询的配置应用目标。
+///
+/// 返回：状态表中的最后成功版本，缺失时固定返回 1；不把当前期望版本当作已应用，也不改写目标状态。
 fn applied_version_of(current: &ConfigView, target: &ReloadTarget) -> u64 {
     current
         .reload_statuses()

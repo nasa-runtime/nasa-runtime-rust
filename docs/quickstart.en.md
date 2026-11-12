@@ -44,7 +44,8 @@ async fn hello() -> &'static str {
 }
 
 /// 业务作用：完成服务启动登记，由 Application 继续管理监听与停机。
-/// 参数说明：_app 是当前应用的受管上下文。
+/// 参数说明：
+/// - `_app`：当前应用的受管上下文，本例不额外使用。
 /// 返回：登记成功，不表示服务已完成接流准备。
 #[nasa::application("web")]
 async fn main(_app: nasa::Application) -> anyhow::Result<()> {
@@ -89,7 +90,8 @@ Keep the generated `Cargo.lock`; use `cargo build --locked` for subsequent build
 plaintext HTTP to localhost and configures no authentication. Configure a trusted ingress before deployment.
 
 `#[nasa::application]` generates the process entry point; do not combine it with `#[tokio::main]`.
-The configuration file is resolved relative to the process working directory and must exist.
+A non-empty `APP_CONFIG_FILE` selects another main configuration file; unset or empty uses
+`zcf/application.yml`. Relative paths resolve against the process working directory and the selected file must exist.
 
 ## Features, components and configuration
 
@@ -190,7 +192,7 @@ cleanup futures execute. The [architecture guide](architecture.en.md) explains S
 
 | Symptom | What to check |
 | --- | --- |
-| Configuration file is missing | Start in the directory containing `zcf/application.yml` |
+| Configuration file is missing | Check `APP_CONFIG_FILE`, or the default `zcf/application.yml`, relative to the process working directory |
 | Address is already in use | Choose a free `server.port` and update the request URLs |
 | Unknown component or missing capability | Compare component strings with enabled facade features |
 | Unknown YAML field or resource reference | Check spelling and use the exact declared datasource or client name |

@@ -541,7 +541,10 @@ pub(crate) struct InitializerRegistration {
 pub(crate) type InitializerOwner = crate::future::StartupCleanup<Box<dyn Initialization>>;
 
 /// 业务作用：在任何登记门禁或后续工厂释放之前接管公开 initializer 实例的析构责任。
-/// 参数说明：`initializer` 为已经构造完成、尚未移交的业务实例。
+///
+/// 参数说明：
+/// - `initializer`：`initializer` 为已经构造完成、尚未移交的业务实例。
+///
 /// 返回：实例不会因普通释放展开越过回滚边界；成功路径仍须显式检查释放结果。
 pub(crate) fn own_initializer(initializer: Box<dyn Initialization>) -> InitializerOwner {
     crate::future::StartupCleanup::new(
@@ -553,7 +556,10 @@ pub(crate) fn own_initializer(initializer: Box<dyn Initialization>) -> Initializ
 }
 
 /// 业务作用：工厂产出实例后先接管实例，再独立释放工厂 future，避免返回值与工厂同时展开。
-/// 参数说明：`future` 为静态工厂返回、尚未被轮询的唯一任务。
+///
+/// 参数说明：
+/// - `future`：`future` 为静态工厂返回、尚未被轮询的唯一任务。
+///
 /// 返回：成功实例带释放保护；工厂或释放失败保留首次错误，未产出实例时不创建替代对象。
 pub(crate) fn own_initializer_future(
     future: ApplicationFuture<'static, Option<Box<dyn Initialization>>>,
@@ -629,7 +635,9 @@ impl InitializerRegistry {
     }
 
     /// 业务作用：在 UserHook 提前终止时撤销尚未冻结的实例，避免其捕获依赖延迟到资源关闭后释放。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：逐项释放产生的次要错误；已冻结时为空，析构用户代码在登记锁外执行。
     pub(crate) fn release_pending(&self) -> Vec<crate::ApplicationError> {
         self.open.store(false, Ordering::Release);
@@ -675,7 +683,10 @@ impl InitializerRegistry {
                 "initializer count cannot exceed {MAX_INITIALIZERS}"
             )));
         }
-        entries.push(InitializerRegistration { spec, initializer });
+        entries.push(InitializerRegistration {
+            spec,
+            initializer,
+        });
         Ok(())
     }
 }
@@ -700,7 +711,14 @@ impl FrozenInitializer {
     /// 返回：无论来源均返回同一规格借用。
     pub(crate) fn spec(&self) -> &InitializerSpec {
         match self {
-            Self::Static { spec, .. } | Self::Runtime { spec, .. } => spec,
+            Self::Static {
+                spec,
+                ..
+            }
+            | Self::Runtime {
+                spec,
+                ..
+            } => spec,
         }
     }
 }
@@ -786,7 +804,9 @@ pub(crate) fn freeze_plan(
         let right = right.spec();
         (left.order, left.name.as_ref()).cmp(&(right.order, right.name.as_ref()))
     });
-    Ok(FrozenInitializerPlan { entries })
+    Ok(FrozenInitializerPlan {
+        entries,
+    })
 }
 
 /// 业务作用：对实际启用集合执行稳定拓扑排序，依赖边优先于 order，名称消除全部平局。

@@ -30,7 +30,11 @@ probe_counter=0
 last_probe_error=""
 
 # 业务作用：使用独立且无 workspace patch 的 Cargo 项目确认 registry 能否满足完整依赖合同。
-# 参数说明：`$1` 为 crate 名称，`$2` 为 Cargo 版本要求，`$3` 表示是否启用默认 feature，`$4` 为显式 feature 的 JSON 数组。
+# 参数说明：
+# - `$1`：待解析的 crate 名称。
+# - `$2`：需要由 registry 满足的 Cargo 版本要求。
+# - `$3`：是否启用默认 feature 的 true/false 文本。
+# - `$4`：显式 feature 名称的 JSON 数组。
 # 返回：版本、默认 feature 与显式 feature 可从 registry 一并解析时成功并缓存结论；否则返回失败并保留探针诊断。
 registry_requirement_resolves() {
   local package_name="$1"
@@ -87,7 +91,8 @@ registry_requirement_resolves() {
 }
 
 # 业务作用：输出依赖合同无法从 registry 解析时的完整上下文，防止只报告版本而隐藏 feature 条件。
-# 参数说明：`$1` 为依赖边上下文。
+# 参数说明：
+# - `$1`：需要附带到失败诊断的依赖边上下文。
 # 返回：无返回值；诊断写入标准错误，不改变探针结论。
 report_registry_failure() {
   local context="$1"

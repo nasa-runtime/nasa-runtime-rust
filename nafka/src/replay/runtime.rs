@@ -19,15 +19,26 @@ const OPERATION_BUDGET: Duration = Duration::from_secs(10);
 /// 框架内部任务依赖，激活前不允许任何来源或目的副作用。
 pub(crate) trait ReplayParticipant: Send + Sync {
     /// 业务作用：等待双方登记完整，停止请求优先于开放执行。
-    /// 参数说明：stopping 为来源当前取消状态。返回：仅双方允许时开放，否则取消本实例。
+    ///
+    /// 参数说明：
+    /// - `stopping`：stopping 为来源当前取消状态。
+    ///
+    /// 返回：仅双方允许时开放，否则取消本实例。
     fn activate(&self, stopping: &dyn Fn() -> bool) -> bool;
     /// 业务作用：在真实 worker 与持久 lease 全部退出后归还另一来源的依赖责任。
-    /// 参数说明：无。返回：移除匹配实例，不能提前释放 native 责任。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：移除匹配实例，不能提前释放 native 责任。
     fn finished(&self);
 }
 
 /// 业务作用：让所有回放共用停机截止时间，超时不丢弃真实责任。
-/// 参数说明：handles 为已通知停止的集合，deadline 为来源总截止时间。
+///
+/// 参数说明：
+/// - `handles`：handles 为已通知停止的集合。
+/// - `deadline`：deadline 为来源总截止时间。
+///
 /// 返回：仍未排干的稳定任务名，实际任务仍留在来源目录。
 pub(crate) async fn drain(handles: &[ReplayHandle], deadline: Instant) -> Vec<String> {
     let mut pending = Vec::new();
@@ -45,7 +56,12 @@ pub(crate) async fn drain(handles: &[ReplayHandle], deadline: Instant) -> Vec<St
 /// 真实资源目录；topic 删除重建必须改变 generation，名称和分区数不能代替代次。
 pub trait ReplayIdentityProvider: Send + Sync {
     /// 业务作用：在执行准入前取得当前资源代次证据。
-    /// 参数说明：cluster_id 为观测到的物理来源，topics 为完整白名单，timeout 为剩余预算。
+    ///
+    /// 参数说明：
+    /// - `cluster_id`：cluster_id 为观测到的物理来源。
+    /// - `topics`：topics 为完整白名单。
+    /// - `timeout`：timeout 为剩余预算。
+    ///
     /// 返回：当前完整映射；目录不可观测时必须失败，不能以旧缓存冒充当前证据。
     fn generations(
         &self,
@@ -58,10 +74,16 @@ pub trait ReplayIdentityProvider: Send + Sync {
 /// 同步成功合同；不同分区可并发调用，返回前必须等待本条全部实际副作用结束。
 pub trait ReplayProcessor: Send + Sync {
     /// 业务作用：固定业务转换、schema、目的地和成功条件的共同合同。
-    /// 参数说明：无。返回：与计划相同的 SHA-256 小写十六进制指纹。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与计划相同的 SHA-256 小写十六进制指纹。
     fn fingerprint(&self) -> String;
     /// 业务作用：在独占任务责任内完成本条真实处理，不允许派生未等待的后台副作用。
-    /// 参数说明：record 为拥有独立原文字节的来源记录。
+    ///
+    /// 参数说明：
+    /// - `record`：record 为拥有独立原文字节的来源记录。
+    ///
     /// 返回：只有全部实际副作用成功才返回 Ok；失败或 panic 不推进本条 checkpoint。
     fn process(&self, record: ReplayRecord) -> ReplayResult<()>;
 }
@@ -133,7 +155,10 @@ pub struct ReplayStatus {
 
 impl ReplayStatus {
     /// 业务作用：区分终态与仅停止准入的控制请求。
-    /// 参数说明：无。返回：只有实际资源全部退出的终态为 true。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只有实际资源全部退出的终态为 true。
     pub fn drained(&self) -> bool {
         matches!(
             self.state,
@@ -150,27 +175,42 @@ pub struct ReplayHandle {
 
 impl ReplayHandle {
     /// 业务作用：暂停新处理，已进入的实际回调继续完成。
-    /// 参数说明：无。返回：Paused 或 Pausing；终态与停止不能重新开放。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：Paused 或 Pausing；终态与停止不能重新开放。
     pub fn pause(&self) -> ReplayStatus {
         self.task.pause(true)
     }
     /// 业务作用：恢复尚未停止的任务准入。
-    /// 参数说明：无。返回：恢复后的快照，取消和失败保持关闭。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：恢复后的快照，取消和失败保持关闭。
     pub fn resume(&self) -> ReplayStatus {
         self.task.pause(false)
     }
     /// 业务作用：永久关闭本实例的新准入，不打断已经发生的实际处理。
-    /// 参数说明：无。返回：停止阶段；不意味着 lease 已归还。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：停止阶段；不意味着 lease 已归还。
     pub fn cancel(&self) -> ReplayStatus {
         self.task.cancel()
     }
     /// 业务作用：无 I/O 读取持久进度与在途责任。
-    /// 参数说明：无。返回：不包含消息正文或连接凭据的快照。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不包含消息正文或连接凭据的快照。
     pub fn status(&self) -> ReplayStatus {
         self.task.status()
     }
     /// 业务作用：异步等待实际任务退出，超时或取消等待不会取消底层责任。
-    /// 参数说明：timeout 为本次等待预算，零仅检查当前状态。
+    ///
+    /// 参数说明：
+    /// - `timeout`：timeout 为本次等待预算。
+    ///
     /// 返回：实际排干为 true；预算耗尽为 false。
     pub async fn await_drained(&self, timeout: Duration) -> bool {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
@@ -203,13 +243,19 @@ struct ManagerState {
 
 impl ReplayManager {
     /// 业务作用：在停机预算已耗尽时仍报告真实未退出的任务身份。
-    /// 参数说明：无。返回：稳定任务名，不触发 I/O 或关闭资源。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：稳定任务名，不触发 I/O 或关闭资源。
     pub(crate) fn pending_names(&self) -> Vec<String> {
         lock(&self.state).tasks.keys().cloned().collect()
     }
 
     /// 业务作用：关闭准入并先通知全部任务，再由调用方等待实际退出。
-    /// 参数说明：无。返回：本轮完整责任集合；任务名称在真实退出前继续占用。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：本轮完整责任集合；任务名称在真实退出前继续占用。
     pub(crate) fn stop(&self) -> Vec<ReplayHandle> {
         let mut state = lock(&self.state);
         state.closed = true;
@@ -225,7 +271,11 @@ impl ReplayManager {
             .collect()
     }
     /// 业务作用：仅在实际资源关闭后移除匹配实例并归还线程额度。
-    /// 参数说明：task 为本次已退出实例。返回：不影响同名后续任务。
+    ///
+    /// 参数说明：
+    /// - `task`：task 为本次已退出实例。
+    ///
+    /// 返回：不影响同名后续任务。
     fn finished(&self, task: &Arc<Task>) {
         let mut state = lock(&self.state);
         if state
@@ -241,7 +291,13 @@ impl ReplayManager {
 
 impl KafkaProxy {
     /// 业务作用：在当前来源登记有界回放责任，不加入或提交线上消费组。
-    /// 参数说明：plan 为冻结合同，store 为持久后端，identity 为真实代次目录，processor 为同步成功合同。
+    ///
+    /// 参数说明：
+    /// - `plan`：plan 为冻结合同。
+    /// - `store`：store 为持久后端。
+    /// - `identity`：identity 为真实代次目录。
+    /// - `processor`：processor 为同步成功合同。
+    ///
     /// 返回：异步准备的控制句柄；关闭、合同不符、同名活动任务或预算不足立即拒绝。
     pub fn replay(
         &self,
@@ -254,7 +310,14 @@ impl KafkaProxy {
     }
 
     /// 业务作用：登记可选框架依赖，在任务开放前完成双方生命周期绑定。
-    /// 参数说明：plan/store/identity/processor 为完整回放合同，participant 为内置目标依赖。
+    ///
+    /// 参数说明：
+    /// - `plan`：固定来源身份、历史范围、处理指纹和资源额度的回放计划。
+    /// - `store`：提供独占租约与持久 checkpoint 的后端。
+    /// - `identity`：执行前和运行期间复验 topic 当前资源代次的目录。
+    /// - `processor`：同步处理记录的实现，其成功结果决定能否推进来源进度。
+    /// - `participant`：participant 为内置目标依赖。
+    ///
     /// 返回：受管句柄；任何同步登记失败都不会启动未登记的任务。
     pub(crate) fn replay_participating(
         &self,
@@ -322,52 +385,91 @@ impl KafkaProxy {
             manager.workers -= count;
             return Err(ReplayError::Capacity);
         }
-        Ok(ReplayHandle { task })
+        Ok(ReplayHandle {
+            task,
+        })
     }
 }
 
+/// 同一互斥门内的准入意图、真实责任计数和可见持久进度。
 #[derive(Default)]
 struct Control {
+    /// 是否已完成来源、处理合同及持久状态初始化。
     initialized: bool,
+    /// 暂停后续读取和处理的意图，不中断活动调用。
     paused: bool,
+    /// 永久取消后续准入的意图。
     cancelled: bool,
+    /// 协调器确认实际资源收口后发布的终态标志。
     done: bool,
+    /// 首个阻止任务继续的稳定失败类别。
     failure: Option<ReplayError>,
+    /// 持久后端失败的单独证据。
     checkpoint_failure: Option<CheckpointError>,
+    /// 后端已经确认的 checkpoint，不发布尚未持久化的进度。
     published: Option<ReplayCheckpoint>,
+    /// 已计入驻留责任且尚未释放的记录数量。
     in_flight: usize,
+    /// 上述记录占用的原文计费字节。
     bytes: u64,
+    /// 已取得处理权且尚未释放责任的调用数量。
     active: usize,
+    /// 已预留且尚未退出的工作线程数，构造失败时立即归还。
     workers: usize,
+    /// 本实例处理成功且进度已持久确认的记录数，不能替代完整 checkpoint。
     processed: u64,
+    /// 按记录速率计算的下一次处理准入时刻。
     next_record: Option<Instant>,
+    /// 按字节速率计算的下一次处理准入时刻。
     next_bytes: Option<Instant>,
 }
+/// 将独占租约和失败后禁止继续写入的保护放在同一门内。
 #[derive(Default)]
 struct Persistence {
+    /// 当前任务独占的持久写权限，实际责任结束后才释放。
     lease: Option<Box<dyn CheckpointLease>>,
+    /// 持久操作失败后阻止继续推进的永久保护标记。
     blocked: bool,
 }
+/// 一次有限范围回放的冻结输入、依赖及实际运行责任。
 struct Task {
+    /// 来源运行时的弱引用，避免任务反向延长业务句柄寿命。
     source: Weak<KafkaProxyInner>,
+    /// 构造独立查询和消费资源的冻结来源配置。
     config: KafkaConfig,
+    /// 不随 broker 末尾增长而扩展的历史范围与处理合同。
     plan: ReplayPlan,
+    /// 需要复验资源代次的完整 topic 集合。
     topics: BTreeSet<String>,
+    /// 提供独占 checkpoint 权限及持久进度的后端。
     store: Arc<dyn CheckpointStore>,
+    /// 复验当前物理资源代次的目录。
     identity: Arc<dyn ReplayIdentityProvider>,
+    /// 决定单条记录业务成功条件的同步处理器。
     processor: Arc<dyn ReplayProcessor>,
+    /// 可选目标依赖，实际退出前参与双方生命周期管理。
     participant: Option<Arc<dyn ReplayParticipant>>,
+    /// 本任务预留的工作线程上限。
     worker_limit: usize,
+    /// 单条原文上限，同时受来源限制与每线程分摊预算约束。
     record_limit: u64,
+    /// 对准入意图、责任计数与状态发布进行线性化的门。
     control: Mutex<Control>,
+    /// 暂停解除、取消或责任变化时唤醒等待线程。
     changed: Condvar,
+    /// 串行保护租约与 checkpoint 的访问。
     persistence: Mutex<Persistence>,
+    /// 工作线程领取下一个冻结分区范围的共享索引。
     cursor: AtomicUsize,
 }
 
 impl Task {
     /// 业务作用：生成控制锁内一致的任务状态。
-    /// 参数说明：state 为当前控制与责任计数。返回：仅真实退出后显示终态。
+    ///
+    /// 参数说明：
+    /// - `state`：state 为当前控制与责任计数。
+    ///
+    /// 返回：仅真实退出后显示终态。
     fn snapshot(&self, state: &Control) -> ReplayStatus {
         let phase = if state.done {
             if state.failure.is_some() {
@@ -406,11 +508,20 @@ impl Task {
             workers: state.workers,
         }
     }
-    /// 业务作用：读取本实例的即时责任。参数说明：无。返回：不触发外部操作的快照。
+    /// 业务作用：读取本实例的即时责任。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：不触发外部操作的快照。
     fn status(&self) -> ReplayStatus {
         self.snapshot(&lock(&self.control))
     }
-    /// 业务作用：以同一门线性化暂停和处理准入。参数说明：value 为暂停状态。返回：不能重开已停止实例。
+    /// 业务作用：以同一门线性化暂停和处理准入。
+    ///
+    /// 参数说明：
+    /// - `value`：value 为暂停状态。
+    ///
+    /// 返回：不能重开已停止实例。
     fn pause(&self, value: bool) -> ReplayStatus {
         let mut state = lock(&self.control);
         if !stopping(&state) {
@@ -419,7 +530,11 @@ impl Task {
         self.changed.notify_all();
         self.snapshot(&state)
     }
-    /// 业务作用：永久关闭新准入，保留在途回调和 lease。参数说明：无。返回：停止状态。
+    /// 业务作用：永久关闭新准入，保留在途回调和 lease。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：停止状态。
     fn cancel(&self) -> ReplayStatus {
         let mut state = lock(&self.control);
         if !state.done {
@@ -428,7 +543,13 @@ impl Task {
         self.changed.notify_all();
         self.snapshot(&state)
     }
-    /// 业务作用：保留首个稳定失败并唤醒全部等待者。参数说明：error 为执行类别，checkpoint 为可选存储类别。返回：新准入关闭，实际责任继续排干。
+    /// 业务作用：保留首个稳定失败并唤醒全部等待者。
+    ///
+    /// 参数说明：
+    /// - `error`：error 为执行类别。
+    /// - `checkpoint`：checkpoint 为可选存储类别。
+    ///
+    /// 返回：新准入关闭，实际责任继续排干。
     fn fail(&self, error: ReplayError, checkpoint: Option<CheckpointError>) {
         let mut state = lock(&self.control);
         state.failure.get_or_insert(error);
@@ -438,7 +559,10 @@ impl Task {
         self.changed.notify_all();
     }
     /// 业务作用：取得持久独占权后启动固定 worker，全部真实退出后才释放所有权和登记。
-    /// 参数说明：无。返回：关闭失败期间保持 Stopping 并持续持有任务额度。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：关闭失败期间保持 Stopping 并持续持有任务额度。
     fn run(self: Arc<Self>) {
         let mut workers = Vec::new();
         let result =
@@ -520,7 +644,12 @@ impl Task {
         lock(&self.control).done = true;
         self.changed.notify_all();
     }
-    /// 业务作用：隔离存储插件 panic 并保留存储失败类别。参数说明：call 为真实同步存储操作。返回：确认结果；失败关闭准入。
+    /// 业务作用：隔离存储插件 panic 并保留存储失败类别。
+    ///
+    /// 参数说明：
+    /// - `call`：call 为真实同步存储操作。
+    ///
+    /// 返回：确认结果；失败关闭准入。
     fn checkpoint_call<T>(
         &self,
         call: impl FnOnce() -> crate::CheckpointResult<T>,
@@ -534,7 +663,10 @@ impl Task {
         }
     }
     /// 业务作用：领取不重叠的分区，在每个分区内维持严格串行。
-    /// 参数说明：无。返回：范围耗尽或停止后退出；panic 同样关闭新准入。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：范围耗尽或停止后退出；panic 同样关闭新准入。
     fn worker(&self) {
         let result = isolate(|| -> ReplayResult<()> {
             while !stopping(&lock(&self.control)) {
@@ -558,7 +690,14 @@ impl Task {
         self.changed.notify_all();
     }
     /// 业务作用：在副作用或无记录边界推进前重新证明来源和保留范围。
-    /// 参数说明：checkpoint 为最后确认进度，consumer 为已有分区客户端，协调阶段传 None。返回：物理身份、代次、分区和范围全部吻合才通过。
+    ///
+    /// 参数说明：
+    /// - `checkpoint`：checkpoint 为最后确认进度。
+    /// - `consumer`：consumer 为已有分区客户端。
+    ///
+    /// 共同约束：协调阶段传 None。
+    ///
+    /// 返回：物理身份、代次、分区和范围全部吻合才通过。
     fn verify(
         &self,
         checkpoint: &ReplayCheckpoint,
@@ -581,7 +720,10 @@ impl Task {
             .validate_resume(&observed, &generations, checkpoint)
     }
     /// 业务作用：将后端权威复验与分区持久推进串行，已知失权后停止新的业务派发。
-    /// 参数说明：无。返回：当前 lease 权威仍成立；任何后端失败或 panic 关闭整个任务的推进门禁。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前 lease 权威仍成立；任何后端失败或 panic 关闭整个任务的推进门禁。
     fn verify_authority(&self) -> ReplayResult<()> {
         let mut persistence = lock(&self.persistence);
         if persistence.blocked {
@@ -604,7 +746,12 @@ impl Task {
         Ok(())
     }
     /// 业务作用：合并分区完成证据并先持久化再公开，写入未知后禁止后续写入。
-    /// 参数说明：index 为冻结分区下标，next 为已成功的下一坐标。返回：持久确认后的进度；失败保持原公开快照。
+    ///
+    /// 参数说明：
+    /// - `index`：index 为冻结分区下标。
+    /// - `next`：next 为已成功的下一坐标。
+    ///
+    /// 返回：持久确认后的进度；失败保持原公开快照。
     fn advance(&self, index: usize, next: i64) -> ReplayResult<()> {
         let mut persistence = lock(&self.persistence);
         // 插件可能未自行封禁；执行器必须阻止其它 worker 在不确定写入之后继续推进。
@@ -635,7 +782,10 @@ impl Task {
         }
     }
     /// 业务作用：暂停期间停止拉取，取消或失败后永久拒绝继续。
-    /// 参数说明：无。返回：允许读取时 true，退出时 false。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：允许读取时 true，退出时 false。
     fn await_unpaused(&self) -> bool {
         let mut state = lock(&self.control);
         while state.paused && !stopping(&state) {
@@ -647,7 +797,11 @@ impl Task {
         !stopping(&state)
     }
     /// 业务作用：用同一门实施全任务速率并授权真实处理。
-    /// 参数说明：size 为驻留原文额度。返回：取得处理权为 true；取消或失败为 false，最多一条初始突发。
+    ///
+    /// 参数说明：
+    /// - `size`：size 为驻留原文额度。
+    ///
+    /// 返回：取得处理权为 true；取消或失败为 false，最多一条初始突发。
     fn admit(&self, size: u64) -> ReplayResult<bool> {
         let mut state = lock(&self.control);
         while !stopping(&state) {
@@ -685,7 +839,12 @@ impl Task {
         Ok(false)
     }
     /// 业务作用：以独立单分区 consumer 执行冻结原文范围，跳过事务控制记录而不移动线上 group。
-    /// 参数说明：index 为持久进度位置，range 为本分区恢复范围。返回：全部完成或真实停止，消费资源随函数退出释放。
+    ///
+    /// 参数说明：
+    /// - `index`：index 为持久进度位置。
+    /// - `range`：range 为本分区恢复范围。
+    ///
+    /// 返回：全部完成或真实停止，消费资源随函数退出释放。
     fn consume(&self, index: usize, range: ReplayPosition) -> ReplayResult<()> {
         let mut native = crate::rd::config::consumer_config(
             &self.config,
@@ -825,23 +984,37 @@ impl Task {
             let positions = consumer
                 .position()
                 .map_err(|_| ReplayError::ObservationFailed)?;
-            if positions.find_partition(&range.topic, range.partition).is_some_and(|position| matches!(position.offset(), Offset::Offset(value) if value >= range.end_offset)) {
+            if positions
+                .find_partition(&range.topic, range.partition)
+                .is_some_and(|position|
+                    matches!(position.offset(), Offset::Offset(value) if value >= range.end_offset)
+                )
+            {
                 let checkpoint = lock(&self.control).published.clone().unwrap();
-                self.verify(&checkpoint, Some(&consumer))?; self.advance(index, range.end_offset)?; return Ok(());
+                self.verify(&checkpoint, Some(&consumer))?;
+                self.advance(index, range.end_offset)?;
+                return Ok(());
             }
         }
         Ok(())
     }
 }
 
+/// 将记录内存和业务调用额度保留到实际处理及持久操作结束。
 struct Residence<'a> {
+    /// 接收额度归还和等待通知的所属任务。
     task: &'a Task,
+    /// 该条记录计入的原文字节数。
     size: u64,
+    /// 是否还需归还已经取得的业务处理额度。
     active: bool,
 }
 impl Drop for Residence<'_> {
     /// 业务作用：只有实际回调和持久操作退出后才归还驻留额度，panic 路径同样保留此顺序。
-    /// 参数说明：无。返回：更新实际计数并唤醒控制等待。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：更新实际计数并唤醒控制等待。
     fn drop(&mut self) {
         let mut state = lock(&self.task.control);
         if self.active {
@@ -853,17 +1026,32 @@ impl Drop for Residence<'_> {
     }
 }
 
-/// 业务作用：使状态锁 panic 后仍可执行保护与排干。参数说明：mutex 为受控内部状态。返回：已有状态，后续业务门仍显式复验。
+/// 业务作用：使状态锁 panic 后仍可执行保护与排干。
+///
+/// 参数说明：
+/// - `mutex`：mutex 为受控内部状态。
+///
+/// 返回：已有状态，后续业务门仍显式复验。
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-/// 业务作用：统一新处理停止门。参数说明：state 为当前控制状态。返回：取消、失败或终态为 true。
+/// 业务作用：统一新处理停止门。
+///
+/// 参数说明：
+/// - `state`：state 为当前控制状态。
+///
+/// 返回：取消、失败或终态为 true。
 fn stopping(state: &Control) -> bool {
     state.cancelled || state.failure.is_some() || state.done
 }
-/// 业务作用：为来源查询和目录证明共用总预算。参数说明：deadline 为单调时钟截止值。返回：正剩余时间；耗尽拒绝。
+/// 业务作用：为来源查询和目录证明共用总预算。
+///
+/// 参数说明：
+/// - `deadline`：deadline 为单调时钟截止值。
+///
+/// 返回：正剩余时间；耗尽拒绝。
 fn remaining(deadline: Instant) -> ReplayResult<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
@@ -872,7 +1060,12 @@ fn remaining(deadline: Instant) -> ReplayResult<Duration> {
         Ok(left)
     }
 }
-/// 业务作用：用共同原文与固定元数据公式计算单条驻留额度。参数说明：message 为原生记录。返回：保留 null 与空值语义的计费字节数。
+/// 业务作用：用共同原文与固定元数据公式计算单条驻留额度。
+///
+/// 参数说明：
+/// - `message`：message 为原生记录。
+///
+/// 返回：保留 null 与空值语义的计费字节数。
 fn record_size(message: &rdkafka::message::BorrowedMessage<'_>) -> u64 {
     128 + message.topic().len() as u64
         + message.key().map_or(0, |value| value.len() as u64)
@@ -887,7 +1080,13 @@ fn record_size(message: &rdkafka::message::BorrowedMessage<'_>) -> u64 {
                 .sum::<u64>()
         })
 }
-/// 业务作用：向上取整速率间隔，零代表不节流。参数说明：amount 为条数或字节，rate 为每秒额度。返回：无乘法溢出的非负等待。
+/// 业务作用：向上取整速率间隔，零代表不节流。
+///
+/// 参数说明：
+/// - `amount`：amount 为条数或字节。
+/// - `rate`：rate 为每秒额度。
+///
+/// 返回：无乘法溢出的非负等待。
 fn delay(amount: u64, rate: u64) -> Duration {
     if rate == 0 {
         Duration::ZERO
@@ -899,7 +1098,11 @@ fn delay(amount: u64, rate: u64) -> Duration {
 }
 
 /// 业务作用：隔离业务与存储插件的 panic，避免异常载荷析构再次中断实际责任收尾。
-/// 参数说明：operation 为同步扩展调用。返回：正常结果或无敏感正文的失败；二次异常载荷保留而不继续析构。
+///
+/// 参数说明：
+/// - `operation`：operation 为同步扩展调用。
+///
+/// 返回：正常结果或无敏感正文的失败；二次异常载荷保留而不继续析构。
 pub(crate) fn isolate<T>(operation: impl FnOnce() -> T) -> std::result::Result<T, ()> {
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(value) => Ok(value),

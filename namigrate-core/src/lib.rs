@@ -121,7 +121,7 @@ impl MigrationComparison {
 
     /// 业务作用: 按稳定优先级把差异收敛为公开门禁错误。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `ignore_extra`: 是否接受数据库中存在但嵌入声明缺失的历史版本。
     ///
     /// 返回: dirty、checksum drift、extra、pending 依次裁决；没有阻断时成功。
@@ -135,7 +135,7 @@ impl MigrationComparison {
 
     /// 业务作用: 校验已有数据库记录是否允许继续应用未决 migration。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `ignore_extra`: 是否接受数据库中存在但嵌入声明缺失的历史版本。
     ///
     /// 返回: dirty、checksum drift 或不允许的 extra 会阻断；pending 留给 adapter 执行。
@@ -200,7 +200,7 @@ pub enum MigrationError {
 impl std::fmt::Display for MigrationError {
     /// 业务作用: 输出不含 SQL 正文、schema 名称或数据库凭据的稳定错误信息。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `formatter`: 标准格式化输出目标。
     ///
     /// 返回: 将当前失败分类写入输出目标的结果。
@@ -264,7 +264,7 @@ impl std::error::Error for MigrationError {}
 
 /// 业务作用: 比较嵌入式声明和数据库 catalog，生成不含 SQL 正文的确定性差异。
 ///
-/// # 参数
+/// 参数说明：
 /// - `embedded`: 当前二进制携带的 up migration 描述。
 /// - `applied`: 数据库 migration 表中的执行记录。
 ///

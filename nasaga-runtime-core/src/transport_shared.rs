@@ -78,7 +78,10 @@ impl<B: SagaBackend, S> ParticipantCommandHandler<B, S> {
     ///
     /// 返回：可交给 hosted command consumer 的轻量 handler。
     pub fn new(runtime: Arc<ParticipantRuntime<B>>, service: Arc<S>) -> Self {
-        Self { runtime, service }
+        Self {
+            runtime,
+            service,
+        }
     }
 }
 

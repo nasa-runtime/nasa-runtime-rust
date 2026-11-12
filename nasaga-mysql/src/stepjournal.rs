@@ -350,7 +350,9 @@ impl MySqlSagaStore {
             .ok_or_else(|| SagaStoreError::new("corrupt attempt status"))?;
         // 不覆盖先到事实，也不返回错误让 incoming 证据随事务回滚；Orchestrator 会把
         // 两个互斥状态写入 conflict 表并在同一 COMMIT 中升级人工介入。
-        Ok(AttemptOutcomeRecord::Conflicting { existing })
+        Ok(AttemptOutcomeRecord::Conflicting {
+            existing,
+        })
     }
 
     /// 业务作用：按阶段与尝试序号加载步骤的全部 attempt 事实，供恢复与人工裁决审阅。

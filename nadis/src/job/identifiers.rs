@@ -31,7 +31,11 @@ fn digest256(fields: &[&str]) -> String {
 /// 业务作用：生成自动调度 Run 的稳定幂等标识；同一逻辑触发时刻只对应一个 Run。
 ///
 /// 参数说明：
-/// - `qualifier`/`namespace`/`job_name`/`logical_fire_at`/`trigger_type`: source、命名空间、任务名、逻辑触发毫秒时刻与触发类型。
+/// - `qualifier`：冻结的数据源标识，使不同 source 的同名任务保持隔离。
+/// - `namespace`：任务所属命名空间。
+/// - `job_name`：已校验的任务名。
+/// - `logical_fire_at`：调度确定的逻辑触发毫秒时刻，不使用本次扫描时刻替代。
+/// - `trigger_type`：触发类型的协议名称；不同触发语义使用不同标识。
 ///
 /// 返回：32 位小写 hex 标识。
 pub fn scheduled_run_id(
@@ -50,10 +54,13 @@ pub fn scheduled_run_id(
     ])
 }
 
-/// 业务作用：生成手工触发 Run 的稳定幂等标识；观测时刻不参与，requestId 相同即同一个 Run。
+/// 业务作用：生成手工触发 Run 的稳定幂等标识；同一 source、命名空间和任务内的相同请求身份映射到同一 Run。
 ///
 /// 参数说明：
-/// - `qualifier`/`namespace`/`job_name`/`request_id`: source、命名空间、任务名与调用方幂等请求标识。
+/// - `qualifier`：冻结的数据源标识。
+/// - `namespace`：任务所属命名空间。
+/// - `job_name`：已校验的任务名。
+/// - `request_id`：调用方提供的幂等请求标识；重试必须保留原值，观测时间不参与计算。
 ///
 /// 返回：32 位小写 hex 标识。
 pub fn manual_run_id(qualifier: &str, namespace: &str, job_name: &str, request_id: &str) -> String {
@@ -63,7 +70,8 @@ pub fn manual_run_id(qualifier: &str, namespace: &str, job_name: &str, request_i
 /// 业务作用：生成与根 attempt 一一对应的 Fanout 标识，使网络重试采用同一批次。
 ///
 /// 参数说明：
-/// - `root_run_id`/`root_attempt`: 根 Run 标识与根 attempt。
+/// - `root_run_id`：已经冻结的根 Run 标识。
+/// - `root_attempt`：根执行尝试编号，调用方须在持久创建前校验为正数。
 ///
 /// 返回：32 位小写 hex 标识。
 pub fn fanout_id(root_run_id: &str, root_attempt: i32) -> String {
@@ -73,7 +81,8 @@ pub fn fanout_id(root_run_id: &str, root_attempt: i32) -> String {
 /// 业务作用：生成不随目标重分配变化的 Fanout shard 标识。
 ///
 /// 参数说明：
-/// - `fanout_id`/`seq`: Fanout 标识与稳定分片序号。
+/// - `fanout_id`：分片所属的冻结批次标识。
+/// - `seq`：批次内的稳定序号，投递重试和目标重分配均保留原值。
 ///
 /// 返回：32 位小写 hex 标识。
 pub fn shard_run_id(fanout_id: &str, seq: i64) -> String {
@@ -93,11 +102,13 @@ pub fn worker_key(worker_name: &str) -> String {
 /// 业务作用：生成能力快照的跨语言完整摘要，source 与成员字段分别编码以消除分隔符歧义。
 ///
 /// 参数说明：
-/// - `qualifier`/`namespace`/`worker_name`: 快照所属 source、命名空间与 Worker。
-/// - `selected_at`: Redis 选定时刻。
+/// - `qualifier`：快照所属的冻结数据源标识。
+/// - `namespace`：快照所属的任务命名空间。
+/// - `worker_name`：被选定成员共同满足的 Worker 能力名。
+/// - `selected_at`：Redis 选定成员的毫秒时刻，作为快照身份的一部分。
 /// - `members`: 已按稳定顺序展开的 nodeIdentity、executorId、heartbeatRevision 字段。
 ///
-/// 返回：64 位小写 hex 摘要。
+/// 返回：64 位小写 hex 摘要；成员顺序原样参与计算，调用方必须先完成稳定排序。
 pub fn snapshot_digest(
     qualifier: &str,
     namespace: &str,

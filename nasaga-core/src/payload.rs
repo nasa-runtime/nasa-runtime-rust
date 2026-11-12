@@ -69,9 +69,12 @@ pub struct SagaPayload {
 impl SagaPayload {
     /// 业务作用：构造可进入摘要和持久消息的原始正文，不重新编码业务内容。
     ///
-    /// 参数说明：content_type 与 schema_id 声明解释合同，body 是原始字节。
+    /// 参数说明：
+    /// - `content_type`：正文声明的媒体类型原文。
+    /// - `schema_id`：正文解释合同的 schema 身份，可按 validate 规则为空。
+    /// - `body`：需要完整保留的原始正文。
     ///
-    /// 返回：合同合法时返回正文；非法媒体类型、schema 或 JSON 返回错误。
+    /// 返回：保存原始字节且 validate 通过时返回正文，媒体类型、schema 或适用的 JSON 校验失败时报错，不重新编码正文或证明业务 schema 语义。
     pub fn new(
         content_type: impl Into<String>,
         schema_id: impl Into<String>,
@@ -114,9 +117,10 @@ impl SagaPayload {
 
     /// 业务作用：把已有 JSON 值转换为无 schema 的规范 JSON 字节正文。
     ///
-    /// 参数说明：value 是调用方已经解析的 JSON 值。
+    /// 参数说明：
+    /// - `value`：调用方已构造或解析的 JSON 值。
     ///
-    /// 返回：无损整数序列化的 JSON 正文；需要保留输入文本时使用 new。
+    /// 返回：返回 application/json、空 schema_id 与 JSON 值重新序列化的字节；不保留原始空白或字段文本形式，也不执行外部 schema 校验。
     pub fn json(value: serde_json::Value) -> Self {
         Self {
             content_type: "application/json".to_owned(),
@@ -133,9 +137,10 @@ pub struct SagaPayloadError;
 impl std::fmt::Display for SagaPayloadError {
     /// 业务作用：输出可安全返回给调用者的正文合同拒绝。
     ///
-    /// 参数说明：formatter 是文本输出目标。
+    /// 参数说明：
+    /// - `formatter`：接收固定公开错误文本的格式器。
     ///
-    /// 返回：写入固定错误文本，不包含正文或 schema 内容。
+    /// 返回：成功写入固定合同拒绝文本时成功，格式器失败时传播错误；不输出正文、schema 或底层详情。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("Saga payload contract is invalid")
     }

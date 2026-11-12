@@ -15,7 +15,7 @@ pub const DEFAULT_EVENT: &str = "DEFAULT";
 pub const HEADER_EVENT: &str = "X-Nasa-Event";
 /// payload 编码标记 header;值固定为 [`PAYLOAD_CODEC_PROTOCOL_BYTES`],JSON 不打此 header(兼容旧消息)。
 pub const HEADER_PAYLOAD_CODEC: &str = "X-Nasa-Payload-Codec";
-/// ProtocolBytes 的 Mode 名 header:消费端校验与类型声明一致,防协议代次或异构实现解码错乱。
+/// ProtocolBytes 的 Mode 名或原文模式 raw；消费端与类型声明比对，不能据此猜测解码方式。
 pub const HEADER_PAYLOAD_MODE: &str = "X-Nasa-Payload-Mode";
 /// 透传快照 header(JSON):trace 等跨服务上下文放 header 而非 payload,与二进制 payload 共存。
 pub const HEADER_PASSTHROUGH: &str = "X-Nasa-Passthrough";
@@ -43,7 +43,10 @@ pub const HEADER_DLT_ORIGIN_CLUSTER: &str = "X-Nasa-DLT-Origin-Cluster";
 pub const PAYLOAD_CODEC_PROTOCOL_BYTES: &str = "protocol-bytes";
 
 /// 业务作用：统一发布、注册与消费的事件空白边界，保留其它事件原文身份。
-/// 参数说明：event 为合法 UTF-8 事件名。
+///
+/// 参数说明：
+/// - `event`：为合法 UTF-8 事件名。
+///
 /// 返回：空串或仅含 Java Character.isWhitespace 对应字符时为 true；NEL 和不换行空格不属于该集合。
 pub(crate) fn is_blank_event(event: &str) -> bool {
     event.chars().all(|value| {
@@ -57,7 +60,10 @@ pub(crate) fn is_blank_event(event: &str) -> bool {
 pub(crate) const MAX_GROUP_BYTES: usize = 1024;
 
 /// 业务作用：在路由发布与原生请求之前验证普通组的共同输入边界。
-/// 参数说明：group 为已经解析的精确 group.id，保留共同边界内的 Unicode 原文。
+///
+/// 参数说明：
+/// - `group`：为已经解析的精确 group.id，保留共同边界内的 Unicode 原文。
+///
 /// 返回：非纯空白、无 NUL、首尾不含 U+0000–0020 且为1至1024个 UTF-8 字节时通过，否则为 Config；不改写身份。
 pub(crate) fn validate_group(group: &str) -> Result<()> {
     // 组与事件共用固定空白集合，不能让 Unicode trim 吞掉 NEL、NBSP 等有效身份。
@@ -78,7 +84,7 @@ pub(crate) fn validate_group(group: &str) -> Result<()> {
 
 /// 业务作用：判断 header 名是否为框架保留:业务发布接口写保留 header 直接报错,不静默覆盖。
 ///
-/// # 参数
+/// 参数说明：
 /// - `name`: 待检查的 header 名；转发证据拒绝所有大小写变体，其余保留字段按协议精确匹配。
 ///
 /// 返回：普通发布接口是否必须拒绝该名称。
@@ -205,13 +211,14 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> &str {
 
 // ==================== Mode 名映射(跨语言) ====================
 
-/// 业务作用：把 ProtocolBytes Mode 映射为跨语言 wire 名(上游对标实现的枚举名)。
+/// 业务作用：把 ProtocolBytes Mode 映射为跨语言共享的 wire 名。
 ///
-/// 为什么单列函数:mode 名进 [`HEADER_PAYLOAD_MODE`],两端必须逐字节一致;
-/// 集中一处 + golden 向量锁死,避免散落的字符串常量各写各的。
+/// 名称写入 [`HEADER_PAYLOAD_MODE`]，发布与消费端必须逐字节一致。
 ///
-/// # 参数
+/// 参数说明：
 /// - `mode`: naws-proto 的线协议模式。
+///
+/// 返回：对应模式的固定大写名称；这里只映射身份，不证明该模式已被当前类型支持或注册批准。
 pub fn mode_wire_name(mode: naws_proto::Mode) -> &'static str {
     match mode {
         naws_proto::Mode::JsonBytes => "JSON_BYTES",
@@ -223,11 +230,10 @@ pub fn mode_wire_name(mode: naws_proto::Mode) -> &'static str {
 
 /// 业务作用：从 wire 名解析 Mode，比较时忽略大小写。
 ///
-/// # 参数
+/// 参数说明：
 /// - `name`: header 携带的 mode 名。
 ///
-/// # 返回
-/// 未知名字返回 None,由调用方按 undecodable 策略处理,不猜默认值。
+/// 返回：未知名字返回 None,由调用方按 undecodable 策略处理,不猜默认值。
 pub fn mode_from_wire_name(name: &str) -> Option<naws_proto::Mode> {
     if name.eq_ignore_ascii_case("JSON_BYTES") {
         Some(naws_proto::Mode::JsonBytes)
@@ -247,6 +253,8 @@ pub fn mode_from_wire_name(name: &str) -> Option<naws_proto::Mode> {
 /// payload 的编码方式,编译期由类型定死,无运行时探测。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PayloadCodec {
+    /// 不解析正文；仅接受缺失编码声明或显式 raw mode，异步消费共享输入所有权。
+    Raw,
     /// serde JSON UTF-8:默认路径,不打 codec header,与旧消息兼容。
     Json,
     /// ProtocolBytes 二进制,携带具体 Mode;发布时打 codec + mode 两个 header。
@@ -263,6 +271,10 @@ pub trait EncodePayload: Sync + 'static {
 
     /// 业务作用：把业务对象编码为 Kafka value 字节。
     ///
+    /// 参数说明：无。
+    ///
+    /// 返回：符合 CODEC 声明的自有字节，失败返回编码错误；本接口不执行 broker 发布，不能把编码成功视为交付成功。
+    ///
     /// # 错误
     /// 编码失败返回 [`NafkaError::Codec`];发布路径把它归为确定失败(可安全重试构造)。
     fn encode(&self) -> Result<Vec<u8>>;
@@ -275,15 +287,29 @@ pub trait DecodePayload: Sized + Send + 'static {
 
     /// 业务作用：从 Kafka value 字节还原业务对象。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `bytes`: 消息 value 原始字节；空 slice 不是 tombstone，不能自动解释为 null。
+    ///
+    /// 返回：符合类型声明的业务值或编码错误；不得在错误诊断中泄露原始内容，解码成功不承担业务确认或 offset 提交。
     ///
     /// # 错误
     /// 解码失败返回 [`NafkaError::Codec`];dispatcher 将该 offset 精确标记为 undecodable。
     fn decode(bytes: &[u8]) -> Result<Self>;
 
+    /// 业务作用：让异步消费者选择共享原文，普通类型沿用既有借用解码语义。
+    ///
+    /// 参数说明：
+    /// - `payload`：框架已预约容量的不可变原文，保留引用会延续输入预算。
+    ///
+    /// 返回：类型解码结果；缺省调用 decode，共享原文类型可直接交接 owner。
+    fn decode_owned(payload: crate::RawPayload) -> Result<Self> {
+        Self::decode(payload.as_ref())
+    }
+
     /// 业务作用：在显式 Deliver 策略下决定业务类型是否能表示删除标记。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：默认拒绝；nullable 类型可返回自己的空值，不用伪造载荷字节。
     fn decode_tombstone() -> Result<Self> {
         Err(NafkaError::MissingPayload)
@@ -298,6 +324,10 @@ impl<T: Serialize + Sync + 'static> EncodePayload for T {
 
     /// 业务作用：将 serde 业务值编码为 UTF-8 JSON 字节。
     ///
+    /// 参数说明：无。
+    ///
+    /// 返回：新分配的 JSON 字节；序列化失败返回 Codec，包含序列化器的错误文本，因此自定义序列化实现不得把敏感内容写入错误。
+    ///
     /// # 错误
     /// JSON 序列化失败时返回 codec 错误。
     fn encode(&self) -> Result<Vec<u8>> {
@@ -310,7 +340,10 @@ impl<T: DeserializeOwned + Send + 'static> DecodePayload for T {
 
     /// 业务作用：从 UTF-8 JSON 字节恢复业务值。
     ///
+    /// 参数说明：
     /// - `bytes`: Kafka value 原始字节。
+    ///
+    /// 返回：JSON 符合目标类型时返回业务值；错误只保留类型名、类别及行列，不展开 serde 错误中的输入片段。
     ///
     /// # 错误
     /// JSON 反序列化失败时返回 codec 错误。**错误文本不得包含 payload 内容**：
@@ -332,7 +365,9 @@ impl<T: DeserializeOwned + Send + 'static> DecodePayload for T {
     }
 
     /// 业务作用：把显式交付的删除标记映射为 serde 类型的 null 表示。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：Option 等可空类型得到空值；非 nullable DTO 返回已脱敏的 codec 错误。
     fn decode_tombstone() -> Result<Self> {
         <Self as DecodePayload>::decode(b"null")
@@ -340,13 +375,19 @@ impl<T: DeserializeOwned + Send + 'static> DecodePayload for T {
 }
 
 /// 可空 typed 消费包装；支持 Proto 等没有 serde null 表示的类型，保留其原 codec 声明。
-pub struct NullablePayload<T>(pub Option<T>);
+pub struct NullablePayload<T>(
+    /// Some 保留实际业务值，None 表示可交付的空值或删除标记。
+    pub Option<T>,
+);
 
 impl<T: DecodePayload> DecodePayload for NullablePayload<T> {
     const CODEC: PayloadCodec = T::CODEC;
 
     /// 业务作用：保留实际负载的类型解码，JSON null 映射为空业务值。
-    /// 参数说明：bytes 为原始非 tombstone 载荷，空字节仍按 codec 判定。
+    ///
+    /// 参数说明：
+    /// - `bytes`：为原始非 tombstone 载荷，空字节仍按 codec 判定。
+    ///
     /// 返回：有效负载为 Some；合法 JSON null 为 None；解码错误仍进入无效记录策略。
     fn decode(bytes: &[u8]) -> Result<Self> {
         if T::CODEC == PayloadCodec::Json && serde_json::from_slice::<()>(bytes).is_ok() {
@@ -357,7 +398,9 @@ impl<T: DecodePayload> DecodePayload for NullablePayload<T> {
     }
 
     /// 业务作用：让显式 Deliver 策略携带不伪造业务对象的删除标记。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：None，来源 key、offset 和 headers 继续保留在 KafkaRecord 上下文。
     fn decode_tombstone() -> Result<Self> {
         Ok(Self(None))
@@ -379,10 +422,17 @@ pub trait ProtoMode {
 /// 禁止为它实现 serde Serialize/Deserialize——那会与 JSON blanket impl 产生编码歧义,
 /// 该类型约束在编译期锁住编码路径边界。
 #[repr(transparent)]
-pub struct Proto<T>(pub T);
+pub struct Proto<T>(
+    /// 固定使用 T::MODE 编解码的业务值。
+    pub T,
+);
 
 impl<T> Proto<T> {
     /// 业务作用：取出内部业务值,零成本。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：移出包装持有的业务值，不重新编解码或克隆内容；原包装随调用消耗。
     pub fn into_inner(self) -> T {
         self.0
     }
@@ -392,6 +442,10 @@ impl<T> std::ops::Deref for Proto<T> {
     type Target = T;
 
     /// 业务作用：借用透明包装中的业务值。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：生命周期受包装借用约束的只读引用，不转移业务值所有权或产生编码字节。
     fn deref(&self) -> &T {
         &self.0
     }
@@ -404,6 +458,10 @@ where
     const CODEC: PayloadCodec = PayloadCodec::Proto(T::MODE);
 
     /// 业务作用：按类型声明的固定 Mode 编码业务值。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：WireCodec 按 T::MODE 生成的字节；失败转为含模式及底层编码原因的 Codec，不尝试其它模式。
     ///
     /// # 错误
     /// 线协议编码失败时返回 codec 错误。
@@ -422,7 +480,10 @@ where
 
     /// 业务作用：按类型声明的固定 Mode 解码业务值。
     ///
+    /// 参数说明：
     /// - `bytes`: Kafka value 原始字节。
+    ///
+    /// 返回：成功解码后的 Proto 包装；失败返回 Codec，JSON 错误正文使用固定文本，其它错误保留结构诊断，不探测备用模式。
     ///
     /// # 错误
     /// 线协议解码失败时返回 codec 错误。与 JSON blanket 同理，错误文本不得包含 payload 内容：

@@ -42,7 +42,8 @@ impl JobFireResult {
 
     /// 业务作用：把批量触发脚本的已校验返回码映射为封闭指标结果。
     ///
-    /// 参数说明：`code` 为 `fire_due_batch.lua` 返回的单项状态码。
+    /// 参数说明：
+    /// - `code`：批量调度脚本返回的单项状态码，仅接受固定协议名称。
     ///
     /// 返回：已知码返回对应结果；未知码返回 `None`，由协议层拒绝而不是扩张 label 域。
     pub(crate) fn from_script_code(code: &str) -> Option<Self> {
@@ -144,9 +145,13 @@ pub struct JobSupervisorMetricsSnapshot {
 #[derive(Debug, Clone)]
 /// 业务作用：保存单个监督循环当前代次、重启累计和封闭结局历史。
 struct SupervisorMetric {
+    /// 当前或下一次运行的监督代次，计数达到上界后饱和。
     generation: u64,
+    /// 已安排重启的累计次数，区别于成功恢复次数。
     restart_total: u64,
+    /// 最近一次监督状态观测，供健康投影使用。
     result: JobSupervisorResult,
+    /// 各封闭结局的累计观测次数，避免结果切换使 counter 回退。
     result_totals: BTreeMap<JobSupervisorResult, u64>,
 }
 
@@ -188,24 +193,32 @@ pub struct JobMetricsSnapshot {
 #[derive(Debug)]
 /// 业务作用：集中保存一个 Redis source 的固定指标值、分片 gauge 与监督循环账目。
 struct JobMetricsState {
+    /// 预登记指标名对应的当前数值，不接受运行期新增名称。
     values: BTreeMap<&'static str, i64>,
+    /// 各类调度结局的饱和累计。
     fire_results: BTreeMap<JobFireResult, u64>,
+    /// 固定指标下各布局分片最近一次观测，用于计算 source 聚合值。
     shard_gauges: BTreeMap<&'static str, BTreeMap<u32, i64>>,
+    /// 每类监督循环的代次与历史结局。
     supervisors: BTreeMap<JobSupervisorLoop, SupervisorMetric>,
+    /// 最近一次完成流裁剪观测的最旧消息标识，空流时为 None。
     completion_oldest_id: Option<String>,
 }
 
 /// 单 source 进程内指标容器；所有 key 与 label 域在构造时封闭。
 #[derive(Debug)]
 pub(crate) struct JobMetrics {
+    /// 冻结的数据源标识，限制对外指标的 source 维度。
     qualifier: String,
+    /// 只保护进程内指标读写的锁，不在持锁期间执行 Redis I/O。
     state: Mutex<JobMetricsState>,
 }
 
 impl JobMetrics {
-    /// 业务作用：按冻结 source 建立完整指标全集，避免运行期因新事件动态增加 descriptor。
+    /// 业务作用：按冻结 source 建立完整指标值与封闭结局域，避免运行期事件扩张指标名称。
     ///
-    /// 参数说明：`qualifier` 为计划冻结的 canonical source id。
+    /// 参数说明：
+    /// - `qualifier`：计划冻结的规范数据源标识，作为快照固定身份。
     ///
     /// 返回：全部计数和 gauge 为零、监督器处于首代的本地容器。
     pub(crate) fn new(qualifier: impl Into<String>) -> Self {
@@ -237,7 +250,9 @@ impl JobMetrics {
 
     /// 业务作用：累计一个已预登记的低基数计数器。
     ///
-    /// 参数说明：`name` 必须来自本模块固定全集，`delta` 为非负增量。
+    /// 参数说明：
+    /// - `name`：本模块预登记的指标名，外部输入不能动态扩展名称。
+    /// - `delta`：本次增加的数量，负值按零处理，溢出时饱和。
     ///
     /// 返回：无；未知名称被忽略，防止运行期输入扩张指标域。
     pub(crate) fn add(&self, name: &'static str, delta: i64) {
@@ -252,7 +267,9 @@ impl JobMetrics {
 
     /// 业务作用：更新一个已预登记的 gauge。
     ///
-    /// 参数说明：`name` 必须来自固定全集，`value` 为当前观测值。
+    /// 参数说明：
+    /// - `name`：固定全集内需要覆盖的指标名。
+    /// - `value`：当前观测值，原样保存，不执行非负归一化。
     ///
     /// 返回：无；未知名称被忽略，指标域保持封闭。
     pub(crate) fn set(&self, name: &'static str, value: i64) {
@@ -267,9 +284,12 @@ impl JobMetrics {
 
     /// 业务作用：更新一个分片局部 gauge，并把全部已观测分片求和发布为 source 聚合值。
     ///
-    /// 参数说明：`name` 为固定 gauge 名，`shard` 为冻结布局下标，`value` 为该分片当前值。
+    /// 参数说明：
+    /// - `name`：固定全集内的聚合 gauge 名称。
+    /// - `shard`：调用方保证属于冻结布局的分片下标，不作为对外 label。
+    /// - `value`：该分片最新观测值，负值按零保存。
     ///
-    /// 返回：无；未知指标名被忽略，运行期不会建立新 family。
+    /// 返回：无；已知名称更新分片观测并饱和求和，未知名称被忽略；未观测的分片不计入总值。
     pub(crate) fn set_shard_gauge(&self, name: &'static str, shard: u32, value: i64) {
         let mut state = self
             .state
@@ -288,9 +308,11 @@ impl JobMetrics {
 
     /// 业务作用：累计一批调度触发的封闭结局，使各 result series 保持独立单调。
     ///
-    /// 参数说明：`result` 来自脚本返回码的封闭映射，`delta` 为本轮同类结局数量。
+    /// 参数说明：
+    /// - `result`：脚本返回码映射出的封闭结局，不接受任意错误文本。
+    /// - `delta`：本轮该类结局的数量。
     ///
-    /// 返回：无返回值。
+    /// 返回：无；对应结局累计增加，达到整数上界后饱和而不回绕。
     pub(crate) fn record_fire(&self, result: JobFireResult, delta: u64) {
         let mut state = self
             .state
@@ -303,9 +325,10 @@ impl JobMetrics {
 
     /// 业务作用：记录一个循环安排新代次，并同步监督器公开计数与 generation。
     ///
-    /// 参数说明：`loop_name` 为封闭循环身份。
+    /// 参数说明：
+    /// - `loop_name`：本次已安排新代次的封闭循环身份。
     ///
-    /// 返回：递增后的 generation。
+    /// 返回：饱和递增后的 generation；同时增加重启累计和安排重启的结局累计，不启动循环。
     pub(crate) fn restart_scheduled(&self, loop_name: JobSupervisorLoop) -> u64 {
         let mut state = self
             .state
@@ -324,38 +347,45 @@ impl JobMetrics {
         metric.generation
     }
 
-    /// 业务作用：标记一个新代次已成功推进，供健康状态从 Degraded 恢复。
+    /// 业务作用：记录一个新代次已成功推进的观测，实际健康恢复由监督器控制。
     ///
-    /// 参数说明：`loop_name` 为封闭循环身份。
+    /// 参数说明：
+    /// - `loop_name`：已经完成成功推进的封闭循环身份。
     ///
-    /// 返回：无；不改变累计重启次数。
+    /// 返回：无；更新最近结局并累计恢复观测，不改变代次或累计重启次数。
     pub(crate) fn recovered(&self, loop_name: JobSupervisorLoop) {
         self.set_supervisor_result(loop_name, JobSupervisorResult::Recovered);
     }
 
     /// 业务作用：记录循环重启预算耗尽。
     ///
-    /// 参数说明：`loop_name` 为封闭循环身份。
+    /// 参数说明：
+    /// - `loop_name`：已无法继续重启的封闭循环身份。
     ///
-    /// 返回：无；source 健康门禁由调用方同步关闭。
+    /// 返回：无；更新结局并累计预算耗尽观测，source 健康门禁仍须由调用方关闭。
     pub(crate) fn budget_exhausted(&self, loop_name: JobSupervisorLoop) {
         self.set_supervisor_result(loop_name, JobSupervisorResult::BudgetExhausted);
     }
 
     /// 业务作用：记录权威循环失效且不得原地重启。
     ///
-    /// 参数说明：`loop_name` 为封闭循环身份。
+    /// 参数说明：
+    /// - `loop_name`：已经失去权威的封闭循环身份。
     ///
-    /// 返回：无；source 健康门禁由调用方同步关闭。
+    /// 返回：无；更新结局并累计失权观测，本函数不直接撤销租约或关闭 source。
     pub(crate) fn authority_lost(&self, loop_name: JobSupervisorLoop) {
         self.set_supervisor_result(loop_name, JobSupervisorResult::AuthorityLost);
     }
 
     /// 业务作用：记录 Completion 双界裁剪数量、最旧 ID 与积压年龄。
     ///
-    /// 参数说明：两类裁剪数、最旧 ID、Redis 权威当前时刻共同形成本轮观测。
+    /// 参数说明：
+    /// - `length_trimmed`：按长度上限裁剪的数量，负值不减少累计。
+    /// - `retention_trimmed`：按保留期限裁剪的数量，负值不减少累计。
+    /// - `oldest_id`：裁剪后最旧 Stream ID，空流为 None；无法解析毫秒部分时年龄记为零。
+    /// - `redis_now`：本轮 Redis 权威毫秒时间，用于估算最旧条目的年龄。
     ///
-    /// 返回：无；累计删除数单调增长，年龄与最旧 ID 覆盖为最近观测。
+    /// 返回：无；依次更新裁剪累计、非负年龄和最旧 ID，跨字段更新不构成原子观测批次。
     pub(crate) fn record_completion_trim(
         &self,
         length_trimmed: i64,
@@ -411,11 +441,13 @@ impl JobMetrics {
         }
     }
 
-    /// 业务作用：更新一个监督循环的最近结局而不改变 generation 或累计次数。
+    /// 业务作用：更新监督循环最近结局并累计该结局的观测次数，保留代次和重启累计。
     ///
-    /// 参数说明：`loop_name` 与 `result` 均来自封闭枚举。
+    /// 参数说明：
+    /// - `loop_name`：当前观测所属的封闭循环身份。
+    /// - `result`：需要发布并累计的封闭结局，连续相同结局也分别计数。
     ///
-    /// 返回：无返回值。
+    /// 返回：无；最近结局被覆盖，对应累计饱和增加，generation 与 restart_total 保持原值。
     fn set_supervisor_result(&self, loop_name: JobSupervisorLoop, result: JobSupervisorResult) {
         let mut state = self
             .state
@@ -429,6 +461,7 @@ impl JobMetrics {
     }
 }
 
+/// source 创建时预登记的全部监督循环。
 const ALL_SUPERVISOR_LOOPS: [JobSupervisorLoop; 6] = [
     JobSupervisorLoop::Subscription,
     JobSupervisorLoop::Scanner,
@@ -438,6 +471,7 @@ const ALL_SUPERVISOR_LOOPS: [JobSupervisorLoop; 6] = [
     JobSupervisorLoop::Heartbeat,
 ];
 
+/// 监督结局的固定 label 域，包含尚未发生的零值项。
 const ALL_SUPERVISOR_RESULTS: [JobSupervisorResult; 5] = [
     JobSupervisorResult::Running,
     JobSupervisorResult::RestartScheduled,
@@ -446,6 +480,7 @@ const ALL_SUPERVISOR_RESULTS: [JobSupervisorResult; 5] = [
     JobSupervisorResult::AuthorityLost,
 ];
 
+/// 调度结果的固定 label 域，协议外文本不能加入。
 const ALL_FIRE_RESULTS: [JobFireResult; 7] = [
     JobFireResult::Fired,
     JobFireResult::Adopted,
@@ -456,6 +491,7 @@ const ALL_FIRE_RESULTS: [JobFireResult; 7] = [
     JobFireResult::Stale,
 ];
 
+/// source 创建时建立的固定指标名，更新操作忽略未知名称。
 const JOB_METRIC_NAMES: [&str; 36] = [
     "redis_job_schedule_lag_ms",
     "redis_job_due_scan_total",

@@ -14,8 +14,10 @@ pub(crate) struct Publication {
 
 impl Publication {
     /// 业务作用：在目标路径权威下创建私有临时文件，拒绝覆盖主文件和孤立 sidecar。
+    ///
     /// 参数说明：
     /// - `destination`：必须尚不存在的新目标路径，父目录必须已经存在。
+    ///
     /// 返回：与目标名称分离的新临时文件及持续持有的目标锁；路径不安全、目标冲突或候选耗尽时失败。
     pub(crate) fn reserve(destination: &Path) -> anyhow::Result<Self> {
         let parent = destination
@@ -83,8 +85,10 @@ impl Publication {
     }
 
     /// 业务作用：在内容校验和物理关闭之后发布备份，目标存在时绝不覆盖。
+    ///
     /// 参数说明：
     /// - `check`：在发布前复验维护预算及来源资格，不能撤销已经完成的发布事实。
+    ///
     /// 返回：文件和目录均已同步的目标路径；发布后同步失败保留目标供核验。
     pub(crate) fn publish(self, check: impl Fn() -> anyhow::Result<()>) -> anyhow::Result<PathBuf> {
         check()?;
@@ -121,7 +125,9 @@ impl Publication {
     }
 
     /// 业务作用：删除或发布前复验临时文件身份，避免处理被替换的材料。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：仍为本次创建的普通文件时成功。
     fn verify(&self) -> anyhow::Result<()> {
         let metadata = std::fs::symlink_metadata(&self.temporary)?;
@@ -135,7 +141,9 @@ impl Publication {
 
 impl Drop for Publication {
     /// 业务作用：撤销本次未发布的临时材料，保留已有目标和稳定锁文件。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只清理仍具有创建身份的精确临时路径。
     fn drop(&mut self) {
         if self.verify().is_ok() {
@@ -149,8 +157,10 @@ impl Drop for Publication {
 }
 
 /// 业务作用：排除已占用的临时材料，以及与最终目标等价的主文件或 sidecar 名称。
+///
 /// 参数说明：
 /// - `path`：尚未创建的临时主文件候选路径。
+///
 /// 返回：全部材料及其 owner 锁名称均未占用时允许创建；查找失败时停止预留。
 fn temporary_available(path: &Path) -> anyhow::Result<bool> {
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -170,8 +180,10 @@ fn temporary_available(path: &Path) -> anyhow::Result<bool> {
 }
 
 /// 业务作用：防止新目标携带旧日志材料或覆盖用户已有数据库。
+///
 /// 参数说明：
 /// - `path`：目标数据库的规范路径。
+///
 /// 返回：主文件与全部 sidecar 都不存在时成功。
 fn require_absent(path: &Path) -> anyhow::Result<()> {
     for suffix in ["", "-wal", "-shm", "-journal"] {

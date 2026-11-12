@@ -49,7 +49,9 @@ pub(crate) struct AdminClose {
 
 impl AdminClose {
     /// 业务作用：只读核对原生销毁和实际关闭线程均已退出，不取走线程或等待。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：完整本地资源退出才为 true；仍被其它请求借用时保持 false。
     pub(crate) fn is_closed(&self) -> bool {
         self.finished.load(std::sync::atomic::Ordering::Acquire)
@@ -61,7 +63,10 @@ impl AdminClose {
                 .is_none_or(|thread| thread.is_finished())
     }
     /// 业务作用：为已关闭准入的 Admin 建立唯一关闭责任，等待已接纳操作归还原生资源。
-    /// 参数说明：client 为旧资源；调用者在启动成功前仍须保留源槽位引用。
+    ///
+    /// 参数说明：
+    /// - `client`：client 为旧资源。
+    ///
     /// 返回：与调用方 future 无关的关闭状态；线程创建失败保留源槽位供再次关闭。
     pub(crate) fn start(client: Arc<AdminHandle>) -> Result<Arc<Self>> {
         let state = Arc::new(Self {
@@ -100,7 +105,11 @@ impl AdminClose {
     }
 
     /// 业务作用：在宿主总期限内观察原生资源真正退出，不把本地等待结束当作关闭完成。
-    /// 参数说明：deadline 为整个停机共用的绝对期限。返回：实际销毁和关闭线程均退出才为 true，超时保留责任供重试。
+    ///
+    /// 参数说明：
+    /// - `deadline`：deadline 为整个停机共用的绝对期限。
+    ///
+    /// 返回：实际销毁和关闭线程均退出才为 true，超时保留责任供重试。
     pub(crate) async fn await_closed(&self, deadline: Instant) -> bool {
         while !self.finished.load(std::sync::atomic::Ordering::Acquire) {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -117,7 +126,11 @@ impl AdminClose {
         worker.is_none_or(|worker| worker.join().is_ok())
     }
 
-    /// 业务作用：为停机期限耗尽提供当前资源责任证据。参数说明：无。返回：最近观测到的其它持有者数量；零不代表原生销毁已经结束。
+    /// 业务作用：为停机期限耗尽提供当前资源责任证据。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：最近观测到的其它持有者数量；零不代表原生销毁已经结束。
     pub(crate) fn resource_holders(&self) -> usize {
         self.holders.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -125,7 +138,10 @@ impl AdminClose {
 
 impl AdminHandle {
     /// 业务作用：在有界阻塞任务中读取 broker 的物理集群身份，不能用连接地址伪造恢复证据。
-    /// 参数说明：无，使用当前 Admin 的总预算。
+    ///
+    /// 参数说明: 无。
+    /// 执行条件：无，使用当前 Admin 的总预算。
+    ///
     /// 返回：非空 cluster ID；本轮无法获得身份时拒绝。
     pub(crate) async fn cluster_id(self: &Arc<Self>) -> Result<String> {
         let deadline = Instant::now() + self.timeout;
@@ -142,9 +158,11 @@ impl AdminHandle {
     }
     /// 业务作用：构造管理客户端。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `config`: 冻结后的顶层配置。
+    ///
+    /// 返回：禁止自动创建 topic、分别持有 API 总预算和请求预算的共享客户端；配置或构造失败返回错误，成功不证明 broker 可达或授权通过。
     ///
     /// # 错误
     ///
@@ -161,7 +179,7 @@ impl AdminHandle {
                     super::config::redact(&error)
                 ))
             })?;
-        //：request_timeout_ms 是单请求超时，default_api_timeout_ms 是 API 总超时；
+        // request_timeout_ms 是单请求超时，default_api_timeout_ms 是 API 总超时；
         // 两者不能互为回退，否则同时配置时单请求会错用总超时值。
         let api_millis = config
             .admin
@@ -181,7 +199,10 @@ impl AdminHandle {
     }
 
     /// 业务作用：查询全部可见 topic 及其元数据状态。
-    /// 参数说明：无。返回：可见资源名称和资源级错误，使用单一查询预算。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：可见资源名称和资源级错误，使用单一查询预算。
     ///
     /// # 错误
     ///
@@ -213,7 +234,11 @@ impl AdminHandle {
     }
 
     /// 业务作用：查询明确指定的资源是否存在，不把列表中不可见的 topic 当作不存在。
-    /// 参数说明：topic 为经过校验的资源名。返回：仅 broker 明确 UnknownTopicOrPartition 才为 false；权限或不完整元数据均拒绝。
+    ///
+    /// 参数说明：
+    /// - `topic`：topic 为经过校验的资源名。
+    ///
+    /// 返回：仅 broker 明确 UnknownTopicOrPartition 才为 false；权限或不完整元数据均拒绝。
     pub(crate) async fn topic_exists(self: &Arc<Self>, topic: String) -> Result<bool> {
         let owner = Arc::clone(self);
         let deadline = Instant::now() + self.timeout;
@@ -239,7 +264,11 @@ impl AdminHandle {
     }
 
     /// 业务作用：在一次总预算内读取 topic 的分区、副本及所请求配置。
-    /// 参数说明：topic 为已校验目标名；include_configs 决定是否执行 DescribeConfigs。
+    ///
+    /// 参数说明：
+    /// - `topic`：topic 为已校验目标名。
+    /// - `include_configs`：include_configs 决定是否执行 DescribeConfigs。
+    ///
     /// 返回：完整描述；metadata、配置查询或阻塞任务失败均返回错误，不把不完整证据视为资源不存在。
     pub(crate) async fn describe_topic(
         self: &Arc<Self>,
@@ -252,7 +281,12 @@ impl AdminHandle {
     }
 
     /// 业务作用：为只读合同核验提供同一截止时刻内的完整 topic 证据。
-    /// 参数说明：topic 为目标，include_configs 表示请求配置，deadline 为调用方总期限。
+    ///
+    /// 参数说明：
+    /// - `topic`：topic 为目标。
+    /// - `include_configs`：include_configs 表示请求配置。
+    /// - `deadline`：deadline 为调用方总期限。
+    ///
     /// 返回：完整描述或查询失败；阻塞查询与实际客户端寿命继续由源持有。
     pub(crate) async fn describe_topic_until(
         self: &Arc<Self>,
@@ -337,9 +371,11 @@ impl AdminHandle {
 
     /// 业务作用：创建一个 topic。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `spec`: 已完成公共层校验的 topic 契约。
+    ///
+    /// 返回：目标 topic 明确确认创建时成功；已存在也按失败处理。授权拒绝和结果未知保留各自类别，失败不能推断资源一定未创建。
     ///
     /// # 错误
     ///
@@ -349,14 +385,23 @@ impl AdminHandle {
     }
 
     /// 业务作用：创建尚不存在的 topic，并区分新建与已存在的结果。
-    /// 参数说明：spec 为公共层已校验的 topic 声明。
+    ///
+    /// 参数说明：
+    /// - `spec`：spec 为公共层已校验的 topic 声明。
+    ///
     /// 返回：明确新建为 Created，明确已存在为 AlreadyExists；不据已存在结果推定配置相符。权限拒绝为 Authorization，已提交请求超时为 AdminOutcomeUnknown。
     pub(crate) async fn create_topic_if_absent(&self, spec: &TopicSpec) -> Result<TopicCreation> {
         self.create_topic_inner(spec, true).await
     }
 
     /// 业务作用：在独立有界等待中增量设置或恢复指定 topic 配置，不覆盖其它项。
-    /// 参数说明：topic 为目标，changes 为配置变更，None 表示恢复默认值。
+    ///
+    /// 参数说明：
+    /// - `topic`：topic 为目标。
+    /// - `changes`：changes 为配置变更。
+    ///
+    /// 共同约束：None 表示恢复默认值。
+    ///
     /// 返回：目标资源明确确认才成功；拒绝和结果未知均保留，不通过缺失响应推定成功。
     pub(crate) async fn alter_topic_configs(
         self: &Arc<Self>,
@@ -381,7 +426,11 @@ impl AdminHandle {
     }
 
     /// 业务作用：向 broker 提交 topic 创建请求，只以该资源的明确响应区分创建与已经存在。
-    /// 参数说明：spec 为完整资源声明，allow_existing 决定是否接纳同名已存在结果。
+    ///
+    /// 参数说明：
+    /// - `spec`：spec 为完整资源声明。
+    /// - `allow_existing`：allow_existing 决定是否接纳同名已存在结果。
+    ///
     /// 返回：目标资源的确认结果；超时或缺失/错配响应为未知，不能推导尚未创建。
     async fn create_topic_inner(
         &self,
@@ -414,9 +463,11 @@ impl AdminHandle {
 
     /// 业务作用：删除一个 topic。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
+    ///
+    /// 返回：目标删除请求收到明确成功响应时返回 Ok；权限拒绝、明确失败及结果未知分别保留，超时不撤回已经提交的删除请求。
     ///
     /// # 错误
     ///
@@ -435,10 +486,12 @@ impl AdminHandle {
 
     /// 业务作用：把 topic 总分区数增加到指定值。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `topic`: 目标 topic。
     /// - `total`: 新的总分区数。
+    ///
+    /// 返回：目标扩分区请求收到明确成功响应时返回 Ok；失败保留授权或未知类别，不在本层缩减分区，也不因等待结束撤回请求。
     ///
     /// # 错误
     ///
@@ -457,7 +510,10 @@ impl AdminHandle {
     }
 
     /// 业务作用：在共同预算内读取指定分区的保留起点和普通日志末尾。
-    /// 参数说明：tps 为已校验的目标分区。
+    ///
+    /// 参数说明：
+    /// - `tps`：tps 为已校验的目标分区。
+    ///
     /// 返回：完整逐分区水位；任一查询失败返回错误，不交付部分位置；普通末尾不能代替 read_committed 的 LSO。
     pub(crate) async fn watermarks(self: &Arc<Self>, tps: Vec<Tp>) -> Result<Vec<(Tp, i64, i64)>> {
         self.watermarks_until(tps, Instant::now() + self.timeout)
@@ -465,7 +521,12 @@ impl AdminHandle {
     }
 
     /// 业务作用：让组合 lag 查询中的所有分区共享原调用预算。
-    /// 参数说明：tps 为已校验目标，deadline 为组合查询截止时间。返回：完整水位或失败，不重新授予等待额度。
+    ///
+    /// 参数说明：
+    /// - `tps`：tps 为已校验目标。
+    /// - `deadline`：deadline 为组合查询截止时间。
+    ///
+    /// 返回：完整水位或失败，不重新授予等待额度。
     pub(crate) async fn watermarks_until(
         self: &Arc<Self>,
         tps: Vec<Tp>,
@@ -513,7 +574,11 @@ impl AdminHandle {
     }
 
     /// 业务作用：通过不订阅 topic 的短命 consumer 查询组提交位置。
-    /// 参数说明：group 为实际 group.id；tps 为目标分区。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为实际 group.id。
+    /// - `tps`：tps 为目标分区。
+    ///
     /// 返回：逐分区明确位置或 broker 确认的无历史；资源拒绝、缺项和非法位置不转为 None，整个查询共用一个总预算。
     pub(crate) async fn committed_offsets(
         self: &Arc<Self>,
@@ -525,7 +590,13 @@ impl AdminHandle {
     }
 
     /// 业务作用：在组合查询的剩余预算内取得组位点，避免 coordinator 重试延长整体等待。
-    /// 参数说明：group 为组名，tps 为已校验目标，deadline 为共同截止时间。返回：完整组位点；无权限、缺项或期限耗尽均失败。
+    ///
+    /// 参数说明：
+    /// - `group`：group 为组名。
+    /// - `tps`：tps 为已校验目标。
+    /// - `deadline`：deadline 为共同截止时间。
+    ///
+    /// 返回：完整组位点；无权限、缺项或期限耗尽均失败。
     pub(crate) async fn committed_offsets_until(
         self: &Arc<Self>,
         group: String,
@@ -596,7 +667,12 @@ impl AdminHandle {
 }
 
 /// 业务作用：限制包含阻塞线程排队在内的本地等待，调用者期限耗尽不丢弃实际原生责任。
-/// 参数说明：deadline 为共同截止时间，operation 为可能修改 broker 的操作名，job 持有真实客户端直到退出。
+///
+/// 参数说明：
+/// - `deadline`：deadline 为共同截止时间。
+/// - `operation`：operation 为可能修改 broker 的操作名。
+/// - `job`：job 持有真实客户端直到退出。
+///
 /// 返回：期限内的真实结果；超时只结束调用者等待，修改结果为未知，后台仍由源级关闭追踪。
 async fn blocking_until<T: Send + 'static>(
     deadline: Instant,
@@ -609,13 +685,19 @@ async fn blocking_until<T: Send + 'static>(
         Ok(result) => result.map_err(join_error)?,
         Err(_) => Err(operation.map_or_else(
             || NafkaError::Broker("管理查询总预算已耗尽".into()),
-            |operation| NafkaError::AdminOutcomeUnknown { operation },
+            |operation| NafkaError::AdminOutcomeUnknown {
+                operation,
+            },
         )),
     }
 }
 
 /// 业务作用：让组合只读查询和阻塞任务排队共用同一预算，避免按分区或步骤延长等待。
-/// 参数说明：deadline 为整个查询的绝对截止时间。返回：剩余正预算；耗尽时只表示本轮观测失败，不改变任何组位点。
+///
+/// 参数说明：
+/// - `deadline`：deadline 为整个查询的绝对截止时间。
+///
+/// 返回：剩余正预算；耗尽时只表示本轮观测失败，不改变任何组位点。
 fn query_budget(deadline: Instant) -> Result<Duration> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -626,7 +708,10 @@ fn query_budget(deadline: Instant) -> Result<Duration> {
 }
 
 /// 业务作用：允许协调器发现与短查询切片耗尽在同一总期限内重试。
-/// 参数说明：error 为原生 offset/metadata 查询错误；调用方已经读取消费事件中的明确权限拒绝。
+///
+/// 参数说明：
+/// - `error`：error 为原生 offset/metadata 查询错误。
+///
 /// 返回：仅协调器暂不可用或本轮等待耗尽为 true；不把权限拒绝转换为无提交历史。
 pub(super) fn is_coordinator_lookup_transient(error: &KafkaError) -> bool {
     let code = match error {
@@ -649,7 +734,10 @@ pub(super) fn is_coordinator_lookup_transient(error: &KafkaError) -> bool {
 }
 
 /// 业务作用：读取未订阅查询客户端的明确权限拒绝，避免协调器事件被查询超时掩盖。
-/// 参数说明：consumer 为本次只读查询专用客户端，不承载业务记录。
+///
+/// 参数说明：
+/// - `consumer`：consumer 为本次只读查询专用客户端。
+///
 /// 返回：本轮至多处理16个即时事件；仅结构化授权错误作为拒绝证据，其它事件不推导权限。
 pub(super) fn poll_query_rejection(consumer: &BaseConsumer) -> Option<KafkaError> {
     for _ in 0..16 {
@@ -667,7 +755,14 @@ pub(super) fn poll_query_rejection(consumer: &BaseConsumer) -> Option<KafkaError
 }
 
 /// 业务作用：在单一总预算内等待管理修改，并核对唯一目标资源的确认。
-/// 参数说明：request 为已提交原生请求；topic 为唯一目标；operation 为固定操作名；allow_existing 为幂等创建策略；timeout 为总预算。
+///
+/// 参数说明：
+/// - `request`：request 为已提交原生请求。
+/// - `topic`：topic 为唯一目标。
+/// - `operation`：operation 为固定操作名。
+/// - `allow_existing`：allow_existing 为幂等创建策略。
+/// - `timeout`：timeout 为总预算。
+///
 /// 返回：真实成功或允许的已存在结果；超时、丢失或错配响应均为结果未知，权限拒绝保留独立类别。
 async fn await_topic_result(
     request: impl std::future::Future<
@@ -681,14 +776,20 @@ async fn await_topic_result(
     // 丢弃等待只能撤回本地观察者，已提交的原生修改可能继续完成，不能自动重发业务操作。
     let results = tokio::time::timeout(timeout, request)
         .await
-        .map_err(|_| NafkaError::AdminOutcomeUnknown { operation })?
+        .map_err(|_| NafkaError::AdminOutcomeUnknown {
+            operation,
+        })?
         .map_err(|error| mutation_error(error, operation))?;
     if results.len() != 1 {
-        return Err(NafkaError::AdminOutcomeUnknown { operation });
+        return Err(NafkaError::AdminOutcomeUnknown {
+            operation,
+        });
     }
     match results.into_iter().next() {
         Some(Ok(name)) if name == topic => Ok(TopicCreation::Created),
-        Some(Err((name, _))) if name != topic => Err(NafkaError::AdminOutcomeUnknown { operation }),
+        Some(Err((name, _))) if name != topic => Err(NafkaError::AdminOutcomeUnknown {
+            operation,
+        }),
         Some(Err((_, RDKafkaErrorCode::TopicAlreadyExists))) if allow_existing => {
             Ok(TopicCreation::AlreadyExists)
         }
@@ -696,17 +797,25 @@ async fn await_topic_result(
             Err(NafkaError::Authorization)
         }
         Some(Err((_, error))) if uncertain_mutation_code(error) => {
-            Err(NafkaError::AdminOutcomeUnknown { operation })
+            Err(NafkaError::AdminOutcomeUnknown {
+                operation,
+            })
         }
         Some(Err((topic, error))) => Err(NafkaError::Broker(format!(
             "topic `{topic}` 管理操作失败: {error}"
         ))),
-        _ => Err(NafkaError::AdminOutcomeUnknown { operation }),
+        _ => Err(NafkaError::AdminOutcomeUnknown {
+            operation,
+        }),
     }
 }
 
 /// 业务作用：识别不能据以判定管理修改未发生的原生通信结果。
-/// 参数说明：code 为请求或资源错误码。返回：超时、传输中断和无效响应属于未知结果。
+///
+/// 参数说明：
+/// - `code`：code 为请求或资源错误码。
+///
+/// 返回：超时、传输中断和无效响应属于未知结果。
 fn uncertain_mutation_code(code: RDKafkaErrorCode) -> bool {
     matches!(
         code,
@@ -721,19 +830,30 @@ fn uncertain_mutation_code(code: RDKafkaErrorCode) -> bool {
 }
 
 /// 业务作用：按是否具有明确拒绝证据转换已提交管理请求的失败。
-/// 参数说明：error 为原生请求错误，operation 为固定管理操作名。返回：授权拒绝、结果未知或普通明确失败，不通过错误文本猜测。
+///
+/// 参数说明：
+/// - `error`：error 为原生请求错误。
+/// - `operation`：operation 为固定管理操作名。
+///
+/// 返回：授权拒绝、结果未知或普通明确失败，不通过错误文本猜测。
 fn mutation_error(error: KafkaError, operation: &'static str) -> NafkaError {
     if matches!(error, KafkaError::Canceled)
         || super::errors::code(&error).is_some_and(uncertain_mutation_code)
     {
-        NafkaError::AdminOutcomeUnknown { operation }
+        NafkaError::AdminOutcomeUnknown {
+            operation,
+        }
     } else {
         broker_error(error)
     }
 }
 
 /// 业务作用：把底层错误收敛为公共类别，保留明确授权拒绝供调用方选择权限处置。
-/// 参数说明：error 为不允许穿透公共 API 的底层错误。返回：授权拒绝或脱敏 broker 诊断，不推断超时请求的最终结果。
+///
+/// 参数说明：
+/// - `error`：error 为不允许穿透公共 API 的底层错误。
+///
+/// 返回：授权拒绝使用固定类别，其它错误保留原生 Display 文本；本函数不执行额外脱敏，也不推断超时请求的最终结果。
 fn broker_error(error: KafkaError) -> NafkaError {
     if super::errors::code(&error).is_some_and(super::errors::authorization) {
         NafkaError::Authorization
@@ -744,9 +864,11 @@ fn broker_error(error: KafkaError) -> NafkaError {
 
 /// 业务作用：把阻塞任务 join 失败收敛为公共 broker 错误。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `error`: 阻塞任务 join 错误。
+///
+/// 返回：包含 JoinError 显示文本的 Broker 错误；这里只转换类别，不能用任务退出推断远端查询或变更是否完成。
 fn join_error(error: tokio::task::JoinError) -> NafkaError {
     NafkaError::Broker(format!("阻塞查询任务失败: {error}"))
 }

@@ -1,7 +1,8 @@
 //! Dispatch 消费：从任务的 Dispatch Stream 拉取消息，取得 Redis 执行权后调用本地 Handler，再提交唯一状态出口。
 //!
 //! 消费者只做定位：真正的执行权、参数与合同以 `start_run` 与 Run 记录为准，Stream 消息丢失由可见性提升重建。
-//! 同一 attempt 最多调用一次 Handler；无本地 Handler 或路由不兼容的消息延后放回可见索引，等待兼容节点。
+//! 本地在途集合阻止同一 Run 并发调用 Handler；受管运行时在处理失败后关闭当前 source，不原地重启执行。
+//! 无本地 Handler 或路由不兼容的消息延后放回可见索引，等待兼容节点。
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
@@ -34,24 +35,39 @@ pub(crate) enum JobDispatcherPollError {
 
 /// 单分片阻塞读取 lane；连接只由本对象持有，关闭令牌用于在停机时打断未返回的 BLOCK 请求。
 struct BlockingLane {
+    /// 当前分片独占的阻塞连接，异步锁串行化该连接上的请求。
     conn: Mutex<Conn>,
+    /// 打断等待锁及等待命令响应的关闭信号。
     close: CancellationToken,
 }
 
 /// 单节点 Dispatch 消费器；持有连接、键模型、配置、仓库、执行器身份与本地定义/Handler 注册表。
 pub struct JobDispatcher {
+    /// 当前数据源的连接和协议配置来源。
     client: Arc<RedisClient>,
+    /// 已冻结的任务命名空间及分片键布局。
     keyspace: JobKeyspace,
+    /// 已验证的容量、租约及读取参数。
     config: Arc<JobConfig>,
+    /// 取得执行权、续租及提交唯一状态出口的持久仓库。
     repository: JobRepository,
+    /// 消费者名和普通 Run 所有者使用的执行器身份。
     executor_id: String,
+    /// 本地已登记的任务定义，按任务名定位。
     definitions: HashMap<String, JobDefinition>,
+    /// 本地处理器，按任务名与冻结定义对应。
     handlers: HashMap<String, Arc<dyn JobHandler>>,
+    /// 覆盖领取到完成提交的全局本地容量。
     capacity: Arc<Semaphore>,
+    /// 各 Worker 能力共享的并发上限，避免单一能力占满执行器。
     handler_capacities: HashMap<String, Arc<Semaphore>>,
+    /// 已占用处理责任的 Run 身份，防止同一进程并发重复进入。
     in_flight: Mutex<HashSet<String>>,
+    /// 每个活跃调度分片当前拥有的阻塞连接代次。
     blocking_lanes: std::sync::Mutex<HashMap<u32, Arc<BlockingLane>>>,
+    /// 普通 Handler 可选的受控 Fanout 创建入口。
     fanout_service: Option<Arc<FanoutService>>,
+    /// 当前数据源运行实例共享的执行和拒绝指标。
     metrics: Arc<JobMetrics>,
 }
 
@@ -77,7 +93,12 @@ impl JobDispatcher {
 
     /// 业务作用：使用 source 运行时的唯一指标容器建立 Dispatch 消费器。
     ///
-    /// 参数说明：连接、键模型、配置、执行器身份与 `metrics` 必须同属一个 source generation。
+    /// 参数说明：
+    /// - `client`：当前数据源运行实例的 Redis 客户端。
+    /// - `keyspace`：同一实例冻结的命名空间和分片键布局。
+    /// - `config`：同一实例已验证的容量、租约及读取配置。
+    /// - `executor_id`：当前执行器身份，用作消费者名和持久所有者。
+    /// - `metrics`：同一实例共享的固定维度指标容器。
     ///
     /// 返回：可装配 Handler 并把执行结局写入逐 source 快照的消费器。
     pub(crate) fn new_with_metrics(
@@ -108,7 +129,8 @@ impl JobDispatcher {
 
     /// 业务作用：在运行时启动前注入同 source Fanout 服务，使普通 Handler 可显式创建批次。
     ///
-    /// 参数说明：`service` 必须与当前 dispatcher 使用同一连接、keyspace、配置与执行器身份。
+    /// 参数说明：
+    /// - `service`：与当前派发器共享连接、键布局、配置和执行器身份的 Fanout 服务。
     ///
     /// 返回：无返回值；冻结后每个 JobContext 克隆共享服务。
     pub(crate) fn set_fanout_service(&mut self, service: Arc<FanoutService>) {
@@ -119,7 +141,7 @@ impl JobDispatcher {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：已取得本地 in-flight 门禁且尚未完成提交的 Run 数量。
+    /// 返回：当前在途集合保留的 Run 身份数量；包括尚在领取或提交的工作，不等同于正在执行的 Handler 数。
     pub(crate) async fn inflight_count(&self) -> usize {
         self.in_flight.lock().await.len()
     }
@@ -145,7 +167,7 @@ impl JobDispatcher {
     /// 参数说明：
     /// - `shard`: 目标调度分片。
     ///
-    /// 返回：本轮成功取得执行权并调用 Handler 的 Run 数；连接或脚本失败时向上返回错误。
+    /// 返回：本轮成功处理的 Run 数；连接或脚本失败返回错误。独立调用方须管理轮询生命周期，取消后不承诺可原地恢复执行。
     /// 每条消息在 `start_run` 内一次性 ACK/删除；没有本地容量时不拉取，PEL 消息先接管再与新消息共同受
     /// `handler_capacity` 限制。
     pub async fn poll_shard(&self, shard: u32) -> Result<usize> {
@@ -159,7 +181,8 @@ impl JobDispatcher {
 
     /// 业务作用：按“领取前可恢复、领取后权威失败”分类轮询结局，供 source 监督器选择重建或停源。
     ///
-    /// 参数说明：`shard` 为目标调度分片。
+    /// 参数说明：
+    /// - `shard`：当前实例负责轮询的调度分片，用于选取 Worker Stream 和阻塞连接。
     ///
     /// 返回：成功时返回实际调用 Handler 的数量；读取失败为 `Recoverable`，消息处理失败为 `Authority`。
     pub(crate) async fn poll_shard_supervised(
@@ -253,7 +276,8 @@ impl JobDispatcher {
     /// 业务作用：确保 Dispatch Stream 上存在共享消费组；组已存在时按幂等处理。
     ///
     /// 参数说明：
-    /// - `stream`/`group`: 目标 Stream key 与消费组名。
+    /// - `stream`：需要建立共享消费组的 Dispatch Stream 键。
+    /// - `group`：当前任务运行配置中的消费组名，从起始位置接管持久待办。
     ///
     /// 返回：创建成功或组已存在返回成功；其它错误向上返回。
     async fn ensure_group(&self, stream: &str, group: &str) -> Result<()> {
@@ -276,7 +300,8 @@ impl JobDispatcher {
     ///
     /// 参数说明：
     /// - `shard`: 目标调度分片，用于绑定独立阻塞 lane。
-    /// - `streams`/`group`: 同 slot 的目标 Stream 集合与消费组名。
+    /// - `streams`：属于当前调度分片、处于同一槽位的 Worker Stream 集合。
+    /// - `group`：各 Stream 共用的已存在消费组名。
     /// - `limit`: 本轮仍可接纳的消息数。
     ///
     /// 返回：本批新消息；无新消息时返回空回复。
@@ -306,7 +331,9 @@ impl JobDispatcher {
     /// 业务作用：把闲置超过门限的 PEL 消息转移给当前执行器，使读取后退出的消费者不会永久占有消息。
     ///
     /// 参数说明：
-    /// - `shard`/`stream`/`group`: 分片、实际 Stream 与共享消费组。
+    /// - `shard`：调度分片下标，用于定位独占连接。
+    /// - `stream`：需要接管未确认待办的实际 Stream 键。
+    /// - `group`：共享消费组名，接管后的消费者为当前执行器。
     /// - `limit`: 本轮最大接管数量。
     ///
     /// 返回：已接管消息与下一扫描游标；Redis 不支持或命令失败时拒绝继续消费。
@@ -370,7 +397,8 @@ impl JobDispatcher {
 
     /// 业务作用：为每个活跃分片惰性建立单一所有者的阻塞连接，避免 BLOCK 请求与控制面或其它分片共享 transport。
     ///
-    /// 参数说明：`shard` 为调度分片下标。
+    /// 参数说明：
+    /// - `shard`：需要独占读取连接的调度分片下标。
     ///
     /// 返回：该分片当前 generation 的共享 lane 外壳；连接本身不会被克隆。
     async fn blocking_lane(&self, shard: u32) -> Result<Arc<BlockingLane>> {
@@ -400,7 +428,9 @@ impl JobDispatcher {
 
     /// 业务作用：只淘汰调用方实际使用的 lane generation，避免旧请求失败时误关并发建立的新连接。
     ///
-    /// 参数说明：`shard` 为分片，`lane` 为待核对的 generation。
+    /// 参数说明：
+    /// - `shard`：失败请求所属的调度分片。
+    /// - `lane`：该请求实际使用的连接代次，必须与目录中的对象身份一致才可移除。
     ///
     /// 返回：无；仍是当前 generation 时取消并移除，否则保持新 generation 不变。
     fn retire_blocking_lane(&self, shard: u32, lane: &Arc<BlockingLane>) {
@@ -408,6 +438,7 @@ impl JobDispatcher {
             .blocking_lanes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 旧请求迟到的失败不能关闭新连接，必须在同一目录锁内复验对象身份后再取消。
         if lanes
             .get(&shard)
             .is_some_and(|current| Arc::ptr_eq(current, lane))
@@ -417,17 +448,18 @@ impl JobDispatcher {
         }
     }
 
-    /// 业务作用：关闭全部 Dispatch 阻塞 lane，使停机不必等待 Redis BLOCK 时限并立即释放连接所有权。
+    /// 业务作用：通知全部当前阻塞连接代次退出，并移除目录引用，使停机可打断 Redis BLOCK 等待。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：无；后续若仍允许轮询，会按分片建立新的 generation。
+    /// 返回：关闭信号已发出，不等待持有连接的请求退出；调用方须先停止新轮询，否则仍可能建立新代次。
     pub(crate) fn close_blocking_lanes(&self) {
         let mut lanes = self
             .blocking_lanes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for lane in lanes.values() {
+            // 先唤醒持有或等待该代次的请求，再移除目录引用，退出证明由外层任务等待负责。
             lane.close.cancel();
         }
         lanes.clear();
@@ -438,9 +470,9 @@ impl JobDispatcher {
     /// 参数说明：
     /// - `stream`: 实际读取消息的 Dispatch Stream。
     /// - `entry`: Stream 消息及字段。
-    /// - `permit`: 覆盖领取、Handler、续租和完成提交的容量许可。
+    /// - `_permit`：覆盖领取、Handler、续租和完成提交的容量许可，作用域退出时释放。
     ///
-    /// 返回：实际调用 Handler 返回 `true`；消息被延后或本地已有同 Run future 返回 `false`。
+    /// 返回：完成处理返回真，延后或已有同 Run 处理责任返回假；异常返回错误，外部取消不保证清除在途身份。
     async fn process_entry(
         &self,
         stream: &str,
@@ -481,7 +513,8 @@ impl JobDispatcher {
     ///
     /// 参数说明：
     /// - `stream`: 实际读取消息的 Dispatch Stream。
-    /// - `job_name`/`run_id`: 消息定位的任务名与 Run 标识。
+    /// - `job_name`：消息定位的任务名，决定本地定义、处理器和持久调度分片。
+    /// - `run_id`：待领取并处理的普通执行标识，业务参数从持久记录读取。
     /// - `message_id`: Stream 消息 ID，随执行权提交一并 ACK/删除。
     ///
     /// 返回：成功取得执行权并调用 Handler 返回 `true`；延后或未取得执行权返回 `false`。
@@ -521,6 +554,8 @@ impl JobDispatcher {
                 .await?;
             return Ok(false);
         };
+        // 从领取请求发出前计时，网络等待和随后载荷读取均消耗本次可用租约窗口。
+        let request_started = tokio::time::Instant::now();
         let (attempt, attempt_token, redis_now, lease_until) = match self
             .repository
             .start_run(definition, run_id, &self.executor_id, message_id)
@@ -581,6 +616,7 @@ impl JobDispatcher {
                 self.config
                     .renew_rtt_allowance_ms
                     .saturating_add(self.config.clock_drift_allowance_ms),
+                request_started,
             ),
             fanout_service: self.fanout_service.clone(),
         };
@@ -604,7 +640,10 @@ impl JobDispatcher {
             )
             .await?;
         match finish {
-            FinishOutcome::Ok { next_state, .. } => {
+            FinishOutcome::Ok {
+                next_state,
+                ..
+            } => {
                 self.record_finished(next_state);
                 Ok(true)
             }
@@ -629,7 +668,8 @@ impl JobDispatcher {
 
     /// 业务作用：按 Lua 已提交的下一状态累计唯一终态或重试结局。
     ///
-    /// 参数说明：`next_state` 来自 `finish_run` 的封闭返回，不使用 Handler 未提交的本地猜测。
+    /// 参数说明：
+    /// - `next_state`：持久完成脚本确认的封闭状态，不使用 Handler 尚未提交的本地结果推断。
     ///
     /// 返回：无；每次成功完成提交只更新一组封闭计数。
     fn record_finished(&self, next_state: crate::job::model::JobState) {
@@ -659,10 +699,13 @@ impl JobDispatcher {
     /// 业务作用：在 Handler 整个生命周期内续期当前 attempt，并把超时、取消和 panic 收敛为封闭结果码。
     ///
     /// 参数说明：
-    /// - `definition`/`run_id`/`attempt_token`: 续期 CAS 所需的任务与当前执行权身份。
-    /// - `handler`/`execution`: 业务处理器与冻结上下文。
+    /// - `definition`：提供执行超时及续期路由合同的冻结任务定义。
+    /// - `run_id`：当前持久执行标识。
+    /// - `attempt_token`：续期 CAS 使用的 fencing token，必须仍对应当前尝试。
+    /// - `handler`：当前定义绑定的本地业务处理器。
+    /// - `execution`：业务参数、持久身份和本地权威门禁组成的冻结上下文。
     ///
-    /// 返回：Handler 正常、超时、取消或 panic 时返回可提交结果；续期失败或已失权时返回错误并禁止完成提交。
+    /// 返回：正常、超时、持久取消及 Future 轮询的展开异常形成结果；续期失败或失权返回错误，Fanout 移交后由协调器收敛。
     async fn run_with_lease(
         &self,
         definition: &JobDefinition,
@@ -673,6 +716,8 @@ impl JobDispatcher {
     ) -> Result<JobOutcome> {
         let authority = execution.authority.clone();
         let _authority_guard = AuthorityGuard(authority.clone());
+        // 领取成功不代表响应到达时仍有可用窗口；过期证据不得进入业务 Future 的创建或执行。
+        execution.checkpoint()?;
         let mut handler_future =
             Box::pin(AssertUnwindSafe(handler.handle(execution)).catch_unwind());
         let run_timeout_ms = definition
@@ -707,6 +752,7 @@ impl JobDispatcher {
                     if execution.authority.is_fanout_transferred() {
                         return Ok(JobOutcome::success());
                     }
+                    let request_started = tokio::time::Instant::now();
                     let renewed = match self.repository
                         .renew_run(definition, run_id, &self.executor_id, attempt_token)
                         .await
@@ -737,6 +783,7 @@ impl JobDispatcher {
                                 self.config
                                     .renew_rtt_allowance_ms
                                     .saturating_add(self.config.clock_drift_allowance_ms),
+                                request_started,
                             );
                             if !updated {
                                 self.metrics.add("redis_job_self_fence_total", 1);
@@ -764,10 +811,17 @@ impl JobDispatcher {
 }
 
 /// Handler future 的权威关闭守卫；正常返回、续期错误、超时或 task abort 都会永久关闭 checkpoint。
-struct AuthorityGuard(Arc<JobExecutionAuthority>);
+struct AuthorityGuard(
+    /// 本次尝试共享的本地权威门禁，随处理作用域退出而关闭。
+    Arc<JobExecutionAuthority>,
+);
 
 impl Drop for AuthorityGuard {
     /// 业务作用：在 Handler 执行作用域结束时关闭 attempt 的本地副作用门禁。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：撤销本地执行权威，不在析构中提交 Redis 完成状态或执行异步等待。
     fn drop(&mut self) {
         self.0.revoke(false);
     }

@@ -103,7 +103,8 @@ impl MySqlInbox {
 
     /// 业务作用：创建绑定命名 datasource 的 Inbox 入口。
     ///
-    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：为启动期已注册的数据源名称。
     ///
     /// 返回：claim、process 和 schema 操作固定使用该 datasource；名称非法时在 I/O 前失败。
     pub fn with_datasource(datasource: impl AsRef<str>) -> anyhow::Result<Self> {
@@ -132,7 +133,8 @@ impl MySqlInbox {
 
     /// 业务作用：在指定 datasource 上创建 Inbox 表。
     ///
-    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    /// 参数说明：
+    /// - `datasource`：是启动期已注册的数据源名称。
     ///
     /// 返回：表已存在或创建成功时完成；名称、连接或 DDL 失败时返回脱敏错误。
     pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), InboxStoreError> {
@@ -144,7 +146,8 @@ impl MySqlInbox {
     /// 业务作用：复用调用方已持有的 MySQL 连接建立 Inbox 结构，使外层 schema 互斥权
     /// 覆盖建表、索引收敛和最终判定。
     ///
-    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    /// 参数说明：
+    /// - `connection`：是调用方已取得 schema 互斥权的连接。
     ///
     /// 返回：表和保留索引可用时完成；DDL 或结构冲突返回脱敏错误。
     pub async fn ensure_schema_on_connection(
@@ -410,11 +413,12 @@ impl nainbox_core::DurableInboxRetention for MySqlInbox {
 /// 业务作用：在已持有 owner 锁的连接上执行分批删除与账目统计。
 ///
 /// 参数说明：
-/// - `connection`：持有 `GET_LOCK` 的同一 MySQL 连接。
-/// - `consumer_name`：目标消费命名空间。
-/// - `policy`：已复验的保留策略。
+/// - `connection`：已经由外层取得该保留 owner 会话锁的专用连接。
+/// - `consumer_name`：需要清理与统计的消费命名空间。
+/// - `policy`：已经通过保留窗口和批次上限复验的策略。
+/// - `deadline`：本轮所有数据库步骤共用的单调时钟截止时刻。
 ///
-/// 返回：本轮账目报告；删除或统计失败返回脱敏错误。
+/// 返回：正常结束返回 Completed 与账目；数据库步骤预算耗尽或超时返回 BudgetAbandon，已完成删除不撤销；查询或删除失败返回脱敏错误。截断时须由外层弃用 session，报告可能不包含回包未知的删除。
 async fn retention_round_locked(
     connection: &mut sqlx::MySqlConnection,
     consumer_name: &str,
@@ -491,11 +495,21 @@ async fn retention_round_locked(
 fn map_transaction_error(error: TxRunError<anyhow::Error>) -> anyhow::Error {
     match error {
         TxRunError::Rollback(error) => error,
-        TxRunError::RollbackOnly { .. } => InboxTransactionError::RollbackOnly.into(),
-        TxRunError::CommitRejected { .. } => InboxTransactionError::CommitRejected.into(),
-        TxRunError::CommitUncertain { .. } => InboxTransactionError::CommitUncertain.into(),
-        TxRunError::RollbackFailed { .. } => InboxTransactionError::RollbackFailed.into(),
-        TxRunError::Infrastructure { .. } => InboxTransactionError::Infrastructure.into(),
+        TxRunError::RollbackOnly {
+            ..
+        } => InboxTransactionError::RollbackOnly.into(),
+        TxRunError::CommitRejected {
+            ..
+        } => InboxTransactionError::CommitRejected.into(),
+        TxRunError::CommitUncertain {
+            ..
+        } => InboxTransactionError::CommitUncertain.into(),
+        TxRunError::RollbackFailed {
+            ..
+        } => InboxTransactionError::RollbackFailed.into(),
+        TxRunError::Infrastructure {
+            ..
+        } => InboxTransactionError::Infrastructure.into(),
     }
 }
 

@@ -32,7 +32,10 @@ impl DltReplayTrace {
     pub const HEADER: &'static str = "x-nasa-dlt-replay";
 
     /// 业务作用：在使用可变公开来源字段前验证坐标、原证据和稳定ID。
-    /// 参数说明：无。返回：全部字段合法且ID与原事件一致才通过，不认证消息来源。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：全部字段合法且ID与原事件一致才通过，不认证消息来源。
     pub fn validate(&self) -> Result<()> {
         self.origin.validate().map_err(|_| Error::HeaderInvalid)?;
         self.destination
@@ -61,7 +64,11 @@ impl DltReplayTrace {
     }
 
     /// 业务作用：读取可用于重复识别的历史回投证据，不以其字段授权路由。
-    /// 参数说明：headers为完整有序消息头。返回：普通输入为None；重复、别名、损坏或超额证据拒绝。
+    ///
+    /// 参数说明：
+    /// - `headers`：headers为完整有序消息头。
+    ///
+    /// 返回：普通输入为None；重复、别名、损坏或超额证据拒绝。
     pub fn read(headers: &KafkaHeaders) -> Result<Option<Self>> {
         check_headers(headers)?;
         let mut encoded = None;
@@ -78,7 +85,13 @@ impl DltReplayTrace {
     }
 
     /// 业务作用：保留原事件ID并限制再次失败的回投，不松动普通Transfer的回环保护。
-    /// 参数说明：plan为批准合同，record为实际DLT输入，evidence为已验证当前来源，target为固定映射目标。
+    ///
+    /// 参数说明：
+    /// - `plan`：plan为批准合同。
+    /// - `record`：record为实际DLT输入。
+    /// - `evidence`：evidence为已验证当前来源。
+    /// - `target`：target为固定映射目标。
+    ///
     /// 返回：保留业务头并写入唯一回投证据，旧活动转发头的身份被封装到历史字段。
     pub(super) fn forward(
         plan: &DltReplayPlan,
@@ -156,7 +169,10 @@ impl DltReplayTrace {
     }
 
     /// 业务作用：生成首次来源与回投次数的唯一共同字节，不编码当前目标offset。
-    /// 参数说明：无。返回：无来源扩展时为NSKDRH01，有扩展时为NSKDRH02，正文附加完整性摘要，单头最大64KiB。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无来源扩展时为NSKDRH01，有扩展时为NSKDRH02，正文附加完整性摘要，单头最大64KiB。
     fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
         let mut bytes = if self.original_evidence.origin.is_some() {
@@ -205,7 +221,11 @@ impl DltReplayTrace {
     }
 
     /// 业务作用：在使用历史计数前验证完整摘要及唯一表达，不能接受尾部或截断证据。
-    /// 参数说明：encoded为单个头值。返回：规范有界证据，全部格式错误为HeaderInvalid。
+    ///
+    /// 参数说明：
+    /// - `encoded`：encoded为单个头值。
+    ///
+    /// 返回：规范有界证据，全部格式错误为HeaderInvalid。
     fn decode(encoded: &[u8]) -> Result<Self> {
         if !(80..=DltEvidence::MAX_HEADER_BYTES).contains(&encoded.len()) {
             return Err(Error::HeaderInvalid);
@@ -271,7 +291,11 @@ impl DltReplayTrace {
 }
 
 /// 业务作用：约束证据与业务头的总规模，防止回投元数据造成无限增长。
-/// 参数说明：headers为完整集合。返回：最多256项、合计64KiB才通过。
+///
+/// 参数说明：
+/// - `headers`：headers为完整集合。
+///
+/// 返回：最多256项、合计64KiB才通过。
 pub(super) fn check_headers(headers: &KafkaHeaders) -> Result<()> {
     let size = headers.iter().try_fold(0usize, |n, h| {
         n.checked_add(h.name.len())?
@@ -284,12 +308,24 @@ pub(super) fn check_headers(headers: &KafkaHeaders) -> Result<()> {
     }
     Ok(())
 }
-/// 业务作用：编码有界来源文本，保留Unicode证据。参数说明：out为正文，value为已验证文本。返回：u16大端长度及UTF-8字节。
+/// 业务作用：编码有界来源文本，保留Unicode证据。
+///
+/// 参数说明：
+/// - `out`：out为正文。
+/// - `value`：value为已验证文本。
+///
+/// 返回：u16大端长度及UTF-8字节。
 fn text(out: &mut Vec<u8>, value: &str) {
     out.extend((value.len() as u16).to_be_bytes());
     out.extend(value.as_bytes());
 }
-/// 业务作用：编码物理资源而非逻辑别名。参数说明：out为正文，resource为合法身份。返回：三个长度前缀字段。
+/// 业务作用：编码物理资源而非逻辑别名。
+///
+/// 参数说明：
+/// - `out`：out为正文。
+/// - `resource`：resource为合法身份。
+///
+/// 返回：三个长度前缀字段。
 pub(super) fn resource(out: &mut Vec<u8>, resource: &TransferResource) {
     text(out, &resource.cluster_id);
     text(out, &resource.topic);
@@ -299,7 +335,12 @@ pub(super) fn resource(out: &mut Vec<u8>, resource: &TransferResource) {
 /// 游标只在完整的有界正文内前进。
 pub(super) struct Input<'a>(pub(super) &'a [u8]);
 impl<'a> Input<'a> {
-    /// 业务作用：拒绝越界与截断字段。参数说明：length为字节数。返回：完整切片并移动游标。
+    /// 业务作用：拒绝越界与截断字段。
+    ///
+    /// 参数说明：
+    /// - `length`：length为字节数。
+    ///
+    /// 返回：完整切片并移动游标。
     pub(super) fn take(&mut self, length: usize) -> Result<&'a [u8]> {
         if length > self.0.len() {
             return Err(Error::HeaderInvalid);
@@ -308,19 +349,33 @@ impl<'a> Input<'a> {
         self.0 = rest;
         Ok(value)
     }
-    /// 业务作用：读取共同大端坐标或次数位模式。参数说明：无。返回：完整u32，具体业务范围由外层验证。
+    /// 业务作用：读取共同大端坐标或次数位模式。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：完整u32，具体业务范围由外层验证。
     pub(super) fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_be_bytes(
             self.take(4)?.try_into().map_err(|_| Error::HeaderInvalid)?,
         ))
     }
-    /// 业务作用：读取有符号offset或时间戳。参数说明：无。返回：完整i64，负值语义由对应字段复验。
+    /// 业务作用：读取有符号offset或时间戳。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：完整i64，负值语义由对应字段复验。
     pub(super) fn i64(&mut self) -> Result<i64> {
         Ok(i64::from_be_bytes(
             self.take(8)?.try_into().map_err(|_| Error::HeaderInvalid)?,
         ))
     }
-    /// 业务作用：在分配文本前约束长度和UTF-8合法性。参数说明：max为字节上限，empty决定是否允许空原因。返回：完整唯一文本。
+    /// 业务作用：在分配文本前约束长度和UTF-8合法性。
+    ///
+    /// 参数说明：
+    /// - `max`：max为字节上限。
+    /// - `empty`：empty决定是否允许空原因。
+    ///
+    /// 返回：完整唯一文本。
     pub(super) fn text(&mut self, max: usize, empty: bool) -> Result<String> {
         let length = u16::from_be_bytes(self.take(2)?.try_into().map_err(|_| Error::HeaderInvalid)?)
             as usize;
@@ -331,7 +386,11 @@ impl<'a> Input<'a> {
             .map(str::to_owned)
             .map_err(|_| Error::HeaderInvalid)
     }
-    /// 业务作用：恢复并复验物理资源身份，防止文本替换掩盖不同资源。参数说明：无。返回：有界ASCII资源。
+    /// 业务作用：恢复并复验物理资源身份，防止文本替换掩盖不同资源。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：有界ASCII资源。
     pub(super) fn resource(&mut self) -> Result<TransferResource> {
         let resource = TransferResource {
             cluster_id: self.text(1024, false)?,

@@ -36,11 +36,22 @@ cargo check --manifest-path nasa/Cargo.toml --no-default-features --features app
 cargo fmt --all -- --check
 ```
 
-Internal workspace dependencies use crates.io versions. Checking `nasa` builds the local facade, but
-its `napp` and other implementation dependencies still come from the registry. That command does not
-replace checking a modified local implementation through its own manifest. For cross-component API
-changes, also check integration in a consumer that explicitly selects the local implementation and
-confirm dependency sources in its graph; published behavior is not evidence about the local change.
+Component manifests retain crates.io version requirements. The root workspace uses `[patch.crates-io]`
+to resolve member names to the current checkout, while the lockfile also pins external dependencies.
+Run `python3 .github/scripts/verify-workspace-sources.py` to reject registry copies of member names
+in the complete feature graph; add `--offline` when using cached dependencies. Check modified components
+through their manifests, and check facade and consumer feature graphs for cross-component changes.
+
+Root patches do not propagate to consumer applications or normalized publication manifests. A source
+build does not establish that public dependency versions are available. Independent consumers must
+explicitly select the matching source checkout or use a fully published dependency set. Do not upload
+immutable versions merely to discover whether the dependency graph resolves.
+
+`python3 .github/scripts/package-workspace.py --target-dir target/archive` keeps the selected component
+sources through external Cargo configuration, creates and compiles every member archive, and checks
+its version, README, license text and NOTICE. Use Python 3.11 or an earlier Python with `tomli` installed;
+`--offline` uses cached dependencies. Archives still declare crates.io version requirements. Consumer
+delivery must state the matching source checkout or the availability of complete public versions.
 
 The full workspace includes native dependencies. Capabilities such as Kafka may require a C/C++
 toolchain, CMake, pkg-config and platform development libraries. Consult the component manifest and

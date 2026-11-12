@@ -80,9 +80,10 @@ impl SagaContext {
 
     /// 业务作用：将已经过合同复验的原始正文交给业务 handler，供自定义 schema 解码。
     ///
-    /// 参数说明：payload 是当前命令的精确字节与媒体合同。
+    /// 参数说明：
+    /// - `payload`：上层已复验、需要交给 handler 的原始正文及媒体合同。
     ///
-    /// 返回：包含正文只读视图的上下文，不改变任何幂等身份。
+    /// 返回：返回替换 payload 后的上下文，不改变幂等身份，也不在本方法执行 payload 合同复验；None 清除已有正文。
     pub fn with_payload(mut self, payload: Option<crate::SagaPayload>) -> Self {
         self.payload = payload;
         self

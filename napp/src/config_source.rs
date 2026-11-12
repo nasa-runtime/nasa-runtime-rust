@@ -41,7 +41,11 @@ struct ObservationState {
 
 impl StrictSource {
     /// 业务作用：在 runtime 创建前固定环境和来源权限，配置中心启用时仅求值引导依赖。
-    /// 参数说明：`loader` 是业务显式工厂的产物；`spec` 声明能够连接配置中心的组件。
+    ///
+    /// 参数说明：
+    /// - `loader`：`loader` 是业务显式工厂的产物。
+    /// - `spec`：`spec` 声明能够连接配置中心的组件。
+    ///
     /// 返回：初始视图及唯一来源 owner；远端业务表达式延后到完整装配。
     pub(crate) fn start(
         loader: ConfigLoader,
@@ -98,7 +102,10 @@ impl StrictSource {
     }
 
     /// 业务作用：取出同步预读文档用于唯一首拉，随后每轮重读并复验冻结来源权限。
-    /// 参数说明：`initial` 表示配置中心首拉阶段。
+    ///
+    /// 参数说明：
+    /// - `initial`：`initial` 表示配置中心首拉阶段。
+    ///
     /// 返回：没有改变订阅清单、模式或信任根的候选计划。
     #[cfg(any(feature = "config-watch", feature = "nacos-config"))]
     pub(crate) fn prepare(&self, initial: bool) -> ApplicationResult<PreparedLoad> {
@@ -125,7 +132,9 @@ impl StrictSource {
     }
 
     /// 业务作用：本地重载从空基线重新装配，删除的来源不留下旧值。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：新候选树；不会自行发布应用视图。
     #[cfg(feature = "config-watch")]
     pub(crate) fn load_local(&self) -> ApplicationResult<Value> {
@@ -137,7 +146,10 @@ impl StrictSource {
     }
 
     /// 业务作用：记录候选实际来源供观察准备，业务发布仍由既有 publisher 决定。
-    /// 参数说明：`loaded` 是完整且复验通过的候选。
+    ///
+    /// 参数说明：
+    /// - `loaded`：`loaded` 是完整且复验通过的候选。
+    ///
     /// 返回：候选树；旧活动 watcher 在发布完成前保持不变。
     pub(crate) fn accept(&self, loaded: LoadedConfig) -> Value {
         self.observation
@@ -152,7 +164,9 @@ impl StrictSource {
     }
 
     /// 业务作用：来源候选受理后单独推进观察序号，同值来源变化不冒充业务版本提交。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只提交最近完整候选的来源摘要，失败候选由下一轮完整结果覆盖。
     pub(crate) fn commit_observation(&self) {
         let mut state = self
@@ -165,14 +179,19 @@ impl StrictSource {
                     .accepted
                     .as_ref()
                     .map_or(1, |prior| prior.revision.saturating_add(1));
-                state.accepted = Some(ConfigObservation { revision, report });
+                state.accepted = Some(ConfigObservation {
+                    revision,
+                    report,
+                });
                 state.fingerprint = Some(fingerprint);
             }
         }
     }
 
     /// 业务作用：向宿主提供已经受理来源的安全观察状态。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：独立观察序号，不包含路径、环境名称或值摘要。
     pub(crate) fn observation(&self) -> Option<ConfigObservation> {
         self.observation
@@ -183,7 +202,9 @@ impl StrictSource {
     }
 
     /// 业务作用：取得最近完整候选的观察计划，独立于值指纹。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：来源计划副本，不公开原始材料。
     #[cfg(feature = "config-watch")]
     pub(crate) fn watch_plan(&self) -> WatchPlan {
@@ -194,7 +215,9 @@ impl StrictSource {
     }
 
     /// 业务作用：材料和组件资源准备后再次拒绝已知过期来源，避免安装旧候选。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：完整候选来源仍成立时成功，不在配置发布锁内读取文件。
     #[cfg(any(feature = "config-watch", feature = "nacos-config"))]
     pub(crate) fn revalidate(&self) -> ApplicationResult<()> {
@@ -214,7 +237,10 @@ impl StrictSource {
 }
 
 /// 业务作用：按编入能力选择同一 naml 计划，远端适配器只补充中立声明。
-/// 参数说明：`loader` 已固定读取约束。
+///
+/// 参数说明：
+/// - `loader`：`loader` 已固定读取约束。
+///
 /// 返回：尚未求值业务叶子的有序计划。
 fn prepare(loader: &ConfigLoader) -> ApplicationResult<PreparedLoad> {
     #[cfg(feature = "nacos-config")]
@@ -251,7 +277,11 @@ fn prepare(loader: &ConfigLoader) -> ApplicationResult<PreparedLoad> {
 }
 
 /// 业务作用：从已读取文档中仅解析指定引导段及其依赖闭包。
-/// 参数说明：`plan` 是来源计划；`names` 是宿主需要的顶层段。
+///
+/// 参数说明：
+/// - `plan`：`plan` 是来源计划。
+/// - `names`：`names` 是宿主需要的顶层段。
+///
 /// 返回：仅含已声明且完成求值的段，不暴露半解析业务树。
 fn sections(plan: &PreparedLoad, names: &[&str]) -> ApplicationResult<Value> {
     let mut tree = serde_json::Map::new();
@@ -268,7 +298,10 @@ fn sections(plan: &PreparedLoad, names: &[&str]) -> ApplicationResult<Value> {
 }
 
 /// 业务作用：将来源拒绝转换为不回显配置值的宿主错误。
-/// 参数说明：`message` 是固定诊断摘要。
+///
+/// 参数说明：
+/// - `message`：`message` 是固定诊断摘要。
+///
 /// 返回：由生命周期阶段统一处理的错误。
 fn error(message: &'static str) -> ApplicationError {
     ApplicationError::new(ComponentId::Config, ApplicationPhase::Bootstrap, message)

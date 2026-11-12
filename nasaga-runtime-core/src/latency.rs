@@ -74,7 +74,9 @@ pub fn saga_latency_snapshot() -> Vec<SagaLatencySnapshot> {
 
 /// 业务作用：记录真实耗时或数据库 timer 到期后的调度滞后。
 ///
-/// 参数说明：`stage` 是固定采样边界，`duration` 是单调耗时或非负调度滞后。
+/// 参数说明：
+/// - `stage`：是固定采样边界
+/// - `duration`：是单调耗时或非负调度滞后。
 ///
 /// 返回：更新一个阶段的计数、总量和非累积桶，不改变任何业务状态。
 pub(crate) fn observe(stage: LatencyStage, duration: Duration) {
@@ -99,7 +101,8 @@ pub(crate) struct LatencyGuard {
 impl LatencyGuard {
     /// 业务作用：在阶段开始时固定单调时钟。
     ///
-    /// 参数说明：`stage` 指定阶段边界。
+    /// 参数说明：
+    /// - `stage`：指定阶段边界。
     ///
     /// 返回：离开作用域时采样的守卫，不持有指标锁跨越业务等待。
     pub(crate) fn new(stage: LatencyStage) -> Self {
@@ -123,7 +126,8 @@ impl Drop for LatencyGuard {
 
 /// 业务作用：限定参与方 handler 的采样范围，不混入 Inbox、gate 或 Outbox 数据库等待。
 ///
-/// 参数说明：`body` 是业务 handler 的异步调用。
+/// 参数说明：
+/// - `body`：是业务 handler 的异步调用。
 ///
 /// 返回：透传业务返回值；耗时不被解释为成功或失败的证明。
 pub(crate) async fn measure_handler<T>(body: impl std::future::Future<Output = T>) -> T {

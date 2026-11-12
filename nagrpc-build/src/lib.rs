@@ -299,6 +299,12 @@ impl Builder {
 }
 
 /// 业务作用：把存在的输入路径规范化，阻止构建逻辑依赖未解析的相对路径身份。
+///
+/// 参数说明：
+/// - `paths`：待规范化的 proto 或 include 路径集合。
+/// - `directories`：true 要求目录，false 要求非目录。
+///
+/// 返回：按原序返回 canonicalize 后路径；不可解析或目录类别不符时报错。directories=false 只排除目录，不证明是普通文件；跟随符号链接，不限制路径必须位于某个根目录。
 fn canonicalize_existing<P>(paths: &[P], directories: bool) -> Result<Vec<PathBuf>, Error>
 where
     P: AsRef<Path>,
@@ -319,6 +325,11 @@ where
 }
 
 /// 业务作用：限制 generated code 可引用的运行时路径语法，避免把任意 token 注入输出文件。
+///
+/// 参数说明：
+/// - `path`：生成适配代码需要引用的绝对运行时模块路径。
+///
+/// 返回：以 :: 开始且各段非空、只含 ASCII 标识符字符且不以数字起头时成功，否则报错；不识别 Rust 保留字或验证路径存在。
 fn validate_runtime_path(path: &str) -> Result<(), Error> {
     if !path.starts_with("::") {
         return Err(Error::InvalidInput(
@@ -340,6 +351,11 @@ fn validate_runtime_path(path: &str) -> Result<(), Error> {
 }
 
 /// 业务作用：校验 descriptor 中 package/service/method 的规模和完整身份。
+///
+/// 参数说明：
+/// - `descriptor`：已解码的完整 descriptor set。
+///
+/// 返回：文件数、package 形态及长度、service/method 名称非空长度和各层数量都在上限内时成功，否则返回固定 descriptor 错误。未检查 service/method 名称字符、重名、消息引用或完整 protobuf 合法性。
 fn validate_descriptor(descriptor: &FileDescriptorSet) -> Result<(), Error> {
     if descriptor.file.is_empty() || descriptor.file.len() > MAX_PROTO_FILES {
         return Err(Error::Descriptor(
@@ -513,7 +529,7 @@ fn validate_compatibility(
 /// 业务作用：逐字段号检查类型身份，并要求删除字段显式 reserve 原编号或名称。
 ///
 /// 参数说明：
-/// - `old`: baseline message。
+/// - `old`: 基准 message 定义。
 /// - `new`: 同一全限定名的候选 message。
 ///
 /// 返回：既有字段保留等价 wire 合同或被 reserve 时成功，否则返回稳定规则编号。
@@ -563,7 +579,7 @@ fn field_contract_equal(old: &FieldDescriptorProto, new: &FieldDescriptorProto) 
 /// 业务作用：逐枚举数字检查名称身份，并要求删除数字显式 reserve 数字或名称。
 ///
 /// 参数说明：
-/// - `old`: baseline enum。
+/// - `old`: 基准 enum 定义。
 /// - `new`: 同一全限定名的候选 enum。
 ///
 /// 返回：既有数字含义不变或被 reserve 时成功，否则返回稳定规则编号。
@@ -610,6 +626,11 @@ fn qualified(scope: &str, name: &str) -> String {
 }
 
 /// 业务作用：确认 protobuf package 只含可稳定映射到 Rust 输出文件的标识符段。
+///
+/// 参数说明：
+/// - `name`：protobuf package 的完整点分名称。
+///
+/// 返回：所有点分段均非空、只含 ASCII 标识符字符且不以数字起头时 true，否则 false；不处理 Rust 保留字或输出名称碰撞。
 fn valid_proto_name(name: &str) -> bool {
     name.split('.').all(|segment| {
         !segment.is_empty()
@@ -770,6 +791,12 @@ fn write_package_outputs(
 }
 
 /// 业务作用：为 descriptor 中每个 generated server 生成消息边界与 registry 的统一适配实现。
+///
+/// 参数说明：
+/// - `files`：经前置 descriptor 门禁筛选的协议文件借用集合。
+/// - `runtime_path`：已通过语法检查的运行时绝对路径原文。
+///
+/// 返回：返回 managed trait 实现源码文本；无 service/method 名称时跳过，按转换后的 Rust service 名去重并保留首个。生成 ABI 断言、方法目录及路由适配，不在本层编译、校验全部命名或写入文件。
 fn managed_adapters(files: Vec<&FileDescriptorProto>, runtime_path: &str) -> String {
     let mut output = String::new();
     let mut seen = BTreeSet::new();

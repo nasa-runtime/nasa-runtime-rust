@@ -39,21 +39,19 @@ pub type CryptoConditionFuture<'a> =
 pub trait CryptoCondition: Send + Sync + 'static {
     /// 业务作用：返回注册表使用的稳定 condition ID。
     ///
-    /// # 返回
+    /// 返回：返回非空、有限长度的 ASCII 标识。
     ///
-    /// 返回非空、有限长度的 ASCII 标识。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str;
 
     /// 业务作用：根据可信元数据收窄本请求的加解密方向。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 不含 body 的只读请求视图，生命周期只覆盖当前 await。
     /// - `declared`: route policy 静态声明的方向上限。
     ///
-    /// # 返回
-    ///
-    /// 返回声明子集；实现错误或试图打开未声明方向时 endpoint composer fail closed。
+    /// 返回：返回声明子集；实现错误或试图打开未声明方向时 endpoint composer fail closed。
     fn evaluate<'a>(
         &'a self,
         input: CryptoConditionInput<'a>,
@@ -70,13 +68,11 @@ pub struct LegacyDisableHeaderCondition {
 impl std::fmt::Debug for LegacyDisableHeaderCondition {
     /// 业务作用：输出 header 名但不输出作为 secret 的匹配值。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `formatter`: 调试输出目标。
     ///
-    /// # 返回
-    ///
-    /// 返回脱敏格式化结果。
+    /// 返回：返回脱敏格式化结果。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("LegacyDisableHeaderCondition")
@@ -88,14 +84,12 @@ impl std::fmt::Debug for LegacyDisableHeaderCondition {
 impl LegacyDisableHeaderCondition {
     /// 业务作用：建立需要可信入口证明的 legacy 旁路条件。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `header_name`: 公网入口必须先剥离、再由可信网关注入的 header 名。
     /// - `expected_value`: 作为 secret 的精确匹配字节，禁止日志、回显和公开配置明文。
     ///
-    /// # 返回
-    ///
-    /// 值非空时返回只保存固定长度摘要的 condition；空值返回配置错误。原始匹配值不会在构造后
+    /// 返回：值非空时返回只保存固定长度摘要的 condition；空值返回配置错误。原始匹配值不会在构造后
     /// 继续驻留于对象中，避免调试、崩溃转储或普通比较路径暴露旁路凭证。
     pub fn new(header_name: HeaderName, expected_value: Vec<u8>) -> Result<Self, CryptoError> {
         if expected_value.is_empty() || expected_value.len() > 256 {
@@ -116,23 +110,21 @@ impl LegacyDisableHeaderCondition {
 impl CryptoCondition for LegacyDisableHeaderCondition {
     /// 业务作用：返回架构固定的显式 condition ID。
     ///
-    /// # 返回
+    /// 返回：返回 `legacy-disable-header`。
     ///
-    /// 返回 `legacy-disable-header`。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str {
         "legacy-disable-header"
     }
 
     /// 业务作用：只有 secret 匹配且存在可信入口证明时关闭已声明方向。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 已由公网边界完成伪造 header 剥离的请求视图。
     /// - `declared`: route policy 已声明方向。
     ///
-    /// # 返回
-    ///
-    /// header 缺失时保持声明；存在但不可信或不匹配时拒绝；双重验证成功时返回空方向。
+    /// 返回：header 缺失时保持声明；存在但不可信或不匹配时拒绝；双重验证成功时返回空方向。
     fn evaluate<'a>(
         &'a self,
         input: CryptoConditionInput<'a>,

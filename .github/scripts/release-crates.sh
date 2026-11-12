@@ -7,7 +7,8 @@ if [[ "$#" -ne 1 ]]; then
 fi
 
 # 业务作用：返回单个发布批次的 crate 与目标版本，作为批次和版本的唯一事实来源。
-# 参数说明：`$1` 为 workflow 暴露的批次标识。
+# 参数说明：
+# - `$1`：workflow 暴露的批次标识。
 # 返回：已知批次输出空格分隔的 `crate@version`；未知批次返回非零状态。
 release_items() {
   case "$1" in
@@ -21,10 +22,10 @@ release_items() {
       printf '%s\n' "nasaga-runtime@2.0.2"
       ;;
     application-runtime)
-      printf '%s\n' "napp@2.0.5"
+      printf '%s\n' "napp@2.0.6"
       ;;
     facade)
-      printf '%s\n' "nasa@2.0.5"
+      printf '%s\n' "nasa@2.0.6"
       ;;
     *)
       echo "未知发布批次: $1" >&2
@@ -34,7 +35,8 @@ release_items() {
 }
 
 # 业务作用：把版本化发布项转换为 Cargo 接受的 crate 名列表，避免验证与上传逻辑重复维护版本。
-# 参数说明：`$1` 为发布批次标识。
+# 参数说明：
+# - `$1`：发布批次标识。
 # 返回：已知批次输出空格分隔的 crate 名；未知批次返回非零状态。
 release_crates() {
   local item

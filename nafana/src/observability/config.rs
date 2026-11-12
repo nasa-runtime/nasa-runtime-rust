@@ -95,6 +95,8 @@ config!(
     ObservabilityConfig {
     /// 是否建立统一观测出口；关闭时不创建出口资源。
     enabled: bool = false,
+    /// 当前进程、可见 cgroup 和明确白名单资源的独立采样策略。
+    collectors: super::resources::CollectorsConfig = super::resources::CollectorsConfig::default(),
     /// 跨出口一致的服务与实例身份。
     identity: IdentityConfig = IdentityConfig::default(),
     /// Prometheus 传输与采集策略。
@@ -404,7 +406,10 @@ pub struct Identity {
 
 impl ObservabilityConfig {
     /// 业务作用：从同一应用 YAML 提取并严格校验观测配置，拒绝未知字段和显式空值。
-    /// 参数说明：`root` 为已合并环境与配置源的应用配置。
+    ///
+    /// 参数说明：
+    /// - `root`：已合并环境与配置源的应用配置。
+    ///
     /// 返回：无网络副作用的递归默认配置；错误只给出固定配置路径。
     pub fn from_root(root: &Value) -> Result<Self, String> {
         if root.get("grafana").is_some_and(|v| !v.is_object()) {
@@ -421,7 +426,10 @@ impl ObservabilityConfig {
     }
 
     /// 业务作用：为独立 controller 投影应用实际抓取地址，避免 Web 端口和路由前缀漂移。
-    /// 参数说明：`root` 为与业务进程相同的 YAML；仅读取受管 server 的 port 与 context_path。
+    ///
+    /// 参数说明：
+    /// - `root`：与业务进程相同的 YAML；仅读取受管 server 的 port 与 context_path。
+    ///
     /// 返回：dedicated 配置保持原样；Web 模式将服务端口和前缀冻结到发现配置，临时端口被拒绝。
     pub fn platform_projection(root: &Value) -> Result<Self, String> {
         let mut config = Self::from_root(root)?;
@@ -456,9 +464,12 @@ impl ObservabilityConfig {
     }
 
     /// 业务作用：在创建任何出口之前完成数值、路径与条件必填门禁。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：配置可供当前能力使用时成功；禁用能力不要求凭据或端点。
     pub fn validate(&self) -> Result<(), String> {
+        self.collectors.validate()?;
         let s = &self.prometheus.scrape;
         range(
             s.max_concurrent_requests as u64,
@@ -625,7 +636,12 @@ impl ObservabilityConfig {
     }
 
     /// 业务作用：冻结跨 exporter 的统一身份，防止同一进程被识别为不同服务。
-    /// 参数说明：`application` 为应用名，`local_instance` 为本进程唯一标识，`root` 用于校验 telemetry 别名。
+    ///
+    /// 参数说明：
+    /// - `application`：应用名。
+    /// - `local_instance`：本进程唯一标识。
+    /// - `root`：用于校验 telemetry 别名。
+    ///
     /// 返回：启用时的完整身份；非本地缺失身份或别名冲突时拒绝启动。
     pub fn freeze_identity(
         &self,
@@ -676,11 +692,15 @@ impl ObservabilityConfig {
                 }
             }
         }
-        Ok(Identity { labels })
+        Ok(Identity {
+            labels,
+        })
     }
 
     /// 业务作用：计算专用 listener 的默认绑定地址。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：platform 模式对平台网络开放，其它模式默认仅本机。
     pub fn bind(&self) -> &str {
         self.prometheus.scrape.bind.as_deref().unwrap_or(
@@ -692,20 +712,26 @@ impl ObservabilityConfig {
         )
     }
     /// 业务作用：判断当前启用的出口是否包含 scrape。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：禁用配置始终返回 false。
     pub fn scrape_enabled(&self) -> bool {
         self.enabled && self.prometheus.export_mode != ExportMode::RemoteWrite
     }
     /// 业务作用：判断当前启用的出口是否包含 remote write。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：禁用配置始终返回 false。
     pub fn remote_write_enabled(&self) -> bool {
         self.enabled && self.prometheus.export_mode != ExportMode::Scrape
     }
 
     /// 业务作用：为发现资源与可用性规则选择同一条主数据路径。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：显式发现保持不变；auto 在 remote-write-only 时选择推送，其余情况按平台环境选择抓取。
     pub fn primary_discovery(&self) -> Discovery {
         let discovery = self.provisioning.prometheus.discovery;
@@ -724,7 +750,9 @@ impl ObservabilityConfig {
 
 impl AuthConfig {
     /// 业务作用：只在 bearer 生效时要求合法 secret locator。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：合法引用或不包含材料的配置错误。
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == AuthMode::Bearer {
@@ -740,7 +768,9 @@ impl AuthConfig {
 
 impl AlertRulesConfig {
     /// 业务作用：校验聚合规则的固定字段、外部期望指标引用与采样窗口。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：指标名无表达式注入、窗口足以覆盖两次 evaluation，且各规则阈值有效时成功。
     fn validate(&self) -> Result<(), String> {
         let metric = &self.instance_down.expected_instances_metric;
@@ -830,7 +860,10 @@ impl AlertRulesConfig {
 }
 
 /// 业务作用：提取凭据标识而不接触凭据材料。
-/// 参数说明：`locator` 必须是 secret:// 引用。
+///
+/// 参数说明：
+/// - `locator`：必须是 secret:// 引用。
+///
 /// 返回：合法 ID；非法引用只返回固定说明。
 pub fn secret_id(locator: &str) -> Result<&str, String> {
     let id = locator
@@ -852,7 +885,12 @@ pub fn secret_id(locator: &str) -> Result<&str, String> {
     Ok(id)
 }
 /// 业务作用：限制部署身份的稳定字符集和长度。
-/// 参数说明：`value` 为身份，`max` 为上限，`field` 为安全字段名。
+///
+/// 参数说明：
+/// - `value`：身份。
+/// - `max`：上限。
+/// - `field`：安全字段名。
+///
 /// 返回：合法时成功，否则只包含字段名。
 pub fn identifier(value: &str, max: usize, field: &str) -> Result<(), String> {
     if value.is_empty()
@@ -867,7 +905,11 @@ pub fn identifier(value: &str, max: usize, field: &str) -> Result<(), String> {
     }
 }
 /// 业务作用：拒绝明文跨网络凭据传输和带用户信息的 URL。
-/// 参数说明：`url` 为目标，`local` 允许本机回环 HTTP。
+///
+/// 参数说明：
+/// - `url`：目标。
+/// - `local`：允许本机回环 HTTP。
+///
 /// 返回：校验后的 URL；错误不回显输入。
 pub fn validate_url(url: &str, local: bool) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "invalid observability endpoint")?;
@@ -889,7 +931,10 @@ pub fn validate_url(url: &str, local: bool) -> Result<reqwest::Url, String> {
     Ok(parsed)
 }
 /// 业务作用：拒绝显式 null，防止可选字段被静默重置。
-/// 参数说明：`value` 为观测配置子树。
+///
+/// 参数说明：
+/// - `value`：观测配置子树。
+///
 /// 返回：整棵树无 null 时成功。
 fn reject_null(value: &Value) -> Result<(), String> {
     match value {
@@ -900,7 +945,13 @@ fn reject_null(value: &Value) -> Result<(), String> {
     }
 }
 /// 业务作用：统一拒绝超出资源预算的配置数字。
-/// 参数说明：`value` 为值，`min/max` 为闭区间，`field` 为字段。
+///
+/// 参数说明：
+/// - `value`：值。
+/// - `min`：闭区间下界。
+/// - `max`：闭区间上界。
+/// - `field`：字段。
+///
 /// 返回：范围内成功，否则固定字段错误。
 fn range(value: u64, min: u64, max: u64, field: &str) -> Result<(), String> {
     if value < min || value > max {

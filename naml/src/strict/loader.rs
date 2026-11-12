@@ -13,7 +13,10 @@ use super::{
     FileEvidence, FilePattern, LoadPolicy, ParsedDocument, PathSegment, ProfileSelection, Result,
     SourceDocument,
 };
-use crate::YmlImport;
+use crate::{
+    source::{standard_base_file, CONFIG_FILE_ENV},
+    YmlImport,
+};
 
 /// 已完成读取与解析的来源记录，显式访问名称与摘要需要调用方承担保密责任。
 #[derive(Clone)]
@@ -117,7 +120,10 @@ struct Merged {
 
 impl ConfigLoader {
     /// 业务作用：创建完全不读取文件和真实环境的内存加载器。
-    /// 参数说明：`environment` 是调用方固定的快照。
+    ///
+    /// 参数说明：
+    /// - `environment`：是调用方固定的快照。
+    ///
     /// 返回：尚未指定本地文件的严格入口。
     pub fn memory(environment: EnvironmentSnapshot) -> Self {
         Self {
@@ -133,14 +139,18 @@ impl ConfigLoader {
         }
     }
 
-    /// 业务作用：固定标准主路径、profile 模板、环境及工作目录。
+    /// 业务作用：从固定环境选择标准主路径，并固定 profile 模板及工作目录。
+    /// `APP_CONFIG_FILE` 未设置或为空时使用默认路径；主路径选择不改变 profile 模板。
+    ///
     /// 参数说明：无。
-    /// 返回：标准严格加载器；无法取得工作目录或环境时失败。
+    ///
+    /// 返回：主路径已绑定当前目录的严格加载器；无法取得工作目录、环境或路径编码非法时失败。
     pub fn standard() -> Result<Self> {
         let directory =
             std::env::current_dir().map_err(|_| ConfigError::new(ErrorKind::Unreadable))?;
         let mut loader = Self::memory(EnvironmentSnapshot::capture()?);
-        loader.base = Some(directory.join("zcf/application.yml"));
+        let base = standard_base_file(loader.environment.get(CONFIG_FILE_ENV)?.map(PathBuf::from));
+        loader.base = Some(directory.join(base));
         loader.profile_pattern = Some(
             directory
                 .join("zcf/application-{profile}")
@@ -152,9 +162,12 @@ impl ConfigLoader {
         Ok(loader)
     }
 
-    /// 业务作用：在创建阶段固定文件的绝对位置。
-    /// 参数说明：`path` 为主文档路径。
-    /// 返回：相对路径已绑定当前目录的加载器。
+    /// 业务作用：显式覆盖环境所选或默认主路径，并在创建阶段固定文件的绝对位置。
+    ///
+    /// 参数说明：
+    /// - `path`：主文档路径，优先于 `APP_CONFIG_FILE` 和默认路径。
+    ///
+    /// 返回：相对路径已绑定当前目录的加载器，不改变 profile 模板；无法取得工作目录时失败。
     pub fn base_file(mut self, path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         self.base = Some(absolute(&path)?);
@@ -162,7 +175,10 @@ impl ConfigLoader {
     }
 
     /// 业务作用：明确 profile 的目录模板，避免跟随进程工作目录变动。
-    /// 参数说明：`pattern` 可包含一个 profile 名占位符。
+    ///
+    /// 参数说明：
+    /// - `pattern`：可包含一个 profile 名占位符。
+    ///
     /// 返回：模板固定的加载器。
     pub fn profile_pattern(mut self, pattern: impl Into<PathBuf>) -> Result<Self> {
         self.profile_pattern = Some(
@@ -175,7 +191,10 @@ impl ConfigLoader {
     }
 
     /// 业务作用：显式选择或关闭 profile，优先于环境选择。
-    /// 参数说明：`profile` 是加载器级选择策略。
+    ///
+    /// 参数说明：
+    /// - `profile`：是加载器级选择策略。
+    ///
     /// 返回：选择已固定的新加载器。
     pub fn profile(mut self, profile: ProfileSelection) -> Self {
         self.profile = profile;
@@ -183,7 +202,10 @@ impl ConfigLoader {
     }
 
     /// 业务作用：设置 profile 的原样环境名称。
-    /// 参数说明：`name` 是快照中的确切键。
+    ///
+    /// 参数说明：
+    /// - `name`：是快照中的确切键。
+    ///
     /// 返回：使用指定名称的加载器。
     pub fn profile_env(mut self, name: impl Into<String>) -> Self {
         self.profile_env = name.into();
@@ -191,7 +213,11 @@ impl ConfigLoader {
     }
 
     /// 业务作用：明确环境结构覆盖的命名规则。
-    /// 参数说明：`prefix` 是前缀；`separator` 是层级分隔符，空串表示单下划线前缀与平面键。
+    ///
+    /// 参数说明：
+    /// - `prefix`：是前缀
+    /// - `separator`：是层级分隔符，空串表示单下划线前缀与平面键。
+    ///
     /// 返回：命名规则固定的加载器。
     pub fn environment_mapping(
         mut self,
@@ -204,7 +230,10 @@ impl ConfigLoader {
     }
 
     /// 业务作用：应用受信的预算、字段和来源策略。
-    /// 参数说明：`policy` 由调用方构造，不接受导入文档修改。
+    ///
+    /// 参数说明：
+    /// - `policy`：由调用方构造，不接受导入文档修改。
+    ///
     /// 返回：策略固定的新加载器。
     pub fn policy(mut self, policy: LoadPolicy) -> Self {
         self.policy = policy;
@@ -212,7 +241,10 @@ impl ConfigLoader {
     }
 
     /// 业务作用：控制文件入口是否展开本地 import 声明。
-    /// 参数说明：`enabled` 为显式启用状态。
+    ///
+    /// 参数说明：
+    /// - `enabled`：为显式启用状态。
+    ///
     /// 返回：改变装配范围的加载器；内存入口始终不自行读文件。
     pub fn local_imports(mut self, enabled: bool) -> Self {
         self.local_imports = enabled;
@@ -220,7 +252,10 @@ impl ConfigLoader {
     }
 
     /// 业务作用：仅装配调用方已经取得的文档，环境最后覆盖。
-    /// 参数说明：`documents` 的顺序就是来源优先级。
+    ///
+    /// 参数说明：
+    /// - `documents`：的顺序就是来源优先级。
+    ///
     /// 返回：完整可绑定的候选，不会因文档名称打开文件。
     pub fn load_documents(&self, documents: &[SourceDocument]) -> Result<LoadedConfig> {
         let mut merged = Merged::new();
@@ -234,14 +269,18 @@ impl ConfigLoader {
     }
 
     /// 业务作用：完成本地来源装配和解析，不启动业务资源。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：完整配置；远端声明存在但未提供文档时按必需性拒绝。
     pub fn load(&self) -> Result<LoadedConfig> {
         self.prepare()?.finish(&BTreeMap::new())
     }
 
     /// 业务作用：读取主文件/profile 并只求值来源计划的依赖闭包。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：可以交给配置中心适配器补充远端文档的固定计划。
     pub fn prepare(&self) -> Result<PreparedLoad> {
         let base = self
@@ -344,28 +383,38 @@ impl ConfigLoader {
     }
 
     /// 业务作用：供受限读取适配器复用创建时固定的主文件身份。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：绝对主路径，纯内存入口没有路径。
     pub fn base_path(&self) -> Option<&Path> {
         self.base.as_deref()
     }
 
     /// 业务作用：提供固定快照供宿主分阶段配置与业务隔离读取共享。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：只读环境快照，不重新读取进程环境。
     pub fn environment(&self) -> &EnvironmentSnapshot {
         &self.environment
     }
 
     /// 业务作用：让宿主为实际来源建立同策略的观察器。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不可由配置文件改变的加载约束。
     pub fn load_policy(&self) -> &LoadPolicy {
         &self.policy
     }
 
     /// 业务作用：在解析完成前保持环境优先级，并计算有界的有效值身份。
-    /// 参数说明：`merged` 为来源合并结果；`watch` 为读取事实。
+    ///
+    /// 参数说明：
+    /// - `merged`：为来源合并结果
+    /// - `watch`：为读取事实。
+    ///
     /// 返回：解析和结果预算均通过的候选。
     fn finish(&self, mut merged: Merged, watch: WatchPlan) -> Result<LoadedConfig> {
         let environment_origins = apply_environment(&mut merged.tree, self)?;
@@ -403,7 +452,9 @@ impl ConfigLoader {
     }
 
     /// 业务作用：从固定快照或显式设置选择单个安全 profile 名。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：名称或关闭状态，路径型名称明确拒绝。
     pub fn selected_profile(&self) -> Result<Option<String>> {
         let profile = match &self.profile {
@@ -428,14 +479,19 @@ impl ConfigLoader {
 
 impl PreparedLoad {
     /// 业务作用：给上层提供已校验的有序来源声明。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：不包含实际远端连接动作的描述列表。
     pub fn imports(&self) -> &[YmlImport] {
         &self.imports
     }
 
     /// 业务作用：让配置中心门面保留 nacos.imports 在前的既有合同。
-    /// 参数说明：`imports` 为调用方已校验的前置声明。
+    ///
+    /// 参数说明：
+    /// - `imports`：为调用方已校验的前置声明。
+    ///
     /// 返回：总声明预算内的固定计划。
     pub fn prepend_imports(mut self, mut imports: Vec<YmlImport>) -> Result<Self> {
         imports.append(&mut self.imports);
@@ -445,14 +501,20 @@ impl PreparedLoad {
     }
 
     /// 业务作用：查询引导字段是否声明，避免把缺省段误判为求值失败。
-    /// 参数说明：`path` 是结构化字段位置。
+    ///
+    /// 参数说明：
+    /// - `path`：是结构化字段位置。
+    ///
     /// 返回：仅表示存在性，不输出尚未解析的业务值。
     pub fn contains(&self, path: &ConfigPath) -> bool {
         path.get(&self.bootstrap).is_some()
     }
 
     /// 业务作用：让宿主枚举已声明能力名称而不提前求值其连接材料。
-    /// 参数说明：`path` 是引导映射的位置。
+    ///
+    /// 参数说明：
+    /// - `path`：是引导映射的位置。
+    ///
     /// 返回：现有子字段路径；缺失映射为空，非映射声明拒绝。
     pub fn children(&self, path: &ConfigPath) -> Result<Vec<ConfigPath>> {
         match path.get(&self.bootstrap) {
@@ -463,7 +525,11 @@ impl PreparedLoad {
     }
 
     /// 业务作用：让宿主为已确认的引导字段设置精确类型或求值规则。
-    /// 参数说明：`path` 是字段路径；`hint` 是受信宿主选择的规则。
+    ///
+    /// 参数说明：
+    /// - `path`：是字段路径
+    /// - `hint`：是受信宿主选择的规则。
+    ///
     /// 返回：采用新规则的计划，来源声明和环境快照保持冻结。
     pub fn with_hint(mut self, path: ConfigPath, hint: super::ValueHint) -> Self {
         self.loader.policy.hints.insert(path, hint);
@@ -471,7 +537,10 @@ impl PreparedLoad {
     }
 
     /// 业务作用：为明确禁用的可选能力保留原始文本，不访问其未启用的连接材料。
-    /// 参数说明：`path` 是宿主已确认不参与本轮初始化的子树。
+    ///
+    /// 参数说明：
+    /// - `path`：是宿主已确认不参与本轮初始化的子树。
+    ///
     /// 返回：该路径使用字面量策略的固定计划；不会改变来源读取权限。
     pub fn protect(mut self, path: ConfigPath) -> Self {
         self.loader
@@ -482,7 +551,10 @@ impl PreparedLoad {
     }
 
     /// 业务作用：只向启动方提供已经求值的必要引导字段。
-    /// 参数说明：`paths` 是启动身份、连接和信任设置的字段路径。
+    ///
+    /// 参数说明：
+    /// - `paths`：是启动身份、连接和信任设置的字段路径。
+    ///
     /// 返回：选定字段的结果，不提前求值其它业务表达式。
     pub fn bootstrap(&self, paths: &[ConfigPath]) -> Result<BTreeMap<ConfigPath, Value>> {
         super::expression::resolve_selected_overlaid(
@@ -495,7 +567,10 @@ impl PreparedLoad {
     }
 
     /// 业务作用：按固定声明位置装配本地和调用方取得的远端文档。
-    /// 参数说明：`remote` 以 import 条目索引标识文档，未声明项不能注入。
+    ///
+    /// 参数说明：
+    /// - `remote`：以 import 条目索引标识文档，未声明项不能注入。
+    ///
     /// 返回：所有必需来源齐全且身份复验通过的候选。
     pub fn finish(mut self, remote: &BTreeMap<usize, SourceDocument>) -> Result<LoadedConfig> {
         for index in remote.keys() {
@@ -506,7 +581,10 @@ impl PreparedLoad {
         let mut remote_identities = BTreeSet::new();
         for (index, import) in self.imports.iter().enumerate() {
             match import {
-                YmlImport::File { path, optional } => {
+                YmlImport::File {
+                    path,
+                    optional,
+                } => {
                     let pattern = FilePattern::new(path)?;
                     let files = expand_pattern(&pattern, *optional, &self.loader.policy)?;
                     if pattern.is_glob() {
@@ -576,7 +654,9 @@ impl PreparedLoad {
 
 impl WatchPlan {
     /// 业务作用：为有序文件身份、缺失候选及模式生成独立观察身份。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：内部对账摘要；即使值相同，来源替换也会改变此身份。
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
@@ -606,7 +686,10 @@ impl WatchPlan {
     }
 
     /// 业务作用：已知来源或模式集合变化时拒绝旧候选。
-    /// 参数说明：`policy` 是原读取策略。
+    ///
+    /// 参数说明：
+    /// - `policy`：是原读取策略。
+    ///
     /// 返回：读取证据与重新枚举的集合均一致时成功。
     pub fn revalidate(&self, policy: &LoadPolicy) -> Result<()> {
         for source in &self.files {
@@ -647,7 +730,9 @@ pub struct CheckReport {
 
 impl LoadedConfig {
     /// 业务作用：返回不触发业务发布或外部副作用的装配诊断。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：完整候选的安全规模报告，不能替代业务校验和组件应用状态。
     pub fn report(&self) -> CheckReport {
         CheckReport {
@@ -662,25 +747,34 @@ impl LoadedConfig {
     }
 
     /// 业务作用：显式借用含原值的候选，调用方负责材料边界。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：已求值树，不表示业务组件已经应用。
     pub fn tree(&self) -> &Value {
         &self.tree
     }
     /// 业务作用：将完整树所有权交给宿主的候选发布流程。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：消费来源结果后的配置树。
     pub fn into_tree(self) -> Value {
         self.tree
     }
     /// 业务作用：按业务结构绑定整个候选。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：通过类型与自定义 Serde 校验的配置。
     pub fn bind<T: DeserializeOwned>(&self) -> Result<T> {
         bind(self.tree.clone())
     }
     /// 业务作用：让分段初始化的组件复用相同文本绑定规则。
-    /// 参数说明：`path` 是组件拥有的子树。
+    ///
+    /// 参数说明：
+    /// - `path`：是组件拥有的子树。
+    ///
     /// 返回：子树目标配置；缺失或类型错误被拒绝。
     pub fn bind_at<T: DeserializeOwned>(&self, path: &ConfigPath) -> Result<T> {
         let value = path
@@ -696,13 +790,17 @@ impl LoadedConfig {
         })
     }
     /// 业务作用：取得值身份供宿主去重，来源观察仍须独立对账。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：候选摘要材料，不能作为公开秘密指纹输出。
     pub fn fingerprint(&self) -> &[u8; 32] {
         &self.fingerprint
     }
     /// 业务作用：把有序来源事实与观察目标合成独立身份，不混用有效值身份。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：包含内存及远端文档身份的来源摘要，仅供受控比较。
     pub fn source_fingerprint(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
@@ -719,7 +817,10 @@ impl LoadedConfig {
         hash.finalize().into()
     }
     /// 业务作用：执行只读业务校验，不安装资源。
-    /// 参数说明：`validate` 为纯校验函数。
+    ///
+    /// 参数说明：
+    /// - `validate`：为纯校验函数。
+    ///
     /// 返回：全部业务约束成立时成功，错误由调用方使用安全字段位置表达。
     pub fn validate(&self, validate: impl FnOnce(&Value) -> Result<()>) -> Result<()> {
         validate(&self.tree)
@@ -728,13 +829,17 @@ impl LoadedConfig {
 
 impl SourceRecord {
     /// 业务作用：显式获取来源名称以供受控管理界面使用。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：原始身份名称，不适合默认日志输出。
     pub fn name(&self) -> &str {
         &self.name
     }
     /// 业务作用：为调用方保留同一文档字节的内容身份。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：源摘要，仅供内部比较。
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
@@ -743,7 +848,9 @@ impl SourceRecord {
 
 impl Merged {
     /// 业务作用：为一轮装配创建空基线，不继承上一轮已删除来源的值。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：没有任何来源贡献的树。
     fn new() -> Self {
         Self {
@@ -756,7 +863,11 @@ impl Merged {
         }
     }
     /// 业务作用：检查本轮共享预算后解析和合并文档。
-    /// 参数说明：`document` 是取得的正文；`policy` 是本轮约束。
+    ///
+    /// 参数说明：
+    /// - `document`：是取得的正文
+    /// - `policy`：是本轮约束。
+    ///
     /// 返回：完整合并成功，不重复解析同一文档。
     fn add(&mut self, document: &SourceDocument, policy: &LoadPolicy) -> Result<()> {
         let parsed = self.parse(document, policy)?;
@@ -764,7 +875,11 @@ impl Merged {
         Ok(())
     }
     /// 业务作用：导入文档不能重新声明控制自身加载的权限。
-    /// 参数说明：`document` 是外部导入；`policy` 是固定策略。
+    ///
+    /// 参数说明：
+    /// - `document`：是外部导入
+    /// - `policy`：是固定策略。
+    ///
     /// 返回：仅业务字段进入来源合并。
     fn add_import(&mut self, document: &SourceDocument, policy: &LoadPolicy) -> Result<()> {
         let parsed = self.parse(document, policy)?;
@@ -779,7 +894,11 @@ impl Merged {
         Ok(())
     }
     /// 业务作用：让所有文件和内存来源共同消耗输入及实际解析预算，覆盖不退还此前消耗。
-    /// 参数说明：`document` 为下一来源；`policy` 是共享限制。
+    ///
+    /// 参数说明：
+    /// - `document`：为下一来源
+    /// - `policy`：是共享限制。
+    ///
     /// 返回：通过预算和严格解析的文档。
     fn parse(&mut self, document: &SourceDocument, policy: &LoadPolicy) -> Result<ParsedDocument> {
         self.bytes = self
@@ -807,7 +926,11 @@ impl Merged {
         Ok(parsed)
     }
     /// 业务作用：合并已验证文档并保留字段覆盖来源。
-    /// 参数说明：`document` 提供名称；`parsed` 提供唯一解析结果。
+    ///
+    /// 参数说明：
+    /// - `document`：提供名称
+    /// - `parsed`：提供唯一解析结果。
+    ///
     /// 返回：原地更新私有候选，不影响运行态。
     fn add_parsed(&mut self, document: &SourceDocument, parsed: ParsedDocument) {
         merge(
@@ -829,9 +952,16 @@ impl Merged {
     }
 }
 
-/// 业务作用：保持映射深合并、数组整体替换和显式 null 的语义。
-/// 参数说明：`target/value` 是两层节点；`path/source/origins` 记录覆盖关系。
-/// 返回：更新尚未发布的候选树。
+/// 业务作用：在候选配置树中深合并映射，整体替换其它节点并维护覆盖来源。
+///
+/// 参数说明：
+/// - `target`：较低优先级、将在原位更新的候选节点。
+/// - `value`：当前较高优先级来源的新节点，数组和显式 null 整体替换。
+/// - `path`：当前合并节点在配置树中的规范路径。
+/// - `source`：本次较高优先级来源的编号。
+/// - `origins`：按节点路径保存的覆盖来源链，随替换清除失效子路径。
+///
+/// 返回：无返回值；映射递归合并，其它节点替换后重建子路径来源。修改仅作用于尚未发布的候选树，不在此执行策略预算或最终类型校验。
 fn merge(
     target: &mut Value,
     value: Value,
@@ -860,9 +990,15 @@ fn merge(
     }
 }
 
-/// 业务作用：节点整体替换后为所有新子节点建立来源归属。
-/// 参数说明：`value/path/source/origins` 指定新子树与来源记录。
-/// 返回：补充数组或映射内部的字段来源。
+/// 业务作用：为整体替换后的新子树登记每个子节点的单一来源。
+///
+/// 参数说明：
+/// - `value`：已经选定的完整新子树。
+/// - `path`：新子树根节点的规范配置路径。
+/// - `source`：本次替换来源的编号。
+/// - `origins`：需要写入新后代路径归属的来源表。
+///
+/// 返回：无返回值；逐一为映射字段及数组元素登记来源并递归后代，不重复登记根路径，也不在此删除已有无关路径。
 fn record_children(
     value: &Value,
     path: &ConfigPath,
@@ -889,7 +1025,10 @@ fn record_children(
 }
 
 /// 业务作用：固定相对路径的工作目录，不在热加载时重新解释。
-/// 参数说明：`path` 是调用方提供路径。
+///
+/// 参数说明：
+/// - `path`：是调用方提供路径。
+///
 /// 返回：绝对路径或当前目录错误。
 fn absolute(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
@@ -902,7 +1041,11 @@ fn absolute(path: &Path) -> Result<PathBuf> {
 }
 
 /// 业务作用：零匹配条目也计入来源规划上限。
-/// 参数说明：`imports` 是完整声明；`policy` 为声明预算。
+///
+/// 参数说明：
+/// - `imports`：是完整声明
+/// - `policy`：为声明预算。
+///
 /// 返回：模式和声明数量有限时成功。
 fn validate_import_limits(imports: &[YmlImport], policy: &LoadPolicy) -> Result<()> {
     let patterns = imports.iter().filter(|entry| matches!(entry, YmlImport::File {path, ..} if path.to_string_lossy().contains(['*', '?']))).count();
@@ -914,7 +1057,11 @@ fn validate_import_limits(imports: &[YmlImport], policy: &LoadPolicy) -> Result<
 }
 
 /// 业务作用：不同声明不能重复读取同一真实配置文件。
-/// 参数说明：`prior` 是已有证据；`next` 是新来源。
+///
+/// 参数说明：
+/// - `prior`：是已有证据
+/// - `next`：是新来源。
+///
 /// 返回：身份唯一时成功。
 fn reject_duplicate(prior: &[FileEvidence], next: &FileEvidence) -> Result<()> {
     if prior.iter().any(|old| old.same_file(next)) {
@@ -925,7 +1072,11 @@ fn reject_duplicate(prior: &[FileEvidence], next: &FileEvidence) -> Result<()> {
 }
 
 /// 业务作用：统一环境层优先级并拒绝同层路径碰撞。
-/// 参数说明：`tree` 为环境覆盖前树；`loader` 固定快照和命名规则。
+///
+/// 参数说明：
+/// - `tree`：为环境覆盖前树
+/// - `loader`：固定快照和命名规则。
+///
 /// 返回：本轮被环境赋值的路径与确切变量名，名称只供受控解释。
 fn apply_environment(
     tree: &mut Value,
@@ -1002,7 +1153,12 @@ fn apply_environment(
 }
 
 /// 业务作用：结构覆盖不创建稀疏数组，也不以父子冲突猜测容器类型。
-/// 参数说明：`tree` 是当前节点；`path` 是剩余路径；`value` 为原值或显式结构化值。
+///
+/// 参数说明：
+/// - `tree`：是当前节点
+/// - `path`：是剩余路径
+/// - `value`：为原值或显式结构化值。
+///
 /// 返回：合法路径完成覆盖，容器类型冲突失败。
 fn set_value(tree: &mut Value, path: &[PathSegment], value: Value) -> Result<()> {
     let Some((segment, rest)) = path.split_first() else {
@@ -1036,7 +1192,10 @@ struct DigestWriter {
 }
 impl Write for DigestWriter {
     /// 业务作用：结果摘要的序列化过程中限制大小，不先创建无界 Vec。
-    /// 参数说明：`bytes` 为下一个序列化片段。
+    ///
+    /// 参数说明：
+    /// - `bytes`：为下一个序列化片段。
+    ///
     /// 返回：预算内写入长度，超限后拒绝继续序列化。
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.size = self
@@ -1050,7 +1209,9 @@ impl Write for DigestWriter {
         Ok(bytes.len())
     }
     /// 业务作用：摘要写入不持有外部缓冲区。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：立即成功。
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
@@ -1058,7 +1219,11 @@ impl Write for DigestWriter {
 }
 
 /// 业务作用：计算仅供内部值去重的有界序列化身份。
-/// 参数说明：`tree` 为候选；`limit` 为最终序列化字节上限。
+///
+/// 参数说明：
+/// - `tree`：为候选
+/// - `limit`：为最终序列化字节上限。
+///
 /// 返回：摘要或预算错误。
 fn tree_fingerprint(tree: &Value, limit: usize) -> Result<[u8; 32]> {
     let mut writer = DigestWriter {
@@ -1072,7 +1237,10 @@ fn tree_fingerprint(tree: &Value, limit: usize) -> Result<[u8; 32]> {
 
 impl fmt::Debug for SourceRecord {
     /// 业务作用：来源默认诊断隐藏名称和摘要。
-    /// 参数说明：`f` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：为格式化目标。
+    ///
     /// 返回：数值编号和输入字节数。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SourceRecord")
@@ -1083,7 +1251,10 @@ impl fmt::Debug for SourceRecord {
 }
 impl fmt::Debug for WatchPlan {
     /// 业务作用：观察默认诊断只显示规模，不显示路径。
-    /// 参数说明：`f` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：为格式化目标。
+    ///
     /// 返回：来源数量摘要。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WatchPlan")
@@ -1094,7 +1265,10 @@ impl fmt::Debug for WatchPlan {
 }
 impl fmt::Debug for LoadedConfig {
     /// 业务作用：完整候选的默认诊断隐藏业务值和环境材料。
-    /// 参数说明：`f` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：为格式化目标。
+    ///
     /// 返回：来源和字段数量摘要。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LoadedConfig")
@@ -1105,7 +1279,11 @@ impl fmt::Debug for LoadedConfig {
 }
 
 /// 业务作用：以带长度的编码保留路径边界，避免串联摘要歧义。
-/// 参数说明：`hash` 是候选摘要；`path` 是逻辑来源身份。
+///
+/// 参数说明：
+/// - `hash`：是候选摘要
+/// - `path`：是逻辑来源身份。
+///
 /// 返回：仅更新内部摘要。
 fn fingerprint_path(hash: &mut Sha256, path: &Path) {
     let bytes = path.as_os_str().as_encoded_bytes();

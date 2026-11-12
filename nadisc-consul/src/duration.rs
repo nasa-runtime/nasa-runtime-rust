@@ -2,7 +2,10 @@ use nadisc::{http::error, managed::*};
 use std::time::Duration;
 
 /// 业务作用：将 agent 可读检查时限转换为精确时长，避免单位和复合表达影响冻结计划核验。
-/// 参数说明：`value` 是 Interval 或 Timeout 字段，单位遵循 Consul 的 Go duration 表达。
+///
+/// 参数说明：
+/// - `value`：是 Interval 或 Timeout 字段，单位遵循 Consul 的 Go duration 表达。
+///
 /// 返回：完整且可精确表示为纳秒的非负时长；缺失、溢出或非法表达返回 IncompleteSnapshot。
 pub(super) fn read(value: Option<&str>) -> Result<Duration> {
     value.and_then(parse).ok_or_else(|| {
@@ -14,7 +17,10 @@ pub(super) fn read(value: Option<&str>) -> Result<Duration> {
 }
 
 /// 业务作用：有界解析 agent 的时长字符串，不因浮点舍入把不同检查期限认证为同一值。
-/// 参数说明：`value` 是带单位的时长，可以包含小时、分钟、秒及小数分量。
+///
+/// 参数说明：
+/// - `value`：是带单位的时长，可以包含小时、分钟、秒及小数分量。
+///
 /// 返回：纳秒精度时长；负值、无法精确表达的子纳秒和超出后端整数范围的值拒绝。
 fn parse(value: &str) -> Option<Duration> {
     if value.is_empty() || value.len() > 128 {

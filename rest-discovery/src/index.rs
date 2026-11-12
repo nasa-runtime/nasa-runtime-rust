@@ -41,7 +41,14 @@ pub(crate) struct ServiceNameIndex {
 }
 
 impl ServiceNameIndex {
-    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造尚无服务名快照的启发式路由索引。
+    ///
+    /// 参数说明：
+    /// - `match_mode`：主机名查找时的大小写匹配策略。
+    /// - `grace`：成功枚举中名称缺席后的保留期限。
+    /// - `max_services`：输入及保留索引的容量上限。
+    ///
+    /// 返回：返回空索引并保存策略，不校验预算或执行服务枚举。
     pub(crate) fn new(match_mode: ServiceMatchMode, grace: Duration, max_services: usize) -> Self {
         Self {
             names: ArcSwap::from_pointee(HashMap::new()),
@@ -51,10 +58,12 @@ impl ServiceNameIndex {
         }
     }
 
-    /// 业务作用：按 match_mode 归一化 host(CaseInsensitive → ASCII lowercase)。
+    /// 业务作用：按配置统一查找键与服务名的 ASCII 大小写。
     ///
-    /// # 参数
-    /// - `host`: 实例注册或请求路由使用的主机名。
+    /// 参数说明：
+    /// - `host`：原始请求主机或服务名。
+    ///
+    /// 返回：大小写不敏感模式返回 ASCII 小写副本，否则原样克隆；不执行 Unicode 归一化。
     fn normalize(&self, host: &str) -> String {
         match self.match_mode {
             ServiceMatchMode::CaseInsensitive => host.to_ascii_lowercase(),
@@ -62,7 +71,12 @@ impl ServiceNameIndex {
         }
     }
 
-    /// 业务作用：host 命中 → 返回注册中心 canonical 服务名;未命中 → `None`。
+    /// 业务作用：从当前索引快照查询规范服务名。
+    ///
+    /// 参数说明：
+    /// - `host`：按匹配策略归一化后查找的请求主机名。
+    ///
+    /// 返回：命中返回规范服务名克隆，否则 None；不在此主动检查缺席期限或请求后端。
     pub(crate) fn lookup(&self, host: &str) -> Option<String> {
         let key = self.normalize(host);
         self.names
@@ -71,9 +85,13 @@ impl ServiceNameIndex {
             .map(|e| e.canonical_name.clone())
     }
 
-    /// 业务作用：用一份新服务名列表刷新索引(仅 list_services 成功时调用)。`now` 由调用方传入(便于确定性验证)。
-    /// 返回本轮【需回收 watch】的旧 canonical 名(超 grace 缺席 + canonical 单值替换;冲突不计,见 [`IndexRefreshOutcome`]),
-    /// 供调用方 `mark_removed`。
+    /// 业务作用：由一次成功枚举构建并发布新的服务名索引及待回收名称。
+    ///
+    /// 参数说明：
+    /// - `names`：后端本次完整成功枚举的服务名。
+    /// - `now`：用于计算连续缺席期限的单调观察时刻。
+    ///
+    /// 返回：输入规模及名称长度有效时原子发布索引，并返回宽限耗尽或规范名替换所需回收的旧名称；非法输入保留旧索引。归一化名称冲突整体不进入索引且不列为 removed，剩余容量不足也可提前回收缺席旧项。
     pub(crate) fn refresh(
         &self,
         names: Vec<String>,
@@ -148,7 +166,10 @@ impl ServiceNameIndex {
             }
         }
 
+        // 新快照全部构建完成后再一次发布，读者不会看到归组和旧名称保留过程中的半成品。
         self.names.store(Arc::new(next));
-        Ok(IndexRefreshOutcome { removed })
+        Ok(IndexRefreshOutcome {
+            removed,
+        })
     }
 }

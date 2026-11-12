@@ -41,7 +41,11 @@ impl DeferredTask {
     /// 返回：当前 worker 独占 Handling 责任的任务引用。
     fn envelope(&self) -> &Arc<TaskEnvelope> {
         match self {
-            Self::Main { envelope, .. } | Self::Tunnel(envelope) => envelope,
+            Self::Main {
+                envelope,
+                ..
+            }
+            | Self::Tunnel(envelope) => envelope,
         }
     }
 }
@@ -707,7 +711,10 @@ pub(crate) async fn run(
                 Ordering::Release,
             );
             match control_poll {
-                ConsumerPoll::Item { value, .. } => {
+                ConsumerPoll::Item {
+                    value,
+                    ..
+                } => {
                     let decremented = slot
                         .control_depth
                         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -722,7 +729,9 @@ pub(crate) async fn run(
                     }
                     progressed = true;
                 }
-                ConsumerPoll::Poisoned { .. } => {
+                ConsumerPoll::Poisoned {
+                    ..
+                } => {
                     let decremented = slot
                         .control_depth
                         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -736,14 +745,24 @@ pub(crate) async fn run(
                     runner.fail_slot(&slot, "control_queue_failed");
                     break;
                 }
-                ConsumerPoll::Empty | ConsumerPoll::Reserved { .. } | ConsumerPoll::Closed => break,
+                ConsumerPoll::Empty
+                | ConsumerPoll::Reserved {
+                    ..
+                }
+                | ConsumerPoll::Closed => break,
             }
         }
         if let Some(deferred) = consumers.deferred.take() {
             consumers.deferred = match deferred {
-                DeferredTask::Main { sequence, envelope } => runner
+                DeferredTask::Main {
+                    sequence,
+                    envelope,
+                } => runner
                     .resume_main_handling(&slot, sequence, envelope)
-                    .map(|envelope| DeferredTask::Main { sequence, envelope }),
+                    .map(|envelope| DeferredTask::Main {
+                        sequence,
+                        envelope,
+                    }),
                 DeferredTask::Tunnel(envelope) => runner
                     .resume_handling(slot.index(), envelope)
                     .map(DeferredTask::Tunnel),
@@ -760,7 +779,10 @@ pub(crate) async fn run(
                 Ordering::Release,
             );
             match main_poll {
-                ConsumerPoll::Item { sequence, value } => {
+                ConsumerPoll::Item {
+                    sequence,
+                    value,
+                } => {
                     let decremented = slot
                         .main_depth
                         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -768,12 +790,18 @@ pub(crate) async fn run(
                         })
                         .is_ok();
                     debug_assert!(decremented, "main queue depth authority lost");
-                    consumers.deferred = runner
-                        .consume_main(&slot, sequence, value)
-                        .map(|envelope| DeferredTask::Main { sequence, envelope });
+                    consumers.deferred =
+                        runner.consume_main(&slot, sequence, value).map(|envelope| {
+                            DeferredTask::Main {
+                                sequence,
+                                envelope,
+                            }
+                        });
                     progressed = true;
                 }
-                ConsumerPoll::Poisoned { .. } => {
+                ConsumerPoll::Poisoned {
+                    ..
+                } => {
                     let decremented = slot
                         .main_depth
                         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -787,7 +815,11 @@ pub(crate) async fn run(
                     runner.fail_slot(&slot, "main_queue_failed");
                     break;
                 }
-                ConsumerPoll::Empty | ConsumerPoll::Reserved { .. } | ConsumerPoll::Closed => break,
+                ConsumerPoll::Empty
+                | ConsumerPoll::Reserved {
+                    ..
+                }
+                | ConsumerPoll::Closed => break,
             }
         }
         runner.progress_migrations(&slot, consumers.main.boundary());
@@ -805,20 +837,27 @@ pub(crate) async fn run(
                     break;
                 }
                 match tunnel.poll_executable() {
-                    ConsumerPoll::Item { sequence, value } => {
+                    ConsumerPoll::Item {
+                        sequence,
+                        value,
+                    } => {
                         consumers.deferred = runner
                             .consume_tunnel(&slot, sequence, value)
                             .map(DeferredTask::Tunnel);
                         progressed = true;
                     }
-                    ConsumerPoll::Poisoned { .. } => progressed = true,
+                    ConsumerPoll::Poisoned {
+                        ..
+                    } => progressed = true,
                     ConsumerPoll::Failed => {
                         runner.fail_strict_tunnel(&slot, &tunnel, "strict_tunnel_queue_failed");
                         break;
                     }
-                    ConsumerPoll::Empty | ConsumerPoll::Reserved { .. } | ConsumerPoll::Closed => {
-                        break
+                    ConsumerPoll::Empty
+                    | ConsumerPoll::Reserved {
+                        ..
                     }
+                    | ConsumerPoll::Closed => break,
                 }
             }
         }
@@ -837,20 +876,27 @@ pub(crate) async fn run(
                     break;
                 }
                 match tunnel.poll() {
-                    ConsumerPoll::Item { sequence, value } => {
+                    ConsumerPoll::Item {
+                        sequence,
+                        value,
+                    } => {
                         consumers.deferred = runner
                             .consume_tunnel(&slot, sequence, value)
                             .map(DeferredTask::Tunnel);
                         progressed = true;
                     }
-                    ConsumerPoll::Poisoned { .. } => progressed = true,
+                    ConsumerPoll::Poisoned {
+                        ..
+                    } => progressed = true,
                     ConsumerPoll::Failed => {
                         tunnel.close();
                         break;
                     }
-                    ConsumerPoll::Empty | ConsumerPoll::Reserved { .. } | ConsumerPoll::Closed => {
-                        break
+                    ConsumerPoll::Empty
+                    | ConsumerPoll::Reserved {
+                        ..
                     }
+                    | ConsumerPoll::Closed => break,
                 }
             }
             runner.retire_non_strict_tunnel(&slot, &tunnel);

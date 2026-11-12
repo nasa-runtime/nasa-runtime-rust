@@ -21,7 +21,7 @@ name = "nadisc"
 # 抽象接口需要:async trait(对象安全,供 dyn DiscoveryClient)、错误类型、watch::Receiver(服务实例快照推送)。
 async-trait = "0.1"
 anyhow = "1"
-tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["net", "rt", "sync", "time"] }
 serde = { version = "1", features = ["derive"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 serde_json = { version = "1", optional = true }

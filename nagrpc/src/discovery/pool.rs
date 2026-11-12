@@ -37,7 +37,9 @@ struct Dial {
 }
 impl Drop for Dial {
     /// 业务作用：在握手成功、失败或调用取消时释放端点建连权并唤醒同端点等待者。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：取消不遗留建连占位；未成功发布的端点从握手结束时继续退避，不能由等待者立即重拨。
     fn drop(&mut self) {
         let mut pool = self
@@ -79,7 +81,9 @@ struct Activity {
 }
 impl Drop for Connection {
     /// 业务作用：最后一个池或在途 RPC 引用释放时结束该连接 driver。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：实例被移除时仍由在途正文持有连接，直到排空或预算结束。
     fn drop(&mut self) {
         self.driver.abort();
@@ -88,7 +92,9 @@ impl Drop for Connection {
 struct Active(Arc<Connection>);
 impl Drop for Active {
     /// 业务作用：RPC 结束时更新连接空闲事实。
+    ///
     /// 参数说明：无。
+    ///
     /// 返回：最后一个流结束后开始计算空闲回收时间。
     fn drop(&mut self) {
         self.0.active.streams.fetch_sub(1, Ordering::AcqRel);
@@ -102,8 +108,17 @@ impl Drop for Active {
 }
 
 /// 业务作用：用当前实例完整协议字段选址，并在实际 HTTP/2 提交前再次核对同一候选。
-/// 参数说明：`shared` 固定作用域，`reservation` 与 `budget` 保留原期限，`request` 是双向流，`release` 保证回收；`selected` 绑定已认证实例，`admission` 复验业务身份。
-/// 返回：带受管正文的响应，不重试已提交或可能提交的 RPC。
+///
+/// 参数说明：
+/// - `shared`：冻结的服务发现、连接池和拨号策略。
+/// - `reservation`：本次 RPC 的预留责任与有效性句柄。
+/// - `request`：待提交的 HTTP/2 请求及流式 body。
+/// - `release`：需随返回 body 或失败路径释放的调用责任。
+/// - `budget`：从外层传入的原请求期限与流控预算。
+/// - `selected`：可选已认证的精确实例；存在时启用 strict 发现门禁。
+/// - `admission`：发送前同步复验业务身份的可选回调。
+///
+/// 返回：门禁、连接和发送通过时返回携带受管 body 的响应；发现、预算、容量、身份或 HTTP/2 失败返回受控 Status。已提交或可能提交的请求不在本函数内重试；body 生命周期继续持有回收责任。
 pub(super) async fn call(
     shared: Arc<Shared>,
     reservation: Arc<Reservation>,
@@ -210,8 +225,16 @@ pub(super) async fn call(
 }
 
 /// 业务作用：复用健康连接或取得单端点建连权，让不同端点的握手互不持有全局池锁。
-/// 参数说明：`shared` 固定池和拨号上限，`observation` 与 `instance` 保留候选身份；`reservation`、`budget` 保留原期限，`strict` 禁止失败证据宽限。
-/// 返回：当前候选的连接；同端点等待者复用成功结果，失败或取消保留退避，容量不足不启动拨号。
+///
+/// 参数说明：
+/// - `shared`：共享池、容量与端点拨号策略。
+/// - `observation`：绑定当前服务 slot 的发现观察。
+/// - `instance`：需要精确匹配的完整候选实例。
+/// - `reservation`：新连接发布前需仍有效的调用预留责任。
+/// - `budget`：新连接发布前复验的原始请求预算。
+/// - `strict`：是否禁止发现失败证据宽限。
+///
+/// 返回：返回当前仍接纳候选的健康连接；同端点握手在途时等待共享结果，容量、退避、预算、发现或连接失败返回 Status。新连接发布前再验预算与候选，复用连接仍须在最终发送边界复验。
 async fn pooled_connection(
     shared: &Arc<Shared>,
     observation: &nadisc_runtime::Observation,
@@ -387,7 +410,11 @@ async fn pooled_connection(
 }
 
 /// 业务作用：按明确协议与 TLS 信任策略建立一个由 discovery owner 托管的 HTTP/2 连接。
-/// 参数说明：`shared` 是冻结调用配置，`instance` 提供本代完整端点事实。
+///
+/// 参数说明：
+/// - `shared`：是冻结调用配置
+/// - `instance`：提供本代完整端点事实。
+///
 /// 返回：握手成功且 driver 已登记才发布池条目；失败不留下独立重连任务。
 async fn connect(shared: &Shared, instance: Instance) -> Result<Arc<Connection>, Status> {
     let metadata = &instance.metadata;

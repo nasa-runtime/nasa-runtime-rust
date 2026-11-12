@@ -22,7 +22,10 @@ pub struct ConfigPath(
 
 impl ConfigPath {
     /// 业务作用：解析明确的字段与数组索引引用，拒绝含糊路径。
-    /// 参数说明：`text` 采用 `a.b[0].c` 形式。
+    ///
+    /// 参数说明：
+    /// - `text`：采用 `a.b[0].c` 形式。
+    ///
     /// 返回：合法路径；空段、负下标、溢出或不支持的转义被拒绝。
     pub fn parse(text: &str) -> Result<Self> {
         if text.is_empty() || text.len() > 4096 {
@@ -72,7 +75,10 @@ impl ConfigPath {
     }
 
     /// 业务作用：追加确切字段名，保持字面键身份。
-    /// 参数说明：`key` 是原始字段名。
+    ///
+    /// 参数说明：
+    /// - `key`：是原始字段名。
+    ///
     /// 返回：独立的子字段路径。
     pub fn key(&self, key: &str) -> Self {
         let mut path = self.clone();
@@ -81,7 +87,10 @@ impl ConfigPath {
     }
 
     /// 业务作用：追加只读数组位置。
-    /// 参数说明：`index` 是非负数组下标。
+    ///
+    /// 参数说明：
+    /// - `index`：是非负数组下标。
+    ///
     /// 返回：独立的数组元素路径。
     pub fn index(&self, index: usize) -> Self {
         let mut path = self.clone();
@@ -90,7 +99,10 @@ impl ConfigPath {
     }
 
     /// 业务作用：按结构身份查找配置节点，不创建缺失路径。
-    /// 参数说明：`tree` 是完整候选树。
+    ///
+    /// 参数说明：
+    /// - `tree`：是完整候选树。
+    ///
     /// 返回：命中节点或不存在。
     pub fn get<'a>(&self, tree: &'a Value) -> Option<&'a Value> {
         self.0
@@ -102,7 +114,10 @@ impl ConfigPath {
     }
 
     /// 业务作用：识别父级策略是否覆盖当前字段。
-    /// 参数说明：`other` 为父级候选路径。
+    ///
+    /// 参数说明：
+    /// - `other`：为父级候选路径。
+    ///
     /// 返回：当前路径位于该子树内时为真。
     pub fn starts_with(&self, other: &Self) -> bool {
         self.0.starts_with(&other.0)
@@ -111,7 +126,10 @@ impl ConfigPath {
 
 impl fmt::Display for ConfigPath {
     /// 业务作用：输出有长度限制且不包含控制字符的字段位置。
-    /// 参数说明：`f` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：为格式化目标。
+    ///
     /// 返回：安全展示结果，完整身份仍保留在结构中。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (number, part) in self.0.iter().take(16).enumerate() {
@@ -141,7 +159,10 @@ impl fmt::Display for ConfigPath {
 
 impl fmt::Debug for ConfigPath {
     /// 业务作用：调试表示沿用受限字段展示。
-    /// 参数说明：`f` 为格式化目标。
+    ///
+    /// 参数说明：
+    /// - `f`：为格式化目标。
+    ///
     /// 返回：不输出无界路径内容。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)

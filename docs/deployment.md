@@ -33,8 +33,13 @@ cargo build --locked --release
 cargo build --locked --release -p <package>
 ```
 
-镜像只复制最终二进制、`zcf/` 下的配置和业务必需的证书或静态资源。进程工作目录必须能解析
-`zcf/application.yml`；该文件必须存在，内容可以是 `{}`。
+镜像只复制最终二进制、配置和业务必需的证书或静态资源。主路径优先使用非空环境变量
+`APP_CONFIG_FILE`，未设置或为空时使用 `zcf/application.yml`。相对路径按进程工作目录解析；
+所选文件必须存在，内容可以是 `{}`，指定文件不可读时不回退默认文件。
+
+例如通过 `APP_CONFIG_FILE=/etc/orders/application.yml` 使用挂载的配置；在项目根目录启动时，
+也可通过 `APP_CONFIG_FILE=config/application.yml` 使用项目内的 `config/` 目录。
+默认 profile 模板仍为 `zcf/application-{profile}`；需要其它位置时通过配置工厂显式指定模板。
 
 ## 启动配置
 

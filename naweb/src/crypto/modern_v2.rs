@@ -48,9 +48,9 @@ pub struct ModernV2Protocol;
 impl ModernV2Protocol {
     /// 业务作用：建立无可变状态的 modern-v2 协议对象。
     ///
-    /// # 返回
+    /// 返回：返回可共享注册到 [`super::CryptoRuntime`] 的协议实现。
     ///
-    /// 返回可共享注册到 [`super::CryptoRuntime`] 的协议实现。
+    /// 参数说明: 无。
     pub const fn new() -> Self {
         Self
     }
@@ -59,31 +59,29 @@ impl ModernV2Protocol {
 impl CryptoProtocol for ModernV2Protocol {
     /// 业务作用：返回静态协议 ID。
     ///
-    /// # 返回
+    /// 返回：返回 route policy 使用的 `modern-v2`。
     ///
-    /// 返回 route policy 使用的 `modern-v2`。
+    /// 参数说明: 无。
     fn id(&self) -> &'static str {
         "modern-v2"
     }
 
     /// 业务作用：返回请求和响应共同使用的 vendor JSON 媒体类型。
     ///
-    /// # 返回
+    /// 返回：返回 [`MODERN_V2_MEDIA_TYPE`]。
     ///
-    /// 返回 [`MODERN_V2_MEDIA_TYPE`]。
+    /// 参数说明: 无。
     fn request_content_type(&self) -> &'static str {
         MODERN_V2_MEDIA_TYPE
     }
 
     /// 业务作用：严格解析、认证解密、校验时间并最后写入重放存储。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: 请求固定快照提供的完整有界输入。
     ///
-    /// # 返回
-    ///
-    /// 成功返回业务 JSON 与响应上下文；任何失败都不尝试其它协议或明文。
+    /// 返回：成功返回业务 JSON 与响应上下文；任何失败都不尝试其它协议或明文。
     fn decrypt<'a>(
         &'a self,
         input: ProtocolDecryptInput,
@@ -223,13 +221,11 @@ impl CryptoProtocol for ModernV2Protocol {
 
     /// 业务作用：使用请求固定的 rid、key、target 和 audience 加密完整响应。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `input`: handler 完整响应、状态和请求固定上下文。
     ///
-    /// # 返回
-    ///
-    /// 返回七字段 modern-v2 信封；随机源、上限或响应 JSON 错误均禁止透传明文。
+    /// 返回：返回七字段 modern-v2 信封；随机源、上限或响应 JSON 错误均禁止透传明文。
     fn encrypt<'a>(
         &'a self,
         input: ProtocolEncryptInput,
@@ -340,13 +336,11 @@ pub struct ModernAadInput<'a> {
 
 /// 业务作用：按跨语言二进制合同构造 modern-v2 AAD。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `input`: 已由路由、认证、key ring 和本地 HTTP 栈确认的固定字段。
 ///
-/// # 返回
-///
-/// 返回无 JSON 歧义的二进制 AAD；字段过长或方向/status 组合错误会关闭请求。
+/// 返回：返回无 JSON 歧义的二进制 AAD；字段过长或方向/status 组合错误会关闭请求。
 pub fn build_modern_aad(input: ModernAadInput<'_>) -> Result<Vec<u8>, CryptoError> {
     if (input.direction == CryptoDirection::Request && input.status.is_some())
         || (input.direction == CryptoDirection::Response && input.status.is_none())
@@ -381,14 +375,12 @@ pub fn build_modern_aad(input: ModernAadInput<'_>) -> Result<Vec<u8>, CryptoErro
 
 /// 业务作用：追加 `u32 big-endian length + UTF-8 bytes` 字段。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `output`: 当前 AAD 拥有缓冲区。
 /// - `value`: 经过上游语义验证的文本字段。
 ///
-/// # 返回
-///
-/// 长度可表示时返回空值，否则返回策略错误。
+/// 返回：长度可表示时返回空值，否则返回策略错误。
 fn push_lp(output: &mut Vec<u8>, value: &str) -> Result<(), CryptoError> {
     let length = u32::try_from(value.len())
         .map_err(|_| CryptoError::new(CryptoErrorKind::Policy, "modern-aad-field-too-large"))?;
@@ -399,14 +391,12 @@ fn push_lp(output: &mut Vec<u8>, value: &str) -> Result<(), CryptoError> {
 
 /// 业务作用：校验信封字符串字段在 Base64 解码前已经受限。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `envelope`: 已通过字段数量和类型检查的信封。
 /// - `max_string_bytes`: 任一字符串允许的最大 UTF-8 字节数。
 ///
-/// # 返回
-///
-/// 全部字段有界时返回空值，否则返回公开大小错误。
+/// 返回：全部字段有界时返回空值，否则返回公开大小错误。
 fn validate_envelope_strings(
     envelope: &ModernEnvelope,
     max_string_bytes: usize,
@@ -432,14 +422,12 @@ fn validate_envelope_strings(
 
 /// 业务作用：解码无 padding Base64URL 并限制解码后长度。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 信封中的受限编码文本。
 /// - `max_decoded`: 解码后二进制上限。
 ///
-/// # 返回
-///
-/// 合法时返回二进制；padding、字符集或长度错误返回统一信封错误。
+/// 返回：合法时返回二进制；padding、字符集或长度错误返回统一信封错误。
 fn decode_unpadded(value: &str, max_decoded: usize) -> Result<Vec<u8>, CryptoError> {
     if value.contains('=') || value.len() > max_decoded.saturating_mul(4).saturating_add(3) / 3 {
         return Err(CryptoError::new(
@@ -466,14 +454,12 @@ fn decode_unpadded(value: &str, max_decoded: usize) -> Result<Vec<u8>, CryptoErr
 ///
 /// - `N`: 协议规定的固定二进制字节数。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `value`: 信封中的编码文本。
 /// - `reason`: 由调用方写死的低基数内部原因。
 ///
-/// # 返回
-///
-/// 长度与编码严格匹配时返回数组，否则返回信封错误。
+/// 返回：长度与编码严格匹配时返回数组，否则返回信封错误。
 fn decode_exact<const N: usize>(value: &str, reason: &'static str) -> Result<[u8; N], CryptoError> {
     let decoded = decode_unpadded(value, N)?;
     decoded
@@ -483,13 +469,11 @@ fn decode_exact<const N: usize>(value: &str, reason: &'static str) -> Result<[u8
 
 /// 业务作用：把系统时间转换成协议使用的 Unix epoch 毫秒。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `time`: 当前请求固定或响应读取的系统时间。
 ///
-/// # 返回
-///
-/// 在 epoch 之后且不超过 i64 时返回毫秒，否则返回内部时间错误。
+/// 返回：在 epoch 之后且不超过 i64 时返回毫秒，否则返回内部时间错误。
 fn system_time_millis(time: SystemTime) -> Result<i64, CryptoError> {
     let millis = time
         .duration_since(UNIX_EPOCH)
@@ -501,16 +485,14 @@ fn system_time_millis(time: SystemTime) -> Result<i64, CryptoError> {
 
 /// 业务作用：在 AEAD 认证成功后检查请求时间窗。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `timestamp_ms`: 信封中已认证的 Unix epoch 毫秒。
 /// - `now`: 本次请求固定系统时间。
 /// - `past_window`: 允许落后服务端的最大时长。
 /// - `future_skew`: 允许领先服务端的最大时长。
 ///
-/// # 返回
-///
-/// 时间在闭区间内返回空值，否则返回过期错误。
+/// 返回：时间在闭区间内返回空值，否则返回过期错误。
 fn validate_timestamp(
     timestamp_ms: i64,
     now: SystemTime,
@@ -532,14 +514,12 @@ fn validate_timestamp(
 
 /// 业务作用：解析业务 JSON 并检查实际嵌套深度。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `bytes`: 已认证解密或准备加密的完整 JSON 字节。
 /// - `max_depth`: 根节点计为一的最大嵌套深度。
 ///
-/// # 返回
-///
-/// 单个完整 JSON value 且深度有界时返回空值；尾随字节、语法或深度错误均拒绝。
+/// 返回：单个完整 JSON value 且深度有界时返回空值；尾随字节、语法或深度错误均拒绝。
 pub fn validate_json(bytes: &[u8], max_depth: usize) -> Result<(), CryptoError> {
     if !json_depth_within_limit(bytes, max_depth) {
         return Err(CryptoError::new(
@@ -557,14 +537,12 @@ pub fn validate_json(bytes: &[u8], max_depth: usize) -> Result<(), CryptoError> 
 
 /// 业务作用：在不分配 JSON 对象树的前提下预检容器嵌套深度。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `bytes`: 尚待严格语法解析的 JSON 字节。
 /// - `max_depth`: 根容器或根标量都按深度一计算的上限。
 ///
-/// # 返回
-///
-/// 扫描过程中未超过上限返回 `true`。字符串内括号和转义不会改变深度；括号配对与其它 JSON
+/// 返回：扫描过程中未超过上限返回 `true`。字符串内括号和转义不会改变深度；括号配对与其它 JSON
 /// 语法仍交给后续 serde 解析器统一判断。
 fn json_depth_within_limit(bytes: &[u8], max_depth: usize) -> bool {
     let mut depth = 0_usize;

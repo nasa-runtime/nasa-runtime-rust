@@ -29,9 +29,19 @@ cargo check --manifest-path nasa/Cargo.toml --no-default-features --features app
 cargo fmt --all -- --check
 ```
 
-工作区内部依赖使用 crates.io 版本。检查 `nasa` 会构建本地门面，但它使用的 `napp` 等实现仍来自
-registry；该命令不能代替对本地实现组件的检查。修改实现时使用该组件的 manifest；涉及跨组件接口时，
-还应在显式选择本地实现的消费应用中核对接线，并通过依赖图确认来源，避免把已发布组件的行为当作本地改动。
+组件 manifest 保留 crates.io 版本约束；根工作区通过 `[patch.crates-io]` 将同名成员统一解析为当前
+检出的源码。锁文件同时固定外部依赖。运行 `python3 .github/scripts/verify-workspace-sources.py`
+可确认完整 feature 图中没有同名成员的 registry 副本，离线环境可追加 `--offline`。
+修改实现时使用该组件的 manifest；涉及跨组件接口时，还需核对门面与消费应用的完整 feature 图。
+
+根工作区的 patch 不随 crate 传播到消费应用，也不进入规范化发布清单。源码构建成功不代表公开
+依赖版本已经可下载；独立消费应用需要自己显式选择配套源码，或者使用已完整发布的依赖版本。
+不要通过上传不可替换的版本来试探依赖关系是否成立。
+
+`python3 .github/scripts/package-workspace.py --target-dir target/archive` 使用外部 Cargo 配置继续选择
+当前组件源码，生成并实际编译每个成员的归档，再核对归档内的版本、README、许可正文与 NOTICE。
+该命令需要 Python 3.11 或安装了 `tomli` 的较早 Python，可追加 `--offline` 使用本地依赖缓存。
+产物仍声明 crates.io 版本依赖；向外部应用交付时必须同时说明所需配套源码或公开版本的可用条件。
 
 完整工作区包含原生依赖；Kafka 等能力可能需要 C/C++ 工具链、CMake、pkg-config 和对应平台开发库。
 具体依赖与 feature 以组件 manifest 和 README 为准。独立应用的接入与升级见

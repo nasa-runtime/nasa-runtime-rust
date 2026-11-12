@@ -55,7 +55,7 @@ impl IdempotentRejection {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：`ledger_type`/`operation`/`command`。
+    /// 返回：对应账本类型、操作或原生命令拒绝的固定文本，取值为 `ledger_type`、`operation` 或 `command`。
     pub fn label(self) -> &'static str {
         match self {
             Self::LedgerType => "ledger_type",
@@ -70,12 +70,12 @@ impl IdempotentRejection {
 pub struct IdempotentCounterError {
     /// 封闭拒绝原因。
     pub code: IdempotentRejection,
-    /// 脚本或命令返回的诊断文本，不含业务结果。
+    /// 脚本或命令返回的诊断文本；对外展示前由调用方检查是否需要脱敏。
     pub detail: String,
 }
 
 impl fmt::Display for IdempotentCounterError {
-    /// 业务作用：输出封闭原因与诊断文本，便于日志定位而不泄漏业务值。
+    /// 业务作用：输出封闭原因与原始诊断文本，供调用方定位拒绝来源；不在此处进行脱敏。
     ///
     /// 参数说明：
     /// - `formatter`: 目标格式化缓冲区。
