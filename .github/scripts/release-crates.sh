@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$#" -ne 1 ]]; then
-  echo "用法: $0 <batch|--plan|--versioned-plan>" >&2
+  echo "用法: $0 <batch|--plan|--versioned-plan|--patch-candidates>" >&2
   exit 2
 fi
 
@@ -175,6 +175,25 @@ update-application-runtime 8
 update-facade 9
 PLAN
 }
+
+# 业务作用：限定增量发布期间允许重新使用本地源码的组件及目标版本。
+# 参数说明：无。
+# 返回：仅输出当前明确安排的补丁组件，版本仍取自统一发布计划。
+patch_candidates() {
+  local item
+  local items
+  items="$(release_items new-update-storage-adapters) $(release_items update-application-runtime)" || return 1
+  for item in $items; do
+    case "${item%@*}" in
+      nagrpc|napp) printf '%s\n' "$item" ;;
+    esac
+  done
+}
+
+if [[ "$1" == "--patch-candidates" ]]; then
+  patch_candidates
+  exit 0
+fi
 
 if [[ "$1" == "--plan" || "$1" == "--versioned-plan" ]]; then
   while IFS=' ' read -r batch stage; do

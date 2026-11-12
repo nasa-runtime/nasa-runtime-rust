@@ -12,11 +12,11 @@ except ModuleNotFoundError:
 
 
 def registry_versions(root, packages):
-    """业务作用：只允许完整前置批次解除源码覆盖，固定线上组件的版本边界。
+    """业务作用：按完整前置批次或明确的增量候选固定组件的源码与线上版本边界。
     参数说明：
     - root：包含发布顺序与组件来源映射的仓库根目录。
     - packages：需要核对来源的工作区成员。
-    返回：已解除覆盖的前置组件及其版本；批次不完整、顺序异常或源码路径不符时拒绝。
+    返回：使用 registry 的组件及精确版本；不符合批次或候选名单、版本不符、源码路径异常时拒绝。
     """
     mapping = tomllib.loads((root / "Cargo.toml").read_text())["patch"]["crates-io"]
     published = {}
@@ -36,9 +36,21 @@ def registry_versions(root, packages):
     for line in plan.splitlines():
         _, _, names = line.split("\t")
         prefixes.append(prefixes[-1] | set(names.split()))
-    # 只能按完整批次依次采用线上依赖，不能以零散删除 patch 绕过未发布组件的来源约束。
+    # 增量发布只能让名单内的目标版本回到本地来源，其余组件继续严格核对线上版本。
+    # 完整发布仍按批次前缀推进，不能借增量入口替换任意组件或放宽来源检查。
     if set(published) not in prefixes:
-        raise ValueError("registry components must form complete preceding batches")
+        candidates = dict(
+            item.rsplit("@", 1) for item in subprocess.check_output(
+                [str(root / ".github/scripts/release-crates.sh"), "--patch-candidates"],
+                text=True,
+            ).split()
+        )
+        versions = {package["name"]: package["version"] for package in packages}
+        local = set(versions) - set(published)
+        if not local or not local.issubset(candidates):
+            raise ValueError("local overrides must form a release prefix or explicit patch candidates")
+        if any(versions[name] != candidates[name] for name in local):
+            raise ValueError("local patch candidate version differs from release plan")
     return published
 
 

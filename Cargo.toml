@@ -97,3 +97,4 @@ categories = ["asynchronous", "web-programming"]
 
 [patch.crates-io]
 nagrpc = { path = "nagrpc" }
+napp = { path = "napp" }
