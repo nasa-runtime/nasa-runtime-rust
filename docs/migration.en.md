@@ -86,7 +86,7 @@ rewrite applied SQL to bypass checksum mismatches. See the [SQLite guide](sqlite
 
 ## Migrate Kafka source and configuration
 
-`nafka 2.0.3` and its `napp`/`nasa` entry points include source-incompatible changes. Consumers must migrate and recompile; the patch number does not imply drop-in source compatibility. Keep the previous lockfile until migration is complete.
+The current `nafka` and its `napp`/`nasa` entry points require consumers to migrate their source and recompile; the patch number does not imply drop-in source compatibility. Keep the previous lockfile until migration is complete.
 
 - Full `ConsumerConfig` literals need `concurrency` and `group_concurrency`. Prefer explicit overrides with `..Default::default()` and review the remaining defaults. Other public producer and lane configuration structures also have additional fields.
 - Exhaustive `NafkaError` matches and complete field patterns must account for new variants and fields. Keep definite failure, unknown outcome, authorization denial and incomplete shutdown distinct.

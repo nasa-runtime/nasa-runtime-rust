@@ -6,7 +6,7 @@ Derived from [nacos-sdk 0.8.3](https://crates.io/crates/nacos-sdk/0.8.3), retain
 
 ## Integration and ownership
 
-Applications normally enable `nacos-sdk` through `nanacos` or the NASA facade. New multi-registry owners use the HTTP adapter in `nanacos::managed`; both owners must not supervise the same registration target. Direct dependencies use package `nanacos-sdk` version `1.0.0` with library name `nacos_sdk`.
+Applications normally enable `nacos-sdk` through `nanacos` or the NASA facade. New multi-registry owners use the HTTP adapter in `nanacos::managed`; both owners must not supervise the same registration target. Direct dependencies use package `nanacos-sdk` version `1.0.1` with library name `nacos_sdk`.
 
 Default features are `config`, `naming` and `auth-by-http`. Optional `tls`, `auth-by-aliyun` and `tracing-log` provide TLS, RAM signing and the SDK tracing subscriber. Configure `api::props::ClientProps` and construct `ConfigServiceBuilder` or `NamingServiceBuilder`. Use separate services for distinct credentials or namespaces.
 

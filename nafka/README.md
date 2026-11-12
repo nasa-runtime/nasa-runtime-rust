@@ -6,7 +6,7 @@ passthrough。
 可选 Schema Registry 能力在同一门面下提供 Confluent wire envelope、schema ID 白名单、
 有界正负缓存以及显式兼容性检查/注册，把消息编解码所需的远端 schema 访问与 Kafka 生命周期解耦。
 
-当前公开配置结构、错误类型和默认策略要求调用方完成源码与配置迁移；`2.0.3` 不能按补丁号推断源码兼容。迁移动作见[接入与升级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md#kafka-源码与配置迁移)。
+当前公开配置结构、错误类型和默认策略要求调用方完成源码与配置迁移；不能仅按补丁号推断源码兼容。迁移动作见[接入与升级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md#kafka-源码与配置迁移)。
 
 ## 核心价值与边界
 

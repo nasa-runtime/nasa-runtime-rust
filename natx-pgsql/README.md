@@ -2,7 +2,7 @@
 
 `natx-pgsql` 提供 PostgreSQL 的命名连接池、ambient transaction、强制事务连接、提交结果分类，
 以及分离的连接池获取、事务连接槽等待和执行前拒绝观测。
-它与 `natx` 共享 `natx-core` 的 datasource catalog，为同 owner 的 MySQL/PostgreSQL 受管编排提供
+它与 `natx` 共享 `natx-core` 的 datasource catalog，为同 owner 的 MySQL/PostgreSQL/SQLite 受管编排提供
 typed registry 基础。通过门面同时开启 `application,tx-pgsql` 后，由 `napp` 的 `"db"` 组件纳管
 连接、迁移门禁与关闭；本 crate 自身不依赖 Application。单个本地事务不能跨 driver 或跨 datasource。
 

@@ -12,7 +12,7 @@ Nacos 配置中心与注册中心的兼容传输 SDK，供 `nanacos` 的旧单 N
 
 ```toml
 [dependencies]
-nacos-sdk = { package = "nanacos-sdk", version = "1.0.0" }
+nacos-sdk = { package = "nanacos-sdk", version = "1.0.1" }
 ```
 
 默认启用 `config`、`naming` 和 `auth-by-http`。可选 `tls` 提供 TLS 通道，`auth-by-aliyun` 提供 RAM 签名认证，`tracing-log` 安装 SDK 日志 subscriber。连接参数仍使用 `api::props::ClientProps`，并通过 `ConfigServiceBuilder` 或 `NamingServiceBuilder` 构造对应服务；不同凭据和 namespace 使用独立服务实例。
