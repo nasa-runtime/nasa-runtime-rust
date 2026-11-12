@@ -81,13 +81,14 @@ def inspect_archive(package, target):
 
 
 def main():
-    """业务作用：按当前工作区依赖形成可编译归档，不尝试公开上传。
+    """业务作用：逐包形成可编译归档，保留已发布依赖的 registry 校验和身份。
     参数说明: 无。
-    返回：全部成员归档编译及资源核对成功后退出；任一失败立即停止。
+    返回：全部选定成员归档编译及资源核对成功后退出；任一失败立即停止。
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--target-dir", type=Path, default=Path("target"))
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--package", action="append")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     target = args.target_dir.resolve()
@@ -104,7 +105,6 @@ def main():
         "package",
         "--target-dir",
         str(target),
-        "--workspace",
         "--all-features",
         "--locked",
         "--allow-dirty",
@@ -112,9 +112,17 @@ def main():
     ]
     if args.offline:
         command.append("--offline")
-    # 外部 patch 只证明配套源码可编译；消费应用的 registry 依赖仍需独立可用。
-    subprocess.run(command, cwd=root, check=True)
-    for package in packages:
+    selected = packages
+    if args.package:
+        requested = set(args.package)
+        if requested - {p["name"] for p in packages}:
+            raise ValueError("unknown workspace package selection")
+        selected = [p for p in packages if p["name"] in requested]
+    # 整个工作区一起打包会用临时归档替代同名线上组件；VCS 信息变化即可造成校验和冲突。
+    # 逐包验证保留线上前置依赖，未发布组件仍由显式 patch 装配，不把临时归档伪装成 registry 内容。
+    for package in selected:
+        print("Packaging workspace member:", package["name"], flush=True)
+        subprocess.run([*command, "-p", package["name"]], cwd=root, check=True)
         inspect_archive(package, target)
     print("Registry-only dependency availability is not established by this build.")
 
