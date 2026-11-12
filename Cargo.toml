@@ -100,22 +100,16 @@ categories = ["asynchronous", "web-programming"]
 [patch.crates-io]
 nasa = { path = "nasa" }
 napp = { path = "napp" }
-naweb = { path = "naweb" }
-namapper-core = { path = "namapper-core" }
 namapper = { path = "namapper" }
 namapper-pgsql = { path = "namapper-pgsql" }
 namapper-sqlite = { path = "namapper-sqlite" }
-hystrix = { path = "hystrix" }
 nafana = { path = "nafana" }
 cacheable = { path = "cacheable" }
-natx-core = { path = "natx-core" }
 natx = { path = "natx" }
 natx-pgsql = { path = "natx-pgsql" }
 natx-sqlite = { path = "natx-sqlite" }
 nasched = { path = "nasched" }
 naws = { path = "naws" }
-nafka = { path = "nafka" }
-nadis = { path = "nadis" }
 nagrpc = { path = "nagrpc" }
 naidempotency-mysql = { path = "naidempotency-mysql" }
 naidempotency-pgsql = { path = "naidempotency-pgsql" }
@@ -135,8 +129,5 @@ namigrate-pgsql = { path = "namigrate-pgsql" }
 namigrate-sqlite = { path = "namigrate-sqlite" }
 naaudit-mysql = { path = "naaudit-mysql" }
 naaudit-pgsql = { path = "naaudit-pgsql" }
-config-boot = { path = "config-boot" }
 nadisc-runtime = { path = "nadisc-runtime" }
-nadisc-kubernetes = { path = "nadisc-kubernetes" }
-rest-discovery = { path = "rest-discovery" }
 rest-discovery-nacos = { path = "rest-discovery-nacos" }
