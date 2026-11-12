@@ -131,7 +131,7 @@ series for stages with no observations.
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.7", default-features = false, features = ["application", "web"] }
 ```
 
 | Capability | Features | Public entry |
@@ -148,6 +148,16 @@ nasa = { version = "2.0.6", default-features = false, features = ["application",
 | Durable Saga | `saga-runtime` or `saga-runtime-pgsql` | `nasa::saga` and role-specific configuration |
 | gRPC | `grpc` | `nasa::grpc` |
 
+Managed gRPC listeners configure deployment ceilings through `grpc.message_size_ceiling_bytes`
+and `grpc.unary_timeout_ceiling_ms`, defaulting to 64 MiB and 300000 milliseconds. Actual limits
+use `grpc.max_decoding_bytes`, `grpc.max_encoding_bytes` and `grpc.unary_timeout_ms`, defaulting
+to 4 MiB and 30000 milliseconds. Independent listeners use `nasa::grpc::GrpcServerCeilings`
+with `ServerPlan::ceilings`; no additional runtime dependency is needed. Before binding, the
+runtime validates actual values against those ceilings, protocol and monotonic-clock ranges,
+concurrency limits and memory budgets. These settings are fixed at startup: a reload that
+changes them rejects the entire candidate and retains the running configuration. A shorter
+caller deadline still wins, and a timeout does not prove that business side effects did not occur.
+
 Features compile capabilities. Component strings assign managed ownership; they are not interchangeable.
 For example, declare `"db"` for managed database resources. Declaring `"saga"` implicitly includes DB
 and Outbox, while transport remains explicit. `mapper`, `hystrix` and `grafana` are not component strings.
@@ -162,7 +172,7 @@ changing YAML does not translate SQL or switch an already compiled Mapper to ano
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.6", default-features = false, features = ["application", "mapper", "mapper-sqlite"] }
+nasa = { version = "2.0.7", default-features = false, features = ["application", "mapper", "mapper-sqlite"] }
 ```
 
 ```yaml
@@ -212,7 +222,7 @@ application configuration evaluation uses the loaders described in the next sect
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.6", features = ["yml"] }
+nasa = { version = "2.0.7", features = ["yml"] }
 ```
 
 ```rust
