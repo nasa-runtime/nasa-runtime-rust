@@ -132,7 +132,7 @@ release_items() {
       ;;
     update-facade)
       items=(
-        "nasa@2.0.6"
+        "nasa@2.0.7"
       )
       ;;
     *)
@@ -182,10 +182,12 @@ PLAN
 patch_candidates() {
   local item
   local items
-  items="$(release_items new-update-storage-adapters) $(release_items update-application-runtime)" || return 1
+  items="$(release_items new-update-storage-adapters) $(release_items update-application-runtime) $(release_items update-facade)" || return 1
   for item in $items; do
     case "${item%@*}" in
-      nagrpc|napp) printf '%s\n' "$item" ;;
+      nagrpc|napp|nasa)
+        printf '%s\n' "$item"
+        ;;
     esac
   done
 }

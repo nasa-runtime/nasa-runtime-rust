@@ -564,7 +564,7 @@ Kafka Schema Registry、对象存储、gRPC listener 和受管 Web listener 已�
 | --- | --- | --- | --- |
 | [Schema Registry](nafka/README.md#schema-registry) | Confluent envelope、批准 ID、有界查询/等待/缓存、独立 CA/mTLS、取消后的请求责任 | 独立 client，或 Application 按 `schema_registries.<name>` 装配的命名资源；无需声明 Kafka 消费组件 | codec 生成、引用解析、schema 治理、subject ACL、灾备复制 |
 | [对象存储](naobject/README.md) | 有界单对象读写、条件创建、SigV4 与内容完整性 | provider-neutral trait + path-style S3 adapter；可独立构造，或由 Application 按 `object_stores.<name>` 托管 | multipart、流式/range/list、STS 刷新、对象版本治理 |
-| [gRPC](nagrpc/README.md) | 统一 codegen、generated service registry、HTTP/2/TLS/方法门禁、具名发现调用、观测与有预算排空 | 独立 handle，或交给 Application 的 listener 与 discovery owner 托管 | proto 业务语义、service mesh、业务授权 |
+| [gRPC](nagrpc/README.md) | 统一 codegen、generated service registry、可配置消息/请求上界、HTTP/2/TLS/方法门禁、具名发现调用、观测与有预算排空 | 独立 handle，或交给 Application 的 listener 与 discovery owner 托管 | proto 业务语义、service mesh、业务授权 |
 | [Web listener](napp/README.md#web-http-listener-受管模式) | 确定的 HTTP/1/h2c 选择、连接与 stream 上界、协议观测和有预算排空 | Application `"web"` 组件独占明文 TCP listener 与路由服务图 | TLS 终止、h2c Upgrade 协商、服务间协议选择 |
 
 独立模式由业务显式构造 `ConfluentSchemaRegistry` 或 `S3ObjectStore` 并持有实例。受管模式分别开启
@@ -876,7 +876,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.6", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "2.0.7", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包使用工作区 `Cargo.toml` 中的 package name，例如 `nabase`、`naimg`、`naws`。

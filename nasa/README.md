@@ -192,7 +192,7 @@ exactly-once 调度。
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.6", features = [
+nasa = { version = "2.0.7", features = [
     "application",
     "tx",
     "mapper",
@@ -495,7 +495,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.6", features = ["application", "grpc"] }
+nasa = { version = "2.0.7", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.1"
@@ -511,6 +511,8 @@ nagrpc-build = "2.0.1"
 descriptor/摘要和 generated adapter；`nagrpc` 统一 service registry、Router、HTTP/2/TLS、容量、deadline、
 方法策略与独立 `ServerPlan`；`napp` 在 Prepare 封口 registry，等 initializer 全部成功后才绑定并负责
 readiness、发现 metadata、指标和反向停机；`nasa::grpc` 是业务运行时唯一门面。
+
+消息与 unary 时长的部署上界通过 `grpc.message_size_ceiling_bytes`、`grpc.unary_timeout_ceiling_ms` 配置，默认 64 MiB、300000 毫秒；实际值由 `grpc.max_decoding_bytes`、`grpc.max_encoding_bytes`、`grpc.unary_timeout_ms` 指定，默认 4 MiB、30000 毫秒。独立服务只需从本门面使用 `nasa::grpc::GrpcServerCeilings`，交给 `ServerPlan::ceilings`，不需要增加底层运行时依赖。上界、实际值、协议表示范围、并发与内存预算在 bind 前一起校验；这些字段需要重启 listener，热更候选改变它们时保留旧配置。更短的调用方 deadline 继续优先，超时不证明业务副作用未发生。
 
 `include_proto!` 不等价于简单转调 `tonic::include_proto!`：它还包含同一次构建的 descriptor 与摘要，
 并连接 codegen ABI 和 `ManagedGrpcService` 适配，使运行时能在 bind 前验证 service/method 目录、冲突和
@@ -541,7 +543,7 @@ Kubernetes 认证文件与 Prometheus 采集配置也使用该入口。应用配
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.6", features = ["yml"] }
+nasa = { version = "2.0.7", features = ["yml"] }
 ```
 
 ```rust
@@ -707,7 +709,7 @@ datasources 配置 → napp 全表校验 → 各 source 的 owner 与统一 cata
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.6", default-features = false, features = ["application", "mapper", "mapper-sqlite"] }
+nasa = { version = "2.0.7", default-features = false, features = ["application", "mapper", "mapper-sqlite"] }
 ```
 
 ```yaml

@@ -119,6 +119,9 @@
 //! TLS/mTLS、HTTP/2 资源门禁和有预算排空；`web` 与 `application` 同时启用后，
 //! `#[nasa::application("web")]` 托管唯一明文 listener。这四项能力都进入 `full`，业务只通过本门面
 //! 使用公开合同。
+//! gRPC 部署上界由 `grpc.message_size_ceiling_bytes` 与 `grpc.unary_timeout_ceiling_ms` 配置；
+//! 独立 listener 通过 `grpc::GrpcServerCeilings` 与 `grpc::ServerPlan::ceilings` 选择同一边界。
+//! 实际消息与请求期限不得越界，总内存和并发门禁继续生效；这些传输字段在启动后固定。
 //!
 //! `rate-limit` 通过 `nasa::application` 提供后端中立配额合同和共享 Redis 原子计数实现；业务必须
 //! 显式声明 Redis 组件并决定主体身份或路由中间件。默认后端失败时 fail-open；它不替代 Web 的
@@ -457,6 +460,7 @@ pub use nasaga_macro::saga_workflow;
 ///
 /// 业务实现 generated trait 后只登记 server；health、reflection、消息/stream/RPC 预算、listener
 /// readiness 与 shutdown owner 由框架统一装配。独立进程通过 `ServerPlan` 使用同一运行合同。
+/// `GrpcServerCeilings` 声明消息与 unary 时长的部署上界，绑定前与实际值及总量预算一起校验。
 #[cfg(feature = "grpc")]
 pub mod grpc {
     /// 具名发现客户端、传输选项与协议身份，和 Application 使用同一底层类型。
@@ -468,10 +472,10 @@ pub mod grpc {
         propagate_request_budget, reflection, Certificate, Channel, ClientTlsConfig, Code,
         Deadline, DeadlineSource, Endpoint, GrpcMessageLimits, GrpcMethodDescriptor,
         GrpcMethodPolicy, GrpcMethodType, GrpcRpcMethodSnapshot, GrpcRpcOutcome,
-        GrpcRpcRejectionReason, GrpcServerConfig, GrpcServerError, GrpcServerHandle,
-        GrpcServerObserver, GrpcServerSnapshot, GrpcServerState, GrpcTlsIdentity, Identity,
-        ManagedGrpcService, ManagedService, PeerIdentity, Request, Response, ServerPlan, Status,
-        Streaming,
+        GrpcRpcRejectionReason, GrpcServerCeilings, GrpcServerConfig, GrpcServerError,
+        GrpcServerHandle, GrpcServerObserver, GrpcServerSnapshot, GrpcServerState, GrpcTlsIdentity,
+        Identity, ManagedGrpcService, ManagedService, PeerIdentity, Request, Response, ServerPlan,
+        Status, Streaming,
     };
 
     #[doc(hidden)]

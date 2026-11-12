@@ -3,7 +3,7 @@
 [中文](migration.md) | [English](migration.en.md)
 
 This guide explains how an existing Rust application adopts the dependency and runtime contracts
-of `nasa 2.0.6`. The steps depend on the capabilities in use. A version number alone cannot establish
+of `nasa 2.0.7`. The steps depend on the capabilities in use. A version number alone cannot establish
 API, schema, message or configuration compatibility. For a new application, start with the
 [quickstart](quickstart.en.md).
 
@@ -13,10 +13,10 @@ Prefer selecting capabilities through the facade:
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.7", default-features = false, features = ["application", "web"] }
 ```
 
-`version = "2.0.6"` is a Cargo compatibility range; the application's `Cargo.lock` fixes the resolved
+`version = "2.0.7"` is a Cargo compatibility range; the application's `Cargo.lock` fixes the resolved
 versions. Applications using `sqlx::FromRow` or `sqlx::migrate!` still declare the appropriate direct
 dependency; the facade does not implicitly make external crate names available to application code.
 

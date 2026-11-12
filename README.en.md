@@ -206,7 +206,7 @@ different purposes; for example, `mapper` is a feature, while `"db"` selects dat
 | Application need | Facade features | Main boundary |
 | --- | --- | --- |
 | Managed HTTP service | `application,web` | Readiness, listener ownership and bounded shutdown; plaintext HTTP/1 by default |
-| gRPC service and discovery | `application,grpc`; add `grpc-discovery` for dynamic clients | Generated services and clients, TLS/mTLS, submission gates, resource limits and draining |
+| gRPC service and discovery | `application,grpc`; add `grpc-discovery` for dynamic clients | Generated services and clients, configurable message/request ceilings, TLS/mTLS, submission gates, resource limits and draining |
 | MySQL transactions and mapping | `application,tx,mapper` | One driver and one datasource per local transaction |
 | PostgreSQL transactions and mapping | `application,tx-pgsql,mapper-pgsql` | Explicit PostgreSQL driver and typed APIs |
 | SQLite files and mapping | `application,mapper-sqlite` | Owned local file, same Mapper macros, managed migration and shutdown |
@@ -231,7 +231,7 @@ Rust 1.94 or newer is required. A basic HTTP service needs:
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.7", default-features = false, features = ["application", "web"] }
 ```
 
 The [quickstart](docs/quickstart.en.md) supplies the complete manifest, application source, YAML,

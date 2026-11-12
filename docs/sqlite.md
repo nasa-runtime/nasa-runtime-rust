@@ -37,7 +37,7 @@ edition = "2021"
 anyhow = "1"
 linkme = "0.3"
 tokio = { version = "1", features = ["full"] }
-nasa = { version = "2.0.6", default-features = false, features = ["application", "mapper-sqlite"] }
+nasa = { version = "2.0.7", default-features = false, features = ["application", "mapper-sqlite"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "migrate"] }
 ```
 
