@@ -220,7 +220,7 @@ fn process() -> Samples {
 fn memory(_config: &CollectorsConfig) -> Samples {
     #[cfg(target_os = "linux")]
     {
-        return super::linux::memory(_config);
+        super::linux::memory(_config)
     }
     #[cfg(target_os = "macos")]
     {
