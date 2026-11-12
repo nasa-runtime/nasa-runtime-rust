@@ -19,7 +19,7 @@ grouped-cache = ["dep:cacheable"]
 [dependencies]
 namapper-core = { version = "2.0.1" }
 namapper-macro = { version = "2.0.1" }
-natx-sqlite = { version = "1.0.0", path = "../natx-sqlite" }
+natx-sqlite = { version = "1.0.0" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "chrono", "json", "macros"] }
 anyhow = "1"
 async-stream = "0.3"
