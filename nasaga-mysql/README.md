@@ -14,8 +14,8 @@
 
 ```toml
 [dependencies]
-nasaga-mysql = "2.0.1"
-natx = "2.0.0"
+nasaga-mysql = "2.0.2"
+natx = "2.0.1"
 ```
 
 ## 初始化

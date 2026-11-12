@@ -27,7 +27,7 @@ Web 边界、低层 registry 调用和 handler 在同一请求中得到不同裁
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["application", "oauth", "web-security"] }
+nasa = { version = "2.0.6", features = ["application", "oauth", "web-security"] }
 ```
 
 ```rust

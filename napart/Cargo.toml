@@ -4,7 +4,7 @@
 # 独立依赖：napart = "2.0.0"；兼容入口为 napart::PartitionExecutor。
 [package]
 name = "napart"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "命名隔离、严格 FIFO 的保序任务窃取分区执行器（有界背压、可证明停机）"
@@ -24,7 +24,7 @@ name = "napart"
 tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
 # 任务权威在提交时捕获环境 trace 上下文，业务 Future 执行期恢复同一链路。
-natelemetry = { version = "2.0.0" }
+natelemetry = { version = "2.0.1" }
 # 类型状态注册表按 key 分片，已存在类型的提交不经过 slot 级全表互斥锁。
 dashmap = "6"
 # 业务 Future 的 poll 展开在单任务边界转换为稳定失败终态。

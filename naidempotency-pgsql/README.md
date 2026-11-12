@@ -10,9 +10,9 @@
 
 ```toml
 [dependencies]
-naidempotency = "2.0.0"
-naidempotency-pgsql = "2.0.0"
-natx-pgsql = "2.0.0"
+naidempotency = "2.0.1"
+naidempotency-pgsql = "2.0.1"
+natx-pgsql = "2.0.1"
 ```
 
 业务经门面使用时开启 `idempotency-pgsql`，从 `nasa::idempotency::pgsql` 取得 store，并从

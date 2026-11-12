@@ -171,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "async-macro"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -437,7 +437,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cacheable"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "config-boot"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "anyhow",
  "naml",
@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "hystrix"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-stream",
  "axum",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "hystrix-macro"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -2046,7 +2046,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "macro-support"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2167,7 +2167,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "naaudit"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "naoutbox-core",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "naaudit-mysql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "naaudit",
@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "naaudit-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "naaudit",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "naauthz"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "nabase"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2214,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "nabudget"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "tokio",
  "tokio-util",
@@ -2222,7 +2222,7 @@ dependencies = [
 
 [[package]]
 name = "nacache-macro"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -2244,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "nadis"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "base64",
  "chrono",
@@ -2270,7 +2270,7 @@ dependencies = [
 
 [[package]]
 name = "nadis-derive"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "nadisc"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2292,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "nadisc-consul"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "nadisc-kubernetes"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2318,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "nadisc-runtime"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "nafana"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "axum",
  "chrono",
@@ -2365,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "nafana-macro"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -2376,7 +2376,7 @@ dependencies = [
 
 [[package]]
 name = "nafka"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "async-trait",
  "base64",
@@ -2403,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "nafka-macro"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -2413,7 +2413,7 @@ dependencies = [
 
 [[package]]
 name = "nagrpc"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2444,7 +2444,7 @@ dependencies = [
 
 [[package]]
 name = "nagrpc-build"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "heck",
  "prost",
@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "naidempotency"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "serde",
@@ -2465,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "naidempotency-mysql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "naidempotency",
@@ -2476,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "naidempotency-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "naidempotency",
@@ -2487,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "naidempotency-redis"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "nadis",
@@ -2499,21 +2499,21 @@ dependencies = [
 
 [[package]]
 name = "naimg"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "image",
 ]
 
 [[package]]
 name = "nainbox-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
 ]
 
 [[package]]
 name = "nainbox-mysql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "nainbox-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "nalog"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "namapper"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "namapper-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2640,11 +2640,11 @@ dependencies = [
 
 [[package]]
 name = "nametrics-core"
-version = "2.0.0"
+version = "2.0.1"
 
 [[package]]
 name = "namigrate"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "namigrate-core",
  "natx-core",
@@ -2654,14 +2654,14 @@ dependencies = [
 
 [[package]]
 name = "namigrate-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "namigrate-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "namigrate-core",
@@ -2683,7 +2683,7 @@ dependencies = [
 
 [[package]]
 name = "naml"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "config",
@@ -2703,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "nanacos"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2717,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "nanacos-sdk"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "nanotify-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "nametrics-core",
@@ -2762,7 +2762,7 @@ dependencies = [
 
 [[package]]
 name = "nanum"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "bigdecimal",
  "rand 0.8.6",
@@ -2770,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "naobject"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2785,14 +2785,14 @@ dependencies = [
 
 [[package]]
 name = "naopenapi"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "naoutbox-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "tokio",
@@ -2801,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "naoutbox-mysql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "naoutbox-core",
@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "naoutbox-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "naoutbox-core",
@@ -2824,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "napart"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "arc-swap",
  "dashmap",
@@ -2928,7 +2928,7 @@ dependencies = [
 
 [[package]]
 name = "napp-macro"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -3007,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-backend"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "nainbox-core",
@@ -3019,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3029,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-macro"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-mysql"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3065,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-runtime"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "hex",
@@ -3089,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-runtime-core"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3118,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-runtime-pgsql"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "linkme",
@@ -3136,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "nasched"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-macro",
@@ -3154,7 +3154,7 @@ dependencies = [
 
 [[package]]
 name = "nasecret"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3167,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "nasecret-http"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3178,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "nasecret-vault"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "async-trait",
  "nasecret",
@@ -3190,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "natelemetry"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "hex",
  "rand 0.8.6",
@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "natx"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -3254,7 +3254,7 @@ dependencies = [
 
 [[package]]
 name = "natx-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "log",
@@ -3291,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "nauth-oauth"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "arc-swap",
  "base64",
@@ -3303,7 +3303,7 @@ dependencies = [
 
 [[package]]
 name = "naweb"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "arc-swap",
  "axum",
@@ -3323,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "naweb-macro"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -3333,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "naws"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "base64",
  "bytes",
@@ -3354,7 +3354,7 @@ dependencies = [
 
 [[package]]
 name = "naws-proto"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "base64",
  "bytes",
@@ -3365,7 +3365,7 @@ dependencies = [
 
 [[package]]
 name = "naws-proto-derive"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3375,7 +3375,7 @@ dependencies = [
 
 [[package]]
 name = "ncrypto"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4342,7 +4342,7 @@ dependencies = [
 
 [[package]]
 name = "rest-client-macro"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "rest-discovery"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4378,7 +4378,7 @@ dependencies = [
 
 [[package]]
 name = "rest-discovery-nacos"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "anyhow",
  "nanacos",

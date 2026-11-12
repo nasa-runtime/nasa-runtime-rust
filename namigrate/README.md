@@ -25,7 +25,7 @@ Application 从 `sql.observability` 装配等待日志与连接超时通知。�
 
 ```toml
 [dependencies]
-namigrate = "2.0.0"
+namigrate = "2.0.1"
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "mysql"] }
 ```
 

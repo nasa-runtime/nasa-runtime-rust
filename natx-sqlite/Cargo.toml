@@ -12,10 +12,10 @@ categories = ["database", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
-nametrics-core = { version = "2.0.0" }
+nametrics-core = { version = "2.0.1" }
 natx-core = { version = "2.0.1" }
 natx-macro = { version = "2.0.1" }
-nabudget = { version = "2.0.0" }
+nabudget = { version = "2.0.1" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "macros"] }
 sqlx-core = { version = "0.9", default-features = false }
 libsqlite3-sys = "0.37"

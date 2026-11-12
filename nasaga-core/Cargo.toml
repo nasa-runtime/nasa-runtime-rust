@@ -1,6 +1,6 @@
 [package]
 name = "nasaga-core"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Saga provider-neutral definition, identity, outcome and state machine contract"

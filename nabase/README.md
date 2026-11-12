@@ -5,7 +5,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["base"] }
+nasa = { version = "2.0.6", features = ["base"] }
 ```
 
 模块入口如下：

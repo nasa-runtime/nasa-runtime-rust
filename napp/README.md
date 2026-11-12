@@ -1572,7 +1572,7 @@ UserHook 登记 generated service
 nasa = { version = "2.0.6", features = ["application", "grpc"] }
 
 [build-dependencies]
-nagrpc-build = "2.0.0"
+nagrpc-build = "2.0.1"
 ```
 
 ```rust

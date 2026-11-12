@@ -1,6 +1,6 @@
 [package]
 name = "nasaga-macro"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Saga #[saga] participant step attribute macro with compile-time contract checks"
@@ -16,7 +16,7 @@ proc-macro = true
 name = "nasaga_macro"
 
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "2.0.0" }
+nasa-macro-support = { package = "macro-support", version = "2.0.1" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

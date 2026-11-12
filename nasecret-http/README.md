@@ -22,7 +22,7 @@ prepare/commit 结果和当前代际，单次请求始终使用同一快照。
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["secret-http"] }
+nasa = { version = "2.0.6", features = ["secret-http"] }
 ```
 
 ```rust

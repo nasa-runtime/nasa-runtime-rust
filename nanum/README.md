@@ -4,7 +4,7 @@
 
 ```toml
 [dependencies]
-nanum = "2.0.0"
+nanum = "2.0.1"
 ```
 
 核心表示：

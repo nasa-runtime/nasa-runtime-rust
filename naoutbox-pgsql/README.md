@@ -10,9 +10,9 @@ global 或单 lane 权威。原批次入口通过 `FOR UPDATE SKIP LOCKED` 按�
 
 ```toml
 [dependencies]
-naoutbox-core = "2.0.0"
-naoutbox-pgsql = "2.0.0"
-natx-pgsql = "2.0.0"
+naoutbox-core = "2.0.1"
+naoutbox-pgsql = "2.0.1"
+natx-pgsql = "2.0.1"
 ```
 
 ```rust

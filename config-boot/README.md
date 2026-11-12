@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.2", features = ["config-boot", "nacos-sdk"] }
+nasa = { version = "2.0.6", features = ["config-boot", "nacos-sdk"] }
 ```
 
 ## 入口选择

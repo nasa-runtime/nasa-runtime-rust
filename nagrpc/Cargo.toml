@@ -1,6 +1,6 @@
 [package]
 name = "nagrpc"
-version = "2.0.3"
+version = "2.0.4"
 edition.workspace = true
 rust-version.workspace = true
 description = "Managed gRPC listeners and discovery clients with HTTP/2 admission, TLS, bounded streams, and shutdown"
@@ -16,12 +16,12 @@ default = []
 discovery = ["dep:nadisc-runtime", "dep:nadisc", "dep:tower-service", "dep:http-body-util", "dep:futures-util"]
 
 [dependencies]
-nadisc-runtime = { version = "1.0.0", optional = true }
-nadisc = { version = "2.0.3", optional = true }
+nadisc-runtime = { version = "1.0.1", optional = true }
+nadisc = { version = "2.0.4", optional = true }
 tower-service = { version = "0.3", optional = true }
 http-body-util = { version = "0.1", optional = true }
 futures-util = { version = "0.3", optional = true }
-nabudget = { version = "2.0.0" }
+nabudget = { version = "2.0.1" }
 bytes = "1"
 http-body = "1"
 hyper = { version = "1", features = ["http2", "server", "client"] }

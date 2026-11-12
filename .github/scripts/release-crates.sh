@@ -11,27 +11,136 @@ fi
 # - `$1`：workflow 暴露的批次标识。
 # 返回：已知批次输出空格分隔的 `crate@version`；未知批次返回非零状态。
 release_items() {
+  local items=()
   case "$1" in
-    saga-mysql)
-      printf '%s\n' "nasaga-mysql@2.0.1"
+    foundation)
+      items=(
+        "macro-support@2.0.1"
+        "naauthz@2.0.1"
+        "nabase@2.0.1"
+        "nabudget@2.0.1"
+        "nadisc@2.0.4"
+        "nagrpc-build@2.0.1"
+        "naidempotency@2.0.1"
+        "naimg@2.0.1"
+        "nainbox-core@2.0.1"
+        "nametrics-core@2.0.1"
+        "namigrate-core@2.0.1"
+        "nanacos-sdk@1.0.1"
+        "nanum@2.0.1"
+        "naopenapi@2.0.1"
+        "naoutbox-core@2.0.1"
+        "nasaga-core@2.0.1"
+        "nasecret@2.0.1"
+        "natelemetry@2.0.1"
+        "naws-proto-derive@2.0.1"
+        "ncrypto@2.0.1"
+        "rest-client-macro@2.0.4"
+      )
       ;;
-    saga-pgsql)
-      printf '%s\n' "nasaga-runtime-pgsql@2.0.2"
+    support-components)
+      items=(
+        "async-macro@2.0.1"
+        "hystrix-macro@2.0.1"
+        "naaudit@2.0.1"
+        "nacache-macro@2.0.1"
+        "nadis-derive@2.0.1"
+        "nadisc-consul@1.0.1"
+        "nafana-macro@2.0.1"
+        "nafka-macro@2.0.4"
+        "nalog@2.0.1"
+        "namapper-macro@2.0.1"
+        "naml@2.0.3"
+        "nanacos@2.0.4"
+        "nanotify-core@2.0.1"
+        "naobject@2.0.1"
+        "napart@2.0.1"
+        "napp-macro@2.0.4"
+        "nasaga-macro@2.0.1"
+        "nasecret-http@2.0.1"
+        "nasecret-vault@2.0.1"
+        "natx-macro@2.0.1"
+        "nauth-oauth@2.0.1"
+        "naweb-macro@2.0.1"
+        "naws-proto@2.0.1"
+      )
+      ;;
+    core-services)
+      items=(
+        "config-boot@2.0.2"
+        "hystrix@2.0.1"
+        "nadis@2.0.1"
+        "nadisc-kubernetes@1.0.1"
+        "nafka@2.0.4"
+        "namapper-core@2.0.1"
+        "natx-core@2.0.1"
+        "naweb@2.0.1"
+        "rest-discovery@2.0.4"
+      )
+      ;;
+    resource-runtimes)
+      items=(
+        "cacheable@2.0.1"
+        "nadisc-runtime@1.0.1"
+        "nafana@2.0.2"
+        "naidempotency-redis@2.0.1"
+        "namigrate@2.0.1"
+        "namigrate-pgsql@2.0.1"
+        "nasaga-backend@2.0.1"
+        "nasched@2.0.1"
+        "natx@2.0.1"
+        "natx-pgsql@2.0.1"
+        "natx-sqlite@1.0.0"
+        "naws@2.0.1"
+        "rest-discovery-nacos@2.0.4"
+      )
+      ;;
+    storage-adapters)
+      items=(
+        "nagrpc@2.0.4"
+        "naidempotency-mysql@2.0.1"
+        "naidempotency-pgsql@2.0.1"
+        "nainbox-mysql@2.0.1"
+        "nainbox-pgsql@2.0.1"
+        "namapper@2.0.1"
+        "namapper-pgsql@2.0.1"
+        "namapper-sqlite@1.0.0"
+        "namigrate-sqlite@1.0.0"
+        "naoutbox-mysql@2.0.1"
+        "naoutbox-pgsql@2.0.1"
+        "nasaga-mysql@2.0.2"
+        "nasaga-pgsql@2.0.1"
+      )
+      ;;
+    workflow-support)
+      items=(
+        "naaudit-mysql@2.0.1"
+        "naaudit-pgsql@2.0.1"
+        "nasaga-runtime-core@2.0.2"
+      )
       ;;
     saga-runtime)
-      printf '%s\n' "nasaga-runtime@2.0.2"
+      items=(
+        "nasaga-runtime@2.0.3"
+        "nasaga-runtime-pgsql@2.0.3"
+      )
       ;;
     application-runtime)
-      printf '%s\n' "napp@2.0.6"
+      items=(
+        "napp@2.0.6"
+      )
       ;;
     facade)
-      printf '%s\n' "nasa@2.0.6"
+      items=(
+        "nasa@2.0.6"
+      )
       ;;
     *)
       echo "未知发布批次: $1" >&2
       return 1
       ;;
   esac
+  printf '%s\n' "${items[*]}"
 }
 
 # 业务作用：把版本化发布项转换为 Cargo 接受的 crate 名列表，避免验证与上传逻辑重复维护版本。
@@ -55,11 +164,15 @@ release_crates() {
 # 返回：逐行输出批次标识与单调递增的拓扑阶段。
 release_stages() {
   cat <<'PLAN'
-saga-mysql 1
-saga-pgsql 2
-saga-runtime 3
-application-runtime 4
-facade 5
+foundation 1
+support-components 2
+core-services 3
+resource-runtimes 4
+storage-adapters 5
+workflow-support 6
+saga-runtime 7
+application-runtime 8
+facade 9
 PLAN
 }
 

@@ -10,7 +10,7 @@ REST 发现客户端的 bulkhead/circuit 负责传输级失败，hystrix 负责�
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["hystrix"] }
+nasa = { version = "2.0.6", features = ["hystrix"] }
 ```
 
 ```rust

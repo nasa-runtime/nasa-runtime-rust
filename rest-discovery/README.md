@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = ["rest-discovery"] }
+nasa = { version = "2.0.6", features = ["rest-discovery"] }
 ```
 
 ## 具名连接与完整响应生命周期

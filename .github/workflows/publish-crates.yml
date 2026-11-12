@@ -8,13 +8,17 @@ on:
         required: true
         type: choice
         options:
-          - saga-mysql
-          - saga-pgsql
+          - foundation
+          - support-components
+          - core-services
+          - resource-runtimes
+          - storage-adapters
+          - workflow-support
           - saga-runtime
           - application-runtime
           - facade
       confirm:
-        description: "输入 publish-<batch>，例如 publish-saga-mysql"
+        description: "输入 publish-<batch>，例如 publish-foundation"
         required: true
         type: string
 
@@ -40,7 +44,7 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
-            saga-mysql|saga-pgsql|saga-runtime|application-runtime|facade)
+            foundation|support-components|core-services|resource-runtimes|storage-adapters|workflow-support|saga-runtime|application-runtime|facade)
               expected_ref="refs/heads/release"
               expected_confirm="publish-${RELEASE_BATCH}"
               ;;

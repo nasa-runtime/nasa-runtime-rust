@@ -26,7 +26,7 @@ Business implementations of `JobParameter::decode` must also keep sensitive payl
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["redis"] }
+nasa = { version = "2.0.6", features = ["redis"] }
 ```
 
 ## 连接 Redis

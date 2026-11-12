@@ -30,7 +30,7 @@ YAML 文档由同一有界事件解析器读取，再按入口施加键名与根
 
 ```toml
 [dependencies]
-naml = { version = "2.0.2", features = ["watch"] }
+naml = { version = "2.0.3", features = ["watch"] }
 ```
 
 默认 feature 不包含文件监听。同步解析与装配不需要 Tokio 或 Nacos SDK。

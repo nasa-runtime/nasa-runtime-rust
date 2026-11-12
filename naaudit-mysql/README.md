@@ -20,7 +20,7 @@ adapter 只在当前事务中追加审计事件，不自行提交或发布。事
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["audit"] }
+nasa = { version = "2.0.6", features = ["audit"] }
 ```
 
 ```rust

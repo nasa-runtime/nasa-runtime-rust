@@ -498,7 +498,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 nasa = { version = "2.0.6", features = ["application", "grpc"] }
 
 [build-dependencies]
-nagrpc-build = "2.0.0"
+nagrpc-build = "2.0.1"
 ```
 
 1. 在 `build.rs` 调用 `nagrpc_build::compile("proto/order.proto")`；

@@ -11,7 +11,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = ["nacos-sdk"] }
+nasa = { version = "2.0.6", features = ["nacos-sdk"] }
 ```
 
 ## 多连接受管注册

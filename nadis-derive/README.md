@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["redis-derive"] }
+nasa = { version = "2.0.6", features = ["redis-derive"] }
 ```
 
 ## 编译与运行边界
