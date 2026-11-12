@@ -60,6 +60,10 @@ struct GrpcSettings {
     idle_connection_timeout_ms: u64,
     /// 单次 unary RPC 的服务端毫秒预算。
     unary_timeout_ms: u64,
+    /// 部署允许的 unary 请求时长上界，单位为毫秒。
+    unary_timeout_ceiling_ms: u64,
+    /// 部署允许的单消息容量上界，单位为字节。
+    message_size_ceiling_bytes: usize,
     /// 流式 RPC 连续无进展的毫秒上限。
     stream_idle_timeout_ms: u64,
     /// 单个流式 RPC 的总持续毫秒上限。
@@ -251,6 +255,8 @@ struct ValidatedGrpcSettings {
     bind: SocketAddr,
     /// 已统一校验容量与时间边界的底层监听器配置。
     config: nagrpc::GrpcServerConfig,
+    /// 与实际配置一起验证的部署上界。
+    ceilings: nagrpc::GrpcServerCeilings,
     /// 是否在服务目录中装配 reflection。
     reflection: bool,
     /// 是否允许空业务服务目录。
@@ -269,6 +275,7 @@ impl Default for GrpcSettings {
     /// 返回：端口 50051、受管连接/消息边界、关闭 reflection 且要求业务 service 的配置投影。
     fn default() -> Self {
         let config = nagrpc::GrpcServerConfig::default();
+        let ceilings = nagrpc::GrpcServerCeilings::default();
         Self {
             bind: "127.0.0.1:50051".to_owned(),
             authority: None,
@@ -279,6 +286,8 @@ impl Default for GrpcSettings {
             first_request_timeout_ms: duration_millis(config.first_request_timeout),
             idle_connection_timeout_ms: duration_millis(config.idle_connection_timeout),
             unary_timeout_ms: duration_millis(config.unary_timeout),
+            unary_timeout_ceiling_ms: duration_millis(ceilings.unary_timeout_ceiling),
+            message_size_ceiling_bytes: ceilings.message_size_ceiling_bytes,
             stream_idle_timeout_ms: duration_millis(config.stream_idle_timeout),
             max_stream_duration_ms: duration_millis(config.max_stream_duration),
             max_received_messages_per_stream: config.max_received_messages_per_stream,
@@ -396,7 +405,12 @@ impl GrpcSettings {
                 })
                 .collect(),
         };
-        config.validate().map_err(|error| {
+        let ceilings = nagrpc::GrpcServerCeilings {
+            message_size_ceiling_bytes: self.message_size_ceiling_bytes,
+            unary_timeout_ceiling: Duration::from_millis(self.unary_timeout_ceiling_ms),
+        };
+        // 候选配置先整体校验，任一部署上界或总量约束无效时不得推进 listener 的生命周期。
+        config.validate_with_ceilings(&ceilings).map_err(|error| {
             grpc_error_src(
                 phase,
                 "grpc configuration exceeds a managed server boundary",
@@ -419,6 +433,7 @@ impl GrpcSettings {
         Ok(ValidatedGrpcSettings {
             bind,
             config,
+            ceilings,
             reflection: self.reflection.enabled,
             health_only: self.health_only,
             tls,
@@ -1473,6 +1488,8 @@ pub(crate) struct GrpcComponent {
     bind: Option<SocketAddr>,
     /// Start 冻结、随后按方法目录应用收紧策略的监听配置。
     config: Option<nagrpc::GrpcServerConfig>,
+    /// 与监听配置同代冻结的部署上界。
+    ceilings: nagrpc::GrpcServerCeilings,
     /// Prepare 独占取得、Ready 消费的服务目录。
     registry: Option<nagrpc::ManagedServiceRegistry>,
     /// 是否装配标准 reflection 服务。
@@ -1501,6 +1518,7 @@ impl GrpcComponent {
         Self {
             bind: None,
             config: None,
+            ceilings: nagrpc::GrpcServerCeilings::default(),
             registry: None,
             reflection: false,
             health_only: false,
@@ -1557,6 +1575,7 @@ impl ApplicationComponent for GrpcComponent {
             }
             self.bind = Some(validated.bind);
             self.config = Some(validated.config);
+            self.ceilings = validated.ceilings;
             self.reflection = validated.reflection;
             self.health_only = validated.health_only;
             self.tls = validated.tls;
@@ -1643,6 +1662,7 @@ impl ApplicationComponent for GrpcComponent {
                 None => (None, None),
             };
             let mut plan = nagrpc::ServerPlan::with_config(config)
+                .ceilings(self.ceilings)
                 .with_registry(registry)
                 .reflection(self.reflection)
                 .health_only(self.health_only);

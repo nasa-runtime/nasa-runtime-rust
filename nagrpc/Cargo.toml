@@ -1,6 +1,6 @@
 [package]
 name = "nagrpc"
-version = "2.0.4"
+version = "2.0.5"
 edition.workspace = true
 rust-version.workspace = true
 description = "Managed gRPC listeners and discovery clients with HTTP/2 admission, TLS, bounded streams, and shutdown"

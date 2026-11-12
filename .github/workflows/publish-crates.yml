@@ -17,6 +17,10 @@ on:
           - update-saga-runtime
           - update-application-runtime
           - update-facade
+      crate:
+        description: "留空发布整批；指定名称只发布所选批次内的单个组件"
+        required: false
+        type: string
       confirm:
         description: "输入 publish-<batch>，例如 publish-update-foundation"
         required: true
@@ -80,9 +84,23 @@ jobs:
       - name: select release crates
         env:
           RELEASE_BATCH: ${{ inputs.batch }}
+          RELEASE_CRATE: ${{ inputs.crate }}
         shell: bash
         run: |
           release_crates="$(.github/scripts/release-crates.sh "$RELEASE_BATCH")"
+          if [[ -n "$RELEASE_CRATE" ]]; then
+            matched=false
+            for crate_name in $release_crates; do
+              if [[ "$crate_name" == "$RELEASE_CRATE" ]]; then
+                matched=true
+              fi
+            done
+            if [[ "$matched" != true ]]; then
+              echo "指定组件不属于当前发布批次" >&2
+              exit 1
+            fi
+            release_crates="$RELEASE_CRATE"
+          fi
           echo "RELEASE_CRATES=$release_crates" >> "$GITHUB_ENV"
       - name: verify batch registry dependency policy
         env:
@@ -96,14 +114,16 @@ jobs:
         shell: bash
         run: |
           for crate_name in $RELEASE_CRATES; do
-            cargo clippy --locked -p "$crate_name" --all-targets --all-features -- -D warnings
+            version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
+            cargo clippy --locked -p "${crate_name}@${version}" --all-targets --all-features -- -D warnings
           done
       - name: verify rustdoc
         shell: bash
         run: |
           for crate_name in $RELEASE_CRATES; do
+            version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             RUSTDOCFLAGS="-D missing_docs -D warnings" \
-              cargo doc --locked --no-deps --all-features -p "$crate_name"
+              cargo doc --locked --no-deps --all-features -p "${crate_name}@${version}"
           done
       - name: verify package archives
         shell: bash
@@ -112,8 +132,8 @@ jobs:
           mkdir -p "$scan_root"
           for crate_name in $RELEASE_CRATES; do
             .github/scripts/verify-release-version.sh "$crate_name"
-            cargo package --locked -p "$crate_name"
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
+            cargo package --locked -p "${crate_name}@${version}"
             archive="target/package/${crate_name}-${version}.crate"
             if [[ ! -f "$archive" ]]; then
               echo "未生成归档: $archive" >&2
@@ -170,9 +190,23 @@ jobs:
       - name: select release crates
         env:
           RELEASE_BATCH: ${{ inputs.batch }}
+          RELEASE_CRATE: ${{ inputs.crate }}
         shell: bash
         run: |
           release_crates="$(.github/scripts/release-crates.sh "$RELEASE_BATCH")"
+          if [[ -n "$RELEASE_CRATE" ]]; then
+            matched=false
+            for crate_name in $release_crates; do
+              if [[ "$crate_name" == "$RELEASE_CRATE" ]]; then
+                matched=true
+              fi
+            done
+            if [[ "$matched" != true ]]; then
+              echo "指定组件不属于当前发布批次" >&2
+              exit 1
+            fi
+            release_crates="$RELEASE_CRATE"
+          fi
           echo "RELEASE_CRATES=$release_crates" >> "$GITHUB_ENV"
       - name: publish crates sequentially
         env:
@@ -247,7 +281,7 @@ jobs:
           for crate_name in $RELEASE_CRATES; do
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             .github/scripts/verify-release-version.sh "$crate_name"
-            cargo package --locked -p "$crate_name"
+            cargo package --locked -p "${crate_name}@${version}"
             archive="target/package/${crate_name}-${version}.crate"
             local_checksum="$(sha256sum "$archive" | awk '{print $1}')"
             response_file="$RUNNER_TEMP/${crate_name}-${version}.json"
@@ -300,7 +334,7 @@ jobs:
               fi
 
               set +e
-              cargo publish --locked -p "$crate_name" 2>&1 | tee "$publish_log"
+              cargo publish --locked -p "${crate_name}@${version}" 2>&1 | tee "$publish_log"
               publish_status="${PIPESTATUS[0]}"
               set -e
               if [[ "$publish_status" == "0" ]]; then

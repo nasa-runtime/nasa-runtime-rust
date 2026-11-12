@@ -97,7 +97,7 @@ release_items() {
       ;;
     new-update-storage-adapters)
       items=(
-        "nagrpc@2.0.4"
+        "nagrpc@2.0.5"
         "naidempotency-mysql@2.0.1"
         "naidempotency-pgsql@2.0.1"
         "nainbox-mysql@2.0.1"
@@ -127,7 +127,7 @@ release_items() {
       ;;
     update-application-runtime)
       items=(
-        "napp@2.0.6"
+        "napp@2.0.7"
       )
       ;;
     update-facade)

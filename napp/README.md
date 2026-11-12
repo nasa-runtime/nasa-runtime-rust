@@ -2158,3 +2158,6 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 组件安装及执行器调度仍需时间。同步文件系统调用无法被异步期限强制打断，需要硬期限的来源读取
 应由调用方使用可终止进程取得文本后再装配。观察异常应同时检查来源状态和各组件状态，不能仅看
 配置版本递增。严格候选不自动重新捕获进程环境，环境与来源权限调整后需重启。
+
+
+gRPC listener 的部署上界通过 `grpc.message_size_ceiling_bytes` 与 `grpc.unary_timeout_ceiling_ms` 配置，默认分别为 64 MiB 与 300000 毫秒；实际编解码上限由 `grpc.max_decoding_bytes`、`grpc.max_encoding_bytes` 设置，实际请求超时由 `grpc.unary_timeout_ms` 设置。默认实际值保持 4 MiB、30000 毫秒。实际值必须不超过部署上界，部署上界还须满足 gRPC 帧长度和单调时钟的可表示范围；进程在途消息、并发和受管内存预算继续整体校验。以上配置在启动时固定，热更新候选改变这些字段时拒绝整份候选，旧配置与运行 listener 保持不变。完整示例见 [nagrpc](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md#配置边界)。

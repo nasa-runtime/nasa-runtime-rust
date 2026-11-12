@@ -13,6 +13,8 @@
 //! listener 在 bind 前冻结 service/method 目录、TLS 与容量；运行期按连接、RPC、stream 和消息分别
 //! 执行有界准入，并以固定原因和结局导出观测事实。停机先停止新准入，再发送 HTTP/2 GOAWAY 并在
 //! `drain_timeout` 内等待已接纳调用。它不提供 service mesh 或业务授权模型。
+//! [`GrpcServerCeilings`] 为部署声明消息与 unary 时长上界，交由 [`ServerPlan::ceilings`] 在 bind 前
+//! 与实际配置整体校验；扩大上界不会取消进程在途消息、并发与内存预算，也不支持运行期变更。
 //! `discovery` feature 为生成客户端提供具名服务发现、有限连接池和轮询选址；在实际 HTTP/2
 //! 提交处复验实例资格，四种 RPC 的请求和响应正文共用 owner 与总期限，不自动重放业务请求。
 
@@ -42,13 +44,13 @@ use tokio_util::sync::CancellationToken;
 
 /// generated code 与运行时共同遵守的 ABI 标识。
 pub const CODEGEN_ABI: u32 = 2;
-/// generated service 单消息的框架硬上限；业务可按接口进一步收紧。
+/// 未显式指定部署上界时允许的最大单消息字节数。
 pub const MAX_GRPC_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 /// 单连接业务并发的框架硬上限，防止底层 semaphore 因异常 `usize` 配置 panic。
 pub const MAX_GRPC_CONCURRENCY_PER_CONNECTION: usize = 65_535;
 /// 进程级并发连接硬上限，限制 socket、HTTP/2 状态与 TLS 会话占用。
 pub const MAX_GRPC_CONNECTIONS: usize = 4_096;
-/// gRPC 请求、keepalive 与 drain 计时参数的统一硬上限。
+/// keepalive、TCP 与 drain 等后台计时参数的统一硬上限。
 pub const MAX_GRPC_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// 进程级在途 RPC 的框架硬上限。
 pub const MAX_GRPC_INFLIGHT_RPCS: usize = 65_535;
@@ -2474,10 +2476,33 @@ pub struct GrpcServerConfig {
     pub max_inflight_message_bytes: usize,
     /// 框架受管连接、stream、RPC 与消息状态的会计预算。
     pub managed_memory_budget_bytes: usize,
-    /// generated service 消息上限。
+    /// generated service 实际生效的编解码消息上限。
     pub message_limits: GrpcMessageLimits,
     /// 以 descriptor 完整方法路径为键的授权、并发与速率收紧策略。
     pub method_policies: BTreeMap<String, GrpcMethodPolicy>,
+}
+
+/// listener 部署允许的消息与 unary 时长上界；实际值仍由 `GrpcServerConfig` 指定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcServerCeilings {
+    /// 部署允许的单消息容量上界；必须可由 gRPC 长度字段表示。
+    pub message_size_ceiling_bytes: usize,
+    /// 部署允许的 unary 请求时长上界；必须可由单调时钟表示。
+    pub unary_timeout_ceiling: Duration,
+}
+
+impl Default for GrpcServerCeilings {
+    /// 业务作用：保持未显式扩大部署边界的 listener 使用保守容量与请求时长。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：单消息上界 64 MiB、unary 时长上界 300 秒，实际消息与超时默认值不变。
+    fn default() -> Self {
+        Self {
+            message_size_ceiling_bytes: MAX_GRPC_MESSAGE_BYTES,
+            unary_timeout_ceiling: Duration::from_secs(5 * 60),
+        }
+    }
 }
 
 /// descriptor 固定方法的可选安全策略；所有字段只能收紧 listener 全局边界。
@@ -2545,12 +2570,26 @@ impl Default for GrpcServerConfig {
 }
 
 impl GrpcServerConfig {
-    /// 业务作用：校验 transport、连接、消息与停机配置的所有受管上界。
+    /// 业务作用：按默认部署边界校验 transport、连接、消息与停机配置。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：全部字段在非零硬上限内时成功，否则返回稳定配置错误。
+    /// 返回：消息不超过 64 MiB、unary 不超过 300 秒且全部总量约束成立时成功，否则返回配置错误。
     pub fn validate(&self) -> Result<(), GrpcServerError> {
+        self.validate_with_ceilings(&GrpcServerCeilings::default())
+    }
+
+    /// 业务作用：按显式部署边界校验 listener，保留协议表示范围与进程总量门禁。
+    ///
+    /// 参数说明：
+    /// - `ceilings`: 部署允许的单消息和 unary 时长上界，不能替代实际容量与总内存预算。
+    ///
+    /// 返回：上界可表示、实际值未越界且全部总量约束成立时成功；任一不满足时拒绝配置。
+    pub fn validate_with_ceilings(
+        &self,
+        ceilings: &GrpcServerCeilings,
+    ) -> Result<(), GrpcServerError> {
+        // 部署上界与实际值一并校验；外部配置不能溢出帧长度、计时器或绕过总量预算。
         if self.max_connections == 0
             || self.max_connections > MAX_GRPC_CONNECTIONS
             || self.concurrency_limit_per_connection == 0
@@ -2599,7 +2638,13 @@ impl GrpcServerConfig {
             || self.managed_memory_budget_bytes > MAX_GRPC_MANAGED_MEMORY_BYTES
             || self.message_limits.max_decoding_bytes == 0
             || self.message_limits.max_encoding_bytes == 0
-            || self.unary_timeout > Duration::from_secs(5 * 60)
+            || ceilings.message_size_ceiling_bytes == 0
+            || ceilings.message_size_ceiling_bytes > u32::MAX as usize
+            || ceilings.unary_timeout_ceiling.is_zero()
+            || std::time::Instant::now()
+                .checked_add(ceilings.unary_timeout_ceiling)
+                .is_none()
+            || self.unary_timeout > ceilings.unary_timeout_ceiling
             || self.connection_handshake_timeout > Duration::from_secs(60)
             || self.first_request_timeout > Duration::from_secs(5 * 60)
             || self.idle_connection_timeout > Duration::from_secs(60 * 60)
@@ -2627,8 +2672,8 @@ impl GrpcServerConfig {
             || self.process_control_frames_burst > 200_000
             || self.concurrency_limit_per_connection > self.max_concurrent_streams as usize
             || self.concurrency_limit_per_connection > self.max_inflight_rpcs
-            || self.message_limits.max_decoding_bytes > MAX_GRPC_MESSAGE_BYTES
-            || self.message_limits.max_encoding_bytes > MAX_GRPC_MESSAGE_BYTES
+            || self.message_limits.max_decoding_bytes > ceilings.message_size_ceiling_bytes
+            || self.message_limits.max_encoding_bytes > ceilings.message_size_ceiling_bytes
             || self.method_policies.len() > MAX_GRPC_METHODS
         {
             return Err(GrpcServerError::InvalidConfiguration);
@@ -2840,6 +2885,7 @@ impl ManagedHealth {
 /// 独立 listener 与 Application component 共用的稳定装配计划。
 pub struct ServerPlan {
     config: GrpcServerConfig,
+    ceilings: GrpcServerCeilings,
     registry: ManagedServiceRegistry,
     reflection_enabled: bool,
     health_only: bool,
@@ -2904,6 +2950,7 @@ impl Default for ServerPlan {
     fn default() -> Self {
         Self {
             config: GrpcServerConfig::default(),
+            ceilings: GrpcServerCeilings::default(),
             registry: ManagedServiceRegistry::new(),
             reflection_enabled: false,
             health_only: false,
@@ -2934,6 +2981,17 @@ impl ServerPlan {
             config,
             ..Self::default()
         }
+    }
+
+    /// 业务作用：声明本 listener 允许的消息与 unary 时长上界，在绑定前与实际配置统一复验。
+    ///
+    /// 参数说明：
+    /// - `ceilings`: 部署上界；实际消息大小、请求时长与进程总量预算仍各自生效。
+    ///
+    /// 返回：持有新边界的装配计划；不修改已运行的 listener，也不产生网络副作用。
+    pub fn ceilings(mut self, ceilings: GrpcServerCeilings) -> Self {
+        self.ceilings = ceilings;
+        self
     }
 
     /// 业务作用：接收 UserHook 阶段已经冻结的 registry，维持 service 只能消费一次的所有权。
@@ -3030,7 +3088,8 @@ impl ServerPlan {
         self,
         bind: SocketAddr,
     ) -> Result<(GrpcServerHandle, GrpcServerActivation), GrpcServerError> {
-        self.config.validate()?;
+        // 所有部署边界必须在路由冻结与端口绑定前通过，防止部分可用的 listener 暴露业务。
+        self.config.validate_with_ceilings(&self.ceilings)?;
         if self.registry.is_empty() && !self.health_only {
             return Err(GrpcServerError::MissingService);
         }
@@ -4260,7 +4319,7 @@ impl GrpcServerHandle {
         health: Option<ManagedHealth>,
         rpc_metrics: Arc<RpcMetrics>,
     ) -> Result<(Self, GrpcServerActivation), GrpcServerError> {
-        config.validate()?;
+        // 配置仅从 ServerPlan 的统一门禁按所有权移入，后续不再变更其容量或计时边界。
         if tls_identity.is_some() && tls_source.is_some() {
             return Err(GrpcServerError::TlsConfiguration);
         }

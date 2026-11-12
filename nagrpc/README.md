@@ -223,6 +223,7 @@ grpc:
 | --- | --- | --- |
 | listener | `bind`、`authority`、`allow_insecure_remote`、`max_connections` | loopback `127.0.0.1:50051`，最多 256 条受管连接 |
 | RPC | `concurrency_limit_per_connection`、`unary_timeout_ms`、`max_inflight_rpcs` | 每连接 128，并按进程共享 1024 个 RPC permit |
+| 部署上界 | `message_size_ceiling_bytes`、`unary_timeout_ceiling_ms` | 64 MiB、300000 毫秒；可显式调整，实际值不得超出 |
 | 消息 | `max_decoding_bytes`、`max_encoding_bytes`、`max_inflight_message_bytes` | 单消息 4 MiB，请求与响应共享 128 MiB 实际在途 permit；未发送的声明长度不预扣 |
 | streaming | `stream_idle_timeout_ms`、`max_stream_duration_ms`、`max_*_messages_per_stream`、`max_*_stream_bytes` | 空闲、总时长、消息数和双向累计字节都有限 |
 | HTTP/2 | `initial_*_window_size`、`max_frame_size`、`http2_*` | 限制窗口、header、HPACK、发送缓冲、reset 与控制帧速率 |
@@ -234,6 +235,23 @@ grpc:
 零值、超过硬上限、内存预算不自洽或字段组合不合法都会在 bind 前失败。显式设置
 `application.shutdown_timeout_ms` 时，它必须覆盖发现注销预留、gRPC drain 和 Application 收尾；省略时
 容器会自动提高到最低安全预算。
+
+消息容量和 unary 时长各有部署上界与实际值：`message_size_ceiling_bytes` 默认 64 MiB，`unary_timeout_ceiling_ms` 默认 300000；实际编解码上限默认 4 MiB，实际请求超时默认 30000 毫秒。全部字段均可由 YAML 设置，实际值不能超过部署上界。单消息部署上界不能超过 gRPC 32 位帧长度，时间上界必须能由单调时钟表示；进程在途消息、并发和受管内存会计预算继续独立约束，不会因增大上界而预分配相应内存。
+
+Application 集成通过 YAML 的 `grpc` 配置选择上界与实际值，需要 `napp` 2.0.7 或更高兼容版本。独立 listener 将 `GrpcServerCeilings` 传入 `ServerPlan::ceilings`，实际值仍在 `GrpcServerConfig` 中设置，时长使用 `Duration`。`GrpcServerConfig::validate()` 使用默认上界，显式上界使用 `validate_with_ceilings` 校验。例如传送控制面快照：
+
+```yaml
+grpc:
+  message_size_ceiling_bytes: 268435456
+  unary_timeout_ceiling_ms: 86400000
+  max_decoding_bytes: 201326592
+  max_encoding_bytes: 201326592
+  unary_timeout_ms: 86400000
+  max_inflight_message_bytes: 805306368
+  managed_memory_budget_bytes: 2147483648
+```
+
+这些值必须在绑定端口前通过整体校验。传输预算不支持热更新，变更需要重启 listener；修改环境变量需要重启进程。请求携带的更短 deadline 仍优先，超时不能证明外部副作用未发生。
 
 ## 服务发现
 

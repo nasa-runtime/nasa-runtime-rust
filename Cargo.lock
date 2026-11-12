@@ -1041,7 +1041,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2720,40 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "nagrpc"
-version = "2.0.4"
-dependencies = [
- "bytes",
- "futures-util",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "nabudget 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nadisc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nadisc-runtime 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "prost",
- "prost-types",
- "rustls",
- "sha2 0.10.9",
- "socket2",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tonic",
- "tonic-health",
- "tonic-prost",
- "tonic-reflection",
- "tower-service",
- "tracing",
- "x509-parser",
- "zeroize",
-]
-
-[[package]]
-name = "nagrpc"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ad1fd948ecb8285091e08eb30cc6412cc63daf04352f767414ca388465e46c"
+version = "2.0.5"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3626,6 +3593,8 @@ dependencies = [
 [[package]]
 name = "napp"
 version = "2.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64e44b0678b58ffd8d69d57c805924a0a9e65e7d7ef9c9919d5fca16f59774b"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3654,7 +3623,7 @@ dependencies = [
  "nadisc-runtime 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nagrpc",
  "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3717,9 +3686,7 @@ dependencies = [
 
 [[package]]
 name = "napp"
-version = "2.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d64e44b0678b58ffd8d69d57c805924a0a9e65e7d7ef9c9919d5fca16f59774b"
+version = "2.0.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3748,7 +3715,7 @@ dependencies = [
  "nadisc-runtime 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nagrpc",
  "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3851,7 +3818,7 @@ dependencies = [
  "nafana 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nagrpc",
  "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3876,7 +3843,7 @@ dependencies = [
  "naoutbox-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "napp 2.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ "napp 2.0.6",
  "napp-macro 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -4087,7 +4054,7 @@ dependencies = [
  "linkme",
  "nadis 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nagrpc",
  "nagrpc-build 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -4118,7 +4085,7 @@ dependencies = [
  "linkme",
  "nadis 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nagrpc",
  "nagrpc-build 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -4772,7 +4739,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4970,7 +4937,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5833,7 +5800,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6207,7 +6174,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6488,7 +6455,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7309,7 +7276,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
