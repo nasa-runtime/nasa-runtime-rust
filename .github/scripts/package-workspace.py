@@ -13,16 +13,18 @@ except ModuleNotFoundError:
 
 
 def source_arguments(root, packages):
-    """业务作用：在归档规范化期间保持工作区组件的同一源码身份。
+    """业务作用：为仍采用源码装配的组件保留覆盖，已发布依赖继续使用 registry。
     参数说明：
     - root：拥有统一依赖映射的工作区根目录。
     - packages：Cargo 解析出的工作区成员元数据。
-    返回：显式外部 patch 配置；成员映射缺失、越界或指向其它包时拒绝。
+    返回：现有映射对应的外部 patch 配置；已解除覆盖的成员不再补回，路径越界或身份不符时拒绝。
     """
     mapping = tomllib.loads((root / "Cargo.toml").read_text())["patch"]["crates-io"]
     arguments = []
     for package in packages:
         name = package["name"]
+        if name not in mapping:
+            continue
         path = (root / mapping[name]["path"]).resolve()
         path.relative_to(root)
         if path / "Cargo.toml" != Path(package["manifest_path"]).resolve():
