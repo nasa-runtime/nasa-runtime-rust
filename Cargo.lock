@@ -2750,6 +2750,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "nagrpc"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92c3a77438aab2673649b5d984ae56de4282082e382374f6f2b11eb6a9bc6dfa"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nabudget 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadisc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadisc-runtime 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "prost",
+ "prost-types",
+ "rustls",
+ "sha2 0.10.9",
+ "socket2",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tonic",
+ "tonic-health",
+ "tonic-prost",
+ "tonic-reflection",
+ "tower-service",
+ "tracing",
+ "x509-parser",
+ "zeroize",
+]
+
+[[package]]
 name = "nagrpc-build"
 version = "2.0.1"
 dependencies = [
@@ -3621,7 +3654,7 @@ dependencies = [
  "nadisc-runtime 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc",
+ "nagrpc 2.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3724,7 +3757,7 @@ dependencies = [
  "nafana 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc",
+ "nagrpc 2.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3960,7 +3993,7 @@ dependencies = [
  "linkme",
  "nadis 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc",
+ "nagrpc 2.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "nagrpc-build 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3991,7 +4024,7 @@ dependencies = [
  "linkme",
  "nadis 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc",
+ "nagrpc 2.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "nagrpc-build 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
