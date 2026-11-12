@@ -13,7 +13,7 @@ fi
 release_items() {
   local items=()
   case "$1" in
-    foundation)
+    update-foundation)
       items=(
         "macro-support@2.0.1"
         "naauthz@2.0.1"
@@ -38,7 +38,7 @@ release_items() {
         "rest-client-macro@2.0.4"
       )
       ;;
-    support-components)
+    update-support-components)
       items=(
         "async-macro@2.0.1"
         "hystrix-macro@2.0.1"
@@ -65,7 +65,7 @@ release_items() {
         "naws-proto@2.0.1"
       )
       ;;
-    core-services)
+    update-core-services)
       items=(
         "config-boot@2.0.2"
         "hystrix@2.0.1"
@@ -78,7 +78,7 @@ release_items() {
         "rest-discovery@2.0.4"
       )
       ;;
-    resource-runtimes)
+    new-update-resource-runtimes)
       items=(
         "cacheable@2.0.1"
         "nadisc-runtime@1.0.1"
@@ -95,7 +95,7 @@ release_items() {
         "rest-discovery-nacos@2.0.4"
       )
       ;;
-    storage-adapters)
+    new-update-storage-adapters)
       items=(
         "nagrpc@2.0.4"
         "naidempotency-mysql@2.0.1"
@@ -112,25 +112,25 @@ release_items() {
         "nasaga-pgsql@2.0.1"
       )
       ;;
-    workflow-support)
+    update-workflow-support)
       items=(
         "naaudit-mysql@2.0.1"
         "naaudit-pgsql@2.0.1"
         "nasaga-runtime-core@2.0.2"
       )
       ;;
-    saga-runtime)
+    update-saga-runtime)
       items=(
         "nasaga-runtime@2.0.3"
         "nasaga-runtime-pgsql@2.0.3"
       )
       ;;
-    application-runtime)
+    update-application-runtime)
       items=(
         "napp@2.0.6"
       )
       ;;
-    facade)
+    update-facade)
       items=(
         "nasa@2.0.6"
       )
@@ -164,15 +164,15 @@ release_crates() {
 # 返回：逐行输出批次标识与单调递增的拓扑阶段。
 release_stages() {
   cat <<'PLAN'
-foundation 1
-support-components 2
-core-services 3
-resource-runtimes 4
-storage-adapters 5
-workflow-support 6
-saga-runtime 7
-application-runtime 8
-facade 9
+update-foundation 1
+update-support-components 2
+update-core-services 3
+new-update-resource-runtimes 4
+new-update-storage-adapters 5
+update-workflow-support 6
+update-saga-runtime 7
+update-application-runtime 8
+update-facade 9
 PLAN
 }
 

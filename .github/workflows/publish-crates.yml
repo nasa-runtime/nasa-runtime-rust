@@ -4,21 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       batch:
-        description: "选择发布批次；后续批次只能在前置依赖已进入 crates.io 索引后执行"
+        description: "new/update 标明创建或更新；new-update 同时包含两类，按清单顺序执行"
         required: true
         type: choice
         options:
-          - foundation
-          - support-components
-          - core-services
-          - resource-runtimes
-          - storage-adapters
-          - workflow-support
-          - saga-runtime
-          - application-runtime
-          - facade
+          - update-foundation
+          - update-support-components
+          - update-core-services
+          - new-update-resource-runtimes
+          - new-update-storage-adapters
+          - update-workflow-support
+          - update-saga-runtime
+          - update-application-runtime
+          - update-facade
       confirm:
-        description: "输入 publish-<batch>，例如 publish-foundation"
+        description: "输入 publish-<batch>，例如 publish-update-foundation"
         required: true
         type: string
 
@@ -44,7 +44,7 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
-            foundation|support-components|core-services|resource-runtimes|storage-adapters|workflow-support|saga-runtime|application-runtime|facade)
+            update-foundation|update-support-components|update-core-services|new-update-resource-runtimes|new-update-storage-adapters|update-workflow-support|update-saga-runtime|update-application-runtime|update-facade)
               expected_ref="refs/heads/release"
               expected_confirm="publish-${RELEASE_BATCH}"
               ;;
@@ -185,7 +185,11 @@ jobs:
           fi
 
           # 业务作用：在归档 checksum 因发布工作流提交变化而不同时，验证 crates.io 已有版本与当前候选的实际发布内容等价。
-          # 参数说明：依次接收 crate 名、版本、本地归档路径和 crates.io API 返回的远端 checksum。
+          # 参数说明：
+          # - `$1`：需要确认已发布内容的 crate 名。
+          # - `$2`：不可原地替换的目标版本。
+          # - `$3`：当前候选的本地归档路径。
+          # - `$4`：crates.io 对应版本返回的归档 checksum。
           # 返回：远端归档完整且除 VCS 提交号外逐文件一致时成功；任何业务内容或元数据差异均失败。
           verify_existing_archive() {
             local crate_name="$1"
