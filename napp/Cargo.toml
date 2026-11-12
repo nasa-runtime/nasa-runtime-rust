@@ -153,7 +153,7 @@ namapper = { version = "2.0.1", optional = true, default-features = false }
 natx = { version = "2.0.1", optional = true }
 natx-core = { version = "2.0.1", optional = true }
 natx-sqlite = { version = "1.0.0", optional = true }
-namigrate-sqlite = { version = "1.0.0", path = "../namigrate-sqlite", optional = true }
+namigrate-sqlite = { version = "1.0.0", optional = true }
 natx-pgsql = { version = "2.0.1", optional = true }
 namigrate = { version = "2.0.1", optional = true }
 namigrate-core = { version = "2.0.1", optional = true }

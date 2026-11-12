@@ -288,8 +288,8 @@ cache_impl = { package = "cacheable", version = "2.0.1", optional = true }
 nacache_macro = { package = "nacache-macro", version = "2.0.1", optional = true }
 tx_impl = { package = "natx", version = "2.0.1", optional = true }
 tx_sqlite_impl = { package = "natx-sqlite", version = "1.0.0", optional = true }
-migration_sqlite_impl = { package = "namigrate-sqlite", version = "1.0.0", path = "../namigrate-sqlite", optional = true }
-mapper_sqlite_impl = { package = "namapper-sqlite", version = "1.0.0", path = "../namapper-sqlite", optional = true }
+migration_sqlite_impl = { package = "namigrate-sqlite", version = "1.0.0", optional = true }
+mapper_sqlite_impl = { package = "namapper-sqlite", version = "1.0.0", optional = true }
 tx_pgsql_impl = { package = "natx-pgsql", version = "2.0.1", optional = true }
 migration_pgsql_impl = { package = "namigrate-pgsql", version = "2.0.1", optional = true }
 natx_macro = { package = "natx-macro", version = "2.0.1", optional = true }
