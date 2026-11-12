@@ -46,6 +46,8 @@ datasources:
 
 只支持 Linux/macOS 的本地文件系统。不要把文件放在 NFS、SMB、多主共享卷，或用其它进程绕过 owner 协议写入。默认 bundled SQLite，运行时要求引擎至少 3.51.3；SQLx 依赖线为 0.9。未提供 Windows、SQLCipher、透明加密或网络文件系统支持。
 
+数据库、备份与 sidecar 必须来自可信应用。文件权限与 owner 锁不校验文件内容的安全性，不得直接打开用户上传或其它不可信来源的数据库与 WAL，也不得将其作为恢复源。当前 SQLx 0.9.0 所用的 bundled 引擎受 [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459) 影响：特制数据库与 WAL 的页尺寸不一致时，查询可能泄露进程中未初始化的内存。私有文件部署不能消除恶意内容已被导入后的风险。
+
 原生依赖使用 `libsqlite3-sys 0.37`，同一程序只能链接一套 SQLite。同步驱动也必须允许这一原生依赖线；要求 `libsqlite3-sys 0.35` 的 `rusqlite 0.37` 不能与本组件联合解析。不要通过降低原生版本绕过持久化基线，已有同步存储应单独处理依赖兼容。
 
 已有文件的 `journal_mode` 必须匹配声明；普通建连不隐式转换。默认 WAL 使用 FULL，DELETE 默认使用 EXTRA，外键必须开启；可显式选择 NORMAL、FULL 或 EXTRA。NORMAL 和 DELETE+FULL 的断电持久性弱于对应默认策略。macOS 同时启用 `fullfsync` 与 `checkpoint_fullfsync`，备份主文件发布前执行 F_FULLFSYNC，目录发布执行 fsync；Linux 使用 SQLite 同步及文件/目录 fsync。保证依赖文件系统和设备履行同步。`read_only: true` 禁止创建、写 SQL、Immediate 事务、迁移 apply 与 checkpoint，允许 validate 和作为备份源。只读访问仍可能使用 owner 锁或 SQLite 协调文件。

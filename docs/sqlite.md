@@ -163,6 +163,8 @@ Application 自动安装 `sql.observability` 的方法、执行、流和连接�
 
 仅支持 Linux/macOS 私有本地文件系统。默认 WAL/FULL；DELETE 默认 EXTRA，已有文件不能在普通建连时隐式改变日志模式。挂载整个私有数据库目录，禁止多实例共写、网络共享文件、硬链接别名或绕过 owner 协议的工具写入。只读配置仍可能需要 owner 锁或 SQLite 协调文件。
 
+数据库、备份与 sidecar 必须来自可信应用，不能直接打开或恢复用户上传的不可信文件。私有权限与 owner 锁不验证恶意内容；当前 bundled 引擎的已知限制见 [数据源文件边界](../natx-sqlite/README.md#数据源与生命周期)。
+
 `source.maintenance().inspect(&budget)` 在结构和外键检查通过后返回持久 `user_version`，可用于已有数据库的启动门禁；它不开放任意 PRAGMA。
 
 同时管理外部对象目录的宿主可通过 `source.database_path()` 返回的固定绝对路径核对元数据文件位置；该路径已解析父目录，不随相对配置或后续工作目录变化重新解释。用 `source.retain_file_guard(Arc<T>)` 可将独占守卫绑定到实际文件 owner。每个 owner 只接纳一次，守卫不能引用该 datasource；只有原生连接全部退出且文件权威释放后才解除保活，异步取消不能提前交接对象目录。

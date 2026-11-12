@@ -11,6 +11,8 @@
 //! 请求与配置的共同截止点在独立 lease 接纳前固定，覆盖选池、空闲持有和原生监督；
 //! 环境事务保持自身总期限，真实原生关闭前不提前释放容量或文件权威。
 //! 仅支持 Linux/macOS 私有本地文件，不提供跨库原子事务、网络文件库或 SQLite Saga 持久后端。
+//! 数据库、备份与 sidecar 必须来自可信应用；文件权限及 owner 锁不验证恶意文件内容。
+//! SQLx 0.9.0 所用的 bundled 引擎受 RUSTSEC-2026-0459 影响，不能安全打开不可信数据库与 WAL。
 mod datasource;
 mod diagnostics;
 pub use diagnostics::{

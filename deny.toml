@@ -7,7 +7,14 @@ version = 2
 # PKCS#1 v1.5 私钥解密与历史私钥运算受 `legacy-rsa-private` 编译 feature 和 Web 运行时风险门
 # 双重隔离，不进入 `nasa/full`。因上游尚无可升级版本，仍需按包级 advisory 显式登记；
 # 上游提供不受影响的版本后删除本项并升级。
-ignore = ["RUSTSEC-2023-0071"]
+ignore = [
+    "RUSTSEC-2023-0071",
+    # SQLx 0.9.0 要求 libsqlite3-sys <0.38，尚不能使用包含 SQLite 3.54 的 0.39 系列。
+    # 当前 bundled 引擎存在数据库与 WAL 页尺寸不一致时泄露未初始化内存的风险；
+    # 数据源及恢复源只接受可信文件，私有权限与 owner 锁不构成恶意文件内容校验。
+    # SQLx 的 crates.io 版本支持 0.39 系列后，升级原生依赖并删除此公告例外。
+    "RUSTSEC-2026-0459",
+]
 
 [licenses]
 version = 2
