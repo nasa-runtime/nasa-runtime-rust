@@ -131,6 +131,13 @@
 //!
 //! 本 crate 由 `nasa` 门面重导出；业务应用不应直接依赖实现 crate。
 
+//! # 应用协议与资源观测
+//!
+//! `Application::configure_ws` 在 UserHook 登记自定义协议处理器，保留监听、启动许可、连接容量
+//! 和任务排空责任；协议身份与业务授权由应用维护。首次认证沿用 accept 截止点，迟到通知不开放资格。
+//! `Application::register_metrics_source_reserved` 在 Ready 前为有限标签目录预留最坏序列数，
+//! 空初始样本不缩小容量承诺。资源样本与业务许可相互独立，观测成功不证明可继续写入。
+//!
 #![forbid(unsafe_code)]
 
 mod diagnostics;

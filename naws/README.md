@@ -1,6 +1,8 @@
 # naws
 
-`naws` 是通用长连接框架，覆盖 TCP/WebSocket/socket.io 兼容层、NASA wire codec、endpoint/handler 抽象、鉴权、背压、心跳、优雅关闭，以及可选的 Redis Stream 或 Kafka 集群 transport。它不包含业务逻辑，业务通过 endpoint 注册事件处理。
+**`naws` 是受管 TCP/WebSocket 协议宿主与长连接消息框架。** 它统一拥有监听、连接容量、首次认证期限和可等待的关闭，应用不必另建一套接流及任务排空循环。
+
+应用可选择内置 NASA wire codec、endpoint/handler、鉴权、背压、心跳与可选 Redis/Kafka 集群 transport；也可通过 `ServerBuilder::protocol_handler` 接管原始连接，自行实现协议与身份授权。两种接入路径的责任不同，见[应用协议宿主](#应用协议宿主)。
 
 原生 TCP `Client` 也可单独用于出站连接：Application 的 `ws-client` feature 按名称拥有首连认证、
 统一启动许可、重连健康和全部连接子任务的退出责任，无需入站 listener。Service 与 Batch 均可发送，
@@ -59,6 +61,33 @@ async fn start() -> anyhow::Result<()> {
 宿主已有监听 socket 时，可把标准 `tokio::net::TcpListener` 传给 `Server::bind_suspended_on(listener)`。此调用接管所有权，不再次 bind；集群准备完成后返回尚未接流的 `RunningServer`，宿主完成自身准备再调用 `activate()`。`addr` 不重新覆盖移交 socket 的真实地址；此入口不接受额外 `ws_addr`。端口范围、自动分配、配额与对外地址发布由宿主负责。
 
 `ServerBuilder::endpoint_registry()` 返回同一端点目录，后续注册/注销遵守既有会话代际清理。`SessionHandle::disconnect()` 关闭该连接的出站准入并通知协议循环退出；它不解释业务撤权原因，也不是等待连接任务排空的证明。完整服务退出仍需等待 `shutdown_graceful` 的结果。
+
+## 应用协议宿主
+
+`ServerBuilder::protocol_handler` 接管整条已接收连接，供有独立握手、帧布局或授权模型的应用使用。
+框架传入 `TcpStream` 和 `server::ProtocolContext`，继续限制总连接数、未认证名额和首次认证时间，
+并把处理器及通过 `context.spawn` 登记的子任务纳入服务关闭屏障。
+
+```text
+监听接纳 → 连接及未认证名额 → 固定认证截止点 → 应用协议任务
+                                             ├─ 自行校验身份 → authenticated()
+                                             └─ 有界读写与子任务 → 取消 → 实际退出
+```
+
+- `auth_deadline()` 从 accept 起算，HTTP Upgrade、协议分类和异步授权不能重新计时。
+  `authenticated()` 只在期限内首次确认且未取消时成功；它释放首次认证名额，不建立应用的用户、路由或订阅权限。
+- `peer_addr()` 是操作系统确认的 TCP 对端，不能把代理头当作该事实；可信代理身份由应用单独验证。
+- 应用持续观察 `cancellation()`，并通过 `spawn` 登记读写或业务子任务。上下文结束会取消其连接，
+  但登记任务仍必须实际结束，不能用父 future 已返回替代排空。
+- 此路径不执行内置 Message、endpoint、bridge 或 relay；不能同时配置 naws 内置集群 transport。
+  需要产品自己的控制或下行协议时，可另外使用具名 MQ 来源，但须自行维护权限和确认边界。
+- `transport::Connection::accept_with_budget` 可在分配前共用接收容量；共享正文切片保留预算到最后一个 owner 释放。
+  它不限制整个进程 RSS，JSON 转换、WebSocket 掩码、TLS 和外部客户端仍可能复制。
+
+受管应用在 UserHook 使用 `Application::configure_ws` 提交 builder 定制，由 napp 在接流前装配。
+独立宿主使用 `bind_suspended`，或将已绑定 listener 移交给 `bind_suspended_on`，准备完成后再 `activate()`；
+移交 listener 不会重新 bind，也不会决定对外地址、端口目录或业务路由。
+完整说明见[协议接线](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/protocol-hosting.md)。
 
 ## 发送消息
 

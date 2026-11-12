@@ -10,6 +10,8 @@ features are empty. Application combines configuration, resource preparation, in
 traffic admission and shutdown, while transactions, Inbox/Outbox, Saga and ordered processing
 support recoverable workflows.
 
+With `application,ws`, applications can keep their own TCP/WebSocket protocol and authorization while the runtime manages connection capacity, authentication deadlines and shutdown; see [Managed protocol hosting](#managed-protocol-hosting).
+
 With `application,mapper-sqlite`, the same Mapper and SQL attributes operate on SQLite files managed
 by napp's `"db"` component, including migrations, transactions, observability and shutdown. Each
 named datasource selects its own driver; see [SQLite and per-datasource drivers](#sqlite-and-per-datasource-drivers).
@@ -41,6 +43,16 @@ relationship with the United States National Aeronautics and Space Administratio
 the complete statement in `NOTICE`.
 
 Existing Kafka consumers must migrate public APIs and configuration defaults; see the [migration requirements](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.en.md#migrate-kafka-source-and-configuration).
+
+## Managed protocol hosting
+
+Enable `application` and `ws`, declare the `"ws"` component and install
+`ServerBuilder::protocol_handler` through `app.configure_ws` during UserHook. The runtime owns
+listeners, connection capacity, authentication deadlines and draining; the application owns its wire protocol,
+routes and authorization. `nasa::ws::transport` offers bounded raw transport and
+`nasa::ws::proto::dynamic::SchemaPlan` compiles a closed catalog into one ProtocolBytes mode.
+Shared bodies retain receive responsibility until the last owner is released; JSON, WebSocket, TLS and external
+clients can still copy. See [protocol hosting](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/protocol-hosting.en.md).
 
 ## Kafka facade
 

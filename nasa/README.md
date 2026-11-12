@@ -3,6 +3,7 @@
 [中文](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nasa/README.md) | [English](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nasa/README.en.md)
 
 `nasa` 是面向 Rust 服务端应用的受管生命周期与可靠业务执行门面，也是 `nasa-runtime-rust` 的唯一业务入口。
+`application,ws` 同时提供受管自定义 TCP/WebSocket 协议入口；应用拥有协议与授权，框架承担连接容量、认证期限和退出等待，见[受管协议与共享正文](#受管协议与共享正文)。
 应用只依赖本 crate，通过 feature 选择能力，再从
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
 `application,mapper-sqlite` 让业务沿用 `#[Mapper]`、`#[Query]` 等宏，并把 SQLite 文件、迁移、事务、观测与停机交给 napp 的同一个 `"db"` 组件。每个 datasource 独立声明 driver，见 [SQLite 与逐数据源 driver](#sqlite-与逐数据源-driver)。
@@ -40,6 +41,18 @@ Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，
 hystrix 命令目录随 Application 实例重建，业务收尾后排干，旧命令永久拒绝执行。
 
 采用 Kafka 能力的现有应用需要完成公开 API 与默认配置迁移，详见[迁移要求](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md#kafka-源码与配置迁移)。
+
+## 受管协议与共享正文
+
+`application` 与 `ws` 提供受管 TCP/WebSocket 协议宿主：UserHook 中通过
+`app.configure_ws` 安装 `ServerBuilder::protocol_handler`，复用连接容量、认证截止和关闭屏障。
+`nasa::ws::transport` 提供有界原始传输，`nasa::ws::proto::dynamic::SchemaPlan` 提供四种
+ProtocolBytes 模式的动态计划。业务仍负责路由、身份、订阅和消息授权，框架不把连接存活当成权限。
+
+纯转发可以共享正文；JSON 转换、WebSocket 掩码、TLS 与外部客户端仍可能复制。
+持有共享切片也持有相应接收责任，取消等待不会提前归还仍在使用的容量。
+指标来源可在 Ready 前预留最坏序列数，资源观测与业务权限使用不同的状态和证据，观测成功不授予业务权限。
+详见[协议宿主与资源边界](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/protocol-hosting.md)。
 
 ## Kafka 事件门面
 

@@ -8,6 +8,11 @@
 并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复的业务流程。应用按 feature 选择能力，
 使用已有的数据库和消息系统承载持久事实；各组件保留明确的资源、事务和失败边界。
 
+受管长连接把监听、连接容量、首次认证期限和任务排空交给 `naws`，应用可使用内置消息模型，
+也可接管原始 TCP/WebSocket 连接并定义自己的协议。动态 ProtocolBytes schema、共享接收预算和
+独立资源指标支持配置驱动的连接服务；路由、订阅和业务授权仍由应用负责。
+详见[受管协议与资源边界](#受管协议与资源边界)。
+
 SQLite 业务沿用 `#[Mapper]`、`#[Query]` 等 SQL 宏，由同一个 napp `"db"` 组件管理文件、迁移、事务和停机。
 每个 `datasources.<name>.driver` 独立选择 MySQL、PostgreSQL 或 SQLite；详见 [SQLite 文件数据源与统一 Mapper](#sqlite-文件数据源与统一-mapper)。
 
@@ -54,6 +59,30 @@ secret/TLS 与本地文件监听。业务提交配置与 handler，框架在接�
 隔离命令由本代 Application 统一拥有，停机等待在途责任，旧句柄不能重新开放。
 
 采用 Kafka 能力的现有应用需要完成公开 API 与默认配置迁移，详见[迁移要求](docs/migration.md#kafka-源码与配置迁移)。
+
+## 受管协议与资源边界
+
+`napp` 管理应用启动与关闭，`naws` 管理监听和连接任务，`naws-proto` 管理受限编解码，
+`nafka`/`nadis` 提供外部消息来源，`nafana` 提供独立观测。各层共用生命周期，但不互相代替授权或持久确认。
+
+```text
+Application 启动许可 → naws 监听与连接容量 → 应用协议处理器
+                                            ├─ 身份与路由授权 → 业务动作
+                                            ├─ ProtocolBytes schema → 有界正文
+                                            └─ 登记读写子任务 → 关闭与实际退出屏障
+原始消息来源 → 保留正文及处理责任 → 当前权限复验 → 交付 / 持久确认
+固定指标目录 → Ready 前预留序列 → 独立指标出口与平台查询
+```
+
+自定义协议处理器接收原始连接与 `ProtocolContext`，不自动执行内置 endpoint、bridge 或 relay。
+认证沿用 accept 时确定的截止点，完成通知不延长业务身份寿命；服务停止后，迟到确认不能重新接流。
+共享接收预算随真实缓冲和最后一个正文 owner 释放，取消观察者不取消仍在执行的工作。
+动态 schema 可配置字段、集合和嵌套对象，但不能加载任意代码，也不能定义业务权限。
+
+socket-center 使用这些通用能力实现自己的路由、授权、订阅与控制权威；这些产品合同不进入基础框架。
+指标样本缺失、过期或不支持分别表达，图例保留查询输出的区分维度；抓取成功不证明业务来源有权写入。
+完整接线、配置和失败边界见[协议宿主](docs/protocol-hosting.md)、[naws](naws/README.md)、
+[动态 schema](naws-proto/README.md#动态-schema-与-json-边界)和[资源观测](nafana/OBSERVABILITY.md)。
 
 ## Kafka 事件运行时
 
@@ -1102,8 +1131,8 @@ HTTP/1/h2c listener。
 | [nasched](nasched/README.md) | `scheduling` / `scheduling-cluster` | 异步任务、定时任务、Redis 集群去重 | `scheduling.*` |
 | [async-macro](async-macro/README.md) | `scheduling` | `#[Async]`、`#[scheduled]` 宏 | 由 `nasched` 运行时读取 |
 | [napart](napart/README.md) | `partition` | 命名 Runner 隔离、严格 FIFO 的保序任务窃取、有界背压、延迟稳定终态与可证明停机 | 直接模式运行期动态创建并显式停机；Application 模式由 YAML/UserHook 提交启动期计划 |
-| [naws](naws/README.md) | `ws` / `ws-client` / `ws-redis` / `ws-socketio` / `ws-kafka` | TCP/WebSocket 服务端、原生 TCP Client、鉴权、广播、背压与真实退出等待 | 入站 `ws.*`；命名出站 `ws_clients` |
-| [naws-proto](naws-proto/README.md) | `ws` | 长连接 schema 与 ProtocolBytes 编解码 | 显式 Mode 与 schema，无独立配置根 |
+| [naws](naws/README.md) | `ws` / `ws-client` / `ws-redis` / `ws-socketio` / `ws-kafka` | 受管 TCP/WebSocket 协议宿主、原生 Client、鉴权、广播、共享接收预算与真实退出等待 | 入站 `ws.*`；命名出站 `ws_clients` |
+| [naws-proto](naws-proto/README.md) | `ws` | typed 与动态 schema、四种 ProtocolBytes 模式及有界 JSON 转换 | 显式 Mode 与 schema，无独立配置根 |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
 | [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` / `kafka-mysql-checkpoint` | 多数据源与独立producer lane、有界按键消费、组内多owner、安全确认、同集群消费/输出/位点事务、LSO 冻结回放、持久 checkpoint、单目标原文转发和有限DLT回投/原文隔离；可选单主 MySQL 跨语言共享进度，以及 Confluent envelope、批准 ID 映射与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；事务通过 `transact` 固定部署身份与白名单；受管 Registry 用 `schema_registries.<name>`，独立 client 与 MySQL checkpoint 显式构造 |
 | [nafka-macro](nafka-macro/README.md) | `kafka` | `#[kafka_consumer]` 静态收集 | 由 Kafka 运行时读取 |
@@ -1130,7 +1159,7 @@ HTTP/1/h2c listener。
 ## 安全说明(务必阅读)
 
 - **`ncrypto` 的弱加密只用于受控兼容既有密文协议，不适合作新系统的机密性边界。**
-  为逐字节对齐既有服务,ncrypto 保留了 AES-ECB、CBC(IV=Key)、RSA PKCS#1 v1.5、
+  为逐字节对齐既有服务,ncrypto 保留了 AES-ECB、CBC(IV=Key)、RSA 的 PKCS#1 1.5 填充、
   以及"用 RSA 私钥做保密"等**已知弱**的构造。**只用于与既有系统互操作**;新系统请用
   `nasa::crypto::encrypt_modern` / `decrypt_modern` 这类现代入口,不要复用这些兼容函数。现代入口默认使用
   随机盐 + Argon2id + AES-256-GCM，返回自描述 `NC2.*` 令牌；业务可用 AAD 绑定租户或记录上下文。
@@ -1138,7 +1167,7 @@ HTTP/1/h2c listener。
 
 - **`rsa` 0.9 计时侧信道（RUSTSEC-2023-0071，Marvin 攻击）当前没有上游安全更新。**
   由 ncrypto 引入。默认构建只保留 RS256 公钥验签等不执行易受攻击私钥解密的能力；兼容格式
-  PKCS#1 v1.5 私钥解密与私钥 type-1 运算受专用编译 feature 和 Web 运行时开关双重隔离，
+  采用 PKCS#1 1.5 填充的私钥解密与私钥 type-1 运算受专用编译 feature 和 Web 运行时开关双重隔离，
   且不进入 `full`。`deny.toml` 仍按包级 advisory 显式登记，待上游提供安全更新后移除。
 
 - **拒绝服务攻击防护与资源上限**（默认已提供保守兜底，可按部署调整）：

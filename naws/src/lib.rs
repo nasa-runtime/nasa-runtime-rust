@@ -13,6 +13,13 @@
 //! 重连先等待旧 writer 与 heartbeat；关闭先撤销准入，再等待全部子任务退出，晚到认证不能重新开放。
 //! `send_message` 成功只表示本地有界队列接受，不证明远端送达。Client 不支持 ws/wss、TLS 或业务重放。
 
+//! # 应用协议宿主
+//!
+//! `ServerBuilder::protocol_handler` 让应用接管原始连接与 `server::ProtocolContext`，复用连接容量、
+//! accept 时固定的认证截止点和可等待的关闭。应用自行负责握手、路由和业务权限；此路径不执行
+//! 内置 Message、endpoint、bridge 或 relay，也不能与内置集群 transport 同时装配。
+//! 上下文登记的子任务保留实际退出责任，取消等待不能提前归还共享接收预算。
+//!
 /// 鉴权回调、路由授权策略和只读连接上下文。
 pub mod auth;
 /// socket.io 与原生 payload 的转换桥。

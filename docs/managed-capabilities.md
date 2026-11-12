@@ -11,6 +11,8 @@
 
 | 能力 | feature 与组件 | 配置或计划 | 业务取得入口 |
 | --- | --- | --- | --- |
+| 应用自定义 TCP/WebSocket 协议 | `ws`；`"ws"` | `ws.*`，UserHook 中 `configure_ws` + `protocol_handler` | 原始连接及 `ProtocolContext`；应用拥有协议与授权 |
+| 有限指标目录与资源采样 | `grafana`；自动附加 `observability` 组件 | `grafana.observability`，Ready 前登记来源与预留 | 固定标签快照和独立指标出口，不授予业务许可 |
 | Kafka 命名源与事件运行时 | `kafka`；`"kafka"` | 互斥的 `kafka` / `kafkas.<name>`；宏及 `configure_kafka` 登记 | `default_kafka()` / `kafka(name)`，事务与有限任务使用明确计划 |
 | RedisPartition | `redis`；`"redis"` | `redis.partition` 或每源对应段，`configure_redis_partition` 登记 handler | `redis_partition(source)` |
 | 独立 Redis 竞选 | `redis`；`"redis"` | `redis_leaders.<name>` | `redis_leader(name)` |

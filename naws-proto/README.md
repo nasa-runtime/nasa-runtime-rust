@@ -1,6 +1,8 @@
 # naws-proto
 
-`naws-proto` 提供 ProtocolBytes 的 typed codec、已有长连接 schema 和有界字节读取。JSON_BYTES、VARINT_TLV、BITPACK_TLV 与 FAST_FIXED 的格式由调用方显式选择；本组件不决定路由权限、业务时间、投递期限或消息目标。
+**`naws-proto` 提供有界的 ProtocolBytes 编解码，既支持 Rust 类型派生，也支持配置声明的动态 schema。** 应用可把封闭的 schema 目录编译为不可变计划，在不加载业务代码的前提下处理字段、集合和嵌套对象，并在 HTTP 边界转换 JSON。
+
+JSON_BYTES、VARINT_TLV、BITPACK_TLV 与 FAST_FIXED 由调用方显式选择；typed 与 dynamic 的类型集合和 JSON 映射分别遵守下文合同。本组件不决定路由权限、业务时间、投递期限或消息目标。
 
 ## 编解码与网络边界
 
@@ -27,7 +29,10 @@ struct Sample {
     reading: f64,
 }
 
-let sample = Sample { sequence: 7, reading: 1.5 };
+let sample = Sample {
+    sequence: 7,
+    reading: 1.5,
+};
 let bytes = sample.encode(Mode::FastFixed)?;
 let decoded = Sample::decode(Mode::FastFixed, &bytes)?;
 ```

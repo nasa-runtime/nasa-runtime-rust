@@ -137,6 +137,14 @@
 //!
 //! 默认只接受 HTTP/1；最终 YAML 设置 `server.http2.enabled=true` 即可在同一端口接受 h2c prior
 //! knowledge，高级 transport 字段可省略。该入口不终止 TLS，也不实现 `Upgrade: h2c`。
+//!
+//! # 受管协议与动态 schema
+//!
+//! `application,ws` 提供监听、认证期限与任务排空；应用可经 `configure_ws` 安装自定义协议。
+//! `ws::transport` 提供共享接收预算，`ws::proto::dynamic::SchemaPlan` 提供有界动态编解码。
+//! 路由、订阅与授权属于应用，既有 endpoint 或集群 transport 不隐式处理自定义协议连接。
+//! 正文共享保留实际 owner 的容量责任，不承诺网络、JSON、TLS 或外部客户端全链路零拷贝。
+//!
 // ============================================================================
 // nasa —— nasa-runtime-rust 唯一对外门面。
 //

@@ -11,6 +11,18 @@
 受管应用无需编写 metrics Router、采集配置或 Dashboard 导入脚本。配置、递归默认与安全边界见
 [统一观测出口与平台适配](OBSERVABILITY.md)。下文手动 Router 示例用于独立 Axum 接入。
 
+## 资源采集与有限指标目录
+
+`grafana.observability.collectors` 固定采样周期、单次期限和过期时间；`filesystems`、
+`network_interfaces`、`io_devices` 用有限别名映射到进程实际可见的路径或设备。
+容器只能报告其可见 cgroup 层级和文件系统；未配置或不可见的资源不会成为宿主全局使用率。
+采集不依赖抓取请求，失败、过期和不支持使用独立状态表达，不以零值伪装健康。
+
+带动态状态标签的结构化来源应在 Ready 前按完整允许目录预留最坏序列数，包含直方图展开。
+`Application::register_metrics_source_reserved` 的预留不取决于初始样本是否为空；容量不足拒绝登记，
+也不会允许随后增加无界标签。资源样本、业务计数和控制资格各自表达不同事实；资源采样失败本身不构成业务权威的授予或撤销。
+配置和采样语义见[资源观测](OBSERVABILITY.md)。
+
 ## 受管观测与单 owner 平台
 
 `grafana.observability` 默认关闭外部出口，不停止内部指标。显式开启后，`napp` 自动托管独立端口、

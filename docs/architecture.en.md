@@ -7,6 +7,15 @@ messaging and ordered execution for recoverable business workflows. Applications
 through `nasa`. Application owns resources and tasks; databases and message systems own durable facts.
 An in-process state change is never sufficient evidence of a cross-system commit.
 
+## Long connections and retained data
+
+napp's startup permission covers naws listeners and connection tasks. A custom `protocol_handler` owns the raw
+protocol while authentication keeps the accept-time deadline and tracked children keep their draining obligations.
+Dynamic ProtocolBytes plans bound schemas and data; the last shared body owner releases receive capacity.
+Applications implement routing, subscriptions and message authorization. Cancelling a waiter does not undo
+external effects. Metric catalogs reserve capacity before Ready, and resource samples describe visibility rather
+than business permission. See [protocol hosting](protocol-hosting.en.md).
+
 ## Capability layers
 
 | Layer | Responsibility | Main crates |

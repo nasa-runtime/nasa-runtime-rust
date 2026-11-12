@@ -4,6 +4,7 @@
 按优先级执行业务停机任务、组件启停、任务监督、信号处理与退出码。声明 `"web"` 时还独占具备确定
 HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经 `nasa` 门面开启 `application` feature
 使用，不需要为异步业务收尾另建信号监听或 callback 集合。
+`"ws"` 组件可托管应用自定义 TCP/WebSocket 协议，统一连接容量、首次认证期限与任务排空，见[应用协议与连接生命周期](#应用协议与连接生命周期)。
 同一个 `"db"` 组件管理 MySQL、PostgreSQL 与 SQLite；每个 datasource 独立指定 driver。SQLite 业务继续通过 Mapper 宏执行 SQL，文件 owner、迁移门禁、健康与关闭责任统一纳管，见 [SQLite 与逐数据源 driver](#sqlite-与逐数据源-driver)。
 Kafka 命名来源把独立发布通道、有界有序消费、同集群事务和持久回放任务接入同一宿主，业务句柄固定源与权限，关闭保留真实在途责任；见 [Kafka 受管模式](#kafka-受管模式)。
 `discovery` 组件还统一托管多注册中心与 qualifier 选址，保持连接证据隔离及停机顺序。
@@ -27,6 +28,22 @@ Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可；
 再发布配置；失败时保留旧视图及旧监听。
 业务提交配置与 handler，框架负责启动门禁、健康和停机；各能力的 feature、入口、配置和失败边界见
 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
+
+## 应用协议与连接生命周期
+
+声明 `"ws"` 组件后，UserHook 可通过 `Application::configure_ws` 安装
+`ServerBuilder::protocol_handler`。应用取得原始 `TcpStream` 与
+`naws::server::ProtocolContext`，负责协议分类、认证、消息语义和写出；napp 与 naws 保留监听、
+统一启动许可、连接容量、认证截止和任务排空责任。它不自动获得内置 endpoint、bridge 或 relay 的处理。
+
+认证使用 accept 时确定的同一截止点，协议分类和 WebSocket Upgrade 不重置预算。
+应用完成自己的认证后调用 `authenticated()`，重复、逾期或已取消时返回 false；
+该通知只释放首次认证名额，不代替业务会话授权。通过上下文登记子任务，并持续观察其取消令牌。
+关闭请求与真实任务退出是两个时刻，超时不能作为已完成排空的证明。
+
+自定义处理器不能和 naws 的内置集群 transport 同时装配；产品可另外使用受管 Redis/Kafka
+实现自己的路由控制。完整接线与责任边界见
+[受管协议](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/protocol-hosting.md)。
 
 ## 多注册中心与共享发现生命周期
 

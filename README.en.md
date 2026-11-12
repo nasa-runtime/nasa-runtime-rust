@@ -10,6 +10,12 @@ Saga and ordered message processing support recoverable business workflows. Appl
 capabilities through Cargo features and use their databases and message systems to hold durable facts.
 Each component keeps explicit resource, transaction and failure boundaries.
 
+Managed long connections put listeners, admission capacity, initial authentication deadlines and task
+draining under `naws`. Applications can use its built-in message model or own the protocol on raw
+TCP/WebSocket connections. Dynamic ProtocolBytes schemas, shared receive budgets and separate resource
+metrics support configuration-driven services while routing, subscriptions and authorization remain
+application responsibilities. See [Managed protocols and resource boundaries](#managed-protocols-and-resource-boundaries).
+
 SQLite applications use the same `#[Mapper]` and SQL attributes under napp's managed `"db"`
 component. Each named datasource selects its own MySQL, PostgreSQL or SQLite driver; see
 [SQLite and per-datasource drivers](#sqlite-and-per-datasource-drivers).
@@ -45,6 +51,34 @@ async executor, database or message broker.
 > not use the agency's insignia, logotype, seal or other official visual identifiers. See [NOTICE](NOTICE).
 
 Existing Kafka consumers must migrate public APIs and configuration defaults; see the [migration requirements](docs/migration.en.md#migrate-kafka-source-and-configuration).
+
+## Managed protocols and resource boundaries
+
+`napp` owns application startup and shutdown, `naws` owns listeners and connection tasks,
+`naws-proto` provides bounded codecs, `nafka`/`nadis` supply message sources, and `nafana`
+provides separate observation. Shared lifecycle ownership does not merge authorization or persistence guarantees.
+
+```text
+Application startup permit → listener and connection capacity → application protocol
+                                                               ├─ authentication and routing
+                                                               ├─ bounded ProtocolBytes schema
+                                                               └─ tracked tasks and shutdown barrier
+Message source → retained body and processing responsibility → permission check → delivery / commit
+Fixed metric catalog → reservation before Ready → separate export and platform queries
+```
+
+A custom protocol handler receives the raw connection and `ProtocolContext`; built-in endpoints, bridges and
+relays do not process that connection. Authentication uses the deadline fixed at accept, and confirmation does
+not extend application identity. Shutdown prevents late confirmation from reopening admission. Shared receive
+capacity remains occupied until its actual buffer or last body owner is released. Cancelling an observer does
+not cancel work still running. Dynamic schemas allow bounded fields and nested data, without loading application
+code or granting permissions.
+
+socket-center builds its own routes, authorization, subscriptions and control authority on these generic
+capabilities. Missing, stale and unsupported measurements remain distinct, and legends retain the dimensions
+returned by each query. Successful scraping does not establish business write authority.
+See [protocol hosting](docs/protocol-hosting.en.md), [naws](naws/README.md),
+[dynamic schemas](naws-proto/README.md#动态-schema-与-json-边界) and [resource observation](nafana/OBSERVABILITY.md).
 
 ## Kafka event runtime
 
