@@ -100,21 +100,8 @@ categories = ["asynchronous", "web-programming"]
 [patch.crates-io]
 nasa = { path = "nasa" }
 napp = { path = "napp" }
-namapper = { path = "namapper" }
-namapper-pgsql = { path = "namapper-pgsql" }
-namapper-sqlite = { path = "namapper-sqlite" }
-nagrpc = { path = "nagrpc" }
-naidempotency-mysql = { path = "naidempotency-mysql" }
-naidempotency-pgsql = { path = "naidempotency-pgsql" }
-naoutbox-mysql = { path = "naoutbox-mysql" }
-naoutbox-pgsql = { path = "naoutbox-pgsql" }
-nainbox-mysql = { path = "nainbox-mysql" }
-nainbox-pgsql = { path = "nainbox-pgsql" }
-nasaga-mysql = { path = "nasaga-mysql" }
-nasaga-pgsql = { path = "nasaga-pgsql" }
 nasaga-runtime-core = { path = "nasaga-runtime-core" }
 nasaga-runtime = { path = "nasaga-runtime" }
 nasaga-runtime-pgsql = { path = "nasaga-runtime-pgsql" }
-namigrate-sqlite = { path = "namigrate-sqlite" }
 naaudit-mysql = { path = "naaudit-mysql" }
 naaudit-pgsql = { path = "naaudit-pgsql" }

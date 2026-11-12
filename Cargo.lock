@@ -2233,7 +2233,7 @@ version = "2.0.1"
 dependencies = [
  "async-trait",
  "naaudit 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
+ "naoutbox-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -2243,7 +2243,7 @@ version = "2.0.1"
 dependencies = [
  "async-trait",
  "naaudit 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-pgsql",
+ "naoutbox-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -2726,6 +2726,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "nagrpc"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68ad1fd948ecb8285091e08eb30cc6412cc63daf04352f767414ca388465e46c"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nabudget 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadisc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadisc-runtime 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "prost",
+ "prost-types",
+ "rustls",
+ "sha2 0.10.9",
+ "socket2",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tonic",
+ "tonic-health",
+ "tonic-prost",
+ "tonic-reflection",
+ "tower-service",
+ "tracing",
+ "x509-parser",
+ "zeroize",
+]
+
+[[package]]
 name = "nagrpc-build"
 version = "2.0.1"
 dependencies = [
@@ -2783,8 +2816,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "naidempotency-mysql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8571a43ce021865fac3f4faa548c9ba823e9c10aabe71be44518b0f6d122df70"
+dependencies = [
+ "async-trait",
+ "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json",
+ "sqlx",
+]
+
+[[package]]
 name = "naidempotency-pgsql"
 version = "2.0.1"
+dependencies = [
+ "async-trait",
+ "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json",
+ "sqlx",
+]
+
+[[package]]
+name = "naidempotency-pgsql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e177dd782cb279119623d0b87ff05b848494afe1800523f62ce737c37ec16a19"
 dependencies = [
  "async-trait",
  "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2865,8 +2924,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "nainbox-mysql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9984d915d0676a5ed10248cd67d60a2ac9e1a06a579d548145ec1286d2ffe336"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nainbox-pgsql"
 version = "2.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nainbox-pgsql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9ba77fc16dee9e41c197a591c7153b60f6f7bd3b140c4060eb5c3d37b1724d2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2908,6 +2997,28 @@ dependencies = [
 [[package]]
 name = "namapper"
 version = "2.0.1"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "cacheable 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "futures-core",
+ "futures-util",
+ "linkme",
+ "namapper-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "namapper-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+]
+
+[[package]]
+name = "namapper"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffa099be47b794ae9f35118ac5789e07ef0d59fd0fc52f60ac24b3b18eef6266"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3006,8 +3117,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "namapper-pgsql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47231adf3204ed3293facfd3e2decf44dda00111fc6f2ae587580eb79869620d"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "cacheable 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "futures-core",
+ "futures-util",
+ "linkme",
+ "namapper-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "namapper-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+]
+
+[[package]]
 name = "namapper-sqlite"
 version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "cacheable 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "futures-core",
+ "futures-util",
+ "linkme",
+ "namapper-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "namapper-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-sqlite 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+]
+
+[[package]]
+name = "namapper-sqlite"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "700055a6f67448d4db043b206efea588e3c5cc1b6c662ee6a57c0d3c1d154656"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3100,6 +3255,19 @@ dependencies = [
 [[package]]
 name = "namigrate-sqlite"
 version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "namigrate-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-sqlite 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "namigrate-sqlite"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d7607a7b42fe27e8586f332b81d2eb4b16cde47dcd2c0ef6b1b175aeb5182ed"
 dependencies = [
  "anyhow",
  "namigrate-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3367,8 +3535,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "naoutbox-mysql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f5e6c47232fa33a57aa2a3e415f3506871fbc765844d94603e681629c29aa2c"
+dependencies = [
+ "async-trait",
+ "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "naoutbox-pgsql"
 version = "2.0.1"
+dependencies = [
+ "async-trait",
+ "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "naoutbox-pgsql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "309ee15decf4cfc64c27f1c4a99e2747f282d88b813e2426f831e6d218f2e523"
 dependencies = [
  "async-trait",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3435,30 +3630,30 @@ dependencies = [
  "nadisc-runtime 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc",
+ "nagrpc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naidempotency-mysql",
- "naidempotency-pgsql",
+ "naidempotency-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naidempotency-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-redis 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nainbox-mysql",
- "nainbox-pgsql",
+ "nainbox-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nalog 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "namapper",
+ "namapper 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nametrics-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "namigrate 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "namigrate-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "namigrate-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "namigrate-sqlite",
+ "namigrate-sqlite 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naml 2.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanotify-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naobject 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naopenapi 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
- "naoutbox-pgsql",
+ "naoutbox-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime",
  "nasaga-runtime-pgsql",
@@ -3538,30 +3733,30 @@ dependencies = [
  "nafana 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc",
+ "nagrpc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naidempotency-mysql",
- "naidempotency-pgsql",
+ "naidempotency-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naidempotency-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-redis 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naimg 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nainbox-mysql",
- "nainbox-pgsql",
+ "nainbox-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nalog 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "namapper",
+ "namapper 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "namapper-pgsql",
- "namapper-sqlite",
+ "namapper-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "namapper-sqlite 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namigrate-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "namigrate-sqlite",
+ "namigrate-sqlite 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naml 2.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanum 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naobject 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naopenapi 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
- "naoutbox-pgsql",
+ "naoutbox-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "napp",
  "napp-macro 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3671,8 +3866,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "nasaga-mysql"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "265c814b52cdedb2860bacd197d8c2f1456394ed017c39cb0cd839bbf8cd46a0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nasaga-backend 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "nasaga-pgsql"
 version = "2.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nasaga-backend 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
+name = "nasaga-pgsql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cfa922813a629428b5408c60f0755ca85afc7f4b0a3614b6791f579408dd3a5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3691,12 +3916,12 @@ dependencies = [
  "hex",
  "linkme",
  "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nainbox-mysql",
+ "nainbox-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
+ "naoutbox-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-backend 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-mysql",
+ "nasaga-mysql 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime-core",
  "natelemetry 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3718,7 +3943,7 @@ dependencies = [
  "linkme",
  "nadis 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "nagrpc",
+ "nagrpc 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "nagrpc-build 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3742,11 +3967,11 @@ version = "2.0.3"
 dependencies = [
  "anyhow",
  "linkme",
- "nainbox-pgsql",
- "naoutbox-pgsql",
+ "nainbox-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-backend 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-pgsql",
+ "nasaga-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime-core",
  "natelemetry 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx-pgsql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
