@@ -95,8 +95,8 @@ homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
-# 工作区内的组件依赖使用当前检出的源码；版本要求仍由各组件 manifest 约束。
-# 该映射只作用于源码构建，不进入规范化归档，也不证明 registry 已具备这些版本。
+# 未发布的组件依赖使用当前检出的源码；版本要求仍由各组件 manifest 约束。
+# 已发布的前置依赖解除覆盖并从 crates.io 解析；保留的映射不进入规范化归档。
 [patch.crates-io]
 nasa = { path = "nasa" }
 napp = { path = "napp" }

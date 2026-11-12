@@ -44,7 +44,7 @@ multiple-versions = "warn"
 wildcards = "warn"
 
 [sources]
-# 只信 crates.io;内部成员依赖同时声明 path 与 version,公开发布后解析到 crates.io。
+# 只信 crates.io；已发布的前置依赖使用线上版本，未发布组件由根级 patch 装配源码。
 unknown-registry = "deny"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
